@@ -22,6 +22,8 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 
 - Verified browser SQL shortcuts with a two-statement document: Meta+Enter at the second statement returned only 22; Meta+Shift+Enter produced both result tabs; selecting the first statement then Meta+Enter returned only 11. Shortcut labels now use egui’s runtime OS detection instead of the WASM build target, with readable Enter/Shift text for symbols absent from bundled browser fonts.
 
+- Browser query-library storage now uses IndexedDB transactions with 5,000-item / 32 MiB bounds. Group creation, inline rename and persistence across reload were verified in the full browser UI (`Browser examples`). Three Node tests verify group-child renames, stale-save conflict handling, path/name collisions and oversized SQL rejection. Named save/open UI is not connected yet; storage-level tests do not prove that workflow.
+
 ## Required before replacement deployment
 
 - SQL import/download adapters now compile in the full WASM build. Imported files use shared UTF-8/BOM/NUL/8 MiB validation and are opened as copies without an owned filesystem path. Download requests do not mark a disk file as saved. Native script-file tests (3) and strict Clippy pass. Actual picker import/download still requires end-to-end verification: the in-app browser picker did not expose an accessible dialog and native Codex UI control is prohibited.

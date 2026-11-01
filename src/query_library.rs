@@ -25,8 +25,35 @@ pub(super) struct Library {
 impl Library {
     pub fn invalidate(&mut self) { self.refreshed = None; self.receiver = None; }
     #[cfg(target_arch = "wasm32")]
-    pub fn poll(&mut self, _ctx: &egui::Context, _root: PathBuf) {
-        self.error = Some("Saved query storage is not available in this browser build yet.".into());
+    pub fn poll(&mut self, ctx: &egui::Context, root: PathBuf) {
+        if let Some(rx) = &self.receiver && let Ok((_, result)) = rx.try_recv() {
+            match result { Ok((files, groups)) => { self.files = files; self.groups = groups; self.error = None; }, Err(error) => self.error = Some(error) }
+            self.receiver = None; self.refreshed = Some(Instant::now());
+        }
+        if self.receiver.is_none() && self.refreshed.is_none_or(|when| when.elapsed().as_secs() >= 5) {
+            let (tx, rx) = mpsc::channel(); self.receiver = Some(rx);
+            let ctx = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = async {
+                    let records = crate::browser_library::request(serde_json::json!({"op":"list"})).await?;
+                    let mut files = Vec::new(); let mut groups = Vec::new();
+                    for row in records.as_array().ok_or("Invalid library listing")? {
+                        let path = PathBuf::from(row["path"].as_str().ok_or("Invalid query path")?);
+                        if row["kind"] == "group" { groups.push(path.strip_prefix(&root).map_err(|e| e.to_string())?.to_string_lossy().into_owned()); }
+                        else {
+                            let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                            let group = path.parent().ok_or("Missing query group")?.strip_prefix(&root).map_err(|e| e.to_string())?.to_string_lossy().into_owned();
+                            files.push(QueryFile { path, name, group });
+                        }
+                    }
+                    files.sort_by(|a,b| (&a.group, &a.name).cmp(&(&b.group, &b.name)));
+                    groups.sort();
+                    Ok::<_, String>((files, groups))
+                }.await;
+                let _ = tx.send((root, result)); ctx.request_repaint();
+            });
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub fn poll(&mut self, ctx: &egui::Context, root: PathBuf) {
@@ -112,8 +139,23 @@ fn change_group(root: &std::path::Path, rename: Option<(PathBuf, String)>) -> Re
 }
 impl Rustable {
     #[cfg(target_arch = "wasm32")]
-    fn start_query_group_operation(&mut self, _ctx: &egui::Context, _rename: Option<(PathBuf, String)>) {
-        self.query_library.error = Some("Saved query storage is not available in this browser build yet.".into());
+    fn start_query_group_operation(&mut self, ctx: &egui::Context, rename: Option<(PathBuf, String)>) {
+        if self.query_library.group_operation.is_some() { return; }
+        let root = self.query_directory();
+        let (tx, rx) = mpsc::channel(); self.query_library.group_operation = Some(rx);
+        let ctx = ctx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let old = rename.as_ref().map(|(path, _)| path.clone());
+            let request = match rename {
+                Some((path, name)) => serde_json::json!({"op":"rename", "path":path, "name":name}),
+                None => serde_json::json!({"op":"group"}),
+            };
+            let result = crate::browser_library::request(request).await.and_then(|reply| {
+                let path = PathBuf::from(reply["path"].as_str().ok_or("Missing group path")?);
+                Ok((root, old, path))
+            });
+            let _ = tx.send(result); ctx.request_repaint();
+        });
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn start_query_group_operation(&mut self, ctx: &egui::Context, rename: Option<(PathBuf, String)>) {
@@ -188,8 +230,8 @@ impl Rustable {
                 ui.add(TextEdit::singleline(&mut self.query_library.search).frame(false).hint_text("Search for query…").desired_width((ui.available_width()-40.0).max(70.0)));
             });
             ui.menu_button("⋯", |ui| {
-                ui.label(root.display().to_string());
-                if ui.button("Choose storage folder…").clicked() { self.choose_query_directory(ui.ctx()); ui.close(); }
+                ui.label(if cfg!(target_arch = "wasm32") { "Stored in this browser".into() } else { root.display().to_string() });
+                if !cfg!(target_arch = "wasm32") && ui.button("Choose storage folder…").clicked() { self.choose_query_directory(ui.ctx()); ui.close(); }
                 if ui.button("Refresh").clicked() { self.query_library.invalidate(); ui.close(); }
                 ui.separator();
                 if ui.add_enabled(self.query_library.group_operation.is_none(), egui::Button::new("New group")).clicked() {

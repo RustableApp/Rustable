@@ -4,6 +4,8 @@
 mod app;
 #[cfg(target_arch = "wasm32")]
 mod browser_jobs;
+#[cfg(target_arch = "wasm32")]
+mod browser_library;
 pub use app::Rustable;
 mod column_widths;
 mod completion;
