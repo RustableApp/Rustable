@@ -5,6 +5,8 @@ use crate::{connection::MysqlConfig, sql::mysql::Mode};
 
 mod editing;
 mod export;
+#[cfg(test)]
+mod transport_tests;
 
 type CatalogRow = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
 
@@ -266,6 +268,7 @@ impl MysqlDriver {
     fn require_idle(&mut self) -> Result<(), String> {
         match self.transaction_state() {
             TransactionState::Idle => Ok(()),
+            TransactionState::Disconnected => Err("Database connection is disconnected. Reconnect before continuing.".into()),
             _ => Err("Finish the SQL transaction before this operation.".into()),
         }
     }

@@ -224,3 +224,25 @@ MariaDB despite the implemented streaming backend. Both now expose All matching
 rows as CSV/JSON through that existing menu and dialog path. The live full-export
 filter/cancellation regression was rerun successfully on both engines. Native UI
 click-through remains pending; GUI row editing remains gated independently.
+
+### Lost transaction acknowledgements (2026-11-01)
+
+A bounded local packet proxy now forwards the real fixture protocol, detects the
+exact COM_QUERY COMMIT/ROLLBACK command, consumes the server's successful OK
+reply, and closes both sockets before the client sees that reply. Two live tests
+passed on both MySQL and MariaDB:
+
+- Lost COMMIT acknowledgement: apply reports unknown outcome, disconnects, and an
+  independent observer finds exactly one committed insertion. Reapplying on that
+  disconnected driver fails without replay or a second insertion.
+- Lost ROLLBACK acknowledgement after a truncation warning: apply says rollback
+  could not be confirmed and disconnects. An independent observer finds no row;
+  the client correctly does not infer that outcome from a missing reply.
+
+Disconnected idle-operation checks now ask the user to reconnect, rather than
+incorrectly asking them to finish a SQL transaction. The proxy uses only the opted-in
+disposable fixture ports with TLS disabled and bounded packet sizes/timeouts.
+Strict Clippy passed for the new fault tests before the final error-text adjustment;
+both engine tests were rerun after that adjustment. The native UI editing gate
+remains closed pending effective privileges, expression/trigger auditing and native
+workflow acceptance.
