@@ -767,4 +767,29 @@ mod tests {
         driver.conn().unwrap().query_drop("DROP TABLE plan_data_probe").unwrap();
     }
 
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_edit_preconditions_preserve_floating_and_temporal_values() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS edit_types_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE edit_types_probe(id INT PRIMARY KEY, f FLOAT, d DOUBLE, amount DECIMAL(30,10), dt DATETIME(6), duration TIME(6), bits BIT(9), data VARBINARY(8), label VARCHAR(20)) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO edit_types_probe VALUES(1,1.2,1.2345678901234567,12345678901234567890.1234567890,'2026-11-01 12:34:56.000123','-817:59:59.000001',b'100000001',X'00FF','before')").unwrap();
+        let original = driver.browse(&Browse { table:"edit_types_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
+        let plan = driver.plan(&[Change::Cell { table:"edit_types_probe".into(), column:"label".into(), original, value:Value::Text("after".into()) }]).unwrap();
+        let check = &plan.preconditions[0];
+        let params = check.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>,_>>().unwrap();
+        let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, params.clone()).unwrap();
+        assert_eq!(matches, [1], "unchanged row must pass its review precondition");
+        driver.conn().unwrap().query_drop("UPDATE edit_types_probe SET f=1.2000002").unwrap();
+        let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, params.clone()).unwrap();
+        assert!(matches.is_empty(), "small FLOAT changes must not be rounded away");
+        driver.conn().unwrap().query_drop("UPDATE edit_types_probe SET f=1.2,d=1.2345678901234569").unwrap();
+        let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, params).unwrap();
+        assert!(matches.is_empty(), "small DOUBLE changes must not be rounded away");
+        driver.conn().unwrap().query_drop("DROP TABLE edit_types_probe").unwrap();
+    }
+
 }

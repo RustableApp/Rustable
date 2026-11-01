@@ -351,3 +351,19 @@ This is preparation for transactional apply, which remains disabled. It does
 not yet establish metadata locking, privilege-complete visibility, save-time
 revalidation or safe handling of trigger effects on nontransactional tables.
 Those must be resolved before claiming safe MySQL/MariaDB table editing.
+
+### Exact floating-point edit conflict checks (2026-11-01)
+
+A live unchanged-row precondition test exposed a false conflict for FLOAT 1.2:
+its server decimal rendering differs from the exact binary FLOAT promoted to
+f64 by the prepared result decoder. Floating-point originals now use DOUBLE
+arithmetic equality instead of comparing decimal strings. Text/binary fields
+retain bytewise NULL-safe comparison, preserving case/trailing-space detection.
+No rounding tolerance is applied.
+
+The live regression on both engines covers an unchanged row containing FLOAT,
+DOUBLE, DECIMAL(30,10), DATETIME(6), negative TIME(6), BIT(9), binary bytes and text.
+It also rejects small FLOAT and DOUBLE changes. The full db::mysql test selection
+passed 17 tests against each disposable engine, including the earlier case-only
+conflict check; strict all-target Clippy passed. Transactional apply remains
+unfinished and disabled; these are planner/precondition results.

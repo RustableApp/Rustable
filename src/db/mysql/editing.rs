@@ -28,7 +28,17 @@ fn check_row(plan: &mut ChangePlan, object: &Object, original: &[Value]) -> Resu
     let (key, mut parameters) = row_key(object, original)?;
     // Binary comparison catches case-only and trailing-space changes even on
     // case-insensitive database collations. NULL remains NULL-safe.
-    let predicates = object.columns.iter().map(|c| format!("CAST({} AS BINARY) <=> CAST(? AS BINARY)", quote(&c.name))).collect::<Vec<_>>().join(" AND ");
+    let predicates = object.columns.iter().zip(original).map(|(column, value)| {
+        let name = quote(&column.name);
+        if matches!(value, Value::Real(_)) {
+            // FLOAT's decimal display is shorter than its exact binary value.
+            // Compare in DOUBLE arithmetic to the lossless wire value instead
+            // of comparing two differently formatted decimal strings.
+            format!("({name} + 0e0) <=> ?")
+        } else {
+            format!("CAST({name} AS BINARY) <=> CAST(? AS BINARY)")
+        }
+    }).collect::<Vec<_>>().join(" AND ");
     parameters.extend_from_slice(original);
     plan.preconditions.push(PlannedPrecondition { before_statement: plan.statements.len(),
         sql: format!("SELECT 1 FROM {} WHERE ({key}) AND ({predicates}) FOR UPDATE", qualified(object)?), parameters });
