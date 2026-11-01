@@ -6,6 +6,8 @@ mod row_export;
 mod mysql_values;
 #[cfg(not(target_arch = "wasm32"))]
 mod mysql_results;
+#[cfg(not(target_arch = "wasm32"))]
+mod mysql;
 #[cfg(any(test, target_arch = "wasm32"))]
 pub(crate) mod browser_export;
 

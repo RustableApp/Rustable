@@ -11,15 +11,19 @@ impl<T: Protocol> From<QueryResult<'_, '_, '_, T>> for ScriptResult {
     }
 }
 
-fn collect<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: usize, row_limit: usize) -> ScriptResult {
+fn collect<T: Protocol>(results: QueryResult<'_, '_, '_, T>, budget: usize, row_limit: usize) -> ScriptResult {
+    collect_budget(results, &mut { budget }, row_limit, 128)
+}
+
+pub(super) fn collect_budget<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, set_limit: usize) -> ScriptResult {
     let started = Instant::now();
     let mut report = ScriptResult::default();
-    let mut remaining = budget;
+    let mut remaining = *budget;
     while let Some(mut set) = results.iter() {
         // Include structural overhead: a script of empty result sets must also
         // have a bound. Do not misrepresent omitted results as a successful run.
-        if report.grids.len() >= 128 {
-            report.error.get_or_insert_with(|| "Only the first 128 result sets are retained.".into());
+        if report.grids.len() >= set_limit {
+            report.error.get_or_insert_with(|| format!("Only the first {set_limit} result sets are retained for this statement."));
             for row in set.by_ref() { if let Err(error) = row { report.error = Some(error.to_string()); } }
             continue;
         }
@@ -66,6 +70,7 @@ fn collect<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: usize, 
         report.grids.push(Arc::new(grid));
     }
     report.elapsed = started.elapsed();
+    *budget = remaining;
     report
 }
 

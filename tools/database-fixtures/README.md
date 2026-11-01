@@ -85,3 +85,27 @@ utf8mb4, without starting a transaction. Both servers reject the default verifie
 TLS attempt against these untrusted/non-TLS fixtures and pass explicitly selected
 loopback plaintext plus Unicode/emoji and idle-state checks. Positive verified-TLS
 and custom-root/hostname-mismatch coverage remain outstanding.
+
+Driver integration foundation (still hidden from connection UI):
+
+```sh
+RUSTABLE_MYSQL_TEST_PORT=43316 mise exec -- cargo test --lib db::mysql::tests -- --ignored
+RUSTABLE_MYSQL_TEST_PORT=43317 mise exec -- cargo test --lib db::mysql::tests -- --ignored
+```
+
+The real Driver implementation now opens/reuses a session, detects MySQL versus
+MariaDB, lists databases, retrieves table/view/column metadata, executes scripts,
+and browses with bound literal substring filters, validated sorting and paging.
+Live tests exercise quoted identifiers containing backticks, a literal percent
+filter (not a wildcard), generated columns, sorting/offset, rollback and refusal
+to switch databases during a transaction. SQL result byte budgets span statements.
+
+Before exposing this driver in the connection picker: integrate in-flight
+cancellation, preserve typed connectivity errors through result collection,
+refresh SQL-mode/delimiter semantics when a script changes session modes,
+implement table-edit concurrency checks and commits, load indexes/triggers/DDL,
+add SSH/TLS fixtures, and connect profile storage/editor dialect state. Safe-mode
+requests currently return an explicit unsupported error. Stream-result failures
+conservatively close the session; this avoids reusing an uncertain stream but
+still needs differentiated recoverable-error handling. No MySQL/MariaDB support
+claim or release is justified by the foundation alone.
