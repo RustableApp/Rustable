@@ -59,3 +59,23 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 ## Deployment history
 
 The earlier reduced demo was tested and deployed at rustable.app with lazy iframe embedding and screenshot fallback. Its separate JS SQLite worker tests and old size/limit measurements do not validate this replacement. They have been removed from the current source to avoid confusing those results with full-workspace acceptance.
+
+### Compact shared workspace (2026-11-01)
+
+Below 720 egui points, the shared app now switches between workspace, Items,
+and Inspector instead of squeezing three panes side by side. Opening a table
+or saved query returns to the workspace. Compact pane IDs are separate and
+compact layouts never persist desktop pane widths.
+
+Verification: native library suite 391 passed, 44 ignored; strict native
+Clippy passed; release WASM build succeeded (existing WASM unused-code warnings
+remain). Desktop embedded view retains all three panes. A real 360 CSS-pixel
+iframe with normal browser scaling displayed readable controls; Items opened
+at full width and selecting orders returned to its populated table. Evidence:
+`wasm-compact-workspace.png` in the session visualization directory.
+
+The browser tool's 390px viewport override renders canvas text at roughly half
+size despite normal surrounding HTML. This did not reproduce with a narrow
+iframe at normal viewport scaling, so no compensating app zoom was introduced.
+Actual mobile-device verification remains outstanding. Narrow table controls
+wrap into multiple rows and still need layout polish.

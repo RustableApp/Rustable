@@ -440,6 +440,7 @@ pub struct Rustable {
     activity: std::collections::VecDeque<String>,
     last_operation_ms: Option<f64>,
     sidebar_section: usize,
+    compact_panel: u8,
     history_search: String,
     history_selected: Option<usize>,
     connections: bool,
@@ -879,6 +880,7 @@ impl Rustable {
             activity: Default::default(),
             last_operation_ms: None,
             sidebar_section: 0,
+            compact_panel: 0,
             history_search: String::new(),
             history_selected: None,
             connections: false,
@@ -1320,6 +1322,7 @@ impl Rustable {
     }
 
     fn open_table(&mut self, name: String) {
+        self.compact_panel = 0;
         if self.pending.is_some() {
             return;
         }
@@ -2269,6 +2272,25 @@ impl Rustable {
             .show(ctx, |ui| {
                 if self.dialog_owns_workspace_shortcuts() { ui.disable(); }
                 ui.add_space(4.0);
+                if ctx.content_rect().width() < 720.0 {
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(self.compact_panel == 1, "Items").clicked() { self.compact_panel = if self.compact_panel == 1 { 0 } else { 1 }; }
+                        if ui.button("SQL").clicked() { self.compact_panel = 0; self.show_query(); self.tabs[self.tab].focus_editor = true; }
+                        if ui.selectable_label(self.compact_panel == 2, "Inspector").clicked() { self.compact_panel = if self.compact_panel == 2 { 0 } else { 2 }; }
+                        ui.menu_button("More", |ui| {
+                            if ui.button("Find anything").clicked() { self.open_navigator(false); ui.close(); }
+                            if ui.button(if cfg!(target_arch = "wasm32") { "Open SQLite copy…" } else { "Open SQLite…" }).clicked() { self.file_dialog(ctx, false); ui.close(); }
+                            if ui.button("SQL activity").clicked() { self.prefs.activity_visible = !self.prefs.activity_visible; ui.close(); }
+                            for choice in [Appearance::System, Appearance::Light, Appearance::Dark] {
+                                if ui.selectable_value(&mut self.prefs.appearance, choice, choice.label()).clicked() {
+                                    self.shared_preferences_dirty = true; ctx.set_theme(choice.preference()); ui.close();
+                                }
+                            }
+                        });
+                        if self.pending.is_some() && ui.button("Cancel").clicked() { self.worker.cancel(); }
+                    });
+                    return;
+                }
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
                     if toolbar_action(ui, 0, self.connections)
@@ -2324,12 +2346,14 @@ impl Rustable {
     }
 
     fn sidebar(&mut self, ctx: &egui::Context) {
-        let id = egui::Id::new((ctx.viewport_id(), "sidebar"));
+        let compact = ctx.content_rect().width() < 720.0;
+        let id = egui::Id::new((ctx.viewport_id(), if compact { "compact-sidebar" } else { "sidebar" }));
         crate::pane_sizes::restore(ctx, id, self.prefs.pane_sizes.sidebar, 220.0, 0);
+        let width = ctx.available_rect().width();
         egui::SidePanel::left(id)
-            .resizable(true)
-            .default_width(220.0)
-            .width_range(160.0..=360.0)
+            .resizable(!compact)
+            .default_width(if compact { width } else { 220.0 })
+            .width_range(if compact { width..=width } else { 160.0..=360.0 })
             .show(ctx, |ui| {
                 if self.dialog_owns_workspace_shortcuts() { ui.disable(); }
                 ui.set_min_width(ui.available_width());
@@ -2483,8 +2507,8 @@ impl Rustable {
                     self.open_table(name);
                 }
             });
-        self.shared_preferences_dirty |=
-            crate::pane_sizes::record_drag(ctx, id, &mut self.prefs.pane_sizes.sidebar, 0);
+        if !compact { self.shared_preferences_dirty |=
+            crate::pane_sizes::record_drag(ctx, id, &mut self.prefs.pane_sizes.sidebar, 0); }
     }
 
     fn footer(&mut self, ctx: &egui::Context) {
@@ -2509,11 +2533,14 @@ impl Rustable {
         let mut finish = false;
         let mut start_edit = None;
         let mut stage_constant = false;
-        let id = egui::Id::new((ctx.viewport_id(), "inspector"));
+        let compact = ctx.content_rect().width() < 720.0;
+        let id = egui::Id::new((ctx.viewport_id(), if compact { "compact-inspector" } else { "inspector" }));
         crate::pane_sizes::restore(ctx, id, self.prefs.pane_sizes.inspector, 240.0, 0);
+        let width = ctx.available_rect().width();
         egui::SidePanel::right(id)
-            .default_width(240.0)
-            .width_range(190.0..=420.0)
+            .resizable(!compact)
+            .default_width(if compact { width } else { 240.0 })
+            .width_range(if compact { width..=width } else { 190.0..=420.0 })
             .show(ctx, |ui| {
                 if self.dialog_owns_workspace_shortcuts() { ui.disable(); }
                 ui.set_min_width(ui.available_width());
@@ -2651,8 +2678,8 @@ impl Rustable {
                     );
                 }
             });
-        self.shared_preferences_dirty |=
-            crate::pane_sizes::record_drag(ctx, id, &mut self.prefs.pane_sizes.inspector, 0);
+        if !compact { self.shared_preferences_dirty |=
+            crate::pane_sizes::record_drag(ctx, id, &mut self.prefs.pane_sizes.inspector, 0); }
         if finish {
             self.finish_cell_edit();
         }
@@ -3324,6 +3351,7 @@ impl Rustable {
     }
 
     fn activate_query(&mut self, index: usize) {
+        self.compact_panel = 0;
         if index >= self.tabs.len() || !self.finish_cell_edit() {
             return;
         }
@@ -5498,9 +5526,17 @@ impl eframe::App for Rustable {
         self.workspace_shortcuts(ctx);
         self.toolbar(ctx);
         if cfg!(feature = "qa") { self.footer(ctx); }
-        self.sidebar(ctx);
-        self.inspector(ctx);
-        self.workspace(ctx);
+        if ctx.content_rect().width() < 720.0 {
+            match self.compact_panel {
+                1 => self.sidebar(ctx),
+                2 => { let visible = self.inspector; self.inspector = true; self.inspector(ctx); self.inspector = visible; },
+                _ => self.workspace(ctx),
+            }
+        } else {
+            self.sidebar(ctx);
+            self.inspector(ctx);
+            self.workspace(ctx);
+        }
         self.windows(ctx);
         self.navigator_window(ctx);
         self.csv_preview_window(ctx);
