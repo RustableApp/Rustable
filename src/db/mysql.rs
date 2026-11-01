@@ -235,10 +235,13 @@ impl MysqlDriver {
         let table_literal = ::mysql::Value::from(table).as_sql(self.mode.no_backslash_escapes);
         let mut sets = self.metadata_query_sets(&format!("SHOW CREATE TABLE {qualified}; SHOW INDEX FROM {qualified}; SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA={schema_literal} AND EVENT_OBJECT_TABLE={table_literal} ORDER BY TRIGGER_NAME"))?;
         if sets.len() != 3 { return Err("Missing table metadata results".into()); }
-        let names = sets.pop().unwrap().into_iter().map(::mysql::from_row_opt::<(String,)>)
+        let mut names = sets.pop().unwrap().into_iter().map(::mysql::from_row_opt::<(String,)>)
             .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
         let rows = sets.pop().unwrap();
         let ddl = sets.pop().unwrap().into_iter().next().and_then(|row| row.get::<String, _>(1)).ok_or("Missing table definition")?;
+        // Catalog triggers belong to the hidden persistent table, never its
+        // session-local temporary replacement.
+        if ddl.starts_with("CREATE TEMPORARY TABLE") { names.clear(); }
         let mut indexes = std::collections::BTreeMap::<String, Index>::new();
         // SHOW INDEX is ordered by index then sequence by the server. Sort
         // explicitly so multipart keys remain ordered across server versions.
@@ -300,26 +303,44 @@ impl MysqlDriver {
     }
     fn table_select(&mut self, request: &Browse) -> Result<(Object, String, Vec<Value>), String> {
         let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
-        let mut object = self.catalog_objects(Some(&request.table))?.into_iter().next()
-            .unwrap_or_else(|| Object { schema: Some(schema.clone()), name: request.table.clone(),
-                display_name: None, metadata_error: None, kind: "table".into(), columns: Vec::new(), ddl: String::new() });
-        // Temporary tables are absent from MySQL's catalog and MariaDB exposes
-        // them without COLUMNS rows. Ask the current session for their columns.
-        // SHOW also reports missing/inaccessible tables without inventing metadata.
-        if object.columns.is_empty() {
-            let rows: Vec<::mysql::Row> = self.with_connection(|conn| conn.query(
-                format!("SHOW FULL COLUMNS FROM {}.{}", quote(&schema), quote(&request.table))))?;
-            for row in rows {
-                let extra = row.get::<String, _>("Extra").ok_or("Missing column attributes")?;
-                object.columns.push(Column {
-                    name: row.get("Field").ok_or("Missing column name")?,
-                    data_type: row.get("Type").ok_or("Missing column type")?,
-                    not_null: row.get::<String, _>("Null").as_deref() == Some("NO"),
-                    default: row.get::<Option<String>, _>("Default").flatten().unwrap_or_default(),
-                    pk: row.get::<String, _>("Key").as_deref() == Some("PRI"),
-                    generated: extra.contains("VIRTUAL GENERATED") || extra.contains("STORED GENERATED") || extra.contains("PERSISTENT"),
-                });
-            }
+        // Resolve columns through this session, not information_schema: a
+        // temporary table can hide a persistent table with a different shape.
+        let qualified = format!("{}.{}", quote(&schema), quote(&request.table));
+        let (rows, definition) = self.with_connection(|conn| {
+            let mut result = conn.query_iter(format!("SHOW FULL COLUMNS FROM {qualified}; SHOW CREATE TABLE {qualified}"))?;
+            let columns = result.iter().ok_or_else(|| ::mysql::Error::from(std::io::Error::other("Missing column metadata")))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let definition = match result.iter() {
+                Some(set) => match set.collect::<Result<Vec<_>, _>>() {
+                    Ok(rows) => rows.into_iter().next(),
+                    // SELECT on a view does not imply SHOW VIEW. Browsing must
+                    // remain available even if its definition is private.
+                    Err(::mysql::Error::MySqlError(error)) if error.code == 1142 => None,
+                    Err(error) => return Err(error),
+                },
+                None => None,
+            };
+            Ok((columns, definition))
+        })?;
+        let (kind, ddl) = if let Some(definition) = definition {
+            let kind = if definition.columns_ref().iter().any(|column| column.name_str() == "Create View") { "view" } else { "table" };
+            (kind.to_owned(), definition.get(1).ok_or("Missing table definition")?)
+        } else {
+            let object = self.catalog_objects(Some(&request.table))?.into_iter().next().ok_or("Missing object metadata")?;
+            (object.kind, String::new())
+        };
+        let mut object = Object { schema: Some(schema.clone()), name: request.table.clone(),
+            display_name: None, metadata_error: None, kind, columns: Vec::new(), ddl };
+        for row in rows {
+            let extra = row.get::<String, _>("Extra").ok_or("Missing column attributes")?;
+            object.columns.push(Column {
+                name: row.get("Field").ok_or("Missing column name")?,
+                data_type: row.get("Type").ok_or("Missing column type")?,
+                not_null: row.get::<String, _>("Null").as_deref() == Some("NO"),
+                default: row.get::<Option<String>, _>("Default").flatten().unwrap_or_default(),
+                pk: row.get::<String, _>("Key").as_deref() == Some("PRI"),
+                generated: extra.contains("VIRTUAL GENERATED") || extra.contains("STORED GENERATED") || extra.contains("PERSISTENT"),
+            });
         }
         // SELECT * omits invisible columns, including possible primary keys.
         // Project the catalog order explicitly so values and editing metadata
@@ -546,6 +567,28 @@ mod tests {
 
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_browse_view_without_definition_privilege() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let mut config = MysqlConfig { host:"127.0.0.1".into(), port, user:"root".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut admin = Conn::new(OptsBuilder::from(&config)).unwrap();
+        admin.query_drop("CREATE OR REPLACE VIEW rustable_private_view AS SELECT 42 AS answer").unwrap();
+        admin.query_drop("DROP USER IF EXISTS 'rustable_view_reader'@'%'").unwrap();
+        admin.query_drop("CREATE USER 'rustable_view_reader'@'%' IDENTIFIED BY 'rustable-test-only'").unwrap();
+        admin.query_drop("GRANT SELECT ON rustable_test.rustable_private_view TO 'rustable_view_reader'@'%'").unwrap();
+        config.user = "rustable_view_reader".into();
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        assert!(driver.conn().unwrap().query_drop("SHOW CREATE TABLE rustable_private_view").is_err());
+        let result = driver.browse(&Browse { table: "rustable_private_view".into(), ..Default::default() });
+        admin.query_drop("DROP USER 'rustable_view_reader'@'%'").unwrap();
+        admin.query_drop("DROP VIEW rustable_private_view").unwrap();
+        let data = result.unwrap();
+        assert_eq!(data.grid.rows[0][0], Value::Integer(42));
+        assert_eq!(data.columns[0].name, "answer");
+        assert!(data.indexes.is_empty());
+    }
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_browse_session_temporary_table() {
         let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
         assert!([43316, 43317].contains(&port));
@@ -564,6 +607,13 @@ mod tests {
         assert!(data.indexes.iter().any(|index| index.name == "PRIMARY"));
         assert!(driver.browse(&Browse { table: "missing_temporary_browse".into(), ..Default::default() }).is_err());
         assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        let setup = driver.execute("DROP TABLE IF EXISTS rustable_shadow_probe; CREATE TABLE rustable_shadow_probe (persistent_id INT PRIMARY KEY); CREATE TRIGGER rustable_shadow_trigger BEFORE INSERT ON rustable_shadow_probe FOR EACH ROW SET NEW.persistent_id=1; CREATE TEMPORARY TABLE rustable_shadow_probe (temporary_id INT PRIMARY KEY); INSERT INTO rustable_shadow_probe VALUES (42);", false, &cancel);
+        assert!(setup.error.is_none(), "{:?}", setup.error);
+        let shadow = driver.browse(&Browse { table: "rustable_shadow_probe".into(), ..Default::default() }).unwrap();
+        assert_eq!(shadow.columns[0].name, "temporary_id");
+        assert_eq!(shadow.grid.rows[0][0], Value::Integer(42));
+        assert!(shadow.triggers.is_empty());
+        assert!(driver.execute("DROP TEMPORARY TABLE rustable_shadow_probe; DROP TABLE rustable_shadow_probe", false, &cancel).error.is_none());
     }
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]

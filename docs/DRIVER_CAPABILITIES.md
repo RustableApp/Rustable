@@ -547,3 +547,20 @@ sort, missing-table error and idle-session preservation. The updated binary has
 not yet received native acceptance. Temporary tables shadowing persistent tables
 remain a separate metadata-resolution gap; this fallback does not resolve that
 case, and reviewed GUI editing remains disabled.
+
+### Session-resolved browse metadata (2026-11-01)
+
+The temporary-table shadowing gap above is now fixed for browse/export column
+resolution. SHOW FULL COLUMNS and SHOW CREATE TABLE share one protocol request;
+this replaces the catalog read rather than adding a round trip to ordinary table
+loads. Both resolve the object visible to the current session, including a temporary
+table with the same name but different columns as a persistent table. Temporary
+table metadata excludes catalog triggers belonging to the hidden persistent table.
+Views without SHOW VIEW permission fall back to catalog object kind after their
+session-resolved columns have been read; SELECT-only browsing remains available.
+
+Live checks passed separately on MySQL and MariaDB: temporary table shadowing with
+a different primary-key name and a trigger on the persistent table, SELECT-only
+view access, locked-table cancellation, ordinary catalog/query/browse workflows,
+and invisible-column browse/export alignment. GUI editing remains gated; this
+change does not establish safe planning against shadowed persistent tables.
