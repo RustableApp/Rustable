@@ -156,3 +156,19 @@ its original SQL, proving the aborted transaction did not replace it. Evidence:
 `wasm-storage-abort.png` in the session visualization directory. This simulates
 transaction abort, not actual browser quota exhaustion. The clean release build
 replaced the injected preview assets afterward. No fault hooks ship in source.
+
+### Retained download-buffer budget (2026-11-01)
+
+SQL, CSV and JSON downloads now share a 32 MiB budget for retained object-URL
+Blobs. Each URL still expires after 60 seconds to allow the browser to consume
+it; repeated exports above the shared budget fail with a wait-and-retry message
+before allocating another Blob. Failed download launch revokes its URL and
+returns its budget immediately, including exceptions during DOM setup.
+
+A Node test uses real typed arrays and Blobs with controlled URL/DOM/timer
+adapters to verify budget rejection, expiry, failed-launch cleanup, retry,
+filename sanitization and idempotent cleanup. All six browser-adapter tests
+pass; release WASM linking passes. This is an object-URL retention bound, not a
+whole-tab memory bound or proof that browser-managed download copies are freed.
+Actual browser downloads were verified earlier; cross-engine coverage remains
+outstanding.

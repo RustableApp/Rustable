@@ -26,3 +26,14 @@ SQL import/download, loaded-result CSV/JSON downloads, and full-table CSV/JSON d
 CSV preview, mapping, review and transactional import accept browser-selected files up to 8 MiB using immutable in-memory snapshots. Cmd/Ctrl+O opens a standalone SQLite file up to 8 MiB as a writable browser-local copy, without modifying the selected file. Invalid files preserve the current session; WAL-mode files require a standalone backup first. Server connections and OS keychains remain desktop integrations. Browser language-server processes are not started; shared catalog completion remains available.
 
 Verify cancellation, error recovery, keyboard shortcuts, browser memory bounds and more browsers before publishing. The full workspace is not a claim that every native OS integration exists in a browser.
+
+Download object URLs retain at most 32 MiB total for up to 60 seconds. Additional
+exports show a wait-and-retry error until that budget is released. Failed launch
+releases its buffer immediately. This does not bound browser-managed download
+copies or the entire tab's memory.
+
+Browser adapter regression tests (using a mise-managed Node runtime):
+
+```sh
+mise exec node@24.22.0 -- node --test tools/browser/tests/*.mjs
+```

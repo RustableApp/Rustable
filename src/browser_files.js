@@ -26,12 +26,31 @@ function pick_file(accept, label) {
 export function download_sql(name, sql) {
   download_bytes(name, new TextEncoder().encode(sql), 'application/sql;charset=utf-8');
 }
+// Bound retained object URLs across repeated exports, not just each result.
+const DOWNLOAD_BUDGET = 32 * 1024 * 1024;
+let pendingDownloadBytes = 0;
 export function download_bytes(name, bytes, mime) {
+  const size = bytes.byteLength;
+  if (!Number.isSafeInteger(size) || size < 0 || size > DOWNLOAD_BUDGET - pendingDownloadBytes) {
+    throw new Error('Pending downloads exceed 32 MiB. Wait a minute before exporting again.');
+  }
   const url = URL.createObjectURL(new Blob([bytes], {type: mime}));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = name.replace(/[\\/]/g, '_');
-  document.body.append(link);
-  try { link.click(); }
-  finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000); }
+  pendingDownloadBytes += size;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    URL.revokeObjectURL(url);
+    pendingDownloadBytes -= size;
+  };
+  let link;
+  try {
+    link = document.createElement('a');
+    link.href = url;
+    link.download = name.replace(/[\\/]/g, '_');
+    document.body.append(link);
+    link.click();
+    setTimeout(release, 60000);
+  } catch (error) { release(); throw error; }
+  finally { link?.remove(); }
 }
