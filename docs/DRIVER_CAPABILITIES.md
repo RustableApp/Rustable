@@ -929,3 +929,27 @@ excluded):
 
 The raw protocol comparison, rather than these general naming restrictions, is
 the evidence for this particular expression label.
+
+### Native MariaDB insert/delete acceptance (2026-11-01)
+
+Continued in the acceptance app built from 032fb7c, using the disposable MariaDB
+11.4 fixture on localhost:43319 with Verify Full TLS. In native_csv_acceptance,
+added id=7 and label `Inserted 日本` through the grid. The generated doubled field
+was shown as GENERATED and omitted from the highlighted INSERT review. Cmd+Enter
+saved the row and refreshed doubled to 14, with no pending indicator remaining.
+
+Right-clicked that inserted row and chose Delete row, then Cmd+S. The highlighted
+review targeted only `id <=> 7` in the schema-qualified table and showed one
+concurrency check. Cmd+Enter saved; the grid refreshed to two rows: id=1 with
+`Rusty crab 🦀` and doubled=2, and id=3 with `日本 edited` and doubled=6. No pending
+indicator remained. The disposable fixture is restored to its pre-insert rows.
+
+Evidence in the local acceptance directory:
+- native-mariadb-insert-review.png
+- native-mariadb-inserted.png
+- native-mariadb-delete-review.png
+- native-mariadb-deleted.png
+
+This extends the earlier native update/rejection/recovery evidence to insert and
+delete. Native cancel behavior, MySQL visual acceptance and additional server
+versions still require verification. No release was made for this acceptance run.
