@@ -255,7 +255,7 @@ impl MysqlDriver {
     fn require_idle(&mut self) -> Result<(), String> {
         match self.transaction_state() {
             TransactionState::Idle => Ok(()),
-            _ => Err("Finish the SQL transaction before switching databases.".into()),
+            _ => Err("Finish the SQL transaction before this operation.".into()),
         }
     }
 }
@@ -432,8 +432,8 @@ impl Driver for MysqlDriver {
     fn export_table(&mut self, path: &std::path::Path, browse: &Browse, cancel: &AtomicBool, format: ExportFormat) -> Result<(), String> {
         export::table(self, path, browse, cancel, format)
     }
-    fn apply(&mut self, _plan: &ChangePlan) -> Result<(), String> {
-        Err("MySQL table editing is still being implemented.".into())
+    fn apply(&mut self, plan: &ChangePlan) -> Result<(), String> {
+        editing::apply(self, plan)
     }
 }
 
@@ -775,6 +775,97 @@ mod tests {
         let inserted = driver.plan(&[Change::InsertRow { id:1, table:"plan_data_probe".into(), fields:vec![("id".into(),Value::Integer(2))] }]).unwrap();
         assert!(!inserted.statements[0].sql.contains("generated_value"));
         driver.conn().unwrap().query_drop("DROP TABLE plan_data_probe").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_apply_rejects_hidden_trigger_metadata() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let mut config = MysqlConfig { host:"127.0.0.1".into(), port, user:"root".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut admin = Conn::new(OptsBuilder::from(&config)).unwrap();
+        admin.query_drop("DROP USER IF EXISTS 'rustable_review_limited'@'%'").unwrap();
+        admin.query_drop("CREATE USER 'rustable_review_limited'@'%' IDENTIFIED BY 'rustable-test-only'").unwrap();
+        admin.query_drop("GRANT SELECT, UPDATE ON rustable_test.* TO 'rustable_review_limited'@'%'").unwrap();
+        admin.query_drop("DROP TABLE IF EXISTS hidden_trigger_probe").unwrap();
+        admin.query_drop("CREATE TABLE hidden_trigger_probe(id INT PRIMARY KEY, label VARCHAR(20)) ENGINE=InnoDB").unwrap();
+        admin.query_drop("INSERT INTO hidden_trigger_probe VALUES(1,'original')").unwrap();
+        admin.query_drop("CREATE TRIGGER hidden_trigger_probe_t BEFORE UPDATE ON hidden_trigger_probe FOR EACH ROW SET NEW.label='trigger'").unwrap();
+        config.user = "rustable_review_limited".into();
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        if port == 43316 {
+            let count: Option<u64> = driver.conn().unwrap().query_first("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_TABLE='hidden_trigger_probe'").unwrap();
+            assert_eq!(count, Some(0), "MySQL hides triggers from this account");
+        } else {
+            assert!(driver.conn().unwrap().query_drop("SHOW CREATE TRIGGER hidden_trigger_probe_t").is_err(), "MariaDB must deny the trigger definition");
+        }
+        // Review produced by a privileged session must still be rejected when
+        // applied under a session that cannot establish complete visibility.
+        let mut review_config = config.clone();
+        review_config.user = "rustable".into();
+        let mut reviewer = MysqlDriver::connect(&review_config).unwrap();
+        let rows = reviewer.browse(&Browse { table:"hidden_trigger_probe".into(), ..Default::default() }).unwrap();
+        let plan = reviewer.plan(&[Change::Cell { table:"hidden_trigger_probe".into(), column:"label".into(), original:rows.grid.rows[0].clone(), value:Value::Text("edited".into()) }]).unwrap();
+        assert!(driver.apply(&plan).unwrap_err().contains("direct privileges"));
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        assert_eq!(admin.query_first::<String,_>("SELECT label FROM hidden_trigger_probe WHERE id=1").unwrap().as_deref(),Some("original"));
+        drop(driver);
+        admin.query_drop("DROP TABLE hidden_trigger_probe").unwrap();
+        admin.query_drop("DROP USER 'rustable_review_limited'@'%'").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_apply_commit_conflict_warning_and_batch_rollback() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut other = Conn::new(OptsBuilder::from(&config)).unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS apply_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE apply_probe(id INT PRIMARY KEY, label VARCHAR(8)) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO apply_probe VALUES(1,'before'),(2,'other')").unwrap();
+        let edit = |driver: &mut MysqlDriver, id: i64, column: &str, value: Value| {
+            let rows = driver.browse(&Browse { table:"apply_probe".into(), ..Default::default() }).unwrap().grid;
+            let original = rows.rows.iter().find(|r| r[0] == Value::Integer(id)).unwrap().clone();
+            Change::Cell { table:"apply_probe".into(), column:column.into(), original, value }
+        };
+        let change = edit(&mut driver, 1, "label", Value::Text("saved".into()));
+        let plan = driver.plan(&[change]).unwrap();
+        driver.apply(&plan).unwrap();
+        assert_eq!(other.query_first::<String,_>("SELECT label FROM apply_probe WHERE id=1").unwrap().as_deref(),Some("saved"));
+        assert!(driver.apply(&plan).unwrap_err().contains("Row changed"));
+        let unchanged = edit(&mut driver, 1, "label", Value::Text("saved".into()));
+        let plan = driver.plan(&[unchanged]).unwrap();
+        driver.apply(&plan).unwrap();
+        let first = edit(&mut driver, 1, "label", Value::Text("rollback".into()));
+        let second = edit(&mut driver, 2, "id", Value::Integer(1));
+        let plan = driver.plan(&[first, second]).unwrap();
+        assert!(driver.apply(&plan).is_err());
+        assert_eq!(other.query_first::<String,_>("SELECT label FROM apply_probe WHERE id=1").unwrap().as_deref(),Some("saved"));
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        driver.conn().unwrap().query_drop("SET sql_mode=''").unwrap();
+        let long = edit(&mut driver, 1, "label", Value::Text("silently truncated".into()));
+        let plan = driver.plan(&[long]).unwrap();
+        assert!(driver.apply(&plan).unwrap_err().contains("warning"));
+        assert_eq!(other.query_first::<String,_>("SELECT label FROM apply_probe WHERE id=1").unwrap().as_deref(),Some("saved"));
+        let change = edit(&mut driver, 1, "label", Value::Text("next".into()));
+        let plan = driver.plan(&[change]).unwrap();
+        other.query_drop("CREATE TRIGGER apply_probe_trigger BEFORE UPDATE ON apply_probe FOR EACH ROW SET NEW.label='trigger'").unwrap();
+        assert!(driver.apply(&plan).unwrap_err().contains("triggers"));
+        other.query_drop("DROP TRIGGER apply_probe_trigger").unwrap();
+        driver.cancel.store(true, Ordering::Release);
+        assert!(driver.apply(&plan).is_err());
+        driver.cancel.store(false, Ordering::Release);
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        driver.conn().unwrap().query_drop("START TRANSACTION").unwrap();
+        assert!(driver.apply(&plan).is_err());
+        assert_eq!(driver.transaction_state(), TransactionState::Active);
+        driver.conn().unwrap().query_drop("ROLLBACK").unwrap();
+        other.query_drop("ALTER TABLE apply_probe ADD COLUMN extra INT").unwrap();
+        assert!(driver.apply(&plan).unwrap_err().contains("definition changed"));
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        other.query_drop("DROP TABLE apply_probe").unwrap();
     }
 
     #[test]

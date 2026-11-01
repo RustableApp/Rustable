@@ -130,3 +130,36 @@ changed default containing the literal text `AUTO_INCREMENT=23`. Lexical tests
 also retain the column attribute, comments and engine changes. All 22 MySQL driver
 tests passed independently on MySQL and MariaDB; strict all-target Clippy passed.
 This change does not enable the still-incomplete GUI apply path.
+
+### Initial MySQL/MariaDB apply implementation (2026-11-01)
+
+The driver now has an initial reviewed data-save implementation. The UI capability
+remains disabled; this is not yet an officially supported editing workflow.
+It starts one transaction, acquires table metadata locks in sorted order, checks
+InnoDB and trigger visibility, rejects tables with triggers, revalidates schema
+snapshots, checks original rows under FOR UPDATE, and executes parameterized writes.
+Warnings (including non-strict truncation) reject and roll back the batch. No-op
+updates accept zero changed rows only after the one-row original-value check.
+Cancellation is checked before commit; rollback ignores the cancellation flag.
+COMMIT transport/error outcomes disconnect and require verification, never replay.
+
+Trigger visibility currently accepts explicit table or exact database grants only,
+including MySQL's escaped database grant names. Global privileges, roles and broader
+wildcard grants are deliberately not inferred. The restricted-account fixture shows
+MySQL hides triggers, whereas MariaDB exposes their names but denies SHOW CREATE.
+Both accounts are rejected before any write.
+
+All 24 MySQL driver tests passed on each engine. New apply integration coverage:
+commit visible to another session, unchanged updates, stale original rejection,
+constraint failure rolling back an earlier write, non-strict truncation warning
+rollback, trigger rejection, pre-cancellation, retaining user-owned transactions,
+and changed schema rejection. Strict Clippy passed before the final test-only
+restricted-account adjustment.
+
+Before enabling the UI: implement/verify complete effective privileges and trigger
+side effects; audit default/generated expressions and session constraint modes;
+test cancellation during lock waits/writes, rollback transport failure and lost
+COMMIT replies; expand inserts/deletes and native review UI acceptance. Also fix
+MariaDB browsing so inaccessible SHOW CREATE TRIGGER metadata does not prevent
+reading otherwise permitted table rows. These are remaining work, not reasons to
+weaken the safety gate.

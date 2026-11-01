@@ -141,6 +141,129 @@ pub(super) fn schema_signature(ddl: &str, mode: Mode) -> Result<Vec<String>, Str
     Ok(signature)
 }
 
+
+fn snapshot_table(key: &str) -> Result<(String, String), String> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let tokens = Tokenizer::new(&crate::sql::mysql::Lexer(Mode::default()), key)
+        .tokenize().map_err(|error| error.to_string())?;
+    match tokens.as_slice() {
+        [Token::Word(schema), Token::Period, Token::Word(table)]
+            if schema.quote_style == Some('`') && table.quote_style == Some('`') =>
+            Ok((schema.value.clone(), table.value.clone())),
+        _ => Err("Invalid reviewed table identity. Review the changes again.".into()),
+    }
+}
+
+// Fail closed when trigger visibility cannot be established. Role-derived and
+// wildcard database grants need a separate effective-privilege implementation.
+fn require_trigger_visibility(driver: &mut MysqlDriver, schema: &str, table: &str) -> Result<(), String> {
+    let account: String = driver.with_connection(|conn| conn.query_first("SELECT CURRENT_USER()"))?
+        .ok_or("Missing current database account")?;
+    let (user, host) = account.rsplit_once('@').ok_or("Invalid current database account")?;
+    if user.contains(['\'', '\\']) || host.contains(['\'', '\\']) {
+        return Err("Cannot yet establish trigger visibility for this account name.".into());
+    }
+    let grantee = format!("'{user}'@'{host}'");
+    let table_grant: Option<u8> = driver.with_connection(|conn| conn.exec_first(
+        "SELECT 1 FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE=? AND TABLE_SCHEMA=? AND TABLE_NAME=? AND PRIVILEGE_TYPE='TRIGGER' LIMIT 1",
+        (&grantee, schema, table)))?;
+    let schema_grants: Vec<String> = driver.with_connection(|conn| conn.exec(
+        "SELECT TABLE_SCHEMA FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE=? AND PRIVILEGE_TYPE='TRIGGER'", (&grantee,)))?;
+    let schema_grant = schema_grants.iter().any(|pattern| {
+        // MySQL exposes escaped database patterns (e.g. rustable\_test).
+        // Recognize exact names; broader wildcard/role grants remain unsupported.
+        let mut chars = pattern.chars();
+        let mut name = String::new();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                match chars.next() {
+                    Some(c @ ('_' | '%' | '\\')) => name.push(c),
+                    _ => return false,
+                }
+            } else { name.push(ch); }
+        }
+        name == schema
+    });
+    if table_grant.is_none() && !schema_grant {
+        return Err("Cannot verify all table triggers with this account's direct privileges. Reviewed MySQL saves are unavailable for this account.".into());
+    }
+    Ok(())
+}
+
+pub(super) fn apply(driver: &mut MysqlDriver, plan: &ChangePlan) -> Result<(), String> {
+    driver.require_idle()?;
+    if plan.statements.is_empty() { return Ok(()); }
+    if plan.rebuild || plan.schemas.is_empty() || plan.preconditions.iter().any(|c| c.before_statement >= plan.statements.len()) {
+        return Err("Invalid data review. Review the changes again.".into());
+    }
+    let mut tables = plan.schemas.iter().map(|(key, snapshot)| {
+        snapshot_table(key).map(|(schema, table)| (schema, table, snapshot))
+    }).collect::<Result<Vec<_>,_>>()?;
+    tables.sort_by(|a,b| (&a.0,&a.1).cmp(&(&b.0,&b.1)));
+    let result = (|| -> Result<(), String> {
+        driver.with_connection(|conn| conn.query_drop("START TRANSACTION"))?;
+        for (schema, table, expected) in &tables {
+            driver.with_connection(|conn| conn.query_drop(format!("SELECT * FROM {}.{} LIMIT 0", quote(schema), quote(table))))?;
+            require_trigger_visibility(driver, schema, table)?;
+            let engine: Option<String> = driver.with_connection(|conn| conn.exec_first(
+                "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", (schema, table)))?;
+            if engine.as_deref() != Some("InnoDB") { return Err("Reviewed saves require InnoDB base tables.".into()); }
+            let triggers: Option<u64> = driver.with_connection(|conn| conn.exec_first(
+                "SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=?", (schema, table)))?;
+            if triggers != Some(0) {
+                return Err("Reviewed saves for tables with triggers are not implemented yet. No changes were saved.".into());
+            }
+            if driver.edit_schema_snapshot(schema, table)? != **expected {
+                return Err("Table definition changed since review. Refresh and review again.".into());
+            }
+        }
+        for (index, statement) in plan.statements.iter().enumerate() {
+            let update = statement.sql.starts_with("UPDATE ");
+            if !update && !statement.sql.starts_with("INSERT INTO ") && !statement.sql.starts_with("DELETE FROM ") {
+                return Err("Only reviewed row changes can use this transaction.".into());
+            }
+            let checks = plan.preconditions.iter().filter(|c| c.before_statement == index).collect::<Vec<_>>();
+            if (update || statement.sql.starts_with("DELETE FROM ")) && checks.len() != 1 {
+                return Err("Missing original-row check. Review changes again.".into());
+            }
+            for check in checks {
+                let parameters = check.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>,_>>()?;
+                let rows: Vec<u8> = driver.with_connection(|conn| conn.exec(&check.sql, parameters))?;
+                if rows != [1] { return Err("Row changed or was deleted since loading. Refresh and review again.".into()); }
+            }
+            let parameters = statement.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>,_>>()?;
+            let (affected, warnings) = driver.with_connection(|conn| {
+                conn.exec_drop(&statement.sql, parameters)?;
+                Ok((conn.affected_rows(), conn.warnings()))
+            })?;
+            if warnings != 0 { return Err("Server reported a conversion or other warning. The batch was not saved.".into()); }
+            // MySQL reports changed rows, not matched rows by default. The
+            // locked original-row check already established the one-row match.
+            if statement.expected_rows != Some(affected as usize) && !(update && affected == 0 && statement.expected_rows == Some(1)) {
+                return Err("Unexpected affected row count. The batch was not saved.".into());
+            }
+        }
+        if driver.cancel.load(Ordering::Acquire) { return Err("Save cancelled before commit.".into()); }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        // Cancellation must not cancel cleanup. Never replay an uncertain write.
+        let rollback = driver.conn().and_then(|conn| conn.query_drop("ROLLBACK").map_err(|e| e.to_string()));
+        if let Err(rollback_error) = rollback {
+            driver.connection = None;
+            return Err(format!("{error}\nRollback could not be confirmed: {rollback_error}. Reconnect and verify data before retrying."));
+        }
+        return Err(error);
+    }
+    // Do not issue KILL QUERY during COMMIT: once sent, its result must be
+    // observed. Transport loss is an unknown outcome, never an automatic retry.
+    if let Err(error) = driver.conn()?.query_drop("COMMIT") {
+        driver.connection = None;
+        return Err(format!("Commit outcome is unknown: {error}. Reconnect and verify saved data before retrying."));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod signature_tests {
     use super::*;
