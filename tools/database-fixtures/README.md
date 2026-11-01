@@ -102,7 +102,7 @@ to switch databases during a transaction. SQL result byte budgets span statement
 
 Before exposing this driver in the connection picker: extend cancellation to
 metadata/table browsing,
-finish editor-mode integration and fault coverage for session refresh,
+finish session-refresh failure handling and full UI connection wiring,
 implement table-edit concurrency checks and commits, optimize metadata round trips,
 add SSH/TLS fixtures, and connect profile storage/editor dialect state. Safe-mode
 requests currently return an explicit unsupported error. Stream collection preserves typed connectivity classification: ordinary SQL
@@ -158,8 +158,8 @@ regression combines custom delimiters with a mode change and delimiter reset.
 A malformed later statement stops at that point; earlier autocommitted statements
 remain executed, matching the sequential execution model.
 
-Still required: propagation of active mode into editor selection/completion.
-This is a prerequisite for exposing the driver as supported.
+Active modes now propagate through connection/query worker replies into editor
+selection, highlighting and formatting. Completion/LSP parity remains outstanding.
 
 
 Session-changing SET/CALL/EXECUTE/USE statements now refresh authoritative mode,
@@ -174,3 +174,14 @@ state and query values match the server. Normal SELECT/DML with tracking enabled
 adds no session-refresh exchange. A failed session-changing command leaves the
 state dirty for refresh before the next run; immediate UI mode propagation and
 session-refresh failure coverage still need integration.
+
+
+Worker payloads now carry the driver's active dialect on connect and after SQL
+execution, including errors. Rustable keeps it as transient session state and
+uses it for statement selection, editor rendering and formatter requests.
+The headless app regression delivers a MySQL mode update and verifies Run current
+selects the second statement after a backslash-terminated literal under
+NO_BACKSLASH_ESCAPES. Binary transport verifies both mode flags survive roundtrip.
+Full native library suite: 399 passed, 53 ignored; strict Clippy passed. This does
+not imply the hidden driver is connected to the profile picker or that a MySQL
+language server is integrated.

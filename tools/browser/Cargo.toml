@@ -29,3 +29,5 @@ eframe = { path = "../../vendor/eframe" }
 egui_extras = { path = "../../vendor/egui_extras" }
 postgres = { path = "../../vendor/postgres" }
 tokio-postgres = { path = "../../vendor/tokio-postgres" }
+
+mysql = { path = "../../vendor/mysql" }

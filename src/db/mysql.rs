@@ -173,6 +173,7 @@ impl MysqlDriver {
 
 impl Driver for MysqlDriver {
     fn engine_name(&self) -> &'static str { self.engine }
+    fn sql_dialect(&self) -> crate::sql::Dialect { crate::sql::Dialect::Mysql(self.mode) }
     fn transaction_state(&mut self) -> TransactionState {
         let Some(conn) = self.connection.as_mut() else { return TransactionState::Disconnected; };
         if conn.transaction_status().is_none() && conn.ping().is_err() {

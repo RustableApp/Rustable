@@ -396,6 +396,7 @@ pub struct Rustable {
     started: Instant,
     label: String,
     engine: String,
+    session_dialect: Option<crate::sql::Dialect>,
     schemas: db::SchemaCatalog,
     connected_database: Option<String>,
     table_display_name: Option<(String, String)>,
@@ -832,6 +833,7 @@ impl Rustable {
             started: Instant::now(),
             label: "Connecting…".into(),
             engine: String::new(),
+            session_dialect: None,
             schemas: db::SchemaCatalog::default(),
             connected_database: None,
             table_display_name: None,
@@ -1018,6 +1020,7 @@ impl Rustable {
                     }
                 }
                 Ok(Payload::Connected {
+                    dialect,
                     engine,
                     label,
                     database,
@@ -1051,6 +1054,7 @@ impl Rustable {
                     self.label = label;
                     self.connected_database = database;
                     self.engine = engine;
+                    self.session_dialect = Some(dialect);
                     self.schemas = schemas;
                     self.objects = objects;
                     self.language.invalidate();
@@ -1111,10 +1115,12 @@ impl Rustable {
                     }
                 }
                 Ok(Payload::Query {
+                    dialect,
                     report,
                     objects,
                     schemas,
                 }) => {
+                    self.session_dialect = Some(dialect);
                     self.schemas = schemas;
                     self.status = format!(
                         "{} statements completed · {:.1} ms",
@@ -1404,11 +1410,11 @@ impl Rustable {
             &tab.sql,
             tab.cursor.clone(),
             all,
-            crate::sql::Dialect::for_engine(&self.engine),
+            self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)),
         ) else {
             return;
         };
-        let sql = match crate::sql::Dialect::for_engine(&self.engine) {
+        let sql = match self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)) {
             crate::sql::Dialect::Mysql(mode) => match crate::sql::mysql::execution_text(&tab.sql, range, mode) {
                 Ok(sql) => sql,
                 Err(error) => { self.error = Some(error); return; }
@@ -3580,7 +3586,7 @@ impl Rustable {
                                 ui.make_persistent_id(egui::Id::new(("query-editor", tab.id)));
                             if ui.is_enabled() && ui.memory(|m| m.has_focus(editor_id))
                                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I)) {
-                                tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), crate::sql::Dialect::for_engine(&self.engine));
+                                tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
                             }
                             let was_formatting = tab.formatter.busy();
                             if let Some(formatted) = tab.formatter.poll(&tab.sql) {
@@ -3639,7 +3645,7 @@ impl Rustable {
                                     &self.objects,
                                     &self.columns,
                                     explicit_completion,
-                                    crate::sql::Dialect::for_engine(&self.engine),
+                                    self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)),
                                 );
                             }
                             if output.response.has_focus()
@@ -3667,7 +3673,7 @@ impl Rustable {
                                 &output,
                                 &tab.sql,
                                 tab.cursor.clone(),
-                                crate::sql::Dialect::for_engine(&self.engine),
+                                self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)),
                             );
                             self.language.paint(ui, &output, &tab.sql);
                             if tab.focus_editor && ui.is_enabled() {
@@ -3816,7 +3822,7 @@ impl Rustable {
                         .shortcut_text(if ui.ctx().os() == egui::os::OperatingSystem::Mac { "⌘I" } else { "Ctrl+I" }))
                     .on_hover_text("Format selection, or the whole SQL document. Undo with Cmd/Ctrl+Z.")
                     .clicked() {
-                    tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), crate::sql::Dialect::for_engine(&self.engine));
+                    tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
                 }
                 if ui.button("Save").on_hover_text("Save named SQL query · Cmd/Ctrl+S").clicked() {
                     self.save_query_file(ui.ctx(), false);
@@ -10973,5 +10979,31 @@ mod transaction_window_tests {
         app.dispatch(Command::Open(None), Pending::Connect(None));
         settle(&mut app);
         assert_eq!(app.engine, "SQLite");
+    }
+}
+
+#[cfg(test)]
+mod mysql_editor_mode_tests {
+    use super::*;
+    #[test]
+    fn query_reply_updates_mode_used_by_run_current() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.engine = "MySQL".into();
+        app.connections = false;
+        app.show_query();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.worker.rx = receiver;
+        let dialect = crate::sql::Dialect::Mysql(crate::sql::mysql::Mode {
+            no_backslash_escapes: true, ansi_quotes: true,
+        });
+        sender.send(Ok(Payload::Query { dialect, report: Default::default(), objects: None, schemas: Default::default() })).unwrap();
+        app.poll();
+        assert_eq!(app.session_dialect, Some(dialect));
+        app.tabs[0].sql = "SELECT 'a\\'; SELECT 2;".into();
+        let caret = app.tabs[0].sql.chars().count();
+        app.tabs[0].cursor = caret..caret;
+        app.run_query(false);
+        assert_eq!(app.prefs.history.first().map(String::as_str), Some("SELECT 2;"));
     }
 }

@@ -12,6 +12,7 @@ mod tests {
     #[test]
     fn worker_reply_preserves_typed_cells_and_transaction_state() {
         let payload = Payload::Query {
+            dialect: crate::sql::Dialect::Mysql(crate::sql::mysql::Mode { ansi_quotes: true, no_backslash_escapes: true }),
             report: ScriptResult {
                 grids: vec![Arc::new(Grid {
                     columns: vec!["value".into()],
@@ -30,8 +31,9 @@ mod tests {
         let _: Payload = codec().deserialize(&codec().serialize(&payload).unwrap()).expect("payload roundtrip");
         let bytes = codec().serialize(&(Ok::<_, String>(payload), TransactionState::Active)).unwrap();
         let (reply, state): (Result<Payload, String>, TransactionState) = codec().deserialize(&bytes).unwrap();
-        let Payload::Query { report, .. } = reply.unwrap() else { panic!("expected query"); };
+        let Payload::Query { report, dialect, .. } = reply.unwrap() else { panic!("expected query"); };
         assert_eq!(state, TransactionState::Active);
+        assert_eq!(dialect, crate::sql::Dialect::Mysql(crate::sql::mysql::Mode { ansi_quotes: true, no_backslash_escapes: true }));
         assert_eq!(report.grids[0].rows[0], [Value::Integer(i64::MAX)]);
         assert_eq!(report.grids[0].rows[1], [Value::Blob(vec![0, 255])]);
         assert_eq!(report.grids[0].rows[2], [Value::Null]);

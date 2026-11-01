@@ -80,6 +80,7 @@ trait Driver: Send {
     fn databases(&mut self) -> Result<Vec<String>, String> { Ok(Vec::new()) }
     fn transaction_state(&mut self) -> TransactionState { TransactionState::Idle }
     fn engine_name(&self) -> &'static str;
+    fn sql_dialect(&self) -> crate::sql::Dialect { crate::sql::Dialect::for_engine(self.engine_name()) }
     fn objects(&mut self) -> Result<Vec<Object>, String>;
     fn schema_catalog(&self) -> SchemaCatalog {
         SchemaCatalog::default()
@@ -332,6 +333,7 @@ pub enum Payload {
         objects: Result<Vec<Object>, String>,
     },
     Connected {
+        dialect: crate::sql::Dialect,
         engine: String,
         label: String,
         database: Option<String>,
@@ -339,6 +341,7 @@ pub enum Payload {
         schemas: SchemaCatalog,
     },
     Query {
+        dialect: crate::sql::Dialect,
         report: ScriptResult,
         objects: Option<Result<Vec<Object>, String>>,
         schemas: SchemaCatalog,
@@ -510,7 +513,7 @@ fn handle(
         let objects = driver.objects()?;
         let schemas = driver.schema_catalog();
         *connection = Some(driver);
-        return Ok(Payload::Connected { engine: "SQLite".into(), label: format!("{name} · browser copy"), database: None, objects, schemas });
+        return Ok(Payload::Connected { dialect: crate::sql::Dialect::Sqlite, engine: "SQLite".into(), label: format!("{name} · browser copy"), database: None, objects, schemas });
     }
     if let Command::Open(path) = command {
         let mut driver: Box<dyn Driver> =
@@ -518,12 +521,14 @@ fn handle(
         let objects = driver.objects()?;
         let schemas = driver.schema_catalog();
         let engine = driver.engine_name().to_owned();
+        let dialect = driver.sql_dialect();
         let label = path
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "Studio demo · in memory".into());
         // Replace the current session only after the candidate is fully usable.
         *connection = Some(driver);
         return Ok(Payload::Connected {
+            dialect,
             engine,
             label,
             database: None,
@@ -542,9 +547,11 @@ fn handle(
         let objects = driver.objects()?;
         let schemas = driver.schema_catalog();
         let engine = driver.engine_name().to_owned();
+        let dialect = driver.sql_dialect();
         let label = config.label();
         *connection = Some(driver);
         return Ok(Payload::Connected {
+            dialect,
             engine,
             label,
             database: Some(config.database.clone()),
@@ -598,11 +605,12 @@ fn handle(
         Command::Query { sql, safe } => {
             let refresh = query_needs_catalog_refresh(
                 &sql,
-                crate::sql::Dialect::for_engine(driver.engine_name()),
+                driver.sql_dialect(),
             );
             let report = driver.execute(&sql, safe, cancel);
             cancel.store(false, Ordering::Relaxed);
             Ok(Payload::Query {
+                dialect: driver.sql_dialect(),
                 report,
                 // Execution may already have committed writes. Preserve its report
                 // even when the independent schema refresh fails afterward.
