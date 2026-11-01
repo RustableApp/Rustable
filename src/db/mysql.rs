@@ -478,6 +478,17 @@ mod tests {
         assert_eq!(targeted.len(), 1);
         assert_eq!(targeted[0].name, object.name);
         assert!(driver.catalog_objects(Some("driver`probe' OR 1=1 --")).unwrap().is_empty());
+        // Exercise catalog -> qualified completion -> executable SQL on both engines.
+        for alias in ["`customer alias`", "`where`", "`tick``alias`", "`客戶`"] {
+            let head = format!("SELECT {alias}.lab");
+            let mut sql = format!("{head} FROM `driver``probe` AS {alias} WHERE {alias}.id=1");
+            let mut completion = crate::completion::Completion::default();
+            completion.refresh(&sql, head.chars().count(), std::slice::from_ref(&object), &[], true, driver.sql_dialect());
+            completion.apply(&mut sql, "label");
+            assert!(sql.starts_with(&format!("SELECT {alias}.`label`")), "{sql}");
+            let completed = driver.execute(&sql, false, &cancel);
+            assert!(completed.error.is_none(), "{sql}: {:?}", completed.error);
+        }
         assert_eq!(object.columns.len(), 3);
         assert!(object.columns[0].pk);
         assert!(object.columns[2].generated);

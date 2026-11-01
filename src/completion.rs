@@ -504,17 +504,20 @@ fn tokens(sql: &str) -> Vec<String> {
     result
 }
 fn tokens_for_dialect(sql: &str, dialect: Dialect) -> Vec<String> {
-    let Dialect::Mysql(mode) = dialect else { return tokens(sql); };
+    relation_tokens(sql, dialect).into_iter().map(|(text, _)| text).collect()
+}
+fn relation_tokens(sql: &str, dialect: Dialect) -> Vec<(String, bool)> {
+    let Dialect::Mysql(mode) = dialect else { return tokens(sql).into_iter().map(|word| (word, false)).collect(); };
     use sqlparser::tokenizer::{Token, Tokenizer};
     let lexer = crate::sql::mysql::Lexer(mode);
     let Ok(tokens) = Tokenizer::new(&lexer, sql).tokenize() else { return Vec::new(); };
     tokens.into_iter().filter_map(|token| match token {
-        Token::Word(word) => Some(word.value),
-        Token::Period => Some(".".into()),
-        Token::Comma => Some(",".into()),
-        Token::LParen => Some("(".into()),
-        Token::RParen => Some(")".into()),
-        Token::SemiColon => Some(";".into()),
+        Token::Word(word) => Some((word.value, word.quote_style.is_some())),
+        Token::Period => Some((".".into(), false)),
+        Token::Comma => Some((",".into(), false)),
+        Token::LParen => Some(("(".into(), false)),
+        Token::RParen => Some((")".into(), false)),
+        Token::SemiColon => Some((";".into(), false)),
         _ => None,
     }).collect()
 }
@@ -523,13 +526,17 @@ fn relations(sql: &str) -> Vec<(String, String)> {
     relations_for_dialect(sql, Dialect::Sqlite)
 }
 fn relations_for_dialect(sql: &str, dialect: Dialect) -> Vec<(String, String)> {
-    let words = tokens_for_dialect(sql, dialect);
+    let lexemes = relation_tokens(sql, dialect);
+    let words = lexemes.iter().map(|(text, _)| text.clone()).collect::<Vec<_>>();
     let mut result = Vec::new();
     let mut i = 0;
     // A comma introduces another relation only within the FROM list at its
     // own nesting level, never inside a function, tuple, or later clause.
     let mut from_lists = vec![false];
     while i < words.len() {
+        // Quoted identifiers can spell keywords or punctuation. They do not
+        // introduce clauses, joins or nesting while scanning the query body.
+        if lexemes[i].1 { i += 1; continue; }
         match words[i].as_str() {
             "(" => {
                 from_lists.push(false);
@@ -576,24 +583,24 @@ fn relations_for_dialect(sql: &str, dialect: Dialect) -> Vec<(String, String)> {
                 .any(|k| words[i].eq_ignore_ascii_case(k))
         {
             i += 1;
-            if i >= words.len() || words[i] == "(" {
+            if i >= words.len() || (words[i] == "(" && !lexemes[i].1) {
                 continue;
             }
             let mut table = words[i].clone();
             i += 1;
             let mut default_alias = table.clone();
-            if words.get(i).is_some_and(|w| w == ".") && i + 1 < words.len() {
+            if words.get(i).is_some_and(|w| w == ".") && !lexemes[i].1 && i + 1 < words.len() {
                 default_alias = words[i + 1].clone();
                 table = format!("{}.{}", table, words[i + 1]);
                 i += 2;
             }
-            if words.get(i).is_some_and(|w| w.eq_ignore_ascii_case("AS")) {
+            if words.get(i).is_some_and(|w| w.eq_ignore_ascii_case("AS")) && !lexemes[i].1 {
                 i += 1;
             }
             let alias = words
                 .get(i)
                 .filter(|w| {
-                    w.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    lexemes[i].1 || (w.chars().all(|c| c.is_alphanumeric() || c == '_')
                         && ![
                             "WHERE",
                             "JOIN",
@@ -620,7 +627,7 @@ fn relations_for_dialect(sql: &str, dialect: Dialect) -> Vec<(String, String)> {
                             "NATURAL",
                         ]
                         .iter()
-                        .any(|k| w.eq_ignore_ascii_case(k))
+                        .any(|k| w.eq_ignore_ascii_case(k)))
                 })
                 .cloned()
                 .unwrap_or(default_alias);
@@ -918,6 +925,34 @@ mod tests {
         assert!(!local_code_position("SELECT 'escaped \\' FR", normal));
         assert!(local_code_position("SELECT 'escaped \\' FR", no_escape));
         assert!(!local_code_position("SELECT 'escaped \\' FR", Dialect::Mysql(crate::sql::mysql::Mode { no_backslash_escapes: false, ansi_quotes: true })));
+    }
+
+    #[test]
+    fn mysql_quoted_aliases_resolve_join_columns() {
+        let objects = [object("customers", &["customer_name", "tick`field"]), object("orders", &["order_total"])];
+        for mode in [crate::sql::mysql::Mode::default(), crate::sql::mysql::Mode { ansi_quotes: true, no_backslash_escapes: true }] {
+            let dialect = Dialect::Mysql(mode);
+            let mut aliases = vec!["`customer alias`", "`where`", "`tick``alias`", "`客戶`", "`(`", "`.`"];
+            if mode.ansi_quotes { aliases.push("\"customer alias\""); }
+            for alias in aliases {
+                for (prefix, label, inserted) in [("cu", "customer_name", "`customer_name`"), ("tic", "tick`field", "`tick``field`")] {
+                    let head = format!("SELECT {alias}.{prefix}");
+                    let tail = format!(" FROM customers AS {alias} JOIN orders AS o ON 1=1");
+                    let mut sql = format!("{head}{tail}");
+                    let mut completion = Completion::default();
+                    completion.refresh(&sql, head.chars().count(), &objects, &[], true, dialect);
+                    assert_eq!(completion.items, vec![label], "{sql}");
+                    completion.apply(&mut sql, label);
+                    assert_eq!(sql, format!("SELECT {alias}.{inserted}{tail}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_quoted_keywords_do_not_introduce_relations() {
+        let dialect = Dialect::Mysql(crate::sql::mysql::Mode::default());
+        assert_eq!(relations_for_dialect("SELECT `FROM`, `JOIN`, `(` FROM `(` AS `where` JOIN orders AS o ON 1=1", dialect), vec![("(".into(), "where".into()), ("orders".into(), "o".into())]);
     }
 
     #[test]

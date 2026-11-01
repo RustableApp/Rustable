@@ -283,3 +283,16 @@ All four CSV review keyboard tests passed, including both shortcuts for each
 unsupported engine; existing busy, Escape and failed-import retention tests passed.
 Strict all-target Clippy passed. Native visual review of the new explanatory text
 remains pending.
+
+### Quoted alias completion verification (2026-11-01)
+
+MySQL/MariaDB local relation scanning now retains identifier quote information,
+so quoted aliases containing spaces, escaped backticks, Unicode or reserved
+keywords resolve to catalog columns. Quoted punctuation and keywords no longer
+act as relation/clause delimiters. ANSI_QUOTES aliases follow the session mode.
+Completion regression coverage verifies joined-table column isolation and exact
+backtick-escaped insertion (19 completion tests passed). The live catalog/browse
+fixture test now completes and executes qualified column SQL using actual catalog
+metadata on both MySQL 8.4 and MariaDB 11.4; both passed. Strict all-target clippy
+also passed. This improves local suggestions; it does not establish complete
+CTE/subquery scope resolution or language-server parity.
