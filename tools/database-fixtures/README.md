@@ -416,3 +416,26 @@ backticks, schema qualification, column suggestions and false FROM/JOIN text
 inside literals/comments. Seventeen completion tests, six formatter tests (one
 manual benchmark ignored) and strict all-target Clippy pass. This remains local
 catalog-based completion, not a complete MySQL semantic language server.
+
+### Streaming full-table MySQL/MariaDB export (2026-11-01)
+
+Both engines now implement All matching rows as CSV/JSON, enabled in the table
+Export menu. Browsing and export share filter/sort SQL construction; export
+omits paging LIMIT/OFFSET. The native query iterator decodes and encodes one row
+at a time through the shared row writer and same-directory atomic file
+publisher. This avoids retaining the entire result, but a single row and driver
+packet buffers still consume memory; it is not a whole-process memory bound.
+
+Live tests on both engines exported 1,200 filtered rows despite browse offset
+500, verified descending sort, literal %/_ filter semantics, Unicode, NULL and
+binary byte arrays, and checked both CSV and JSON. Active-transaction and
+pre-cancelled exports are rejected. Cancelling a slow view export preserves an
+existing destination, removes staging files, completes within three seconds,
+and allows SELECT 42 on the same connection. Encoder errors signal the scoped
+query canceller before the driver's result-drop drain; errored sessions are
+pinged afterward and discarded if synchronization/transport is unusable.
+
+Validation: native library 410 passed, 63 existing manual/integration tests
+ignored; db::mysql selection 19 passed against each fixture; strict all-target
+Clippy passed. Disk-full fault injection and native UI interaction verification
+remain outstanding. No release or main push performed.

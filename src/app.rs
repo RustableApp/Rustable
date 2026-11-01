@@ -713,7 +713,7 @@ impl Rustable {
     }
 
     fn supports_csv_import(&self) -> bool {
-        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL")
+        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL" | "MySQL" | "MariaDB")
     }
 
     fn supports_schema_changes(&self) -> bool {

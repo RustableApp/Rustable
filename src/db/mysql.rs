@@ -1,9 +1,10 @@
-//! MySQL/MariaDB driver foundation. Not exposed by the connection picker yet.
+//! MySQL/MariaDB driver using a persistent native connection.
 use super::*;
 use ::mysql::{Conn, OptsBuilder, prelude::Queryable};
 use crate::{connection::MysqlConfig, sql::mysql::Mode};
 
 mod editing;
+mod export;
 
 type CatalogRow = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
 
@@ -233,6 +234,23 @@ impl MysqlDriver {
         // Structured encoding avoids delimiter collisions in arbitrary SQL text.
         serde_json::to_string(&(definition, triggers)).map_err(|error| error.to_string())
     }
+    fn table_select(&mut self, request: &Browse) -> Result<(Object, String, Vec<Value>), String> {
+        let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
+        let object = self.catalog_objects(Some(&request.table))?.into_iter().next().ok_or("Table no longer exists")?;
+        let mut sql = format!("SELECT * FROM {}.{}", quote(&schema), quote(&object.name));
+        let mut parameters = Vec::new();
+        if !request.filter.is_empty() {
+            let column = request.filter_column.as_ref().ok_or("Choose a filter column")?;
+            if !object.columns.iter().any(|c| &c.name == column) { return Err("Unknown filter column".into()); }
+            sql.push_str(&format!(" WHERE CAST({} AS CHAR) LIKE ? ESCAPE '!'", quote(column)));
+            parameters.push(Value::Text(format!("%{}%", request.filter.replace('!', "!!").replace('%', "!%").replace('_', "!_"))));
+        }
+        if let Some((column, descending)) = &request.sort {
+            if !object.columns.iter().any(|c| &c.name == column) { return Err("Unknown sort column".into()); }
+            sql.push_str(&format!(" ORDER BY {} {}", quote(column), if *descending { "DESC" } else { "ASC" }));
+        }
+        Ok((object, sql, parameters))
+    }
     fn require_idle(&mut self) -> Result<(), String> {
         match self.transaction_state() {
             TransactionState::Idle => Ok(()),
@@ -373,19 +391,7 @@ impl Driver for MysqlDriver {
     }
     fn browse(&mut self, request: &Browse) -> Result<TableData, String> {
         let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
-        let object = self.catalog_objects(Some(&request.table))?.into_iter().next().ok_or("Table no longer exists")?;
-        let mut sql = format!("SELECT * FROM {}.{}", quote(&schema), quote(&object.name));
-        let mut parameters = Vec::new();
-        if !request.filter.is_empty() {
-            let column = request.filter_column.as_ref().ok_or("Choose a filter column")?;
-            if !object.columns.iter().any(|c| &c.name == column) { return Err("Unknown filter column".into()); }
-            sql.push_str(&format!(" WHERE CAST({} AS CHAR) LIKE ? ESCAPE '!'", quote(column)));
-            parameters.push(Value::Text(format!("%{}%", request.filter.replace('!', "!!").replace('%', "!%").replace('_', "!_"))));
-        }
-        if let Some((column, descending)) = &request.sort {
-            if !object.columns.iter().any(|c| &c.name == column) { return Err("Unknown sort column".into()); }
-            sql.push_str(&format!(" ORDER BY {} {}", quote(column), if *descending { "DESC" } else { "ASC" }));
-        }
+        let (object, mut sql, parameters) = self.table_select(request)?;
         sql.push_str(&format!(" LIMIT {} OFFSET {}", PAGE_SIZE + 1, request.offset));
         let params = parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>, _>>()?;
         let mut remaining = BYTE_LIMIT;
@@ -421,6 +427,9 @@ impl Driver for MysqlDriver {
         let mut plan = editing::plan(changes, &objects)?;
         plan.schemas = snapshots;
         Ok(plan)
+    }
+    fn export_table(&mut self, path: &std::path::Path, browse: &Browse, cancel: &AtomicBool, format: ExportFormat) -> Result<(), String> {
+        export::table(self, path, browse, cancel, format)
     }
     fn apply(&mut self, _plan: &ChangePlan) -> Result<(), String> {
         Err("MySQL table editing is still being implemented.".into())
