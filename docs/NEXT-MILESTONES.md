@@ -2,6 +2,8 @@
 
 User direction, November 1, 2026: continue overnight without routine input, compare and refine the UI against TablePlus, add MySQL and Redis, and publish only meaningful milestones while conserving GitHub minutes. The existing production-readiness/parity goal remains active; this document does not narrow it.
 
+Latest steering: prioritize official MySQL and MariaDB support and investigate Rust language servers for both. Redis remains backlog behind these two. Prefer an existing suitable Rust implementation; if none meets the requirements, evaluate a license-compatible port of an existing language server into a reusable open-source Rust library. Preserve upstream attribution and notices. Treat MariaDB as a separately tested dialect, not an assumed alias for MySQL. The full-main-window WASM correction also remains outstanding: reuse the actual Rustable UI with browser platform/database adapters, replacing the reduced demo.
+
 ## Release discipline
 
 - Work on development branches. Keep routine changes off main.
@@ -15,7 +17,7 @@ User direction, November 1, 2026: continue overnight without routine input, comp
 
 1. **Native workflow polish.** Verify query/group selection, rename, keyboard focus and persistence; compare library/history, navigation, inspector, editor and grid with supplied TablePlus references and disposable native fixtures. Fix observed differences, including missing semantic icons. Keep the detailed parity ledger open until each acceptance criterion has direct evidence.
 2. **MySQL and MariaDB vertical slice.** Add separate connection configuration, redacted credentials, verified TLS and appropriate engine capabilities. Implement persistent worker-owned sessions, metadata browsing, bounded typed query results, dialect-aware editor behavior, cancellation and disconnect recovery. Verify both MySQL and MariaDB on disposable servers before advertising support. Then complete staged edits, transaction handling and import/export with integration coverage.
-3. **Redis vertical slice.** Provide a key browser and command interface appropriate to Redis instead of presenting SQL/table controls. Support authentication, TLS, database selection, cursor-based SCAN, TTL and typed values with explicit bounds. Verify strings, hashes, lists, sets and sorted sets using disposable Redis. Add editing and deletion with clear scope, binary-safe data and recovery/error behavior. Never use blocking KEYS to populate the browser.
+3. **MySQL/MariaDB language intelligence.** Evaluate the candidates and acceptance gates in `MYSQL-LANGUAGE-SERVER-RESEARCH.md`. Validate actual schema-aware completion, aliases, diagnostics, SQL modes and routines against both engines. Prefer a reusable Rust core with an optional LSP adapter, suitable for the native editor and browser build. Do not let a speculative rewrite postpone working database support.
 4. **Performance and platform validation.** Measure connection/query/browse round trips and rendering/memory behavior, retain bounded work on large fixtures, and run native platform acceptance where available. Compilation is not native UI verification.
 
 ## Architectural findings to carry forward

@@ -724,6 +724,18 @@ impl Rustable {
         Self::with_launcher_preferences(&cc.egui_ctx, prefs)
     }
 
+    /// Host the real workspace directly on the disposable sample database.
+    /// Demo sessions deliberately ignore saved connections and recovered drafts.
+    pub fn new_demo(cc: &eframe::CreationContext<'_>) -> Self {
+        crate::fonts::install(&cc.egui_ctx);
+        Self::with_initial_connection(
+            &cc.egui_ctx,
+            Preferences::default(),
+            Command::Open(None),
+            None,
+        )
+    }
+
     #[cfg(test)]
     fn with_preferences(ctx: &egui::Context, prefs: Preferences) -> Self {
         Self::with_initial_connection(ctx, prefs, Command::Open(None), None)
