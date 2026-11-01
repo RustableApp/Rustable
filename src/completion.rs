@@ -96,7 +96,7 @@ impl Completion {
                         });
                     relation_matches
                         && qualifier.as_ref().is_none_or(|q| {
-                            q.eq_ignore_ascii_case(alias) || q.eq_ignore_ascii_case(object_name)
+                            q.eq_ignore_ascii_case(alias)
                         })
                 })
             })
@@ -1022,6 +1022,30 @@ mod tests {
         }
         let dialect = Dialect::Mysql(crate::sql::mysql::Mode::default());
         assert_eq!(scoped_relations("SELECT `UNION`.customer_name FROM customers `UNION`", 15, dialect), vec![("customers".into(), "UNION".into())]);
+    }
+
+    #[test]
+    fn explicit_alias_hides_table_name_and_wins_over_catalog_names() {
+        let objects = [object("customers", &["customer_name"]),object("orders", &["order_total"])];
+        for dialect in [Dialect::Sqlite,Dialect::Postgres,Dialect::Mysql(crate::sql::mysql::Mode::default())] {
+            for (marked,expected) in [
+                ("SELECT orders.| FROM customers AS orders JOIN orders AS o ON 1=1",vec!["customer_name"]),
+                ("SELECT customers.| FROM customers AS c",vec![]),
+                ("SELECT customers.| FROM customers",vec!["customer_name"]),
+                ("SELECT o.| FROM customers AS orders JOIN orders AS o ON 1=1",vec!["order_total"]),
+            ] {
+                let cursor = marked.find('|').unwrap();
+                let sql = marked.replace('|', "");
+                let mut completion = Completion::default();
+                completion.refresh(&sql,cursor,&objects,&[],true,dialect);
+                assert_eq!(completion.items,expected,"{dialect:?}: {sql}");
+            }
+        }
+        let sql = "SELECT * FROM customers c WHERE EXISTS (SELECT customers. FROM orders customers)";
+        let cursor = sql.find("customers. FROM").unwrap()+"customers.".len();
+        let mut completion = Completion::default();
+        completion.refresh(sql,cursor,&objects,&[],true,Dialect::Mysql(crate::sql::mysql::Mode::default()));
+        assert_eq!(completion.items,["order_total"],"inner alias must hide outer table's catalog name");
     }
 
     #[test]

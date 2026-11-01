@@ -129,3 +129,14 @@ These are local debug CPU measurements, not release-build or end-to-end UI
 latency guarantees. The manual test checks the candidate cap and expected
 qualified-column output but intentionally has no machine-dependent timing
 threshold. All 21 ordinary completion tests and strict all-target Clippy passed.
+
+### Qualified completion alias correction (2026-11-01)
+
+Local completion now resolves a column qualifier only against the visible relation
+alias (including its implicit table-name alias). Previously it also compared the
+catalog table name, so `customers AS orders JOIN orders AS o` caused `orders.`
+to suggest columns from both tables. Explicit aliases now hide the original table
+name; an inner alias matching an outer table's name does not leak outer columns.
+Regression coverage includes SQLite, PostgreSQL and MySQL alias/table collisions,
+unaliased relations and MySQL nested scopes. All 22 completion tests passed
+(one manual benchmark ignored); strict all-target Clippy passed.
