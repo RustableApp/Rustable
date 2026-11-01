@@ -8,6 +8,12 @@ Rustable is a native database client. We wanted to click a table and see the tab
 
 It’s written in Rust. Of course it is. We also use mise, and mise is written in Rust. That’s how you know it’s good. Please don’t ask any follow-up questions about this methodology.
 
+**App code: 100% Rust.** We’re not kidding. Even GitHub says so. [Check the sauce for yourself.](https://github.com/RustableApp/Rustable)
+
+<a href="https://github.com/RustableApp/Rustable"><img src="assets/github-rust-languages.png" width="420" alt="GitHub’s Languages panel showing Rust 100%"></a>
+
+<sub>GitHub’s breakdown covers the app; packaging and benchmark scripts are excluded.</sub>
+
 **Still in development.** You can build from source; signed, packaged releases aren’t ready yet. There are rough edges and unfinished features. This isn’t a claim of complete TablePlus parity.
 
 ## What’s in it
