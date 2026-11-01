@@ -1009,6 +1009,48 @@ mod tests {
 
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_generated_columns_and_expression_defaults() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut observer = Conn::new(OptsBuilder::from(&config)).unwrap();
+        observer.query_drop("DROP TABLE IF EXISTS generated_review_probe").unwrap();
+        observer.query_drop("CREATE TABLE generated_review_probe(id INT PRIMARY KEY, qty INT NOT NULL DEFAULT (2+3), virtual_qty INT GENERATED ALWAYS AS (qty*2) VIRTUAL, stored_qty INT GENERATED ALWAYS AS (qty*3) STORED, created TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6), updated TIMESTAMP(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)) ENGINE=InnoDB").unwrap();
+        let object = driver.catalog_objects(Some("generated_review_probe")).unwrap().remove(0);
+        assert_eq!(object.columns.iter().map(|c| (c.name.as_str(),c.generated)).collect::<Vec<_>>(),
+            [("id",false),("qty",false),("virtual_qty",true),("stored_qty",true),("created",false),("updated",false)]);
+        // DEFAULT_GENERATED is an insert default, not a non-writable generated column.
+        let insert = |id, fields| Change::InsertRow { id, table:"generated_review_probe".into(), fields };
+        let plan = driver.plan(&[insert(1,vec![("id".into(),Value::Integer(1)),("updated".into(),Value::Text("2000-01-01 00:00:00.000000".into()))])]).unwrap();
+        driver.apply(&plan).unwrap();
+        let request = Browse { table:"generated_review_probe".into(), ..Default::default() };
+        let original = driver.browse(&request).unwrap().grid.rows.remove(0);
+        assert_eq!(&original[..4], &[Value::Integer(1),Value::Integer(5),Value::Integer(10),Value::Integer(15)]);
+        assert!(!matches!(original[4], Value::Null));
+        for column in ["virtual_qty", "stored_qty"] {
+            assert!(driver.plan(&[insert(2,vec![("id".into(),Value::Integer(2)),(column.into(),Value::Integer(99))])]).unwrap_err().contains("writable column"));
+            assert!(driver.plan(&[Change::Cell { table:request.table.clone(),column:column.into(),original:original.clone(),value:Value::Integer(99) }]).unwrap_err().contains("writable column"));
+        }
+        let change = Change::Cell { table:request.table.clone(),column:"qty".into(),original:original.clone(),value:Value::Integer(7) };
+        let plan = driver.plan(&[change]).unwrap();
+        driver.apply(&plan).unwrap();
+        let values: Option<(i32,i32,i32)> = observer.query_first("SELECT qty,virtual_qty,stored_qty FROM generated_review_probe").unwrap();
+        assert_eq!(values,Some((7,14,21)));
+        let current = driver.browse(&request).unwrap().grid.rows.remove(0);
+        assert_eq!(current[4],original[4], "ordinary default does not change during update");
+        assert_ne!(current[5],original[5], "ON UPDATE timestamp is refreshed by the server");
+        assert!(driver.apply(&plan).unwrap_err().contains("Row changed"), "old review must not overwrite computed/server-updated values");
+        let stale = driver.plan(&[Change::Cell { table:request.table.clone(),column:"qty".into(),original:current,value:Value::Integer(8) }]).unwrap();
+        observer.query_drop("ALTER TABLE generated_review_probe MODIFY stored_qty INT GENERATED ALWAYS AS (qty*4) STORED").unwrap();
+        assert!(driver.apply(&stale).unwrap_err().contains("definition changed"));
+        assert_eq!(driver.transaction_state(),TransactionState::Idle);
+        assert_eq!(observer.query_first::<i32,_>("SELECT qty FROM generated_review_probe").unwrap(),Some(7));
+        observer.query_drop("DROP TABLE generated_review_probe").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_review_rejects_disabled_session_constraints_without_changing_settings() {
         let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
         assert!([43316, 43317].contains(&port));

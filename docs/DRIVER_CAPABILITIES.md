@@ -387,3 +387,21 @@ References:
 - https://dev.mysql.com/doc/mysql-infoschema-excerpt/8.0/en/information-schema-user-privileges-table.html
 - https://dev.mysql.com/doc/refman/8.4/en/partial-revokes.html
 - https://mariadb.com/docs/server/reference/system-tables/information-schema/information-schema-tables/information-schema-user_privileges-table
+
+### Generated/default column acceptance (2026-11-01)
+
+Added a live reviewed-save acceptance test on MySQL 8.4 and MariaDB 11.4 for
+virtual and stored generated columns, an arithmetic expression default,
+CURRENT_TIMESTAMP defaults, and ON UPDATE timestamps. Catalog flags correctly
+separate generated columns from writable default-expression/timestamp columns.
+Both insert and update plans reject explicit writes to generated columns.
+An omitted expression default evaluates to 5; updating its base value to 7
+produces virtual/stored values 14/21, visible from a separate connection.
+The ordinary creation timestamp stays unchanged while the automatic update
+timestamp advances. Replaying the old review fails original-row checks.
+Changing a generated expression after review rejects the save before mutation,
+leaves the session idle, and preserves the base value.
+
+The focused live test passed on each engine; strict all-target Clippy passed.
+This verifies built-in expressions and computed-field behavior, not arbitrary
+MariaDB UDF side effects. The broader expression/trigger and UI gates remain open.
