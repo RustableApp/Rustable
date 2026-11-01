@@ -312,3 +312,25 @@ a deterministic later-statement error followed by successful connection reuse,
 restricted trigger visibility, cancellation, and transport failures. Strict
 all-target Clippy passed. The test also established that MariaDB SHOW INDEX on a
 view need not fail; it is not used as a cross-engine error-injection assumption.
+
+### Metadata wire-count and simulated-latency evidence (2026-11-01)
+
+A loopback packet proxy now verifies that the definition/index pair emits exactly
+one COM_QUERY instead of two and returns identical complete result sets. It also
+calls the actual table_metadata path and verifies that its SHOW requests are
+combined. The fixture uses a session-local temporary table, and all sockets are
+closed and proxy threads joined at completion.
+
+With a deterministic 30 ms delay added to each COM_QUERY request, five paired
+samples produced these local medians:
+
+| Engine | Separate reads | Batched reads |
+| --- | ---: | ---: |
+| MySQL 8.4 | 75.33 ms | 39.22 ms |
+| MariaDB 11.4 | 78.28 ms | 41.46 ms |
+
+This simulates per-request latency; it is not a real WAN or complete browse
+benchmark. Assertions check packet counts and result equality, not wall-clock
+thresholds. Both engine runs and strict all-target Clippy passed. Reproduce with
+`RUSTABLE_MYSQL_TEST_PORT=43316 mise exec -- cargo test --lib db::mysql::transport_tests::metadata_batch_uses_one_wire_request -- --ignored --nocapture`
+(use port 43317 for MariaDB).

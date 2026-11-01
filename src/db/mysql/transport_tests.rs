@@ -90,3 +90,75 @@ fn lost_transaction_reply(commit: bool) {
     assert_eq!(count,Some(if commit { 1 } else { 0 }));
     observer.query_drop(format!("DROP TABLE {table}")).unwrap();
 }
+
+#[test]
+#[ignore = "requires disposable MySQL/MariaDB fixture; simulates 30 ms request latency"]
+fn metadata_batch_uses_one_wire_request() {
+    let target_port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+    assert!([43316, 43317].contains(&target_port));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let enabled = Arc::new(AtomicBool::new(false));
+    let commands = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let proxy_enabled = enabled.clone();
+    let proxy_commands = commands.clone();
+    let proxy = std::thread::spawn(move || {
+        let (mut downstream, _) = listener.accept().unwrap();
+        let mut upstream = TcpStream::connect(("127.0.0.1", target_port)).unwrap();
+        for socket in [&upstream, &downstream] {
+            socket.set_nodelay(true).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        }
+        let mut input = downstream.try_clone().unwrap();
+        let mut output = upstream.try_clone().unwrap();
+        let requests = std::thread::spawn(move || {
+            while let Ok(bytes) = packet(&mut input) {
+                if proxy_enabled.load(Ordering::Acquire) && bytes.get(4) == Some(&3) {
+                    proxy_commands.lock().unwrap().push(bytes[5..].to_vec());
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+                if output.write_all(&bytes).is_err() { break; }
+            }
+            let _ = output.shutdown(Shutdown::Both);
+        });
+        while let Ok(bytes) = packet(&mut upstream) {
+            if downstream.write_all(&bytes).is_err() { break; }
+        }
+        let _ = downstream.shutdown(Shutdown::Both);
+        let _ = upstream.shutdown(Shutdown::Both);
+        requests.join().unwrap();
+    });
+    let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, read_timeout:Duration::from_secs(5), ..Default::default() };
+    let mut driver = MysqlDriver::connect(&config).unwrap();
+    driver.conn().unwrap().query_drop("CREATE TEMPORARY TABLE wire_metadata_probe(id INT PRIMARY KEY, label VARCHAR(20), INDEX by_label(label))").unwrap();
+    let definition = "SHOW CREATE TABLE `rustable_test`.`wire_metadata_probe`";
+    let indexes = "SHOW INDEX FROM `rustable_test`.`wire_metadata_probe`";
+    enabled.store(true, Ordering::Release);
+    let mut separate_times = Vec::new();
+    let mut batched_times = Vec::new();
+    for _ in 0..5 {
+        commands.lock().unwrap().clear();
+        let started = std::time::Instant::now();
+        let mut separate = driver.metadata_query_sets(definition).unwrap();
+        separate.extend(driver.metadata_query_sets(indexes).unwrap());
+        separate_times.push(started.elapsed());
+        assert_eq!(commands.lock().unwrap().len(), 2);
+        commands.lock().unwrap().clear();
+        let started = std::time::Instant::now();
+        let batched = driver.metadata_query_sets(&format!("{definition}; {indexes}")).unwrap();
+        batched_times.push(started.elapsed());
+        assert_eq!(commands.lock().unwrap().as_slice(), [format!("{definition}; {indexes}").into_bytes()]);
+        assert_eq!(batched, separate, "batching preserves both complete result sets");
+    }
+    separate_times.sort();
+    batched_times.sort();
+    eprintln!("30 ms simulated request delay: separate median {:?}; batched median {:?}", separate_times[2], batched_times[2]);
+    commands.lock().unwrap().clear();
+    let (indexes, _) = driver.table_metadata("rustable_test", "wire_metadata_probe").unwrap();
+    assert!(indexes.iter().any(|index| index.name == "by_label"));
+    let captured = commands.lock().unwrap().clone();
+    assert_eq!(captured.iter().filter(|query| query.starts_with(b"SHOW ")).count(), 1);
+    assert!(captured.iter().any(|query| query == format!("{definition}; SHOW INDEX FROM `rustable_test`.`wire_metadata_probe`").as_bytes()));
+    drop(driver);
+    proxy.join().unwrap();
+}
