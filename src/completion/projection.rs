@@ -77,6 +77,12 @@ fn body_columns(body: &SetExpr, objects: &[Object], bindings: &Bindings, dialect
     for item in &select.projection {
         match item {
             SelectItem::ExprWithAlias { alias, .. } => result.push(alias.value.clone()),
+            SelectItem::UnnamedExpr(Expr::Function(function)) if matches!(dialect, Dialect::Postgres) => {
+                let name = function.name.0.last().and_then(|part| part.as_ident())
+                    .map(|id| if id.quote_style.is_some() { id.value.clone() } else { id.value.to_lowercase() })
+                    .unwrap_or_default();
+                result.push(name);
+            }
             SelectItem::UnnamedExpr(Expr::Identifier(id)) => result.push(id.value.clone()),
             SelectItem::UnnamedExpr(Expr::CompoundIdentifier(ids)) => {
                 if let Some(id) = ids.last() { result.push(id.value.clone()); }
@@ -165,4 +171,29 @@ pub(super) fn with_bindings(tokens: &[sqlparser::tokenizer::TokenWithSpan], care
         i += 1;
     }
     bindings
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires disposable PostgreSQL fixture on 54329"]
+    fn postgres_function_projection_matches_server_labels() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+        let mut client = ::postgres::Client::connect(
+            "host=127.0.0.1 port=54329 dbname=rustable_qa user=postgres password=rustable_qa_only",
+            ::postgres::NoTls).unwrap();
+        for sql in [
+            "SELECT COUNT(*)",
+            "SELECT pg_catalog.LOWER('A'), count(*) OVER ()",
+            "SELECT COUNT(*) AS total",
+            "WITH totals(renamed) AS (SELECT COUNT(*), MAX(1)) SELECT * FROM totals",
+            "SELECT pg_catalog.\"lower\"('A')",
+        ] {
+            let statement = client.prepare(sql).unwrap();
+            let server: Vec<_> = statement.columns().iter().map(|column| column.name().to_owned()).collect();
+            assert_eq!(columns(sql, Dialect::Postgres, &[], &Bindings::new()), server, "{sql}");
+        }
+    }
 }

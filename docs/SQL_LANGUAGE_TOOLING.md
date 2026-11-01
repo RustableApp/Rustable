@@ -14,3 +14,17 @@ Editor integration is implemented. Real subprocess fixtures verify Syntaqlite 0.
 Integrate the verified providers through the asynchronous completion interface. PostgreSQL currently runs disconnected without credentials or a database connection; do not claim server-backed catalog/type semantics. SQLite receives bounded cached schema DDL and requires the existing fallback for alias-qualified completion, which the upstream provider does not yet resolve. Keep loaded-schema fallback for unavailable tools and unsupported completion edits. All tool/dependency setup stays through mise/Cargo; no brew/npm toolchain requirement introduced.
 
 Acceptance: relevant columns in joins/aliases/CTEs/nested scopes; correct quoted/Unicode names; suppress suggestions inside comments/strings; tolerate incomplete SQL; latest document version wins; cancellation/stale results cannot move cursor or replace text; no UI-thread blocking; bounded memory/document size; measured keystroke-to-suggestion latency. Ensure providers never execute user's SQL as an autocomplete side effect and never log credentials. Retain upstream license/NOTICE material for any incorporated code.
+
+### PostgreSQL function output names (2026-11-01)
+
+Local derived-table and CTE projection inference now retains the output name of
+an unaliased PostgreSQL function call (for example COUNT(*) produces count).
+Schema qualification, window calls, unquoted-name folding, quoted function names,
+explicit output aliases and partial CTE column renames are covered. Other dialects
+keep their existing behavior because their expression labels differ.
+
+Reference: https://www.postgresql.org/docs/15/queries-select-lists.html
+The live PostgreSQL fixture test prepares five queries and compares inferred names
+to actual server column metadata, without executing mutations. It passes. All 27
+ordinary completion tests and strict all-target Clippy pass. This does not fill
+remaining unnamed-expression, JOIN USING/NATURAL wildcard or quoted-scope gaps.

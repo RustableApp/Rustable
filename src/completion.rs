@@ -1135,6 +1135,22 @@ mod tests {
     }
 
     #[test]
+    fn postgres_derived_functions_keep_server_output_names() {
+        for (marked, expected) in [
+            ("WITH totals AS (SELECT COUNT(*) FROM customers) SELECT totals.| FROM totals", vec!["count"]),
+            ("SELECT d.| FROM (SELECT pg_catalog.LOWER(name), count(*) OVER () FROM customers) d", vec!["lower", "count"]),
+            ("WITH totals AS (SELECT COUNT(*) AS total FROM customers) SELECT totals.| FROM totals", vec!["total"]),
+            ("WITH totals(renamed) AS (SELECT COUNT(*), MAX(id) FROM customers) SELECT totals.| FROM totals", vec!["renamed", "max"]),
+        ] {
+            let cursor = marked.find('|').unwrap();
+            let sql = marked.replace('|', "");
+            let mut completion = Completion::default();
+            completion.refresh(&sql, cursor, &[object("customers", &["id", "name"])], &[], true, Dialect::Postgres);
+            assert_eq!(completion.items, expected, "{sql}");
+        }
+    }
+
+    #[test]
     fn mysql_completion_isolates_nested_aliases_and_keeps_correlations() {
         let objects = [object("customers", &["customer_name"]), object("orders", &["order_total"])];
         for (marked, expected) in [
