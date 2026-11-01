@@ -95,3 +95,20 @@ and a subsequent SELECT returned the committed baseline 7 (not the earlier
 uncommitted update to 8). The connection remained usable. These observations
 are for the in-app browser; only that browser engine is currently exposed by
 the available browser-control inventory.
+
+### Rebuilt worker transport and reload isolation (2026-11-01)
+
+After adding active SQL dialect to worker payloads, the browser package's separate
+lockfile and vendored mysql patch mapping were synchronized. The release WASM
+build passed; mysql remains a native-only dependency. Native library verification
+passed 399 tests (53 ignored), with strict all-target Clippy passing.
+
+In the rebuilt actual landing-page iframe at localhost:8768, created reload_probe,
+inserted a row and executed all three statements successfully. Reloading the page
+removed that table: querying sqlite_schema returned count 0. Saved the check as
+`Reload isolation check`, reloaded again, and opened it from Queries by double
+click. Its SQL survived intact and executed against the fresh database. This
+verifies database disposal independently from persistent browser-local queries
+in the in-app browser. Evidence: `wasm-reload-isolation.png` in the session
+visualization directory. The public replacement remains undeployed; additional
+engine, storage-failure and transactional-worker-failure checks remain open.
