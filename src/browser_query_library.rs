@@ -4,6 +4,7 @@ pub(super) struct SaveDraft {
     name: String,
     group: String,
     focus: bool,
+    error: Option<String>,
 }
 pub(super) struct Document {
     path: PathBuf,
@@ -36,7 +37,11 @@ impl Rustable {
                 self.query_library.error = None;
                 self.query_library.invalidate();
             }
-            Err(error) => { self.error = Some(error.clone()); self.query_library.error = Some(error); }
+            Err(error) => {
+                self.error = Some(error.clone());
+                if let Some(draft) = &mut self.query_library.save_dialog { draft.error = Some(error.clone()); }
+                self.query_library.error = Some(error);
+            }
         }
     }
     pub(in crate::app) fn open_browser_query(&mut self, ctx: &egui::Context, path: PathBuf) {
@@ -63,6 +68,7 @@ impl Rustable {
             name: tab.source_name.as_deref().unwrap_or("Query.sql").trim_end_matches(".sql").into(),
             group: tab.source_path.as_ref().and_then(|p| p.parent()).and_then(|p| p.strip_prefix("/Queries").ok()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
             focus: true,
+            error: None,
         });
     }
     fn write_browser_query(&mut self, ctx: &egui::Context, id: u64, path: PathBuf) {
@@ -92,13 +98,13 @@ impl Rustable {
                     ui.selectable_value(&mut draft.group, String::new(), "Ungrouped");
                     for group in &self.query_library.groups { ui.selectable_value(&mut draft.group, group.clone(), group); }
                 });
-                if let Some(error) = &self.query_library.error { ui.colored_label(ui.visuals().error_fg_color, error); }
+                if let Some(error) = &draft.error { ui.colored_label(ui.visuals().error_fg_color, error); }
                 ui.horizontal(|ui| {
                     cancel = ui.button("Cancel").clicked() || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
                     if ui.button("Save").clicked() || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
                         let name = draft.name.trim().trim_end_matches(".sql").trim();
                         if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':']) {
-                            self.query_library.error = Some("Choose a query name without path separators.".into());
+                            draft.error = Some("Choose a query name without path separators.".into());
                         } else { save = Some((draft.tab_id, PathBuf::from("/Queries").join(&draft.group).join(format!("{name}.sql")))); }
                     }
                 });
@@ -106,6 +112,9 @@ impl Rustable {
             if busy { ui.label("Saving…"); }
         });
         if cancel { self.query_library.save_dialog = None; }
-        if let Some((id, path)) = save { self.write_browser_query(ctx, id, path); }
+        if let Some((id, path)) = save {
+            if let Some(draft) = &mut self.query_library.save_dialog { draft.error = None; }
+            self.write_browser_query(ctx, id, path);
+        }
     }
 }
