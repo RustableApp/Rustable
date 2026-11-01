@@ -637,6 +637,7 @@ impl Rustable {
         child.prefs.query_history = self.prefs.query_history.clone();
         child.prefs.column_widths = self.prefs.column_widths.clone();
         child.prefs.pane_sizes = self.prefs.pane_sizes;
+        child.prefs.activity_visible = self.prefs.activity_visible;
         child.prefs.page_size = self.prefs.page_size;
         child.shared_preferences_revision = self.shared_preferences_revision;
     }
@@ -653,6 +654,7 @@ impl Rustable {
         self.prefs.query_history = child.prefs.query_history.clone();
         self.prefs.column_widths = child.prefs.column_widths.clone();
         self.prefs.pane_sizes = child.prefs.pane_sizes;
+        self.prefs.activity_visible = child.prefs.activity_visible;
         self.prefs.page_size = child.prefs.page_size;
         self.prefs.history.truncate(100);
         self.shared_preferences_revision = self.shared_preferences_revision.wrapping_add(1);
@@ -1900,7 +1902,7 @@ impl Rustable {
                 egui::Key::C,
             )
         }) {
-            self.prefs.activity_visible = !self.prefs.activity_visible;
+            self.prefs.activity_visible = !self.prefs.activity_visible; self.shared_preferences_dirty = true;
         }
         if self.view == View::Data
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F))
@@ -2199,7 +2201,7 @@ impl Rustable {
                 .on_hover_text("Hide activity log")
                 .clicked()
             {
-                self.prefs.activity_visible = false;
+                self.prefs.activity_visible = false; self.shared_preferences_dirty = true;
             }
         });
         egui::ScrollArea::vertical()
@@ -2351,7 +2353,7 @@ impl Rustable {
                         ui.menu_button("More", |ui| {
                             if ui.button("Find anything").clicked() { self.open_navigator(false); ui.close(); }
                             if ui.button(if cfg!(target_arch = "wasm32") { "Open SQLite copy…" } else { "Open SQLite…" }).clicked() { self.file_dialog(ctx, false); ui.close(); }
-                            if ui.button("SQL activity").clicked() { self.prefs.activity_visible = !self.prefs.activity_visible; ui.close(); }
+                            if ui.button("SQL activity").clicked() { self.prefs.activity_visible = !self.prefs.activity_visible; self.shared_preferences_dirty = true; ui.close(); }
                             for choice in [Appearance::System, Appearance::Light, Appearance::Dark] {
                                 if ui.selectable_value(&mut self.prefs.appearance, choice, choice.label()).clicked() {
                                     self.shared_preferences_dirty = true; ctx.set_theme(choice.preference()); ui.close();
@@ -2386,11 +2388,13 @@ impl Rustable {
                     self.connection_status(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
+                        let activity_before = self.prefs.activity_visible;
                         pane_toggles::show(
                             ui,
                             &mut self.prefs.activity_visible,
                             &mut self.inspector,
                         );
+                        self.shared_preferences_dirty |= activity_before != self.prefs.activity_visible;
                         toolbar_group(ui, |ui| {
                             if toolbar_action(ui, 4, false).on_hover_text("Find anything · Cmd/Ctrl+P").clicked() { self.open_navigator(false); }
                             if ui.add_enabled_ui(self.pending.is_none(), |ui| toolbar_action(ui, 3, false)).inner.on_hover_text("Refresh · Cmd/Ctrl+R").clicked() { self.refresh_current_view(); }
@@ -2901,7 +2905,9 @@ impl Rustable {
                     return;
                 }
                 let max_height = (ui.available_height() - 140.0).max(120.0);
-                egui::TopBottomPanel::top(egui::Id::new((ctx.viewport_id(), "query-editor-pane")))
+                let editor_id = egui::Id::new((ctx.viewport_id(), "query-editor-pane"));
+                crate::pane_sizes::restore(ctx, editor_id, self.prefs.pane_sizes.query_editor, 260.0, 1);
+                egui::TopBottomPanel::top(editor_id)
                     .resizable(true)
                     .default_height(260.0)
                     .height_range(120.0..=max_height)
@@ -2909,6 +2915,7 @@ impl Rustable {
                         ui.set_min_height(ui.available_height());
                         self.query_editor(ui);
                     });
+                self.shared_preferences_dirty |= crate::pane_sizes::record_drag(ctx, editor_id, &mut self.prefs.pane_sizes.query_editor, 1);
             }
             if self.view != View::Query {
                 let grid = self.grid();
@@ -3978,6 +3985,20 @@ impl Rustable {
         self.refresh();
     }
 
+    fn remove_filter_rule(&mut self, index: usize) {
+        if self.pending.is_some() || !self.finish_cell_edit() { return; }
+        if self.filter_rules.len() == 1 {
+            // Clear through the normal edit guard before discarding the draft.
+            self.apply_filter_rules(Vec::new());
+            if !self.browse.filters.is_empty() || self.browse.filter_column.is_some() || self.edit.is_some() {
+                return;
+            }
+            self.filters_visible = false;
+        }
+        self.filter_rules.remove(index);
+        self.filter_rules_original.remove(index);
+    }
+
     fn filters(&mut self, ui: &mut egui::Ui) {
         if self.filter_rules_table != self.browse.table {
             self.filter_rules_table = self.browse.table.clone();
@@ -4014,7 +4035,7 @@ impl Rustable {
                         let response = ui.add_enabled(!no_value, TextEdit::singleline(&mut rule.value).id(if index == 0 { egui::Id::new("table-filter-value") } else { egui::Id::new(("table-filter-value", index)) }).desired_width(width).hint_text(if rule.operator.ends_with("IN") { "[1, 2] or [\"a\", \"b\"]" } else if rule.column == "Raw SQL" { "SQL condition…" } else { "Value…" }));
                         if self.focus_filter { response.request_focus(); self.focus_filter = false; }
                         if ui.button("Apply").on_hover_text("Apply this condition; other applied conditions stay unchanged").clicked() || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) { apply = Some(index); }
-                        if ui.add_sized([24.0, 24.0], egui::Button::new("−")).on_hover_text("Remove condition (Apply All to update results)").clicked() { remove = Some(index); }
+                        if ui.add_sized([24.0, 24.0], egui::Button::new("−")).on_hover_text("Remove condition (removing the last condition turns filtering off)").clicked() { remove = Some(index); }
                         if ui.add_sized([24.0, 24.0], egui::Button::new("+")).on_hover_text("Add condition").clicked() { insert = Some(index + 1); }
                     }));
                 }
@@ -4039,7 +4060,7 @@ impl Rustable {
                 });
             });
         });
-        if let Some(index) = remove { self.filter_rules.remove(index); self.filter_rules_original.remove(index); }
+        if let Some(index) = remove { self.remove_filter_rule(index); }
         if let Some(index) = insert { self.filter_rules.insert(index, db::filters::Filter::new(self.filter_column.clone())); self.filter_rules_original.insert(index, None); }
         if clear { self.apply_filter_rules(Vec::new()); if self.browse.filters.is_empty() { self.filter_rules.clear(); self.filter_rules_original.clear(); } }
         else if apply_all { self.apply_filter_rules(self.filter_rules.clone()); if self.browse.filters == self.filter_rules { self.filter_rules_original = self.filter_rules.iter().cloned().map(Some).collect(); } }
@@ -11081,6 +11102,48 @@ mod result_pin_tests {
         app.change_table_page(false);
         assert!(app.pending.is_none(), "previous at the first page is a no-op");
     }
+    #[test]
+    fn removing_last_filter_clears_results_and_closes_filter_bar() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        wait(&mut app);
+        app.browse.table = "customers".into();
+        let rule = db::filters::Filter::new("name".into());
+        app.browse.filters = vec![rule.clone()];
+        app.filter_rules = vec![rule.clone()];
+        app.filter_rules_original = vec![Some(rule)];
+        app.filters_visible = true;
+        app.browse.offset = 500;
+        app.remove_filter_rule(0);
+        assert!(app.browse.filters.is_empty());
+        assert!(app.filter_rules.is_empty());
+        assert!(app.filter_rules_original.is_empty());
+        assert!(!app.filters_visible);
+        assert_eq!(app.browse.offset, 0);
+        assert!(matches!(app.pending, Some(Pending::Table)));
+        wait(&mut app);
+    }
+
+    #[test]
+    fn workspace_pane_preferences_survive_merge_and_serialization() {
+        let ctx = egui::Context::default();
+        let mut root = Rustable::with_preferences(&ctx, Preferences::default());
+        let mut child = Rustable::with_preferences(&ctx, Preferences::default());
+        child.prefs.activity_visible = true;
+        child.prefs.pane_sizes.activity = Some(245.0);
+        child.prefs.pane_sizes.query_editor = Some(330.0);
+        child.shared_preferences_dirty = true;
+        assert!(root.merge_window_preferences(&mut child));
+        let restored: Preferences = serde_json::from_str(&serde_json::to_string(&root.prefs).unwrap()).unwrap();
+        assert!(restored.activity_visible);
+        assert_eq!(restored.pane_sizes.activity, Some(245.0));
+        assert_eq!(restored.pane_sizes.query_editor, Some(330.0));
+        let mut sibling = Rustable::with_preferences(&ctx, Preferences::default());
+        root.sync_window_preferences(&mut sibling);
+        assert!(sibling.prefs.activity_visible);
+        assert_eq!(sibling.prefs.pane_sizes.query_editor, Some(330.0));
+    }
+
     #[test]
     fn invalid_cell_draft_blocks_filter_apply_and_clear_atomically() {
         let ctx = egui::Context::default();

@@ -8,6 +8,7 @@ pub struct PaneSizes {
     pub sidebar: Option<f32>,
     pub inspector: Option<f32>,
     pub activity: Option<f32>,
+    pub query_editor: Option<f32>,
 }
 
 pub fn restore(
