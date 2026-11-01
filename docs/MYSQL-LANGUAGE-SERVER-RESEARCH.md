@@ -155,3 +155,24 @@ PostgreSQL dollar-quoted strings containing fake FROM clauses. All 23 completion
 tests passed (one manual timing benchmark ignored); strict all-target Clippy
 passed. Derived-table/CTE output inference remains outstanding; this does not
 replace the PostgreSQL language server's deeper semantic analysis.
+
+### Derived-table output completion (2026-11-01)
+
+Local completion now resolves projected columns from complete derived queries in
+FROM/JOIN, using the dialect-aware parser. Explicit expression aliases, bare and
+qualified column projections, catalog wildcard expansion, nested derived tables,
+explicit derived-column aliases, and the first UNION arm's output names are
+covered. Parent/sibling query isolation remains intact; a derived table's own
+output alias is not visible inside its definition. The same implementation runs
+for PostgreSQL, SQLite, and MySQL/MariaDB SQL modes without database requests.
+
+Inference is bounded to 64 KiB per parsed derived query, depth 16, 128 source
+relations, and 1024 output candidates (the popup still retains at most 12).
+Unknown expression-generated names are omitted. WITH wildcard inference is
+conservative to avoid mistaking a CTE for a similarly named catalog table.
+Full CTE binding/output inference, partial column-alias list trailing columns,
+recursive CTEs, and incomplete derived-query recovery remain outstanding.
+
+Validation: 24 completion tests pass (one manual benchmark ignored), including
+seven derived-table scenarios across all three dialects. Strict all-target
+Clippy passes. No native release or website deployment is included in this change.

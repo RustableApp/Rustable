@@ -4,6 +4,7 @@ use crate::{
     sql::{Dialect, char_to_byte},
 };
 use eframe::egui;
+mod projection;
 
 #[derive(Default)]
 pub struct Completion {
@@ -81,7 +82,7 @@ impl Completion {
         let prefix = prefix.to_lowercase();
         let range = crate::sql::execution_range_for_dialect(sql, cursor..cursor, false, dialect)
             .unwrap_or(0..sql.len());
-        let references = scoped_relations(&sql[range.clone()], byte.saturating_sub(range.start), dialect);
+        let (references, projected) = scoped_sources(&sql[range.clone()], byte.saturating_sub(range.start), dialect, objects);
         let relevant: Vec<_> = objects
             .iter()
             .filter(|object| {
@@ -103,6 +104,8 @@ impl Completion {
             .collect();
         // Borrow candidates and stop after the visible limit. Large catalogs
         // should not allocate names or quoted SQL for every table on each key.
+        let derived_columns = references.iter().filter(|(_, alias)| qualifier.as_ref().is_none_or(|q| q.eq_ignore_ascii_case(alias)))
+            .filter_map(|(table, _)| projected.get(table)).flatten().map(|name| (name.as_str(), true, None));
         let columns = relevant.iter().flat_map(|object| object.columns.iter()
             .map(|column| (column.name.as_str(), true, None)));
         let tables = objects.iter().filter(|object| qualifier.as_ref().is_none_or(|q| {
@@ -111,7 +114,7 @@ impl Completion {
         let schemas = objects.iter().take(if qualifier.is_none() { objects.len() } else { 0 })
             .filter_map(|object| object.schema.as_deref()).map(|schema| (schema, true, None));
         let keywords = KEYWORDS.iter().filter(|_| qualifier.is_none()).map(|word| (*word, false, None));
-        for (name, identifier, table) in columns.chain(tables).chain(schemas).chain(keywords) {
+        for (name, identifier, table) in derived_columns.chain(columns).chain(tables).chain(schemas).chain(keywords) {
             if name.to_lowercase().starts_with(&prefix)
                 && (!name.eq_ignore_ascii_case(&prefix)
                     || (identifier && identifier_needs_quotes(name)))
@@ -464,9 +467,15 @@ fn relations(sql: &str) -> Vec<(String, String)> {
 }
 // Resolve the caret's query block first, then correlated outer blocks. Child
 // subqueries must not contribute aliases to their parents or sibling queries.
+#[cfg(test)]
 fn scoped_relations(sql: &str, cursor: usize, dialect: Dialect) -> Vec<(String, String)> {
+    scoped_sources(sql, cursor, dialect, &[]).0
+}
+type ScopedSources = (Vec<(String, String)>, std::collections::HashMap<String, Vec<String>>);
+fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]) -> ScopedSources {
     use sqlparser::tokenizer::Token;
-    let Ok(tokens) = located_tokens(sql, dialect) else { return Vec::new(); };
+    let mut projected = std::collections::HashMap::new();
+    let Ok(tokens) = located_tokens(sql, dialect) else { return (Vec::new(), projected); };
     let tokens: Vec<_> = tokens.into_iter().filter(|t| !matches!(t.token, Token::Whitespace(_))).collect();
     let before = &sql[..cursor.min(sql.len())];
     let location = (before.bytes().filter(|b| *b == b'\n').count() as u64 + 1,
@@ -513,13 +522,34 @@ fn scoped_relations(sql: &str, cursor: usize, dialect: Dialect) -> Vec<(String, 
         let mut lexemes = Vec::new();
         for (i, token) in tokens.iter().enumerate().take(arm_end).skip(arm_start) {
             if blocks.iter().any(|&(child_start, child_end)| child_start > start && child_end <= end && child_start <= i && i < child_end) { continue; }
+            if let Some(&(child_start, child_end)) = blocks.iter().find(|&&(cs, ce)| cs > start && ce < end && cs == i + 1) {
+                // Replace the whole child query with an internal relation name.
+                // The normal relation scanner still decides whether it follows
+                // FROM/JOIN (scalar subqueries never become table sources).
+                let name = format!("__rustable_derived_{child_start}");
+                let query = tokens[child_start..child_end].iter().map(|t| t.token.to_string()).collect::<Vec<_>>().join(" ");
+                let mut columns = projection::columns(&query, dialect, objects);
+                let mut alias = child_end + 1;
+                if tokens.get(alias).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("AS"))) { alias += 1; }
+                if matches!(tokens.get(alias).map(|t| &t.token), Some(Token::Word(_)))
+                    && matches!(tokens.get(alias + 1).map(|t| &t.token), Some(Token::LParen)) {
+                    let renamed: Vec<_> = tokens.iter().skip(alias + 2).take_while(|t| t.token != Token::RParen)
+                        .filter_map(|t| if let Token::Word(w) = &t.token { Some(w.value.clone()) } else { None }).collect();
+                    columns = renamed.into_iter().take(1024).collect();
+                }
+                if child_start <= caret && caret <= child_end { columns.clear(); }
+                projected.insert(name.clone(), columns);
+                lexemes.push((name, true));
+                continue;
+            }
+            if blocks.iter().any(|&(cs, ce)| cs > start && ce < end && i == ce) { continue; }
             if let Some(lexeme) = relation_token(token.token.clone()) { lexemes.push(lexeme); }
         }
         for relation in relations_from_tokens(lexemes) {
             if !result.iter().any(|(_, alias)| alias.eq_ignore_ascii_case(&relation.1)) { result.push(relation); }
         }
     }
-    result
+    (result, projected)
 }
 
 #[cfg(test)]
@@ -911,6 +941,29 @@ mod tests {
                 .collect(),
         }
     }
+    #[test]
+    fn derived_table_projection_completion_respects_scope_and_output_names() {
+        let objects = [object("customers", &["customer_id", "customer_name", "private_value"])];
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql(Default::default())] {
+            for (sql, expected, excluded) in [
+                ("SELECT d.| FROM (SELECT customer_id AS public_id, customer_name FROM customers) d", vec!["public_id", "customer_name"], vec!["private_value", "customer_id"]),
+                ("SELECT d.| FROM (SELECT c.* FROM customers c) d", vec!["customer_id", "customer_name", "private_value"], vec![]),
+                ("SELECT d.| FROM (SELECT x.customer_id AS outer_id FROM (SELECT customer_id FROM customers) x) d", vec!["outer_id"], vec!["customer_id", "private_value"]),
+                ("SELECT d.| FROM (SELECT 1 AS first_name UNION ALL SELECT 2 AS second_name) d", vec!["first_name"], vec!["second_name"]),
+                ("SELECT d.| FROM (SELECT 1 AS old_name) AS d(new_name)", vec!["new_name"], vec!["old_name"]),
+                ("SELECT * FROM (SELECT d.|, 1 AS not_yet_visible FROM customers) d", vec![], vec!["not_yet_visible"]),
+                ("SELECT d.| FROM customers d WHERE EXISTS (SELECT 1 FROM (SELECT 1 AS leaked_name) d)", vec!["customer_id"], vec!["leaked_name"]),
+            ] {
+                let cursor = sql.find('|').unwrap();
+                let sql = sql.replace('|', "");
+                let mut completion = Completion::default();
+                completion.refresh(&sql, cursor, &objects, &[], true, dialect);
+                for name in expected { assert!(completion.items.iter().any(|item| item == name), "missing {name}: {sql}: {:?}", completion.items); }
+                for name in excluded { assert!(!completion.items.iter().any(|item| item == name), "leaked {name}: {sql}"); }
+            }
+        }
+    }
+
     #[test]
     fn mysql_completion_respects_comments_and_session_string_escapes() {
         let normal = Dialect::Mysql(crate::sql::mysql::Mode::default());
