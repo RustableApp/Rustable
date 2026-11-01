@@ -456,6 +456,7 @@ export RUSTABLE_MYSQL_TEST_CA="$RUSTABLE_TLS_FIXTURE_DIR/ca.pem"
 for tls_port in 43318 43319; do
   RUSTABLE_MYSQL_TLS_TEST_PORT="$tls_port" mise exec -- cargo test --lib live_tls_verifies -- --ignored --nocapture
   RUSTABLE_MYSQL_TLS_TEST_PORT="$tls_port" mise exec -- cargo test --lib live_driver_over_verified_tls -- --ignored --nocapture
+  RUSTABLE_MYSQL_TLS_TEST_PORT="$tls_port" mise exec -- cargo test --lib live_tls_cancel -- --ignored --nocapture
 done
 docker compose -f tools/database-fixtures/tls.compose.yaml down
 ```
@@ -470,3 +471,11 @@ mismatch fails name verification, and plaintext is rejected by the server.
 Rustable's driver initializes over TLS, returns exact Unicode text, loads its
 catalog and preserves the connection ID. This does not yet verify client
 certificates, remote certificate rotation or the native certificate-picker UI.
+
+TLS cancellation checks cover an interrupted statement inside a transaction,
+retained earlier changes, explicit rollback, unchanged connection identity, and
+no delayed cancellation affecting the following query. Since these servers
+require secure transport, the separate successful KILL QUERY connection also
+uses TLS. Removing its trusted CA after the main connection is established
+produces a certificate error; the main query's read deadline then disconnects
+the session rather than reporting successful cancellation or reusing it.

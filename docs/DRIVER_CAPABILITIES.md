@@ -344,3 +344,17 @@ plaintext rejection tests. The native Rustable driver also passes initialization
 Unicode queries, catalog loading and same-connection reuse over verified TLS.
 No verification bypass or fallback to plaintext was introduced. See
 `tools/database-fixtures/README.md` for commands and remaining TLS UI coverage.
+
+### TLS cancellation verification (2026-11-01)
+
+The transaction/cancellation/reuse contract now runs against both plaintext and
+verified-TLS fixtures. TLS-required servers accept cancellation on the separate
+control connection; the primary connection retains earlier transaction changes,
+rolls back explicitly, keeps its connection ID, and survives a subsequent slow
+query without a late KILL. A separate fault test removes the control connection's
+CA trust: certificate failure is reported, the query read deadline bounds the
+wait, and the timed-out main connection is discarded. No plaintext fallback.
+
+Combined `db::mysql` suites passed with both fixture types configured: 35 tests
+on MySQL 8.4 and 35 on MariaDB 11.4. Strict all-target Clippy passed. Native
+connection-form/keychain acceptance and broader production-readiness gates remain.

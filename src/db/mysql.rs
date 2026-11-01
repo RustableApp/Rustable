@@ -590,7 +590,50 @@ mod tests {
         let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
             user: "rustable".into(), password: "rustable-test-only".into(), tls: false,
             read_timeout: Duration::from_secs(3), ..Default::default() };
-        let mut driver = Box::<dyn Driver>::try_from(&config).unwrap();
+        check_driver_cancellation(&config);
+    }
+
+    #[test]
+    #[ignore = "requires disposable TLS fixture and RUSTABLE_MYSQL_TEST_CA"]
+    fn live_tls_cancellation_preserves_transaction_and_connection() {
+        let port = std::env::var("RUSTABLE_MYSQL_TLS_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43318, 43319].contains(&port));
+        let config = MysqlConfig { host: "localhost".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(),
+            root_certificate: Some(std::env::var_os("RUSTABLE_MYSQL_TEST_CA").unwrap().into()),
+            read_timeout: Duration::from_secs(3), ..Default::default() };
+        check_driver_cancellation(&config);
+    }
+
+    #[test]
+    #[ignore = "requires disposable TLS fixture and RUSTABLE_MYSQL_TEST_CA"]
+    fn live_tls_cancel_rejects_untrusted_control_connection() {
+        let port = std::env::var("RUSTABLE_MYSQL_TLS_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43318, 43319].contains(&port));
+        let config = MysqlConfig { host: "localhost".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(),
+            root_certificate: Some(std::env::var_os("RUSTABLE_MYSQL_TEST_CA").unwrap().into()),
+            read_timeout: Duration::from_secs(1), ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        // Fault injection: the established query connection remains trusted,
+        // but a newly opened cancellation connection no longer has the CA.
+        driver.config.root_certificate = None;
+        let cancel = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        let report = std::thread::scope(|scope| {
+            scope.spawn(|| { std::thread::sleep(Duration::from_millis(100)); cancel.store(true, Ordering::Release); });
+            driver.execute("SELECT SLEEP(5)", false, &cancel)
+        });
+        let error = report.error.expect("cancellation failure and query timeout must be reported");
+        assert!(error.contains("Could not connect to cancel query") && error.to_lowercase().contains("certificate"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
+        assert!(driver.connection.is_none());
+    }
+
+    fn check_driver_cancellation(config: &MysqlConfig) {
+        let mut driver = MysqlDriver::connect(config).unwrap();
+        let connection_id = driver.conn().unwrap().connection_id();
         let cancel = AtomicBool::new(false);
         assert!(driver.execute("CREATE TEMPORARY TABLE cancel_driver_probe(value INT) ENGINE=InnoDB; INSERT INTO cancel_driver_probe VALUES(7); START TRANSACTION; UPDATE cancel_driver_probe SET value=8;", false, &cancel).error.is_none());
         let started = std::time::Instant::now();
@@ -610,6 +653,11 @@ mod tests {
         assert!(driver.execute("ROLLBACK", false, &cancel).error.is_none());
         let result = driver.execute("SELECT value FROM cancel_driver_probe", false, &cancel);
         assert_eq!(result.grids[0].rows, [vec![Value::Integer(7)]]);
+        assert_eq!(driver.conn().unwrap().connection_id(), connection_id);
+        if config.tls {
+            let (_, cipher): (String, String) = driver.conn().unwrap().query_first("SHOW SESSION STATUS LIKE 'Ssl_cipher'").unwrap().unwrap();
+            assert!(!cipher.is_empty());
+        }
     }
 
     #[test]
