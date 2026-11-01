@@ -208,3 +208,19 @@ Clippy passed. This closes the session enforcement guard, not the other apply ga
 
 References: [MySQL session variables](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html)
 and [MariaDB CHECK enforcement](https://mariadb.com/docs/server/reference/sql-statements/data-definition/constraint).
+
+### Insert/delete acceptance and export UI wiring (2026-11-01)
+
+The live reviewed CRUD test passed on both engines: empty-field inserts use server
+defaults, generated values are calculated by the server, Unicode/apostrophes and
+binary bytes survive binding, explicit NULL stays distinct from omission, and
+writes to generated/non-null columns are rejected appropriately. A delete followed
+by a duplicate-key insert restores the deleted row on rollback. Delete/reinsert
+with the same primary key succeeds, repeated deletes deduplicate, and a stale
+second deletion is rejected. Strict Clippy passed for this regression addition.
+
+Current-source inspection found `supports_table_export` still excluded MySQL and
+MariaDB despite the implemented streaming backend. Both now expose All matching
+rows as CSV/JSON through that existing menu and dialog path. The live full-export
+filter/cancellation regression was rerun successfully on both engines. Native UI
+click-through remains pending; GUI row editing remains gated independently.

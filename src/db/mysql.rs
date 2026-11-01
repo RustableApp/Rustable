@@ -790,6 +790,52 @@ mod tests {
 
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_insert_defaults_binary_values_delete_and_failed_batch() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut observer = Conn::new(OptsBuilder::from(&config)).unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS apply_crud_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE apply_crud_probe(id BIGINT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(80) DEFAULT 'default label', data VARBINARY(8), qty INT NOT NULL DEFAULT 2, doubled INT GENERATED ALWAYS AS (qty*2) STORED) ENGINE=InnoDB").unwrap();
+        let insert = |id, fields| Change::InsertRow { id, table:"apply_crud_probe".into(), fields };
+        let plan = driver.plan(&[insert(1, vec![]), insert(2, vec![("label".into(),Value::Text("O'Brien 東京 🦀".into())), ("data".into(),Value::Blob(vec![0,255,39,92])), ("qty".into(),Value::Integer(7))])]).unwrap();
+        assert_eq!(plan.statements.len(),2);
+        driver.apply(&plan).unwrap();
+        let rows = driver.browse(&Browse { table:"apply_crud_probe".into(), sort:Some(("id".into(),false)), ..Default::default() }).unwrap().grid;
+        assert_eq!(rows.rows.len(),2);
+        assert_eq!(&rows.rows[0][1..], &[Value::Text("default label".into()),Value::Null,Value::Integer(2),Value::Integer(4)]);
+        assert_eq!(&rows.rows[1][1..], &[Value::Text("O'Brien 東京 🦀".into()),Value::Blob(vec![0,255,39,92]),Value::Integer(7),Value::Integer(14)]);
+        assert!(driver.plan(&[insert(3, vec![("doubled".into(),Value::Integer(9))])]).is_err());
+        assert!(driver.plan(&[insert(3, vec![("qty".into(),Value::Null)])]).is_err());
+        let original = rows.rows[0].clone();
+        let deletion = Change::DeleteRow { table:"apply_crud_probe".into(), original:original.clone() };
+        // The delete is executed before the duplicate insert fails; rollback
+        // must put the deleted row back, not leave a partial batch behind.
+        let duplicate = insert(3, vec![("id".into(), rows.rows[1][0].clone())]);
+        let plan = driver.plan(&[deletion.clone(), duplicate]).unwrap();
+        assert!(driver.apply(&plan).is_err());
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        let count: Option<u64> = observer.query_first("SELECT COUNT(*) FROM apply_crud_probe").unwrap();
+        assert_eq!(count,Some(2));
+        let mut replacement = vec![("id".into(),original[0].clone()), ("label".into(),Value::Null)];
+        replacement.push(("qty".into(),Value::Integer(3)));
+        let plan = driver.plan(&[deletion,insert(4,replacement)]).unwrap();
+        driver.apply(&plan).unwrap();
+        let rows = driver.browse(&Browse { table:"apply_crud_probe".into(), sort:Some(("id".into(),false)), ..Default::default() }).unwrap().grid;
+        assert_eq!(&rows.rows[0][1..], &[Value::Null,Value::Null,Value::Integer(3),Value::Integer(6)]);
+        let deletion = Change::DeleteRow { table:"apply_crud_probe".into(), original:rows.rows[1].clone() };
+        let plan = driver.plan(&[deletion.clone(),deletion]).unwrap();
+        assert_eq!(plan.statements.len(),1, "deduplicate the same deleted row");
+        driver.apply(&plan).unwrap();
+        assert!(driver.apply(&plan).unwrap_err().contains("Row changed or was deleted"));
+        let count: Option<u64> = observer.query_first("SELECT COUNT(*) FROM apply_crud_probe").unwrap();
+        assert_eq!(count,Some(1));
+        observer.query_drop("DROP TABLE apply_crud_probe").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_review_rejects_disabled_session_constraints_without_changing_settings() {
         let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
         assert!([43316, 43317].contains(&port));

@@ -730,7 +730,7 @@ impl Rustable {
     }
 
     fn supports_table_export(&self) -> bool {
-        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL")
+        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL" | "MySQL" | "MariaDB")
     }
 
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
