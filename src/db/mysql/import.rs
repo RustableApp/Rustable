@@ -33,6 +33,7 @@ pub(super) fn table(driver: &mut MysqlDriver, request: &csv_import::Request, can
         if object.kind != "table" || object.columns != request.columns {
             return Err("Destination schema changed; select the table again before importing".into());
         }
+        expressions::validate_import(driver, &schema, &request.table)?;
         let mut parameters = Vec::new();
         let (mut rows, mut bytes, mut inserted) = (0usize, 0usize, 0u64);
         // Stay below protocol parameter limits even for very wide CSVs.
@@ -167,6 +168,27 @@ mod tests {
         driver.conn().unwrap().query_drop("CREATE TABLE mysql_csv_probe(id BIGINT PRIMARY KEY, label VARCHAR(20), extra INT DEFAULT 7, doubled BIGINT GENERATED ALWAYS AS (id*2) STORED) ENGINE=InnoDB").unwrap();
         let mut text = String::from("label,id\n");
         for id in 1..=130 { text.push_str(&format!("日本,{id}\n")); }
+        driver.conn().unwrap().query_drop("ALTER TABLE mysql_csv_probe ADD CONSTRAINT positive_id CHECK (abs(id)>0)").unwrap();
+        if driver.engine == "MariaDB" {
+            driver.conn().unwrap().query_drop("ALTER TABLE mysql_csv_probe ALTER extra SET DEFAULT (rand())").unwrap();
+            let unvalidated = request(&mut driver, &text);
+            assert!(driver.import_csv(&unvalidated,&cancel).unwrap_err().contains("not validated"));
+            assert_eq!(driver.conn().unwrap().query_first::<u64,_>("SELECT COUNT(*) FROM mysql_csv_probe").unwrap(),Some(0));
+            assert_eq!(driver.transaction_state(),TransactionState::Idle);
+            driver.conn().unwrap().query_drop("ALTER TABLE mysql_csv_probe ALTER extra SET DEFAULT 7").unwrap();
+            for (install, restore) in [
+                ("ALTER TABLE mysql_csv_probe ADD CONSTRAINT unvalidated_check CHECK (crc32(label)>=0)",
+                 "ALTER TABLE mysql_csv_probe DROP CONSTRAINT unvalidated_check"),
+                ("ALTER TABLE mysql_csv_probe MODIFY doubled BIGINT GENERATED ALWAYS AS (bit_count(id)) STORED",
+                 "ALTER TABLE mysql_csv_probe MODIFY doubled BIGINT GENERATED ALWAYS AS (id*2) STORED"),
+            ] {
+                driver.conn().unwrap().query_drop(install).unwrap();
+                let unvalidated = request(&mut driver, &text);
+                assert!(driver.import_csv(&unvalidated,&cancel).unwrap_err().contains("not validated"));
+                assert_eq!(driver.conn().unwrap().query_first::<u64,_>("SELECT COUNT(*) FROM mysql_csv_probe").unwrap(),Some(0));
+                driver.conn().unwrap().query_drop(restore).unwrap();
+            }
+        }
         let good = request(&mut driver, &text);
         assert_eq!(driver.import_csv(&good,&cancel).unwrap(),130);
         assert_eq!(driver.conn().unwrap().query_first::<(String,i32,i64),_>("SELECT label,extra,doubled FROM mysql_csv_probe WHERE id=130").unwrap(),Some(("日本".into(),7,260)));

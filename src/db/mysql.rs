@@ -6,6 +6,7 @@ use crate::{connection::MysqlConfig, sql::mysql::Mode};
 mod editing;
 mod export;
 mod import;
+mod expressions;
 #[cfg(test)]
 mod transport_tests;
 

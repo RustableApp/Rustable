@@ -681,3 +681,29 @@ Unit coverage verifies backticks and literal question marks in identifiers plus
 apostrophes/backslashes in values. Both live CSV tests passed again on each engine;
 strict all-target Clippy passed. This prepares review for UI enablement but does
 not change the current disabled import capability or close native acceptance.
+
+### MariaDB import expression validation (2026-11-01)
+
+Managed CSV imports now inspect column defaults, generated expressions and CHECK
+clauses while holding destination metadata locks, before inserting any batch.
+MariaDB explicitly permits native UDFs in generated columns and CHECK expressions:
+https://mariadb.com/docs/server/reference/sql-statements/data-definition/create/generated-columns
+https://mariadb.com/docs/server/reference/sql-statements/data-definition/constraint
+
+A conservative, session-mode-aware token validator permits common scalar builtins,
+arithmetic and literal defaults. Unknown, quoted or schema-qualified function calls,
+comments (including executable comments) and NEXT VALUE sequence syntax are rejected.
+This is intentionally not a full expression interpreter: safe functions outside the
+current list are also rejected, with the column/constraint and function in the error.
+It does not assert that arbitrary native UDF effects are transactional.
+
+Unit coverage includes nested/disguised calls, quoted string contents, SQL modes,
+sequence syntax and ordinary generated/CHECK expressions. Disposable MariaDB tests
+exercise rejected defaults, generated columns and CHECKs before inserting any rows,
+then restore supported expressions and complete the import. MySQL import and
+cancellation tests also pass. Full library suite: 436 passed, 94 ignored.
+Strict all-target Clippy passes.
+
+This closes part of the expression gate, not the entire MySQL/MariaDB release gate:
+effective privileges, managed-edit expression validation, remaining transport phases
+and native import acceptance still need work. The import UI remains disabled.
