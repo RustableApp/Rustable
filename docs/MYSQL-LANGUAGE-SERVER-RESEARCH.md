@@ -224,3 +224,14 @@ These are local completion timings, not total frame or server latency, and are
 not a controlled before/after benchmark. The completion regression suite still
 passes all 25 tests; the manual benchmark asserts expected suggestions as well
 as recording timings. Strict all-target Clippy passes.
+
+### PostgreSQL partial output aliases (2026-11-01)
+
+Local projection inference now preserves unnamed-expression positions internally
+and applies PostgreSQL relation/CTE column aliases as a positional prefix. Trailing
+named columns remain available instead of disappearing. Empty internal names never
+become suggestions. Added completion coverage for direct/nested CTEs, derived
+sources, recursive anchors and an unnamed expression between two named columns.
+SQLite/MySQL explicit alias lists retain their existing whole-list behavior.
+All 26 completion tests passed (one manual timing test ignored). Before this change,
+the full library suite passed 432 tests with 90 fixture/manual tests ignored.

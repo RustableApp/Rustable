@@ -13,11 +13,21 @@ pub(super) fn columns(sql: &str, dialect: Dialect, objects: &[Object], bindings:
     };
     let Ok(statements) = parsed else { return Vec::new(); };
     match statements.first() {
-        Some(Statement::Query(query)) => query_columns(query, objects, bindings, 0),
+        Some(Statement::Query(query)) => query_columns(query, objects, bindings, dialect, 0),
         _ => Vec::new(),
     }
 }
-fn query_columns(query: &Query, objects: &[Object], bindings: &Bindings, depth: usize) -> Vec<String> {
+// PostgreSQL permits renaming only a prefix of a relation's output columns.
+// Empty strings represent unknown generated names; keep their positions until
+// the final suggestion list, rather than shifting subsequent named columns.
+pub(super) fn rename_columns(mut columns: Vec<String>, aliases: Vec<String>, dialect: Dialect) -> Vec<String> {
+    if aliases.is_empty() { return columns; }
+    if !matches!(dialect, Dialect::Postgres) { return aliases; }
+    if columns.len() < aliases.len() { columns.resize(aliases.len(), String::new()); }
+    for (column, alias) in columns.iter_mut().zip(aliases) { *column = alias; }
+    columns
+}
+fn query_columns(query: &Query, objects: &[Object], bindings: &Bindings, dialect: Dialect, depth: usize) -> Vec<String> {
     if depth >= 16 { return Vec::new(); }
     let mut local = bindings.clone();
     if let Some(with) = &query.with {
@@ -25,18 +35,18 @@ fn query_columns(query: &Query, objects: &[Object], bindings: &Bindings, depth: 
             let name = cte.alias.name.value.to_lowercase();
             if local.len() >= 128 && !local.contains_key(&name) { break; }
             if with.recursive { local.insert(name.clone(), Vec::new()); }
-            let mut output = query_columns(&cte.query, objects, &local, depth + 1);
-            if !cte.alias.columns.is_empty() { output = cte.alias.columns.iter().take(1024).map(|c| c.name.value.clone()).collect(); }
+            let mut output = query_columns(&cte.query, objects, &local, dialect, depth + 1);
+            if !cte.alias.columns.is_empty() { output = rename_columns(output, cte.alias.columns.iter().take(1024).map(|c| c.name.value.clone()).collect(), dialect); }
             local.insert(name, output);
         }
     }
-    body_columns(&query.body, objects, &local, depth)
+    body_columns(&query.body, objects, &local, dialect, depth)
 }
-fn body_columns(body: &SetExpr, objects: &[Object], bindings: &Bindings, depth: usize) -> Vec<String> {
+fn body_columns(body: &SetExpr, objects: &[Object], bindings: &Bindings, dialect: Dialect, depth: usize) -> Vec<String> {
     let select = match body {
         SetExpr::Select(select) => select,
-        SetExpr::Query(query) => return query_columns(query, objects, bindings, depth + 1),
-        SetExpr::SetOperation { left, .. } => return body_columns(left, objects, bindings, depth + 1),
+        SetExpr::Query(query) => return query_columns(query, objects, bindings, dialect, depth + 1),
+        SetExpr::SetOperation { left, .. } => return body_columns(left, objects, bindings, dialect, depth + 1),
         _ => return Vec::new(),
     };
     if depth >= 16 { return Vec::new(); }
@@ -53,12 +63,12 @@ fn body_columns(body: &SetExpr, objects: &[Object], bindings: &Bindings, depth: 
                     && (names.len() == 1 || o.schema.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(names[names.len()-2]))))?;
                 object.columns.iter().take(1024).map(|c| c.name.clone()).collect::<Vec<_>>()
                 };
-                if let Some(alias) = alias && !alias.columns.is_empty() { columns = alias.columns.iter().take(1024).map(|c| c.name.value.clone()).collect(); }
+                if let Some(alias) = alias && !alias.columns.is_empty() { columns = rename_columns(columns, alias.columns.iter().take(1024).map(|c| c.name.value.clone()).collect(), dialect); }
                 Some((alias.as_ref().map_or(table, |a| a.name.value.as_str()).to_owned(), columns))
             }
             TableFactor::Derived { subquery, alias: Some(alias), .. } => {
-                let mut columns = query_columns(subquery, objects, bindings, depth + 1);
-                if !alias.columns.is_empty() { columns = alias.columns.iter().take(1024).map(|c| c.name.value.clone()).collect(); }
+                let mut columns = query_columns(subquery, objects, bindings, dialect, depth + 1);
+                if !alias.columns.is_empty() { columns = rename_columns(columns, alias.columns.iter().take(1024).map(|c| c.name.value.clone()).collect(), dialect); }
                 Some((alias.name.value.clone(), columns))
             }
             _ => None,
@@ -77,7 +87,7 @@ fn body_columns(body: &SetExpr, objects: &[Object], bindings: &Bindings, depth: 
                     result.extend(sources.iter().filter(|(alias, _)| alias.eq_ignore_ascii_case(&id.value)).flat_map(|(_, columns)| columns.iter().cloned()).take(1024 - result.len()));
                 }
             }
-            _ => {} // Unaliased expressions have engine-specific generated names.
+            _ => result.push(String::new()), // Keep an unknown-name slot so positional aliases stay aligned.
         }
         result.truncate(1024);
     }
@@ -127,7 +137,7 @@ pub(super) fn with_bindings(tokens: &[sqlparser::tokenizer::TokenWithSpan], care
             // The nonrecursive anchor determines recursive output names. Parse
             // that arm separately when the caret leaves the recursive term
             // incomplete (for example, SELECT cte.).
-            if recursive && aliases.is_empty() {
+            if recursive && (aliases.is_empty() || matches!(dialect, Dialect::Postgres)) {
                 let mut depth = 0usize;
                 for arm_end in body..i {
                     match &tokens[arm_end].token {
@@ -135,7 +145,7 @@ pub(super) fn with_bindings(tokens: &[sqlparser::tokenizer::TokenWithSpan], care
                         Token::RParen => depth = depth.saturating_sub(1),
                         Token::Word(w) if depth == 0 && w.quote_style.is_none() && w.value.eq_ignore_ascii_case("UNION") => {
                             let sql = tokens[body..arm_end].iter().map(|t| t.token.to_string()).collect::<Vec<_>>().join(" ");
-                            let output = columns(&sql, dialect, objects, &bindings);
+                            let output = rename_columns(columns(&sql, dialect, objects, &bindings), aliases.clone(), dialect);
                             bindings.insert(name, output);
                             break;
                         }
@@ -147,7 +157,8 @@ pub(super) fn with_bindings(tokens: &[sqlparser::tokenizer::TokenWithSpan], care
         }
         if i >= end { break; }
         let sql = tokens[body..i].iter().map(|t| t.token.to_string()).collect::<Vec<_>>().join(" ");
-        let output = if aliases.is_empty() { columns(&sql, dialect, objects, &bindings) } else { aliases };
+        let output = if !aliases.is_empty() && !matches!(dialect, Dialect::Postgres) { aliases }
+            else { rename_columns(columns(&sql, dialect, objects, &bindings), aliases, dialect) };
         bindings.insert(name, output);
         i += 1;
         if !tokens.get(i).is_some_and(|t| t.token == Token::Comma) { break; }

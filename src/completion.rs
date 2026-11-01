@@ -555,14 +555,14 @@ fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]
                     && matches!(tokens.get(alias + 1).map(|t| &t.token), Some(Token::LParen)) {
                     let renamed: Vec<_> = tokens.iter().skip(alias + 2).take_while(|t| t.token != Token::RParen)
                         .filter_map(|t| if let Token::Word(w) = &t.token { Some(w.value.clone()) } else { None }).take(1024).collect();
-                    columns = renamed.into_iter().take(1024).collect();
+                    columns = projection::rename_columns(columns, renamed, dialect);
                 }
                 if child_start <= caret && caret <= child_end { columns.clear(); }
-                projected.insert(relation.0.clone(), columns);
+                projected.insert(relation.0.clone(), columns.into_iter().filter(|name| !name.is_empty()).collect());
             }
             if let Some(columns) = bindings.get(&relation.0.to_lowercase()) {
                 let key = format!("__rustable_cte_{start}_{}", relation.0);
-                projected.insert(key.clone(), columns.clone());
+                projected.insert(key.clone(), columns.iter().filter(|name| !name.is_empty()).cloned().collect());
                 relation.0 = key;
             }
             result.push(relation);
@@ -983,6 +983,32 @@ mod tests {
                 for name in excluded { assert!(!completion.items.iter().any(|item| item == name), "leaked {name}: {sql}"); }
             }
         }
+    }
+
+    #[test]
+    fn postgres_partial_column_aliases_preserve_positions_and_trailing_names() {
+        let objects = [object("customers", &["customer_id", "customer_name"])];
+        for sql in [
+            "WITH c(first) AS (SELECT 1, 2 AS trailing) SELECT c.| FROM c",
+            "SELECT d.| FROM (SELECT 1, 2 AS trailing) d(first)",
+            "SELECT d.| FROM (WITH c(first) AS (SELECT 1, 2 AS trailing) SELECT * FROM c) d",
+            "SELECT d.| FROM (SELECT * FROM (SELECT 1, 2 AS trailing) x(first)) d",
+            "WITH RECURSIVE c(first) AS (SELECT 1, 2 AS trailing UNION ALL SELECT c.| FROM c) SELECT * FROM c",
+        ] {
+            let cursor = sql.find('|').unwrap();
+            let sql = sql.replace('|', "");
+            let mut completion = Completion::default();
+            completion.refresh(&sql, cursor, &objects, &[], true, Dialect::Postgres);
+            assert_eq!(completion.items, ["first", "trailing"], "{sql}");
+        }
+        // An unnamed expression in the middle must retain its ordinal slot.
+        let sql = "WITH c(first, middle) AS (SELECT customer_id, 1+2, customer_name FROM customers) SELECT c. FROM c";
+        let mut completion = Completion::default();
+        completion.refresh(sql, sql.find("c. FROM").unwrap()+2, &objects, &[], true, Dialect::Postgres);
+        assert!(completion.items.contains(&"customer_name".into()));
+        assert!(completion.items.contains(&"first".into()));
+        assert!(completion.items.contains(&"middle".into()));
+        assert!(!completion.items.contains(&String::new()));
     }
 
     #[test]
