@@ -33,6 +33,12 @@ Because PostgreSQL is the only correct choice for a server-side SQL database, an
 
 We can have opinions and still support your toy databases. More engines are coming.
 
+```text
+PostgreSQL:                         ( ͡° ͜ʖ ͡°)
+SQLite:                             ( ͡° ͜ʖ ͡°)
+DB app built in Rust + egui + mise:  (◉ ͜ʖ◉)
+```
+
 ## Run it
 
 Use [mise](https://mise.jdx.dev/) for the toolchain and Cargo for dependencies:
