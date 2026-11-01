@@ -353,3 +353,14 @@ Verified outlined documents, purple folders, the selected saved query and its
 rename remains available. Evidence: `wasm-library-vector-icons.png` in the
 thread visualization directory. Query-library tests: 11 passed; strict
 all-target Clippy passed; optimized WASM build passed.
+
+### Refreshed production demo (2026-11-01)
+
+Published source 57ae883 as Cloudflare version
+`15bb8821-3c33-45f4-88b2-66c4692e2455`. Embedding tests: 3 passed;
+Wrangler dry run passed. Public WASM returned HTTP 200, application/wasm,
+COOP same-origin, COEP require-corp and the WASM CSP. Its SHA-256 matches
+the local 11,188,757-byte build:
+`57853c9d7bc3dbb9edeedbae620e9983927e908a4bc69cb09ce7a54c3bfdd983`.
+Local browser workflow evidence above covers this build; production UI was
+not rerun in this publication pass. No app main push or desktop CI release.
