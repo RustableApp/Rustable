@@ -388,7 +388,8 @@ pub struct Rustable {
     manager_requested: bool,
     window_requests: Vec<crate::session_windows::WindowRequest>,
     connection_manager: connections::Manager,
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
+    redis_demo_active: bool,
     redis_workspace: Option<crate::redis_workspace::Workspace>,
     language: crate::editor_language::LanguageSession,
     active_profile: Option<ProfileIdentity>,
@@ -886,7 +887,8 @@ impl Rustable {
             connected_database: None,
             table_display_name: None,
             connection_manager: Default::default(),
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(target_arch = "wasm32")]
+            redis_demo_active: false,
             redis_workspace: None,
             language: Default::default(),
             active_profile: None,
@@ -5755,6 +5757,8 @@ impl Rustable {
 
 impl Rustable {
     pub(crate) fn begin_workspace_frame(&mut self, ctx: &egui::Context) {
+        #[cfg(target_arch = "wasm32")]
+        if self.redis_demo_active { return; }
         #[cfg(not(target_arch = "wasm32"))]
         if self.redis_workspace.is_some() { return; }
         let start = Instant::now();
@@ -5764,6 +5768,16 @@ impl Rustable {
         self.frame_ms = start.elapsed().as_secs_f32() * 1000.0;
     }
     pub(crate) fn render_workspace_frame(&mut self, ctx: &egui::Context) {
+        #[cfg(target_arch = "wasm32")]
+        if self.redis_demo_active {
+            if self.connections { self.connections_window(ctx); return; }
+            if let Some(workspace) = &mut self.redis_workspace {
+                if workspace.show(ctx, "Redis demo · in memory", egui::Color32::from_rgb(140, 50, 45), &mut self.prefs.pane_sizes, &mut self.shared_preferences_dirty) {
+                    self.connections = true;
+                }
+            }
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(workspace) = &mut self.redis_workspace {
             if workspace.show(ctx, &self.label, self.active_profile.as_ref().map_or(egui::Color32::from_rgb(40, 83, 65), |profile| egui::Color32::from_rgb(profile.color[0], profile.color[1], profile.color[2])), &mut self.prefs.pane_sizes, &mut self.shared_preferences_dirty) { self.manager_requested = true; }

@@ -121,3 +121,16 @@ test verifies pane-width persistence across UI contexts.
 The Redis layout was checked against TablePlus using the same disposable Redis
 fixture. Follow-up UI verification covered grid selection, hash previews and the
 right-hand inspector; all six integration tests also cover grid metadata reads.
+
+## Browser demo
+
+The website connection manager offers **Studio demo** (real SQLite) and
+**Redis demo** (a bounded in-memory Redis-compatible store implemented in Rust,
+compiled to WASM). Both retain their state when switching; reload resets them.
+The Redis demo reuses the desktop key grid, inspector, TTL controls, database
+picker and command editor. It seeds strings, a hash, list, set and sorted set.
+Run `INFO` for the supported command subset. Unsupported commands/options return
+an explicit error; this is not a full Redis server or a remote Redis connection.
+Read-only mode starts enabled. Disable it to try string edits, SET, DEL, EXPIRE
+and PERSIST. Key searches support `*` and `?`. The store is capped at 16 logical
+databases, 256 keys per database, 64 KiB per value and 4 MiB of payload overall.

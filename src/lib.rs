@@ -27,13 +27,15 @@ mod result_search;
 mod review_sql;
 mod script_file;
 mod scroll_response;
-#[cfg(not(target_arch = "wasm32"))]
 mod redis_commands;
 mod redis_settings;
 #[cfg(not(target_arch = "wasm32"))]
 mod redis_session;
-#[cfg(not(target_arch = "wasm32"))]
 mod redis_workspace;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod redis_demo;
+#[cfg(target_arch = "wasm32")]
+use redis_demo as redis_session;
 mod session_windows;
 mod sql;
 mod sql_format;

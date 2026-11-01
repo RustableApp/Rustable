@@ -5,6 +5,8 @@ use crate::{
 };
 use eframe::egui;
 use std::sync::mpsc;
+#[cfg(target_arch = "wasm32")]
+use crate::redis_demo as redis;
 
 enum Job {
     Scan(u64, Vec<u8>),
@@ -23,7 +25,12 @@ enum Reply {
     Changed(&'static str),
 }
 pub(crate) struct Workspace {
+    #[cfg(not(target_arch = "wasm32"))]
     sender: mpsc::SyncSender<Job>,
+    #[cfg(target_arch = "wasm32")]
+    demo: Session,
+    #[cfg(target_arch = "wasm32")]
+    responses: mpsc::Sender<Result<Reply, (String, bool)>>,
     receiver: mpsc::Receiver<Result<Reply, (String, bool)>>,
     busy: bool,
     pub connected: bool,
@@ -57,8 +64,16 @@ pub(crate) struct Workspace {
 impl Workspace {
     pub fn new(mut settings: Settings, password: String, ctx: egui::Context) -> Self {
         let database = settings.database;
+        #[cfg(not(target_arch = "wasm32"))]
         let (sender, jobs) = mpsc::sync_channel(1);
         let (responses, receiver) = mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
+        let demo = {
+            let _ = (&mut settings, &password, &ctx);
+            responses.send(Ok(Reply::Connected(database))).unwrap();
+            Session::new()
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             let mut session = match Session::connect(&settings, &password) {
                 Ok(session) => {
@@ -124,7 +139,12 @@ impl Workspace {
             }
         });
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
             sender,
+            #[cfg(target_arch = "wasm32")]
+            demo,
+            #[cfg(target_arch = "wasm32")]
+            responses,
             receiver,
             busy: true,
             connected: false,
@@ -132,7 +152,7 @@ impl Workspace {
             database_draft: database,
             keys: vec![],
             rows: Default::default(),
-            commands_visible: false,
+            commands_visible: cfg!(target_arch = "wasm32"),
             inspector_visible: true,
             filters_visible: false,
             database_picker: false,
@@ -147,8 +167,8 @@ impl Workspace {
             snapshot: None,
             value_editor: String::new(),
             preview: String::new(),
-            output: String::new(),
-            command: "PING".into(),
+            output: if cfg!(target_arch = "wasm32") { "In-memory Redis demo · Rust/WASM. Data stays in this tab and resets on reload. Run INFO for supported commands; key searches support * and ?.".into() } else { String::new() },
+            command: if cfg!(target_arch = "wasm32") { "INFO" } else { "PING" }.into(),
             error: None,
             notice: None,
             read_only: true,
@@ -183,7 +203,25 @@ impl Workspace {
             Job::Inspect(key) => Some(key.clone()),
             _ => None,
         };
-        match self.sender.try_send(job) {
+        #[cfg(target_arch = "wasm32")]
+        let sent = {
+            let result = match job {
+                Job::Scan(cursor, pattern) => self.demo.scan(cursor, &pattern, 200).and_then(|page| {
+                    let rows = self.demo.key_rows(&page.keys)?;
+                    Ok(Reply::Keys(page, rows))
+                }),
+                Job::Inspect(key) => self.demo.inspect(&key).map(Reply::Value),
+                Job::Execute(text, safe) => self.demo.execute(&text, safe).map(|v| Reply::Output(render_values(&v))),
+                Job::Save(key, original, value, safe) => self.demo.replace_string(&key, &original, &value, safe).map(|_| Reply::Changed("Value saved.")),
+                Job::Delete(key, safe) => self.demo.delete(&key, safe).map(|_| Reply::Changed("Key deleted. Refresh keys to update the list.")),
+                Job::Expire(key, ttl, safe) => self.demo.expire(&key, ttl, safe).map(|_| Reply::Changed("Expiry updated.")),
+                Job::Database(database) => self.demo.select(database).map(|_| Reply::Connected(database)),
+            };
+            self.responses.send(result.map_err(|e| (e, true)))
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let sent = self.sender.try_send(job);
+        match sent {
             Ok(()) => {
                 if let Some(key) = selected {
                     self.selected_key = Some(key);

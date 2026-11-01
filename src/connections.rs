@@ -536,7 +536,19 @@ impl Rustable {
                         }
                     }
                     if ui.add_enabled(self.pending.is_none(), egui::Button::new("Studio demo")).clicked() {
+                        #[cfg(not(target_arch = "wasm32"))]
                         self.window_requests.push(crate::session_windows::WindowRequest { title: "Studio demo".into(), recover_sql: false, identity: None, connection: crate::session_windows::WindowConnection::Demo });
+                        #[cfg(target_arch = "wasm32")]
+                        { self.redis_demo_active = false; self.connections = false; }
+
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    if ui.add_enabled(self.pending.is_none(), egui::Button::new("Redis demo")).clicked() {
+                        if self.redis_workspace.is_none() {
+                            self.redis_workspace = Some(crate::redis_workspace::Workspace::new(Default::default(), String::new(), ctx.clone()));
+                        }
+                        self.redis_demo_active = true;
+                        self.connections = false;
                     }
                     if ui.button("New group").clicked() { action = Some(Action::AddGroup); }
                     if let Some(id) = self.connection_search_navigation(ctx) {
