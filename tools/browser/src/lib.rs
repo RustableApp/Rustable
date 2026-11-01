@@ -54,7 +54,7 @@ struct BrowserApp {
 }
 impl BrowserApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         cc.egui_ctx.style_mut(|style| {
             style.spacing.button_padding = egui::vec2(12.0, 6.0);
         });
