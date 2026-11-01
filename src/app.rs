@@ -1,3 +1,5 @@
+#[path = "query_history.rs"]
+mod query_history;
 #[path = "navigator.rs"]
 mod navigator;
 #[path = "bulk_rows.rs"]
@@ -72,6 +74,7 @@ struct Preferences {
     saved_connections: crate::connection_profiles::ConnectionProfiles,
     connections_migrated: bool,
     history: Vec<String>,
+    query_history: Vec<query_history::Entry>,
     favorites: Vec<String>,
     appearance: Appearance,
     // Legacy sessions stored only SQL strings. Read them once during migration.
@@ -416,6 +419,8 @@ pub struct Rustable {
     activity: std::collections::VecDeque<String>,
     last_operation_ms: Option<f64>,
     sidebar_section: usize,
+    history_search: String,
+    history_selected: Option<usize>,
     connections: bool,
     edit: Option<CellEdit>,
     changes: Vec<Change>,
@@ -586,6 +591,7 @@ impl Rustable {
         child.prefs.appearance = self.prefs.appearance;
         child.prefs.favorites = self.prefs.favorites.clone();
         child.prefs.history = self.prefs.history.clone();
+        child.prefs.query_history = self.prefs.query_history.clone();
         child.prefs.column_widths = self.prefs.column_widths.clone();
         child.prefs.pane_sizes = self.prefs.pane_sizes;
         child.shared_preferences_revision = self.shared_preferences_revision;
@@ -599,6 +605,7 @@ impl Rustable {
         self.prefs.appearance = child.prefs.appearance;
         self.prefs.favorites = child.prefs.favorites.clone();
         self.prefs.history = child.prefs.history.clone();
+        self.prefs.query_history = child.prefs.query_history.clone();
         self.prefs.column_widths = child.prefs.column_widths.clone();
         self.prefs.pane_sizes = child.prefs.pane_sizes;
         self.prefs.history.truncate(100);
@@ -615,6 +622,7 @@ impl Rustable {
             appearance: self.prefs.appearance,
             favorites: self.prefs.favorites.clone(),
             history: self.prefs.history.clone(),
+            query_history: self.prefs.query_history.clone(),
             connection_styles: self.prefs.connection_styles.clone(),
             activity_visible: self.prefs.activity_visible,
             column_widths: self.prefs.column_widths.clone(),
@@ -742,6 +750,9 @@ impl Rustable {
         identity: Option<ProfileIdentity>,
     ) -> Self {
         connections::migrate_recent(&mut prefs);
+        if prefs.query_history.is_empty() {
+            prefs.query_history = prefs.history.iter().map(|sql| query_history::Entry { sql: sql.clone(), timestamp: None }).collect();
+        }
         apply_theme(ctx, prefs.appearance);
         let tabs = if !prefs.documents.is_empty() {
             std::mem::take(&mut prefs.documents)
@@ -829,6 +840,8 @@ impl Rustable {
             activity: Default::default(),
             last_operation_ms: None,
             sidebar_section: 0,
+            history_search: String::new(),
+            history_selected: None,
             connections: false,
             edit: None,
             changes: Vec::new(),
@@ -869,10 +882,12 @@ impl Rustable {
                 Some("Finish SQL transactions with COMMIT or ROLLBACK and save or discard pending changes before switching connections.".into());
             return;
         }
+        let history_sql = match &command { Command::Query { sql, .. } => Some(sql.clone()), _ => None };
         let description = activity_description(&command);
         match self.worker.send(command) {
             Ok(()) => {
                 if let Some(sql) = description { self.log_activity(sql); }
+                if let Some(sql) = history_sql { self.record_query_history(sql); }
                 self.pending = Some(pending);
                 self.started = Instant::now();
                 self.error = None;
@@ -896,6 +911,7 @@ impl Rustable {
             }) = &result
             {
                 let statement = bounded_log_text(&crate::review_sql::readable(sql, parameters));
+                self.record_query_history(statement.clone());
                 self.log_activity(statement);
             }
             let pending = self.pending.take();
@@ -2237,6 +2253,10 @@ impl Rustable {
                 ui.visuals_mut().widgets.hovered = resting;
                 ui.visuals_mut().widgets.active = resting;
                 ui.add_space(4.0);
+                if self.sidebar_section == 2 {
+                    self.history_sidebar(ui);
+                    return;
+                }
                 if self.sidebar_section != 0 {
                     let entries = if self.sidebar_section == 1 {
                         &self.prefs.favorites

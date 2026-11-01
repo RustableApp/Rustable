@@ -28,6 +28,7 @@ sqlformat = "0.5"
 sqlparser = { version = "0.63.0", default-features = false, features = ["std"] }
 tokio = { version = "1.54.1", features = ["rt", "time"] }
 tokio-postgres = "0.7.18"
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 
 [profile.release]
 lto = "thin"
