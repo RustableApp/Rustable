@@ -1,7 +1,19 @@
 //! Bounded binary messages preserve database values across browser workers.
 use bincode::Options;
+pub(crate) const MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) fn codec() -> impl Options {
-    bincode::DefaultOptions::new().with_fixint_encoding().with_limit(32 * 1024 * 1024)
+    bincode::DefaultOptions::new().with_fixint_encoding().with_limit(MAX_BYTES)
+}
+/// Validate the structured-clone value before allocating a copy in WASM memory.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn message_bytes(value: wasm_bindgen::JsValue) -> Result<Vec<u8>, String> {
+    use wasm_bindgen::JsCast;
+    let bytes = value.dyn_into::<js_sys::Uint8Array>()
+        .map_err(|_| "Worker response must be a Uint8Array".to_owned())?;
+    if u64::from(bytes.length()) > MAX_BYTES {
+        return Err("Worker response exceeds the 32 MiB transport limit".into());
+    }
+    Ok(bytes.to_vec())
 }
 #[cfg(test)]
 mod tests {

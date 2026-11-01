@@ -91,10 +91,8 @@ pub(crate) fn start(
     let completed = callback.clone();
     let repaint = ctx.clone();
     let message = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
-        let bytes = js_sys::Uint8Array::new(&event.data()).to_vec();
-        let result = codec()
-            .deserialize::<Result<Response, String>>(&bytes)
-            .map_err(|e| e.to_string())
+        let result = crate::db::transport::message_bytes(event.data())
+            .and_then(|bytes| codec().deserialize::<Result<Response, String>>(&bytes).map_err(|e| e.to_string()))
             .and_then(|r| r);
         completed.borrow_mut()(result);
         repaint.request_repaint();

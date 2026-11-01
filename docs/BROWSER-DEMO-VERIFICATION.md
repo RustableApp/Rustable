@@ -172,3 +172,17 @@ pass; release WASM linking passes. This is an object-URL retention bound, not a
 whole-tab memory bound or proof that browser-managed download copies are freed.
 Actual browser downloads were verified earlier; cross-engine coverage remains
 outstanding.
+
+### Validate worker messages before copying (2026-11-01)
+
+Database and background-job reply handlers now require a Uint8Array and check
+its length against the shared 32 MiB transport limit before copying into WASM
+memory. Previously Uint8Array construction/copy preceded bincode's limit check.
+Native transport regressions and the release WASM build pass.
+
+A local preview worker transferred a 32 MiB + 1 byte Uint8Array on startup. The
+app displayed the transport-limit error and disconnected cleanly. After restoring
+the original worker script, Start fresh demo loaded the sample tables again.
+Evidence: `wasm-oversized-response.png` in the session visualization directory.
+The fault was preview-only. This avoids an extra oversized WASM allocation; it
+cannot prevent the browser from receiving the original structured-clone buffer.

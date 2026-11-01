@@ -83,8 +83,8 @@ impl Worker {
         let message = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
             if message_failed.get() { return; }
             message_started.set(None);
-            let bytes = js_sys::Uint8Array::new(&event.data()).to_vec();
-            let result = codec().deserialize::<(Result<Payload, String>, TransactionState)>(&bytes);
+            let result = super::transport::message_bytes(event.data()).and_then(|bytes|
+                codec().deserialize::<(Result<Payload, String>, TransactionState)>(&bytes).map_err(|error| error.to_string()));
             let reply = match result {
                 Ok((reply, state)) => { status.store(state as u8, Ordering::Release); reply }
                 Err(error) => {
