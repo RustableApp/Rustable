@@ -1,6 +1,15 @@
 name: Package candidates
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: App source ref (blank uses this workflow ref)
+        type: string
+      platform:
+        description: Platform to package
+        type: choice
+        default: all
+        options: [all, windows-latest, macos-14, ubuntu-24.04]
 permissions:
   contents: read
 jobs:
@@ -8,13 +17,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest, ubuntu-24.04]
+        os: ${{ inputs.platform == 'all' && fromJSON('["macos-14", "windows-latest", "ubuntu-24.04"]') || fromJSON(format('["{0}"]', inputs.platform)) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ inputs.source_ref || github.ref }}
           persist-credentials: false
+      - name: Check out packaging tooling from workflow revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: packaging-tooling
+          sparse-checkout: scripts/package-release.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Use current packaging tooling
+        shell: bash
+        run: cp packaging-tooling/scripts/package-release.py scripts/package-release.py
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
       - name: Linux development libraries
         if: runner.os == 'Linux'

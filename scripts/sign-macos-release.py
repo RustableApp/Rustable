@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import platform
 import secrets
+import shlex
+import shutil
 import subprocess
 import tempfile
 import tomllib
@@ -53,11 +55,16 @@ with tempfile.TemporaryDirectory(prefix='rustable-signing-') as temporary:
     p8.write_text(notary_key); p8.chmod(0o600)
     keychain = private / 'release.keychain-db'
     keychain_password = secrets.token_urlsafe(32)
+    original_keychains = shlex.split(run('security', 'list-keychains', '-d', 'user', capture_output=True, text=True).stdout)
     try:
         run('security', 'create-keychain', '-p', keychain_password, str(keychain), stdout=subprocess.DEVNULL)
         run('security', 'set-keychain-settings', '-lut', '21600', str(keychain))
         run('security', 'unlock-keychain', '-p', keychain_password, str(keychain))
         run('security', 'import', str(p12), '-k', str(keychain), '-P', password, '-T', '/usr/bin/codesign', stdout=subprocess.DEVNULL)
+        run('security', 'list-keychains', '-d', 'user', '-s', str(keychain), *original_keychains)
+        identities = run('security', 'find-identity', '-v', '-p', 'codesigning', str(keychain), capture_output=True, text=True).stdout
+        if identity not in identities:
+            raise SystemExit('Signing identity is not available in the imported release keychain')
         run('security', 'set-key-partition-list', '-S', 'apple-tool:,apple:,codesign:', '-s', '-k', keychain_password, str(keychain), stdout=subprocess.DEVNULL)
         def sign(path):
             run('codesign', '--force', '--timestamp', '--options', 'runtime', '--preserve-metadata=entitlements', '--keychain', str(keychain), '--sign', identity, str(path))
@@ -84,7 +91,9 @@ with tempfile.TemporaryDirectory(prefix='rustable-signing-') as temporary:
         run('spctl', '--assess', '--type', 'execute', '--verbose=2', str(app))
         archive.unlink()
         run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(archive))
-        run(str(root/'target/sparkle/bin/generate_appcast'), '--ed-key-file', '-', '--maximum-deltas', '0', '--download-url-prefix', f'https://github.com/RustableApp/Rustable/releases/download/{tag}/', '-o', str(dist/feed_name), str(dist), input=private_key+'\n', text=True)
+        with tempfile.TemporaryDirectory(prefix='rustable-feed-') as feed_dir:
+            shutil.copy2(archive, Path(feed_dir) / archive.name)
+            run(str(root/'target/sparkle/bin/generate_appcast'), '--ed-key-file', '-', '--maximum-deltas', '0', '--download-url-prefix', f'https://github.com/RustableApp/Rustable/releases/download/{tag}/', '-o', str(dist/feed_name), feed_dir, input=private_key+'\n', text=True)
         # Keep Sparkle's ZIP feed separate from the human-facing DMG installer.
         dmg = dist / f'Rustable-macos-{arch}.dmg'
         run('python', 'scripts/create-dmg.py', str(app), str(dmg))
@@ -97,5 +106,6 @@ with tempfile.TemporaryDirectory(prefix='rustable-signing-') as temporary:
         run('xcrun', 'stapler', 'validate', str(dmg))
         run('codesign', '--verify', '--verbose=2', str(dmg))
     finally:
+        run('security', 'list-keychains', '-d', 'user', '-s', *original_keychains)
         if keychain.exists():
             run('security', 'delete-keychain', str(keychain))

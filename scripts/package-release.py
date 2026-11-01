@@ -7,6 +7,7 @@ import plistlib
 import shutil
 import subprocess
 import tomllib
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
@@ -23,7 +24,7 @@ def run(*args):
 helper = ['mise', 'exec', '--', 'cargo', 'run', '--locked', '--manifest-path', 'tools/package/Cargo.toml', '--']
 if system == 'Darwin':
     app = stage / 'Rustable.app'
-    run(*helper, 'bundle', 'target/release/rustable', str(app))
+    run(*helper, 'bundle', os.environ.get('RUSTABLE_RELEASE_BINARY', 'target/release/rustable'), str(app))
     path = app / 'Contents/Info.plist'
     with path.open('rb') as f:
         info = plistlib.load(f)
@@ -44,4 +45,11 @@ else:
         shutil.copy2(source, stage / source.name)
     shutil.copytree(ROOT / 'target/bundle-licenses', stage / 'Licenses', dirs_exist_ok=True)
     shutil.copy2(ROOT / 'LICENSE', stage / 'LICENSE')
-    shutil.make_archive(str(dist / name), 'zip' if system == 'Windows' else 'gztar', stage.parent, stage.name)
+    if system == 'Windows':
+        # Dependency/license archives can preserve Unix-epoch timestamps. ZIP's
+        # date range starts in 1980; clamp metadata without changing file bytes.
+        with zipfile.ZipFile(dist / f'{name}.zip', 'w', zipfile.ZIP_DEFLATED, strict_timestamps=False) as archive:
+            for path in sorted(stage.rglob('*')):
+                archive.write(path, path.relative_to(stage.parent))
+    else:
+        shutil.make_archive(str(dist / name), 'gztar', stage.parent, stage.name)
