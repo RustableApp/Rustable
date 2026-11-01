@@ -1,6 +1,8 @@
 //! SQLite adapter. SQLite-specific SQL, binding, and transaction rules stay here.
 mod export_path;
 mod schema;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod browser_limits;
 use super::*;
 use rusqlite::{Connection, OpenFlags, fallible_iterator::FallibleIterator, params_from_iter};
 use web_time::Instant;
@@ -16,11 +18,15 @@ impl SqliteDriver {
         path: Option<&std::path::Path>,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, String> {
+        #[cfg(target_arch = "wasm32")]
+        browser_limits::limit_heap();
         let connection = match path {
             Some(path) => Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE),
             None => demo(),
         }
         .map_err(|e| e.to_string())?;
+        #[cfg(target_arch = "wasm32")]
+        browser_limits::configure(&connection).map_err(|e| e.to_string())?;
         connection
             .busy_timeout(Duration::from_millis(750))
             .map_err(|e| e.to_string())?;

@@ -26,6 +26,7 @@ pub(crate) fn execute(bytes: &[u8]) -> Vec<u8> {
         let mut connection = slot.borrow_mut();
         DEADLINE.set(Some(web_time::Instant::now() + Duration::from_secs(2)));
         let result = command.and_then(|command| {
+            validate_command(&command)?;
             match &command {
                 Command::Open(None) | Command::Query { .. } | Command::Browse(_)
                 | Command::RefreshSchema | Command::SelectSchema(_) | Command::ListDatabases
@@ -41,6 +42,13 @@ pub(crate) fn execute(bytes: &[u8]) -> Vec<u8> {
     codec().serialize(&(result, state)).unwrap_or_else(|error| {
         codec().serialize(&(Err::<Payload, _>(format!("Browser result exceeds its transport limit: {error}")), state)).expect("bounded error message")
     })
+}
+
+fn validate_command(command: &Command) -> Result<(), String> {
+    if let Command::Query { sql, .. } = command && sql.len() > 8 * 1024 * 1024 {
+        return Err("Browser SQL runs are limited to 8 MiB. Select a smaller script.".into());
+    }
+    Ok(())
 }
 
 pub struct Worker {
@@ -92,6 +100,7 @@ impl Worker {
         Self { worker, rx, transaction, cancellation, _message: message, _error: error }
     }
     pub fn send(&self, command: Command) -> Result<(), String> {
+        validate_command(&command)?;
         if let Some(flag) = &self.cancellation { let _ = js_sys::Atomics::store(flag, 0, 0); }
         let bytes = codec().serialize(&command).map_err(|e| format!("Operation is not available in this browser session: {e}"))?;
         self.worker.as_ref().map_err(Clone::clone)?.post_message(&js_sys::Uint8Array::from(bytes.as_slice())).map_err(|e| format!("Could not send database command: {e:?}"))
