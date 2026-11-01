@@ -417,3 +417,14 @@ browser build. All nine browser file-download/query-library adapter tests pass.
 This pass establishes compilation/linking and adapter regression status only.
 It does not replace browser UI acceptance of this bundle, whole-tab memory
 measurement or additional-browser checks. No deployment or native release.
+
+## Overnight production recheck — 2026-11-01
+
+Reopened https://rustable.app/demo/ in the in-app browser. The full shared
+workspace rendered with table sidebar, SQL tabs, inspector and customers grid.
+Executed a two-statement document with Cmd+Shift+Enter: customer count returned
+2400 and the second result preserved integer 9007199254740993 exactly alongside
+`Rust 🦀`. Both result tabs were visible and selectable. Screenshot evidence:
+`wasm-production-overnight-audit.png` in the session visualization directory.
+This is a check of the existing deployment, not the newer local WASM build;
+no deployment was performed. Cross-engine and sustained memory checks remain.

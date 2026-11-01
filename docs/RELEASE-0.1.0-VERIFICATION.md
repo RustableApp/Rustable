@@ -40,3 +40,23 @@ This records evidence for the first release, not completion of TablePlus parity.
 - macOS Apple Silicon only; Windows/Linux updates are manual.
 - Full refresh-rate/input-to-paint benchmarks, cross-platform accessibility and complete administration/driver parity remain outstanding.
 - Saved-query single-click selection/double-click opening and history-preview ellipsis fixes were made after the release tag and are not in v0.1.0. Their local regression tests pass. Do not imply these changes are in the tagged binaries.
+
+## Published artifact recheck — 2026-11-01
+
+Queried GitHub's latest-release API: v0.1.0 is published, neither draft nor
+prerelease. Downloaded its macOS arm64 DMG anew, rather than validating a local
+build. `hdiutil verify` and `xcrun stapler validate` succeeded. Mounted read-only;
+`codesign --verify --deep --strict --verbose=2` validated the application and
+nested Sparkle/helper executables. `spctl --assess --type execute --verbose=2`
+accepted it as Notarized Developer ID. The image contains Rustable.app,
+Applications -> /Applications and Finder layout metadata; detached after checks.
+
+The packaged SUFeedURL points to the GitHub latest-release arm64 appcast. The
+published feed declares version 0.1.0, arm64, minimum macOS 12, and a signed ZIP
+enclosure whose declared size matches the release asset (33,257,794 bytes).
+This does not prove an installed-version-to-new-version update cycle.
+
+Fetched the production landing page and followed its three actual download
+links with curl: macOS DMG, Windows x64 ZIP and Linux x64 tar.gz all returned
+HTTP 200. Windows/Linux installation was not rerun. macOS Intel remains absent
+from this release. No new build, push or release was triggered by this audit.
