@@ -41,10 +41,26 @@ impl Library {
         { false }
     }
     pub fn invalidate(&mut self) { self.refreshed = None; self.receiver = None; }
+    fn accept_listing(&mut self, root: &std::path::Path, files: Vec<QueryFile>, groups: Vec<String>) {
+        if self.rename_file.as_ref().is_some_and(|(path, _)| !files.iter().any(|file| &file.path == path)) {
+            self.rename_file = None;
+            self.focus_file = false;
+        }
+        if self.rename_group.as_ref().is_some_and(|(path, _)| !groups.iter().any(|group| root.join(group) == *path)) {
+            self.rename_group = None;
+            self.focus_group = false;
+        }
+        if let Some(Selection::File(path)) = &self.selected
+            && !files.iter().any(|file| &file.path == path) { self.selected = None; }
+        self.files = files;
+        self.groups = groups;
+        self.error = None;
+    }
+
     #[cfg(target_arch = "wasm32")]
     pub fn poll(&mut self, ctx: &egui::Context, root: PathBuf) {
         if let Some(rx) = &self.receiver && let Ok((_, result)) = rx.try_recv() {
-            match result { Ok((files, groups)) => { self.files = files; self.groups = groups; self.error = None; }, Err(error) => self.error = Some(error) }
+            match result { Ok((files, groups)) => self.accept_listing(&root, files, groups), Err(error) => self.error = Some(error) }
             self.receiver = None; self.refreshed = Some(Instant::now());
         }
         if self.receiver.is_none() && self.refreshed.is_none_or(|when| when.elapsed().as_secs() >= 5) {
@@ -74,9 +90,15 @@ impl Library {
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub fn poll(&mut self, ctx: &egui::Context, root: PathBuf) {
-        if self.root.as_ref() != Some(&root) { self.root = Some(root.clone()); self.files.clear(); self.groups.clear(); self.selected = None; self.receiver = None; self.refreshed = None; }
+        if self.root.as_ref() != Some(&root) {
+            self.root = Some(root.clone()); self.files.clear(); self.groups.clear();
+            self.selected = None; self.receiver = None; self.refreshed = None;
+            self.rename_group = None; self.rename_file = None;
+            self.focus_group = false; self.focus_file = false;
+            self.search.clear(); self.error = None;
+        }
         if let Some(rx) = &self.receiver && let Ok((scanned, result)) = rx.try_recv() {
-            if scanned == root { match result { Ok((files, groups)) => { self.files = files; self.groups = groups; self.error = None; }, Err(error) => self.error = Some(error) } }
+            if scanned == root { match result { Ok((files, groups)) => self.accept_listing(&root, files, groups), Err(error) => self.error = Some(error) } }
             self.receiver = None; self.refreshed = Some(Instant::now());
         }
         if self.receiver.is_none() && self.refreshed.is_none_or(|when| when.elapsed().as_secs() >= 5) {
@@ -387,6 +409,46 @@ mod tests {
         assert_eq!(app.tabs[0].sql, "SELECT 'unsaved edit';");
         assert!(app.tabs[0].dirty);
     }
+    #[test]
+    fn listing_refresh_preserves_live_rename_and_clears_removed_items() {
+        let root = PathBuf::from("/Queries");
+        let path = root.join("Reports/Customers.sql");
+        let mut library = Library {
+            rename_file: Some((path.clone(), "Unsaved name".into())),
+            rename_group: Some((root.join("Reports"), "Unsaved group".into())),
+            selected: Some(Selection::File(path.clone())),
+            focus_file: true, focus_group: true,
+            ..Default::default()
+        };
+        library.accept_listing(&root, vec![QueryFile { path: path.clone(), name: "Customers".into(), group: "Reports".into() }], vec!["Reports".into()]);
+        assert_eq!(library.rename_file.as_ref().unwrap().1, "Unsaved name");
+        assert_eq!(library.rename_group.as_ref().unwrap().1, "Unsaved group");
+        assert!(library.selected.is_some());
+        library.accept_listing(&root, vec![], vec![]);
+        assert!(!library.renaming_inline());
+        assert!(library.selected.is_none());
+        assert!(!library.focus_file && !library.focus_group);
+    }
+
+    #[test]
+    fn changing_storage_root_cancels_old_inline_edits() {
+        let ctx = egui::Context::default();
+        let old = tempfile::tempdir().unwrap();
+        let new = tempfile::tempdir().unwrap();
+        let mut library = Library {
+            root: Some(old.path().to_owned()),
+            rename_file: Some((old.path().join("Report.sql"), "Draft name".into())),
+            rename_group: Some((old.path().join("Reports"), "Draft group".into())),
+            search: "old filter".into(), error: Some("old error".into()),
+            ..Default::default()
+        };
+        library.poll(&ctx, new.path().to_owned());
+        assert!(!library.renaming_inline());
+        assert!(library.search.is_empty());
+        assert!(library.error.is_none());
+        assert_eq!(library.root.as_deref(), Some(new.path()));
+    }
+
     #[test]
     fn inline_library_rename_owns_workspace_shortcuts_without_disabling_sidebar() {
         let ctx = egui::Context::default();
