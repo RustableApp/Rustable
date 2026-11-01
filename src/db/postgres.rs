@@ -1483,6 +1483,18 @@ mod live_tests {
             .iter()
             .find(|o| o.name == "\"rustable.qa\".\"test.table\"")
             .unwrap();
+        for (column, operator, value, expected) in [("id", ">", "1", 2), ("name", "Contains", "%", 1), ("id", "IN", "[2]", 2), ("Raw SQL", "=", "id = 1 AND name LIKE 'a%'", 1)] {
+            let request = Browse { table: table.name.clone(), filters: vec![crate::db::filters::Filter { enabled: true, column: column.into(), operator: operator.into(), value: value.into() }], ..Default::default() };
+            let filtered = driver.browse(&request).unwrap();
+            assert_eq!(filtered.grid.rows.len(), 1);
+            assert_eq!(filtered.grid.rows[0][0], Value::Integer(expected));
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("filtered.json");
+            driver.export_table(&path, &request, &cancel, ExportFormat::Json).unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(json[0]["id"], expected);
+            assert_eq!(json.as_array().unwrap().len(), 1);
+        }
         assert!(table.columns[0].pk);
         assert!(table.columns[1].not_null);
         assert!(!table.columns[1].default.is_empty());

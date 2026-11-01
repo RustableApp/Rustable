@@ -80,13 +80,13 @@ impl Search {
                 }
             }
             if ui
-                .button("‹")
+                .add(crate::icons::widget("chevron-left"))
                 .on_hover_text("Previous · Cmd+Shift+G")
                 .clicked()
             {
                 action = Some(Action::Previous);
             }
-            if ui.button("›").on_hover_text("Next · ⌘G").clicked() {
+            if ui.add(crate::icons::widget("chevron-right")).on_hover_text("Next · ⌘G").clicked() {
                 action = Some(Action::Next);
             }
             ui.menu_button("Options", |ui| {

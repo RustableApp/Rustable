@@ -52,6 +52,13 @@ impl RowSelection {
         // Single-row mutation controls must never silently act on one of many rows.
         (self.rows.len() == 1).then(|| *self.rows.first().unwrap())
     }
+    pub fn context_click(&mut self, index: usize) -> Option<usize> {
+        if self.rows.contains(&index) {
+            self.focused = Some(index);
+            (self.rows.len() == 1).then_some(index)
+        } else { self.click(index, false, false, None) }
+    }
+
     pub fn select_all(&mut self, count: usize, focused: usize) -> Option<usize> {
         self.focused = (focused < count).then_some(focused);
         self.rows = (0..count).collect();
@@ -92,6 +99,17 @@ impl RowSelection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn context_click_preserves_selection_or_selects_outside_row() {
+        let mut s = RowSelection::default();
+        s.click(1, false, false, None);
+        s.click(3, true, false, None);
+        assert_eq!(s.context_click(2), None);
+        assert_eq!(s.copy_indices(2), vec![1, 2, 3]);
+        assert_eq!(s.focused, Some(2));
+        assert_eq!(s.context_click(7), Some(7));
+        assert_eq!(s.copy_indices(7), vec![7]);
+    }
     #[test]
     fn arrows_extend_contract_and_stop_at_loaded_page_boundaries() {
         let mut s = RowSelection::default();

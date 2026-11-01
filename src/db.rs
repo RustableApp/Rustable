@@ -1,5 +1,6 @@
 //! All database and file work happens on a single owner thread, never in a frame.
 mod csv;
+pub mod filters;
 mod json;
 mod row_export;
 #[cfg(not(target_arch = "wasm32"))]
@@ -231,6 +232,10 @@ pub struct ScriptResult {
 #[derive(Clone, Debug, Default, PartialEq)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Browse {
+    #[serde(default)]
+    pub filters: Vec<filters::Filter>,
+    #[serde(default)]
+    pub limit: usize,
     pub table: String,
     pub offset: usize,
     pub filter_column: Option<String>,
@@ -239,6 +244,7 @@ pub struct Browse {
 }
 
 impl Browse {
+    pub fn page_size(&self) -> usize { if self.limit == 0 { PAGE_SIZE } else { self.limit.clamp(1, 5000) } }
     /// Header clicks cycle descending, ascending, then the default table order.
     pub fn cycle_sort(&mut self, column: String) {
         self.sort = match self.sort.as_ref() {
@@ -710,14 +716,61 @@ pub fn display(value: &Value) -> String {
     }
 }
 
+/// Text preview only: the value remains binary for editing, predicates and export.
+fn readable_binary(bytes: &[u8]) -> Option<&str> {
+    // Avoid repeatedly scanning arbitrarily large binary payloads while painting.
+    if bytes.is_empty() || bytes.len() > 65536 { return None; }
+    let text = std::str::from_utf8(bytes).ok()?;
+    text.chars().all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t')).then_some(text)
+}
+
+/// Copy the complete displayed value. Binary values stay binary internally;
+/// readable bytes copy as text, other bytes use the row-copy hexadecimal format.
+/// Called only on an explicit copy action, never while painting.
+pub fn clipboard_text(value: &Value) -> String {
+    match value {
+        Value::Blob(bytes) => {
+            if let Some(text) = readable_binary(bytes) { return text.to_owned(); }
+            use std::fmt::Write;
+            let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+            for byte in bytes { write!(output, "{byte:02x}").expect("writing into String"); }
+            output
+        }
+        _ => display(value),
+    }
+}
+
 /// Render only a small UTF-8-safe prefix; never clone megabytes to paint a cell.
 pub fn preview(value: &Value, characters: usize) -> std::borrow::Cow<'_, str> {
-    match value {
-        Value::Text(text) => match text.char_indices().nth(characters) {
+    let text = match value {
+        Value::Text(text) => Some(text.as_str()),
+        Value::Blob(bytes) => readable_binary(bytes),
+        _ => None,
+    };
+    match text {
+        Some(text) => match text.char_indices().nth(characters) {
             Some((end, _)) => std::borrow::Cow::Owned(format!("{}…", &text[..end])),
             None => std::borrow::Cow::Borrowed(text),
         },
-        _ => std::borrow::Cow::Owned(display(value)),
+        None => std::borrow::Cow::Owned(display(value)),
+    }
+}
+
+#[cfg(test)]
+mod binary_preview_tests {
+    use super::*;
+    #[test]
+    fn binary_hash_and_unicode_preview_preserve_original_bytes() {
+        let hash = "7fb8e699682a5ef678d03c6a50adcb5fa1d36fad775c48e1855d84b4fe8bed39";
+        let value = Value::Blob(hash.as_bytes().to_vec());
+        assert_eq!(preview(&value, 4096), hash);
+        assert_eq!(clipboard_text(&value), hash);
+        assert_eq!(clipboard_text(&Value::Blob(vec![0, 255, 10])), "00ff0a");
+        assert_eq!(clipboard_text(&Value::Text("日本語".repeat(5000))), "日本語".repeat(5000));
+        assert!(matches!(&value, Value::Blob(bytes) if bytes == hash.as_bytes()));
+        assert_eq!(preview(&Value::Blob("日本語".as_bytes().to_vec()), 2), "日本…");
+        assert_eq!(preview(&Value::Blob(vec![0, 255]), 4096), "BLOB · 2 bytes");
+        assert_eq!(preview(&Value::Blob(b"text\0binary".to_vec()), 4096), "BLOB · 11 bytes");
     }
 }
 
@@ -1537,7 +1590,7 @@ mod browser_database_tests {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) fn probe_mysql(config: &crate::connection::MysqlConfig, cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) { return Err("Connection test cancelled".into()); }
     let mut driver = mysql::open(config, cancel)?;

@@ -154,17 +154,8 @@ fn library_row(ui: &mut egui::Ui, text: &str, selected: bool, folder: bool) -> e
     let color = if selected { egui::Color32::WHITE } else { ui.visuals().text_color() };
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
     let center = rect.left_center() + egui::vec2(14.0, 0.0);
-    let point = |x, y| center + egui::vec2(x, y);
-    if folder {
-        let purple = egui::Color32::from_rgb(157, 106, 192);
-        ui.painter().rect_filled(egui::Rect::from_min_max(point(-7.0, -6.0), point(-1.0, -2.0)), 1.5, purple);
-        ui.painter().rect_filled(egui::Rect::from_min_max(point(-7.0, -4.0), point(7.0, 6.0)), 1.5, purple.gamma_multiply(0.8));
-        ui.painter().line_segment([point(-5.0, -1.5), point(5.0, -1.5)], Stroke::new(1.0_f32, purple));
-    } else {
-        let stroke = Stroke::new(1.2_f32, if selected { color } else { ui.visuals().weak_text_color() });
-        ui.painter().add(egui::Shape::closed_line(vec![point(-5.0, -7.0), point(1.0, -7.0), point(5.0, -3.0), point(5.0, 7.0), point(-5.0, 7.0)], stroke));
-        ui.painter().add(egui::Shape::line(vec![point(1.0, -7.0), point(1.0, -3.0), point(5.0, -3.0)], stroke));
-    }
+    crate::icons::paint(ui.painter(), center, if folder { "folder" } else { "file-code" }, 16.0,
+        if selected { color } else if folder { egui::Color32::from_rgb(157, 106, 192) } else { ui.visuals().weak_text_color() });
     let mut job = egui::text::LayoutJob::simple(text.to_owned(), egui::FontId::monospace(13.0), color, (rect.width() - 36.0).max(1.0));
     job.wrap.max_rows = 1;
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
@@ -323,12 +314,8 @@ impl Rustable {
             egui::Frame::new().corner_radius(16.0).fill(ui.visuals().extreme_bg_color).stroke(ui.visuals().widgets.noninteractive.bg_stroke).inner_margin(egui::Margin::symmetric(8,5)).show(ui, |ui| {
                 ui.add(TextEdit::singleline(&mut self.query_library.search).frame(false).hint_text("Search for query…").desired_width((ui.available_width()-40.0).max(70.0)));
             });
-            let options = ui.add(egui::Button::new("").min_size(egui::vec2(28.0, 26.0)).frame(false));
+            let options = crate::icons::button(ui, "sliders-horizontal", egui::vec2(28.0, 26.0), false);
             options.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Query library options"));
-            let ink = ui.style().interact(&options).fg_stroke.color;
-            for x in [-5.0, 0.0, 5.0] {
-                ui.painter().circle_filled(options.rect.center() + egui::vec2(x, 0.0), 1.5, ink);
-            }
             let options = options.on_hover_text("Query library options");
             egui::Popup::menu(&options).show(|ui| {
                 ui.label(if cfg!(target_arch = "wasm32") { "Stored in this browser".into() } else { root.display().to_string() });

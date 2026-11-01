@@ -18,6 +18,7 @@ mod editor;
 mod editor_language;
 mod find;
 mod fonts;
+mod icons;
 mod native_menu;
 mod pane_sizes;
 mod result_chart;
@@ -36,6 +37,16 @@ mod updates;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result {
+    #[cfg(feature = "qa")]
+    if std::env::var_os("RUSTABLE_UI_PREVIEW").is_some() {
+        return eframe::run_native("Rustable UI Preview", eframe::NativeOptions {
+            viewport: eframe::egui::ViewportBuilder::default().with_title("Rustable UI Preview").with_inner_size([1280.0, 820.0]),
+            vsync: true, ..Default::default()
+        }, Box::new(|cc| {
+            crate::scroll_response::install(&cc.egui_ctx);
+            Ok(Box::new(app::Rustable::new_demo(cc)))
+        }));
+    }
     eframe::run_native(
         if cfg!(feature = "qa") {
             "Rustable QA"

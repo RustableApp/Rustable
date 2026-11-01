@@ -184,6 +184,7 @@ struct TableScrollOptions {
     stick_to_bottom: bool,
     scroll_to_row: Option<(usize, Option<Align>)>,
     scroll_offset_y: Option<f32>,
+    wheel_before_layout: bool,
     min_scrolled_height: f32,
     max_scroll_height: f32,
     auto_shrink: Vec2b,
@@ -199,6 +200,7 @@ impl Default for TableScrollOptions {
             stick_to_bottom: false,
             scroll_to_row: None,
             scroll_offset_y: None,
+            wheel_before_layout: false,
             min_scrolled_height: 200.0,
             max_scroll_height: f32::INFINITY,
             auto_shrink: Vec2b::TRUE,
@@ -366,6 +368,14 @@ impl<'a> TableBuilder<'a> {
         self.scroll_options.scroll_offset_y = Some(offset);
         self
     }
+
+    /// Apply wheel input before drawing. Do not enable when cells contain
+    /// scroll areas that need to consume vertical wheel input themselves.
+    pub fn wheel_before_layout(mut self, enabled: bool) -> Self {
+        self.scroll_options.wheel_before_layout = enabled;
+        self
+    }
+
 
     /// The minimum height of a vertical scroll area which requires scroll bars.
     ///
@@ -734,6 +744,7 @@ impl Table<'_> {
             stick_to_bottom,
             scroll_to_row,
             scroll_offset_y,
+            wheel_before_layout,
             min_scrolled_height,
             max_scroll_height,
             auto_shrink,
@@ -745,6 +756,7 @@ impl Table<'_> {
 
         let mut scroll_area = ScrollArea::new([false, vscroll])
             .id_salt(state_id.with("__scroll_area"))
+            .wheel_before_layout(wheel_before_layout)
             .scroll_source(ScrollSource {
                 drag: drag_to_scroll,
                 ..Default::default()
@@ -1278,6 +1290,21 @@ pub struct TableRow<'a, 'b> {
 }
 
 impl TableRow<'_, '_> {
+    /// Skip the next clipped column when it is outside the viewport.
+    /// Call `col` normally when this returns false. Do not skip cells that need
+    /// keyboard scrolling, focus, or an active editor. Sizing passes never skip.
+    pub fn skip_invisible_column(&mut self) -> bool {
+        let Some(column) = self.columns.get(self.col_index) else { return false; };
+        let Some(&width) = self.widths.get(self.col_index) else { return false; };
+        if !column.clip || column.auto_size_this_frame
+            || !self.layout.skip_invisible_cell(width, self.height)
+        {
+            return false;
+        }
+        self.col_index += 1;
+        true
+    }
+
     /// Add the contents of a column on this row (i.e. a cell).
     ///
     /// Returns the used space (`min_rect`) plus the [`Response`] of the whole cell.

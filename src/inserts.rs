@@ -346,6 +346,11 @@ impl Rustable {
             self.start_insert_edit(id, column, inspector);
         }
         label.context_menu(|ui| {
+            if ui.button("Remove new row").clicked() {
+                self.selected = self.insert_ids().iter().position(|item| *item == id).map(|index| self.table.rows.len() + index);
+                self.remove_selected_insert();
+                ui.close();
+            }
             ui.add_enabled_ui(self.can_insert() && !generated, |ui| {
                 for (title, value) in [
                     ("Use DEFAULT", None),

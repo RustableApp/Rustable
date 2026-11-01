@@ -23,11 +23,23 @@ struct SessionWindow {
     title: String,
     request: Option<WindowRequest>,
     app: Option<Box<Rustable>>,
+    parked: Vec<Box<Rustable>>,
+    active_slot: usize,
     closed: bool,
     connected: bool,
 }
 
 impl SessionWindow {
+    fn switch_workspace(&mut self, index: usize) {
+        let target = self.parked.remove(index);
+        let next_slot = index + usize::from(index >= self.active_slot);
+        if let Some(previous) = self.app.replace(target) {
+            let previous_slot = self.active_slot - usize::from(next_slot < self.active_slot);
+            self.parked.insert(previous_slot, previous);
+        }
+        self.active_slot = next_slot;
+    }
+
     fn connection_completed(&mut self, connected: bool) -> bool {
         let completed = connected && !self.connected;
         self.connected |= connected;
@@ -63,10 +75,7 @@ impl SessionWindows {
         }
     }
     fn collect_requests(&mut self) -> Option<egui::ViewportId> {
-        let mut requests = self.root.take_window_requests();
-        for window in &mut self.windows {
-            if let Some(app) = &mut window.app { requests.extend(app.take_window_requests()); }
-        }
+        let requests = self.root.take_window_requests();
         let mut opened = None;
         for request in requests {
             let id = egui::ViewportId::from_hash_of(("database-session", self.next_id));
@@ -77,6 +86,8 @@ impl SessionWindows {
                 title: request.title.clone(),
                 request: Some(request),
                 app: None,
+                parked: Vec::new(),
+                active_slot: 0,
                 closed: false,
                 connected: false,
             });
@@ -127,12 +138,70 @@ impl eframe::App for SessionWindows {
                     window.closed = true;
                     return;
                 }
+                for app in &mut window.parked {
+                    app.poll();
+                    self.root.sync_window_preferences(app);
+                    self.root.sync_window_profile(app);
+                    shared_changed |= self.root.merge_window_preferences(app);
+                }
+                let requests = window.app.as_mut().map(|app| app.take_window_requests()).unwrap_or_default();
+                for request in requests {
+                    let database = match &request.connection {
+                        WindowConnection::Mysql(config) => Some(config.database.as_str()),
+                        WindowConnection::Postgres(config) => Some(config.database.as_str()),
+                        _ => None,
+                    };
+                    if let Some(index) = window.parked.iter().position(|app| app.workspace_database() == database) {
+                        window.switch_workspace(index);
+                    } else {
+                        let target = Box::new(self.root.new_window(child_ctx, request));
+                        if let Some(previous) = window.app.replace(target) { window.parked.insert(window.active_slot, previous); }
+                        window.active_slot = window.parked.len();
+                    }
+                }
+                {
+                    let app = window.app.get_or_insert_with(|| Box::new(self.root.new_window(child_ctx, window.request.take().expect("new session request"))));
+                    app.manager_shortcut(child_ctx);
+                    self.root.sync_window_preferences(app);
+                    self.root.sync_window_profile(app);
+                    app.begin_workspace_frame(child_ctx);
+                }
+                let mut switch = None;
+                if !window.parked.is_empty() {
+                    egui::SidePanel::left("database-workspaces").exact_width(92.0).resizable(false)
+                        .frame(egui::Frame::new().fill(child_ctx.style().visuals.extreme_bg_color))
+                        .show(child_ctx, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for slot in 0..=window.parked.len() {
+                            let active = slot == window.active_slot;
+                            let parked_index = slot.saturating_sub(usize::from(slot > window.active_slot));
+                            let app = if active { window.app.as_deref() } else { Some(window.parked[parked_index].as_ref()) };
+                            if let Some(app) = app {
+                                let name = app.workspace_database().unwrap_or("Connecting…");
+                                let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 90.0), egui::Sense::click());
+                                if active { ui.painter().rect_filled(rect, 0.0, ui.visuals().panel_fill); }
+                                else { ui.painter().line_segment([rect.right_top(), rect.right_bottom()], ui.visuals().widgets.noninteractive.bg_stroke); }
+                                crate::app::navigator::paint_database_icon(ui.painter(), rect.center_top() + egui::vec2(0.0, 31.0), app.workspace_color(), 24.0);
+                                let mut job = egui::text::LayoutJob::simple_singleline(name.into(), egui::FontId::proportional(12.0), ui.visuals().text_color());
+                                job.wrap.max_width = rect.width() - 12.0; job.wrap.max_rows = 1;
+                                let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+                                ui.painter().galley(egui::pos2(rect.center().x - galley.size().x * 0.5, rect.top() + 57.0), galley, ui.visuals().text_color());
+                                if response.on_hover_text(name).clicked() && !active { switch = Some(parked_index); }
+                            }
+                        }
+                    });
+                }
+                if let Some(index) = switch {
+                    window.switch_workspace(index);
+                    child_ctx.memory_mut(|memory| { if let Some(id) = memory.focused() { memory.surrender_focus(id); } });
+                }
+                let parked_blocked = window.parked.iter().any(|app| app.close_blocked());
                 let app = window.app.get_or_insert_with(|| Box::new(self.root.new_window(child_ctx, window.request.take().expect("new session request"))));
                 quit_requested |= consume_quit(child_ctx);
                 app.manager_shortcut(child_ctx);
                 self.root.sync_window_preferences(app);
                 if self.root.sync_window_profile(app) { child_ctx.request_repaint(); }
-                app.update(child_ctx, frame);
+                app.render_workspace_frame(child_ctx);
                 if app.has_connection() && window.title != app.active_connection_name() {
                     window.title = app.active_connection_name().to_owned();
                     child_ctx.request_repaint();
@@ -143,9 +212,9 @@ impl eframe::App for SessionWindows {
                     manager_requested = true;
                 }
                 if child_ctx.input(|input| input.viewport().close_requested()) {
-                    if app.close_blocked() {
+                    if app.close_blocked() || parked_blocked {
                         child_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                        app.window_error("Finish SQL transactions with COMMIT or ROLLBACK, save or discard pending database changes, and wait for work before closing. SQL drafts are recovered in Connections.");
+                        app.window_error("Finish SQL transactions with COMMIT or ROLLBACK, save or discard pending database changes, and wait for work in every database workspace before closing. SQL drafts are recovered in Connections.");
                     } else { window.closed = true; }
                 }
                 let connected = app.has_connection();
@@ -162,13 +231,12 @@ impl eframe::App for SessionWindows {
             }
         }
         for window in self.windows.iter_mut().filter(|window| window.closed) {
-            if let Some(app) = window.app.take() {
-                self.root.archive_window(*app);
-            }
+            if let Some(app) = window.app.take() { self.root.archive_window(*app); }
+            for app in window.parked.drain(..) { self.root.archive_window(*app); }
         }
         self.windows.retain(|window| !window.closed);
         let blocked_window = self.windows.iter().position(|window| {
-            window.request.is_some() || window.app.as_ref().is_some_and(|app| app.close_blocked())
+            window.request.is_some() || window.app.as_ref().is_some_and(|app| app.close_blocked()) || window.parked.iter().any(|app| app.close_blocked())
         });
         if quit_requested {
             if self.root.close_blocked() || blocked_window.is_some() {
@@ -247,14 +315,12 @@ impl eframe::App for SessionWindows {
         // Child documents join the recovery pool, never overwrite root profiles or
         // execute automatically after restart. Password-bearing requests are excluded.
         for window in &mut self.windows {
-            if let Some(app) = &mut window.app {
-                self.root.merge_window_preferences(app);
-            }
+            for app in window.app.iter_mut().chain(window.parked.iter_mut()) { self.root.merge_window_preferences(app); }
         }
         let documents = self
             .windows
             .iter()
-            .filter_map(|window| window.app.as_ref())
+            .flat_map(|window| window.app.iter().chain(window.parked.iter()))
             .flat_map(|app| app.recovery_documents())
             .collect();
         self.root.save_with_window_documents(storage, documents);
@@ -293,6 +359,8 @@ mod launcher_tests {
             title: "Test".into(),
             request: None,
             app: None,
+            parked: Vec::new(),
+                active_slot: 0,
             closed: false,
             connected: false,
         };

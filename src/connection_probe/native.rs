@@ -19,17 +19,7 @@ pub(super) fn run(connection: ConnectionKind, password: String, cancel: &AtomicB
             }
         }
         ConnectionKind::Mysql(profile) | ConnectionKind::MariaDb(profile) => {
-            let mut fields = vec![Host, Port, Database, User, Password];
-            if profile.tls { fields.push(Tls); }
-            if profile.ssh.is_some() { fields.extend([SshHost, SshPort, SshUser, SshIdentity]); }
-            emit(Event::Running(fields.clone()));
-            let mut config = profile.with_password(password);
-            config.connect_timeout = std::time::Duration::from_secs(5);
-            config.read_timeout = std::time::Duration::from_secs(5);
-            match crate::db::probe_mysql(&config, cancel) {
-                Ok(()) => emit(Event::Success(fields)),
-                Err(error) => emit(Event::Failed(fields, error)),
-            }
+            probe_mysql(profile.with_password(password), cancel, emit);
         }
         ConnectionKind::Postgres(profile) => {
             let config = profile.with_password(password);
@@ -143,6 +133,74 @@ pub(super) fn run(connection: ConnectionKind, password: String, cancel: &AtomicB
         }
     }
 }
+// Keep the SSH lease alive through the database check, but report its result
+// independently. A rejected database login must never invalidate SSH success.
+fn probe_mysql(mut config: crate::connection::MysqlConfig, cancel: &AtomicBool, emit: &impl Fn(Event)) {
+    use ProbeField::*;
+    use mysql::{Conn, OptsBuilder, prelude::Queryable};
+    config.connect_timeout = std::time::Duration::from_secs(5);
+    config.read_timeout = std::time::Duration::from_secs(5);
+    let ssh_fields = vec![SshHost, SshPort, SshUser, SshIdentity];
+    let tunnel = if let Some(ssh) = &config.ssh {
+        emit(Event::Running(ssh_fields.clone()));
+        let mut ssh = ssh.clone();
+        ssh.remote_host = config.host.clone();
+        ssh.remote_port = config.port;
+        match crate::ssh_tunnel::Tunnel::start(&ssh, cancel) {
+            Ok(tunnel) => { emit(Event::Success(ssh_fields)); Some(tunnel) }
+            Err(error) => { emit(Event::Failed(ssh_fields, format!("SSH: {error}"))); return; }
+        }
+    } else { None };
+    if cancel.load(Ordering::Relaxed) { return; }
+    let mut fields = vec![Host, Port, User, Password, Database];
+    if config.tls { fields.push(Tls); }
+    emit(Event::Running(fields.clone()));
+    let destination = tunnel.as_ref().map(|t| std::net::SocketAddr::from(([127,0,0,1],t.local_port())));
+    let mut connection = match Conn::new(OptsBuilder::from(&config).tcp_destination(destination)) {
+        Ok(connection) => connection,
+        Err(error) => {
+            let failed = mysql_error_fields(&error);
+            // A server error proves transport reachability, but not necessarily
+            // TLS or authentication (some errors precede those stages).
+            if matches!(error, mysql::Error::MySqlError(_)) {
+                emit(Event::Success(vec![Host, Port]));
+            }
+            emit(Event::Failed(failed, format!("Database connection: {error}")));
+            return;
+        }
+    };
+    emit(Event::Success(fields.into_iter().filter(|field| *field != Database).collect()));
+    if cancel.load(Ordering::Relaxed) { return; }
+    match connection.query_drop("SELECT 1") {
+        Ok(()) => emit(Event::Success(vec![Database])),
+        Err(error) => emit(Event::Failed(vec![Database], format!("Database readiness check: {error}"))),
+    }
+}
+
+fn mysql_error_fields(error: &mysql::Error) -> Vec<ProbeField> {
+    use ProbeField::*;
+    use mysql::{Error, DriverError};
+    // rustls handshake errors can be wrapped inside the protocol codec's I/O
+    // error rather than Error::TlsError. Preserve the certificate diagnosis.
+    let detail = error.to_string().to_ascii_lowercase();
+    if detail.contains("invalid peer certificate") || detail.contains("received fatal alert") {
+        return vec![Tls];
+    }
+    match error {
+        Error::MySqlError(server) => match server.code {
+            1049 | 1044 => vec![Database],
+            1045 | 1698 => vec![User, Password],
+            // Capacity, shutdown and other server errors are not evidence that
+            // any particular configuration input is incorrect.
+            _ => vec![],
+        },
+        Error::TlsError(_) | Error::DriverError(DriverError::TlsNotSupported) => vec![Tls],
+        Error::IoError(_) | Error::DriverError(DriverError::CouldNotConnect(_) | DriverError::ConnectTimeout) => vec![Host, Port],
+        Error::DriverError(DriverError::UnknownAuthPlugin(_) | DriverError::OldMysqlPasswordDisabled | DriverError::CleartextPluginDisabled) => vec![User, Password],
+        _ => vec![],
+    }
+}
+
 enum ProbeError {
     Postgres(postgres::Error),
     Stopped,
@@ -250,6 +308,46 @@ fn describe_error(error: &postgres::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires disposable SSH and MySQL/MariaDB TLS fixtures"]
+    fn live_mysql_probe_keeps_ssh_success_on_database_failure() {
+        use crate::connection::MysqlConfig;
+        let port = std::env::var("RUSTABLE_MYSQL_TLS_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43318,43319].contains(&port));
+        let directory = std::path::PathBuf::from(std::env::var_os("RUSTABLE_SSH_FIXTURE_DIR").unwrap());
+        let mut config = MysqlConfig { host:"localhost".into(),port,database:"rustable_test".into(),
+            user:"rustable".into(),password:"rustable-test-only".into(),
+            root_certificate:Some(std::env::var_os("RUSTABLE_MYSQL_TEST_CA").unwrap().into()),
+            ssh:Some(crate::ssh_tunnel::Config { host:"127.0.0.1".into(),port:43320,user:"root".into(),
+                identity_file:Some(directory.join("client")),known_hosts_file:Some(directory.join("known_hosts")),
+                config_file:Some("/dev/null".into()),remote_host:"stale.invalid".into(),remote_port:1 }),
+            ..Default::default() };
+        for failure in ["database", "password", "tls"] {
+            let original = config.clone();
+            let expected = match failure {
+                "database" => { config.database = "rustable_missing_probe".into(); vec![ProbeField::Database] }
+                "password" => { config.password = "wrong-test-password".into(); vec![ProbeField::User, ProbeField::Password] }
+                _ => { config.root_certificate = None; vec![ProbeField::Tls] }
+            };
+            let events = std::cell::RefCell::new(Vec::new());
+            probe_mysql(config.clone(), &AtomicBool::new(false), &|event| events.borrow_mut().push(event));
+            let events = events.into_inner();
+            assert!(events.iter().any(|event| matches!(event, Event::Success(fields) if fields.contains(&ProbeField::SshHost))), "{events:?}");
+            assert!(matches!(events.last(), Some(Event::Failed(fields, message)) if fields == &expected && !message.is_empty()), "{events:?}");
+            assert!(!events.iter().any(|event| matches!(event, Event::Failed(fields, _) if fields.contains(&ProbeField::SshHost))), "{events:?}");
+            config = original;
+        }
+    }
+
+    #[test]
+    fn mysql_probe_network_and_server_errors_do_not_blame_all_fields() {
+        assert_eq!(mysql_error_fields(&mysql::Error::DriverError(mysql::DriverError::ConnectTimeout)), vec![ProbeField::Host, ProbeField::Port]);
+        for (code, expected) in [(1049, vec![ProbeField::Database]), (1045, vec![ProbeField::User, ProbeField::Password]), (1040, vec![])] {
+            let error = mysql::Error::MySqlError(mysql::MySqlError { state:"HY000".into(), code, message:"diagnostic".into() });
+            assert_eq!(mysql_error_fields(&error), expected);
+        }
+    }
+
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB plaintext fixture"]
     fn live_mysql_plaintext_probe_does_not_mark_tls_successful() {

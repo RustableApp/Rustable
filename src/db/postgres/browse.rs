@@ -120,6 +120,8 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         parameters.push(Value::Text(request.filter.clone()));
         values.push((&request.filter, Type::TEXT));
     }
+    let predicate = crate::db::filters::predicate(&request.filters, &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), crate::sql::Dialect::Postgres)?;
+    if !predicate.is_empty() { sql.push_str(if request.filter_column.is_some() { " AND " } else { " WHERE " }); sql.push_str(&predicate); }
     if let Some((column, descending)) = request.sort.clone().or_else(|| {
         columns
             .iter()
@@ -139,7 +141,7 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
             if descending { "DESC" } else { "ASC" }
         ));
     }
-    let limit = (PAGE_SIZE + 1) as i64;
+    let limit = (request.page_size() + 1) as i64;
     let offset = i64::try_from(request.offset).map_err(|_| "Page offset is too large")?;
     sql.push_str(&format!(
         " LIMIT ${} OFFSET ${}",
@@ -178,11 +180,11 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         driver.client.query_typed_raw(&sql, values).map_err(error)?
     };
     let names = rows.columns().iter().map(|c| c.name().to_owned()).collect();
-    let mut grid = collect(rows, names, PAGE_SIZE, BYTE_LIMIT, &driver.cancel)?;
+    let mut grid = collect(rows, names, request.page_size(), BYTE_LIMIT, &driver.cancel)?;
     let estimate = row
         .get::<_, Option<f64>>(2)
         .filter(|value| value.is_finite() && *value >= 0.0)
-        .filter(|_| request.filter_column.is_none())
+        .filter(|_| request.filter_column.is_none() && !request.filters.iter().any(|f| f.enabled))
         .map(|value| value.round() as u64);
     let raw_indexes: Vec<CatalogIndex> =
         serde_json::from_str(row.get(4)).map_err(|e| format!("Invalid index metadata: {e}"))?;

@@ -266,7 +266,10 @@ fn form_section(ui: &mut egui::Ui, title: &str) {
 
 fn form_row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.add_sized([84.0, 28.0], egui::Label::new(RichText::new(label).weak()));
+        ui.spacing_mut().item_spacing.x = 20.0;
+        ui.allocate_ui_with_layout(egui::vec2(132.0, 28.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(egui::Label::new(RichText::new(label).weak()).wrap_mode(egui::TextWrapMode::Extend));
+        });
         ui.scope(|ui| {
             ui.set_min_width(ui.available_width());
             content(ui);
@@ -297,25 +300,19 @@ fn status_row(
     });
     if let Some(status) = status {
         let (color, icon, tooltip) = match status {
-            FieldStatus::Running => (ui.visuals().hyperlink_color, "•", "Testing…".to_owned()),
-            FieldStatus::Success => (Color32::from_rgb(45, 170, 95), "✓", "Verified".to_owned()),
-            FieldStatus::Failed(message) => (ui.visuals().error_fg_color, "!", message),
+            FieldStatus::Running => (ui.visuals().hyperlink_color, "clock", "Testing…".to_owned()),
+            FieldStatus::Success => (Color32::from_rgb(45, 170, 95), "check", "Verified".to_owned()),
+            FieldStatus::Failed(message) => (ui.visuals().error_fg_color, "circle-alert", message),
         };
         let mut rect = response.rect;
-        rect.min.x += 92.0;
+        rect.min.x += 152.0;
         ui.painter().rect_stroke(
             rect.shrink(0.5),
             6.0,
             egui::Stroke::new(1.2_f32, color),
             egui::StrokeKind::Inside,
         );
-        ui.painter().text(
-            egui::pos2(response.rect.left() + 79.0, response.rect.center().y),
-            egui::Align2::CENTER_CENTER,
-            icon,
-            egui::FontId::proportional(12.0),
-            color,
-        );
+        crate::icons::paint(ui.painter(), egui::pos2(response.rect.left() + 142.0, response.rect.center().y), icon, 14.0, color);
         response.on_hover_text(tooltip);
     }
 }
@@ -376,7 +373,7 @@ fn form_port(ui: &mut egui::Ui, port: &mut u16, field: ProbeField, generation: u
         edit.committed = *port;
     }
     ui.scope(|ui| {
-        ui.set_max_width(184.0);
+        ui.set_max_width(244.0);
         form_text(ui, "Port", &mut edit.text, false, Some(field));
     });
     let value = edit.text.parse::<u16>().ok().filter(|value| *value != 0);
@@ -620,7 +617,7 @@ impl Rustable {
                                     Drag::Group(id) => action = Some(Action::MoveGroup(id, group_index.saturating_sub(1))),
                                 }
                             }
-                            ui.painter().text(egui::pos2(header.response.rect.left() + 10.0, header.response.rect.center().y), egui::Align2::CENTER_CENTER, if collapsed { "›" } else { "⌄" }, egui::FontId::proportional(14.0), ui.visuals().weak_text_color());
+                            crate::icons::paint(ui.painter(), egui::pos2(header.response.rect.left() + 10.0, header.response.rect.center().y), if collapsed { "chevron-right" } else { "chevron-down" }, 14.0, ui.visuals().weak_text_color());
                             if !editing {
                             let heading_response = header.inner.interact(egui::Sense::click()) | header.response.interact(egui::Sense::click());
                             if heading_response.clicked() {
@@ -752,7 +749,7 @@ impl Rustable {
                                 for (label, timeout) in [("Connect timeout", &mut config.connect_timeout), ("Read timeout", &mut config.read_timeout)] {
                                     form_row(ui, label, |ui| {
                                         let mut seconds = timeout.as_secs_f64();
-                                        if ui.add(egui::DragValue::new(&mut seconds).range(0.1..=3600.0).speed(0.1).suffix(" s")).changed() {
+                                        if ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut seconds).range(0.1..=3600.0).speed(0.1).suffix(" s")).changed() {
                                             *timeout = std::time::Duration::from_secs_f64(seconds);
                                         }
                                     });
@@ -762,7 +759,7 @@ impl Rustable {
                             ConnectionKind::Postgres(config) => {
                                 if ui.available_width() >= 500.0 {
                                     ui.horizontal(|ui| {
-                                        let host_width = ui.available_width() - 192.0;
+                                        let host_width = ui.available_width() - 252.0;
                                         ui.allocate_ui_with_layout(egui::vec2(host_width, 28.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                                             form_text(ui, "Host", &mut config.host, false, Some(ProbeField::Host));
                                         });
@@ -1174,7 +1171,7 @@ fn connection_row(ui: &mut egui::Ui, profile: &Profile, selected: bool) -> egui:
             },
         );
     }
-    let (badge, color, endpoint) = match &profile.connection {
+    let (_badge, color, endpoint) = match &profile.connection {
         ConnectionKind::SQLite { path } => (
             "Sl",
             Color32::from_rgb(137, 72, 224),
@@ -1189,14 +1186,7 @@ fn connection_row(ui: &mut egui::Ui, profile: &Profile, selected: bool) -> egui:
         ),
     };
     let center = egui::pos2(rect.left() + 23.0, rect.center().y);
-    ui.painter().circle_filled(center, 16.0, color);
-    ui.painter().text(
-        center,
-        egui::Align2::CENTER_CENTER,
-        badge,
-        egui::FontId::proportional(14.0),
-        Color32::WHITE,
-    );
+    crate::icons::paint(ui.painter(), center, "database", 24.0, color);
     let left = rect.left() + 47.0;
     let width = (rect.right() - left - 8.0).max(1.0);
     let foreground = if selected {
@@ -1262,13 +1252,7 @@ fn connection_search(ui: &mut egui::Ui, text: &mut String) {
                 let editor_width = (ui.available_width() - 14.0 - 18.0 - 8.0).max(0.0);
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(14.0, 20.0), egui::Sense::hover());
-                let center = rect.center() - egui::vec2(1.5, 1.5);
-                let stroke = Stroke::new(1.3_f32, ui.visuals().weak_text_color());
-                ui.painter().circle_stroke(center, 4.5, stroke);
-                ui.painter().line_segment(
-                    [center + egui::vec2(3.2, 3.2), center + egui::vec2(6.5, 6.5)],
-                    stroke,
-                );
+                crate::icons::paint(ui.painter(), rect.center(), "search", 14.0, ui.visuals().weak_text_color());
                 let search_response = ui.add_sized(
                     [editor_width, 20.0],
                     TextEdit::singleline(text)
@@ -1293,16 +1277,7 @@ fn connection_search(ui: &mut egui::Ui, text: &mut String) {
                     },
                 );
                 if !text.is_empty() {
-                    let center = clear_rect.center();
-                    for direction in [-1.0, 1.0] {
-                        ui.painter().line_segment(
-                            [
-                                center + egui::vec2(-3.0, -3.0 * direction),
-                                center + egui::vec2(3.0, 3.0 * direction),
-                            ],
-                            stroke,
-                        );
-                    }
+                    crate::icons::paint(ui.painter(), clear_rect.center(), "x", 12.0, ui.visuals().weak_text_color());
                     if response.on_hover_text("Clear search").clicked() {
                         text.clear();
                     }
@@ -1337,7 +1312,9 @@ fn ssh_form(ui: &mut egui::Ui, options: &mut Option<SshOptions>, generation: u64
                 ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
             }
         });
-        ui.add(egui::Label::new(RichText::new("Host aliases use ~/.ssh/config. Blank user and automatic port inherit configuration. Selected keys are tried alongside configured keys. Gateway must already be trusted.").weak().small()).wrap());
+        form_row(ui, "", |ui| {
+            ui.add(egui::Label::new(RichText::new("Host aliases, blank user and automatic port use ~/.ssh/config. Keys are tried alongside your configured identities. The gateway must already be trusted.").weak().small()).wrap());
+        });
     }
     ports_valid
 }
@@ -1449,10 +1426,10 @@ mod tests {
         );
         let number = painted_text(&output, "5432").unwrap();
         assert!(
-            number.x < port_rect.left() + 135.0,
+            number.x < port_rect.left() + 195.0,
             "numeric value should sit at the left input edge"
         );
-        assert!(port_rect.width() <= 185.0, "port input should be compact");
+        assert!(port_rect.width() <= 245.0, "port input should be compact");
         ctx.data_mut(|data| {
             data.insert_temp(
                 port_id,
@@ -2294,7 +2271,7 @@ mod tests {
                     );
                     assert!(
                         content.x <= inner.width() + 1.0,
-                        "form fields exceed reserved scrollbar gutter"
+                        "form fields exceed reserved scrollbar gutter: {content:?} {inner:?}"
                     );
                     assert!(rect.width() <= baseline + 1.0);
                     for label in ["Discard", "Save", "Connect"] {

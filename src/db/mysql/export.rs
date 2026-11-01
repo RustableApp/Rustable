@@ -69,7 +69,7 @@ mod tests {
         driver.conn().unwrap().query_drop(format!("INSERT INTO full_export_probe VALUES {rows}")).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("rows.json");
-        let browse = Browse { table:"full_export_probe".into(), offset:500, filter_column:Some("label".into()), filter:"100%".into(), sort:Some(("id".into(),true)) };
+        let browse = Browse { filters: Vec::new(), limit: 0, table:"full_export_probe".into(), offset:500, filter_column:Some("label".into()), filter:"100%".into(), sort:Some(("id".into(),true)) };
         driver.export_table(&path, &browse, &cancel, ExportFormat::Json).unwrap();
         let rows: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let rows = rows.as_array().unwrap();

@@ -524,6 +524,8 @@ fn export_table_to(
         ));
         parameters.push(Value::Text(browse.filter.clone()));
     }
+    let predicate = super::filters::predicate(&browse.filters, &metadata.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), crate::sql::Dialect::Sqlite).map_err(std::io::Error::other)?;
+    if !predicate.is_empty() { sql.push_str(if browse.filter_column.is_some() { " AND " } else { " WHERE " }); sql.push_str(&predicate); }
     if let Some((column, descending)) = &browse.sort {
         sql.push_str(&format!(
             " ORDER BY {} {}",
@@ -593,8 +595,10 @@ fn browse_table_after(
         ));
         params.push(Value::Text(browse.filter.clone()));
     }
+    let predicate = super::filters::predicate(&browse.filters, &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), crate::sql::Dialect::Sqlite).map_err(rusqlite::Error::InvalidParameterName)?;
+    if !predicate.is_empty() { sql.push_str(if browse.filter_column.is_some() { " AND " } else { " WHERE " }); sql.push_str(&predicate); }
     if let Some(cursor) = cursor {
-        sql.push_str(if browse.filter_column.is_some() {
+        sql.push_str(if browse.filter_column.is_some() || !predicate.is_empty() {
             " AND "
         } else {
             " WHERE "
@@ -641,7 +645,7 @@ fn browse_table_after(
         }
     }
     sql.push_str(" LIMIT ? OFFSET ?");
-    params.push(Value::Integer((PAGE_SIZE + 1) as i64));
+    params.push(Value::Integer((browse.page_size() + 1) as i64));
     params.push(Value::Integer(if cursor.is_some() {
         0
     } else {
@@ -650,9 +654,9 @@ fn browse_table_after(
     let mut stmt = conn.prepare(&sql)?;
     let names = stmt.column_names().into_iter().map(String::from).collect();
     let mut rows = stmt.query(params_from_iter(params.iter()))?;
-    let mut grid = collect(&mut rows, names, PAGE_SIZE)?;
+    let mut grid = collect(&mut rows, names, browse.page_size())?;
     if backward {
-        if grid.rows.len() != PAGE_SIZE {
+        if grid.rows.len() != browse.page_size() {
             // A byte-limited reverse result would contain the end of the page,
             // not the start an OFFSET request returns. Preserve that behavior.
             return browse_table_after(conn, browse, None);
@@ -663,7 +667,7 @@ fn browse_table_after(
     }
     // ANALYZE statistics avoid scanning the entire table on every page. When
     // absent, leave the total unknown until a complete final page is observed.
-    let estimate = if browse.filter_column.is_none() {
+    let estimate = if browse.filter_column.is_none() && !browse.filters.iter().any(|f| f.enabled) {
         sqlite_row_estimate(conn, &browse.table)
     } else {
         None
@@ -712,14 +716,14 @@ fn page_version(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
 
 impl PageCursor {
     fn matches(&self, request: &Browse, version: (i64, i64)) -> bool {
-        let adjacent = self.request.offset.checked_add(PAGE_SIZE) == Some(request.offset)
-            || self.request.offset.checked_sub(PAGE_SIZE) == Some(request.offset);
+        let adjacent = self.request.offset.checked_add(self.request.page_size()) == Some(request.offset)
+            || self.request.offset.checked_sub(self.request.page_size()) == Some(request.offset);
         let mut expected = self.request.clone();
         expected.offset = request.offset;
         adjacent && expected == *request && self.version == version
     }
     fn from_page(request: &Browse, data: &TableData, version: (i64, i64)) -> Option<Self> {
-        if data.grid.rows.len() != PAGE_SIZE {
+        if data.grid.rows.len() != request.page_size() {
             return None;
         }
         let keys: Vec<_> = data
@@ -2770,6 +2774,24 @@ mod paging_tests {
         }
     }
     #[test]
+    fn custom_page_limit_preserves_forward_reverse_and_limit_changes() {
+        let mut driver = driver();
+        let mut request = Browse { table: "t".into(), limit: 73, ..Default::default() };
+        let first = driver.browse(&request).unwrap();
+        assert_eq!(first.grid.rows.len(), 73);
+        assert!(first.grid.truncated);
+        request.offset = 73;
+        let next = driver.browse(&request).unwrap();
+        assert_eq!(next.grid.rows, browse_table(&driver.connection, &request).unwrap().grid.rows);
+        request.offset = 0;
+        assert_eq!(driver.browse(&request).unwrap().grid.rows, first.grid.rows);
+        request.limit = 17; request.offset = 34;
+        let resized = driver.browse(&request).unwrap();
+        assert_eq!(resized.grid.rows.len(), 17);
+        assert_eq!(resized.grid.rows, browse_table(&driver.connection, &request).unwrap().grid.rows);
+    }
+
+    #[test]
     fn sequential_pages_match_offset_with_gaps_filters_and_descending_order() {
         for descending in [false, true] {
             let mut driver = driver();
@@ -3192,11 +3214,22 @@ mod insert_tests {
 #[cfg(test)]
 mod full_export_tests {
     #[test]
+    fn compound_filters_match_page_and_full_export() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut driver = SqliteDriver::open(None, cancel.clone()).unwrap();
+        driver.connection.execute_batch("CREATE TABLE filter_probe(id INTEGER PRIMARY KEY, label TEXT); INSERT INTO filter_probe VALUES (1, 'a%'), (2, 'a_'), (3, NULL);").unwrap();
+        let request = Browse { table: "filter_probe".into(), limit: 1, filters: vec![super::super::filters::Filter { enabled: true, column: "id".into(), operator: ">".into(), value: "1".into() }, super::super::filters::Filter { enabled: true, column: "label".into(), operator: "IS NOT NULL".into(), value: String::new() }], ..Default::default() };
+        let page = driver.browse(&request).unwrap();
+        assert_eq!(page.grid.rows, vec![vec![Value::Integer(2), Value::Text("a_".into())]]);
+        let bytes = driver.export_table_bytes(&request, &cancel, ExportFormat::Json).unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(), serde_json::json!([{"id": 2, "label": "a_"}]));
+    }
+    #[test]
     fn browser_table_download_spans_pages_and_preserves_filter_sort() {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut driver = SqliteDriver::open(None, cancel.clone()).unwrap();
         driver.connection.execute_batch("CREATE TABLE download_probe(id INTEGER PRIMARY KEY, label TEXT); WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1200) INSERT INTO download_probe SELECT x, 'matching' FROM n;").unwrap();
-        let browse = Browse { table: "download_probe".into(), offset: 500, filter_column: Some("label".into()), filter: "matching".into(), sort: Some(("id".into(), true)) };
+        let browse = Browse { filters: Vec::new(), limit: 0, table: "download_probe".into(), offset: 500, filter_column: Some("label".into()), filter: "matching".into(), sort: Some(("id".into(), true)) };
         let bytes = driver.export_table_bytes(&browse, &cancel, ExportFormat::Json).unwrap();
         let rows: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(rows.as_array().unwrap().len(), 1200);
@@ -3211,7 +3244,7 @@ mod full_export_tests {
         assert!(driver.export_table_bytes(&browse, &cancel, ExportFormat::Csv).is_err());
         driver.connection.execute_batch("ROLLBACK").unwrap();
         driver.connection.execute_batch("UPDATE download_probe SET label=printf('%20000d',id)").unwrap();
-        let large = Browse { table: "download_probe".into(), ..Default::default() };
+        let large = Browse { filters: Vec::new(), limit: 0, table: "download_probe".into(), ..Default::default() };
         assert!(driver.export_table_bytes(&large, &cancel, ExportFormat::Csv).unwrap_err().contains("16 MiB"));
         assert!(driver.connection.is_autocommit());
         assert_eq!(driver.connection.query_row("SELECT count(*) FROM download_probe", [], |r| r.get::<_, i64>(0)).unwrap(), 1200);

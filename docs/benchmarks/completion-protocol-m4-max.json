@@ -1,0 +1,37 @@
+{
+  "tables": 5000,
+  "columns": 100000,
+  "catalog_bytes": 2533902,
+  "startup_to_initialize_ms": 19.55,
+  "requests": 500,
+  "protocol_latency_ms": {
+    "p50": 0.102,
+    "p95": 0.119,
+    "p99": 0.133
+  },
+  "rss_after_catalog_kib": 50608,
+  "rss_eight_documents_kib": [
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61776
+  ],
+  "rss_after_close_kib": [
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61760,
+    61776
+  ]
+}

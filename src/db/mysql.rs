@@ -419,6 +419,8 @@ impl MysqlDriver {
             sql.push_str(&format!(" WHERE CAST({} AS CHAR) LIKE ? ESCAPE '!'", quote(column)));
             parameters.push(Value::Text(format!("%{}%", request.filter.replace('!', "!!").replace('%', "!%").replace('_', "!_"))));
         }
+        let predicate = super::filters::predicate(&request.filters, &object.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), crate::sql::Dialect::Mysql(self.mode))?;
+        if !predicate.is_empty() { sql.push_str(if parameters.is_empty() { " WHERE " } else { " AND " }); sql.push_str(&predicate); }
         if let Some((column, descending)) = &request.sort {
             if !object.columns.iter().any(|c| &c.name == column) { return Err("Unknown sort column".into()); }
             sql.push_str(&format!(" ORDER BY {} {}", quote(column), if *descending { "DESC" } else { "ASC" }));
@@ -571,20 +573,20 @@ impl Driver for MysqlDriver {
         // Keep page changes on the same cached prepared statement. Literal
         // offsets force COM_STMT_PREPARE for every page and churn the cache.
         sql.push_str(" LIMIT ? OFFSET ?");
-        parameters.push(Value::Integer((PAGE_SIZE + 1) as i64));
+        parameters.push(Value::Integer((request.page_size() + 1) as i64));
         parameters.push(Value::Integer(i64::try_from(request.offset).map_err(|_| "Page offset exceeds the supported range")?));
         let params = parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>, _>>()?;
         let mut remaining = BYTE_LIMIT;
         let query_started = std::time::Instant::now();
         let ((report, disconnected), cancellation_error) = self.with_connection_status(|conn| conn.exec_iter(&sql, params).map(|results|
-            super::mysql_results::collect_budget_since(results, &mut remaining, PAGE_SIZE + 1, 1, query_started)))?;
+            super::mysql_results::collect_budget_since(results, &mut remaining, request.page_size() + 1, 1, query_started)))?;
         if disconnected { self.connection = None; }
         if let Some(error) = report.error {
             return Err(match cancellation_error { Some(cancel_error) => format!("{error}\n{cancel_error}"), None => error });
         }
         if let Some(error) = cancellation_error { return Err(error); }
         let mut grid = Arc::unwrap_or_clone(report.grids.into_iter().next().ok_or("Missing table result")?);
-        if grid.rows.len() > PAGE_SIZE { grid.rows.truncate(PAGE_SIZE); grid.truncated = true; }
+        if grid.rows.len() > request.page_size() { grid.rows.truncate(request.page_size()); grid.truncated = true; }
         grid.set_browse_total(request.offset, None);
         let (indexes, triggers) = if object.kind == "view" { (Vec::new(), Vec::new()) }
             else { self.table_metadata_with_definition(&schema, &object.name, (!object.ddl.is_empty()).then_some(object.ddl.as_str()))? };
@@ -848,6 +850,16 @@ mod tests {
             let completed = driver.execute(&sql, false, &cancel);
             assert!(completed.error.is_none(), "{sql}: {:?}", completed.error);
         }
+        for (column, operator, value, expected) in [("id", ">", "1", vec![2,3]), ("label", "Contains", "%", vec![1]), ("id", "IN", "[1,3]", vec![1,3]), ("Raw SQL", "=", "id = 2", vec![2])] {
+            let request = Browse { table: "driver`probe".into(), filters: vec![super::filters::Filter { enabled: true, column: column.into(), operator: operator.into(), value: value.into() }], sort: Some(("id".into(), false)), ..Default::default() };
+            let page = driver.browse(&request).unwrap();
+            assert_eq!(page.grid.rows.iter().map(|r| match r[0] { Value::Integer(n) => n, _ => panic!("id") }).collect::<Vec<_>>(), expected);
+            let output = std::env::temp_dir().join(format!("rustable-filter-{port}-{}.csv", std::process::id()));
+            let _ = std::fs::remove_file(&output);
+            driver.export_table(&output, &request, &cancel, ExportFormat::Csv).unwrap();
+            assert_eq!(std::fs::read_to_string(&output).unwrap().lines().count(), expected.len() + 1);
+            std::fs::remove_file(output).unwrap();
+        }
         assert_eq!(object.columns.len(), 3);
         assert!(object.columns[0].pk);
         assert!(object.columns[2].generated);
@@ -867,6 +879,25 @@ mod tests {
         assert!(table.triggers[0].ddl.contains("UPPER(NEW.label)"));
         let sorted = driver.browse(&Browse { table: "driver`probe".into(), sort: Some(("id".into(), true)), offset: 1, ..Default::default() }).unwrap();
         assert_eq!(sorted.grid.rows[0][0], Value::Integer(2));
+        // Pagination settings must change both SQL LIMIT and result collection.
+        // Include the final page, an empty page, and returning to an earlier limit.
+        for (limit, offset, expected, truncated) in [
+            (2, 0, vec![1, 2], true),
+            (2, 2, vec![3], false),
+            (1, 1, vec![2], true),
+            (1, 3, vec![], false),
+            (3, 0, vec![1, 2, 3], false),
+            (2, 0, vec![1, 2], true),
+        ] {
+            let page = driver.browse(&Browse {
+                table: "driver`probe".into(), sort: Some(("id".into(), false)),
+                limit, offset, ..Default::default()
+            }).unwrap();
+            assert_eq!(page.grid.rows.iter().map(|row| row[0].clone()).collect::<Vec<_>>(),
+                expected.into_iter().map(Value::Integer).collect::<Vec<_>>(), "limit={limit}, offset={offset}");
+            assert_eq!(page.grid.truncated, truncated, "limit={limit}, offset={offset}");
+        }
+
         assert!(driver.execute("START TRANSACTION; UPDATE `driver``probe` SET label='changed' WHERE id=1;", false, &cancel).error.is_none());
         assert_eq!(driver.transaction_state(), TransactionState::Active);
         assert!(driver.select_schema("rustable_test").is_err());

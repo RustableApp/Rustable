@@ -14,7 +14,7 @@ It’s written in Rust. Of course it is. We also use mise, and mise is written i
 
 <sub>GitHub’s breakdown covers the app; packaging and benchmark scripts are excluded.</sub>
 
-**First release: v0.1.0.** Early software, with rough edges and unfinished features. This isn’t a claim of complete TablePlus parity.
+**Current release: v0.2.0.** Early software, with rough edges and unfinished features. This isn’t a claim of complete TablePlus parity.
 
 [Download for macOS (Apple Silicon)](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-macos-arm64.dmg) · [Windows (x64)](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-windows-x86_64.zip) · [Linux (x64)](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-linux-x86_64.tar.gz)
 
@@ -32,7 +32,7 @@ The browser edition runs real SQLite against disposable sample data. Query it, c
 
 - Saved connections and separate database windows.
 - SSH tunnels, schema browsing, and credentials stored through the system credential store when enabled.
-- Resizable data grids, sorting, filtering, pagination, and a row inspector.
+- Virtualized data grids, compound filters, pagination, row context menus, and a row inspector.
 - SQL tabs, syntax highlighting, completion tooling, query history, and named saved queries grouped in folders.
 - Staged table edits, undo, and a SQL review before saving.
 - Result exports, light and dark themes, and keyboard shortcuts for the things you do repeatedly.
@@ -43,7 +43,7 @@ You already have a browser. No need to ship another one to display some rows.
 
 ## Database support
 
-PostgreSQL and SQLite work today. MySQL, MariaDB, Redis, and more engines are planned; they aren’t implemented yet. Rustable is intended to be a client for your databases, not a two-engine club.
+PostgreSQL, SQLite, MySQL, and MariaDB are available. MySQL 8.4 and MariaDB 11.4 have been tested for browsing, SQL, TLS/SSH connections, import/export, and reviewed row edits. Reviewed MySQL/MariaDB writes require a primary key, InnoDB, and supported effective privileges; visual schema administration and a full MySQL language server remain unfinished. See [capabilities and limits](docs/MYSQL-MARIADB-RELEASE.md). Redis remains planned.
 
 ### Why start with PostgreSQL and SQLite?
 

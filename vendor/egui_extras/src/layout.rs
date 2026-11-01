@@ -109,6 +109,18 @@ impl<'l> StripLayout<'l> {
         self.set_pos(self.cell_rect(&width, &height));
     }
 
+    pub(crate) fn skip_invisible_cell(&mut self, width: f32, height: f32) -> bool {
+        let rect = self.cell_rect(&CellSize::Absolute(width), &CellSize::Absolute(height));
+        if self.ui.is_sizing_pass()
+            || self.ui.is_rect_visible(rect.expand2(self.ui.spacing().item_spacing * 0.5))
+        {
+            return false;
+        }
+        self.set_pos(rect);
+        self.ui.advance_cursor_after_rect(rect);
+        true
+    }
+
     /// This is the innermost part of [`crate::Table`] and [`crate::Strip`].
     ///
     /// Return the used space (`min_rect`) plus the [`Response`] of the whole cell.

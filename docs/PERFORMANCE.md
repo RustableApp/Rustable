@@ -467,3 +467,281 @@ browses case verifies new column data and updated index DDL on the next browse.
 Strict all-target Clippy passes. No production latency improvement is claimed;
 three sequential ordinary browse requests remain, plus the first SELECT prepare
 and any trigger-definition batches.
+
+## Wide-table scrolling — 2026-11-01
+
+The grid now skips offscreen clipped columns before creating cell UIs or laying
+out their text. Row virtualization alone still paid that cost for every column
+in each visible row. The opt-in vendored table helper preserves layout extent
+and column indices; auto-sizing, active editors, and keyboard scroll targets
+continue through the normal cell path. Keyboard targets are also forwarded to
+the outer horizontal scroll area instead of being consumed by the inner vertical
+scroll area.
+
+Reproduce the CPU-only frame benchmark:
+
+```sh
+mise exec -- cargo test --locked --lib wide_grid_scroll_frame_benchmark -- --ignored --nocapture
+```
+
+Fixture: 500 rows × 120 text columns, 1200×800 viewport, 180 scrolling frames,
+first 20 excluded. Local unoptimized debug build, same fixture before/after:
+
+| CPU egui frame | Before | After |
+| --- | ---: | ---: |
+| p50 | 52.170 ms | 5.789 ms |
+| p95 | 55.392 ms | 6.244 ms |
+
+About 9× lower CPU frame time in this fixture. These are headless egui layout
+measurements, not GPU/input-to-display timings or measurements of the user's
+`smf_members` database. The regression suite covers scrolling to the final
+column by keyboard, selection, resizing, inline editing, and fitting widths.
+
+### Mouse-wheel response — small immediate steps
+
+After clarifying the desired feel with the user, wheel interpolation was removed.
+The intended behavior is a small immediate step for each wheel tick, with no
+animated tail. Discrete line input now uses 20 logical points per reported line,
+half egui's default of 40. This is a chosen initial tuning value, not a measured
+TablePlus setting. Native pixel deltas and OS momentum remain unchanged; page
+and zoom commands retain their meaning. Shift+wheel uses the same small steps
+horizontally.
+
+Unit tests verify the distance, immediate reversal and absence of residual
+motion. A production-grid test checks both axes: one wheel line produces exactly
+one 20-point painted movement, no cross-axis movement, and no animation tail.
+This verifies rendered layout behavior, not physical input-to-display latency
+or subjective parity with TablePlus.
+
+The manual benchmark covers both axes with precise input and discrete wheel
+ticks using the installed input handling. Prior measurements using the temporary
+interpolation approach are omitted because that behavior was superseded.
+
+### Same-frame wheel presentation
+
+A stricter painted-output check exposed a one-frame delay in egui 0.33's
+ScrollArea: children were drawn using the previous offset, then wheel input
+updated the stored offset at the end of the pass. The existing test checked the
+final distance and absence of a tail, but did not require movement in the event
+frame. Adding that assertion failed before the fix.
+
+The first fix requested a second layout pass after wheel consumption. That
+removed the visible delay but triggered egui's top-left red performance warning
+during sustained scrolling. It has been replaced: the grid now opts into a
+small vendored ScrollArea extension that applies wheel movement before laying
+out children, using the previous measured content extent. It clears scrolling
+targets/momentum, clamps to bounds, respects hover/clip/disabled/drag state, and
+consumes only the corresponding axis. Other scroll areas retain upstream
+behavior. First layout falls back to upstream handling until bounds are known.
+
+The production-grid regression now verifies line and precise point input on both
+axes: the final painted output moves exactly 20 points in the event frame, with
+no extra movement afterward. Isolated ticks and four consecutive scrolling
+frames must each use exactly one layout pass. All 450 non-ignored library tests passed. This
+removes one frame of layout latency (potentially 8.3 ms at 120 Hz or 16.7 ms at
+60 Hz); it is not a measurement of physical mouse-to-display latency.
+
+Native parity still requires a same-device comparison: wheel drivers can emit
+precise point events, so a mouse is not necessarily a line-input device. Record
+slow isolated detents, rapid detents, reversal and Shift+wheel using the same
+mouse, OS scrolling settings, monitor, refresh rate and zoom in both apps. A
+high-frame-rate recording should measure displacement per detent and response
+frames. Automated injected wheel events cannot establish the physical device's
+acceleration curve or end-to-end display latency. No measured TablePlus parity
+is claimed here.
+
+Historical release benchmark of the superseded two-pass fix (Apple M4 Max, 500 rows × 120
+columns, 1200 × 800 logical points, 180 frames / 20 warmup frames):
+
+| Input | Layout p50 | Layout p95 | Event-frame layout p95 | Tessellation p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Precise vertical | 0.633 ms | 0.718 ms | 0.718 ms | 0.057 ms |
+| Precise horizontal | 0.625 ms | 0.713 ms | 0.713 ms | 0.058 ms |
+| Wheel vertical | 0.295 ms | 0.645 ms | 0.707 ms | 0.059 ms |
+| Wheel horizontal | 0.308 ms | 0.644 ms | 0.695 ms | 0.055 ms |
+
+Wheel events occur every sixth frame; event-only percentiles avoid hiding their
+cost among idle frames. Precise input occurs every frame. The superseded extra pass roughly
+doubled layout work on scrolling frames. These values do not describe the new
+single-pass implementation. Tessellation is measured separately; neither measurement includes GPU
+submission, macOS composition or physical display latency. Reproduce with the
+benchmark command above, adding `--release`.
+
+To identify what a real mouse/driver sends, launch a development build with
+`RUSTABLE_SCROLL_TRACE=/tmp/rustable-scroll.jsonl mise exec -- cargo run --locked`.
+Use a fresh output filename: existing files are never overwritten. The opt-in
+JSONL trace records wheel units/deltas/modifiers, scale, relative timestamps,
+layout-pass durations and discard requests during input and for half a second
+afterward. It records no SQL or cell data. Writes run off the UI thread through a
+bounded queue; saturation can drop records, so this is diagnostic evidence,
+not a lossless recorder. Tracing is disabled by default and should be disabled
+for timing benchmarks. It cannot measure when the physical wheel was actuated
+or when pixels reached the display.
+
+Single-pass replacement benchmark, same release fixture and sampling:
+
+| Input | Layout p50 | Layout p95 | Event-frame layout p95 | Tessellation p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Precise vertical | 0.324 ms | 0.374 ms | 0.374 ms | 0.052 ms |
+| Precise horizontal | 0.313 ms | 0.426 ms | 0.426 ms | 0.071 ms |
+| Wheel vertical | 0.321 ms | 0.417 ms | 0.475 ms | 0.064 ms |
+| Wheel horizontal | 0.301 ms | 0.376 ms | 0.439 ms | 0.060 ms |
+
+### Mouse-down selection latency
+
+The row-selection state was already updated on press, but only after painting
+the row. That left the blue fill and selected text colors one frame behind.
+A painted-output assertion failed despite the old state-only assertion passing.
+The grid now resolves the pressed row/cell from the current scrolled body
+geometry before painting any rows. This clears the old highlight and paints the
+new highlight in the same pass. Command/Shift modifiers, gutter selection and
+bulk-edit validation remain in the selection path.
+
+The regression uses a 120-column grid and verifies the blue fill is present on
+the mouse-down frame, the old row loses its fill in the same frame when switching,
+release does not re-toggle Command selection, and no extra layout pass is used.
+All 450 non-ignored library tests pass after these changes. These are rendered
+output checks, not a measured physical-mouse comparison with TablePlus. The
+inspector and full-window rendering still need their own profiling; the grid
+benchmark should not be represented as whole-window or input-to-display timing.
+
+### Whole-workspace inspector cost
+
+`wide_workspace_selection_frame_benchmark` renders toolbar, sidebar, inspector
+and workspace, then tessellates the result. It changes the selected row each
+frame. Fixture: 500 text rows, 12 or 120 columns with schema metadata,
+1440 × 900 logical points, 120 frames / 20 warmups, Apple M4 Max. These are
+**debug-build CPU layout plus tessellation** numbers, excluding the event loop,
+worker polling, GPU, compositor and display. They are not a VRR measurement.
+
+| Columns / inspector | Before p50 / p95 | After p50 / p95 |
+| --- | ---: | ---: |
+| 12 / hidden | 5.211 / 5.472 ms | 4.999 / 5.351 ms |
+| 12 / visible | 5.413 / 5.781 ms | 5.544 / 5.866 ms |
+| 120 / hidden | 6.815 / 7.151 ms | 6.291 / 7.053 ms |
+| 120 / visible | 14.888 / 15.626 ms | 7.392 / 7.793 ms |
+
+The normal row inspector previously built every field on every frame, including
+offscreen fields. It now uses fixed compact field rows and ScrollArea row
+virtualization, with stable field IDs. Long field names truncate and retain a
+full-name tooltip. An active inspector editor retains the full rendering path
+so scrolling it out of view cannot destroy its keyboard/edit state. Filtering
+works over the complete field list, independent of visibility. A regression
+checks bounded visible fields, scrolling to the final field, and filtering back
+to the first field with the correct value; the existing compact-layout test
+still passes. All 451 non-ignored library tests pass.
+
+Reproduce: `mise exec -- cargo test --locked --lib wide_workspace_selection_frame_benchmark -- --ignored --nocapture`.
+
+
+Optimized-build control for the complete-workspace fixture above:
+
+| Columns / inspector | Release CPU layout+tessellation p50 / p95 |
+| --- | ---: |
+| 12 / hidden | 0.306 / 0.406 ms |
+| 12 / visible | 0.322 / 0.430 ms |
+| 120 / hidden | 0.356 / 0.472 ms |
+| 120 / visible | 0.428 / 0.520 ms |
+
+Reproduce by adding `--release` to the workspace benchmark command. Do not
+convert these values directly into process CPU percentages: the native event
+loop, all windows, actual repaint frequency, GPU driver and compositor are not
+included. A physical-mouse comparison must use the same build configuration,
+monitor/refresh settings, window dimensions, data and inspector visibility.
+
+### Invisible wheel repaint tail
+
+Overwriting `smooth_scroll_delta` alone left egui's private interpolation
+accumulator populated. Its `wants_repaint_after` continued requesting immediate
+frames even though Rustable no longer displayed that animation. The regression
+`wheel_does_not_schedule_invisible_smoothing_frames` failed at idle frame 2
+before the fix. The vendored InputState setter now clears that accumulator when
+applying direct native movement, without changing scroll-to-zoom behavior.
+After the ordinary input follow-up frames, idle wheel smoothing no longer
+requests immediate repaint. This removes verified wasted work; it does not
+establish that the user's reported 95% CPU has fallen to any specific number.
+
+### Native user observation and profiling build — 2026-11-01
+
+The user subsequently reported roughly 30% CPU while scrolling the optimized
+build, compared with the earlier 95%, and approximately 15% for TablePlus on
+the same large table. This is useful workload feedback, not a controlled capture:
+sampling interval, event rate and frame rate have not been matched. It does not
+isolate the contribution of release optimization versus individual rendering
+fixes. Native scrolling parity remains unverified.
+
+Use `mise exec -- cargo build --locked --profile profiling` for native profiling.
+This inherits release optimization, thin LTO and one codegen unit, but retains
+line tables and symbols. The separate `target/profiling/rustable` executable
+does not replace the running release build. Launch it deliberately after saving
+work; capture its PID with macOS `sample` or Instruments while reproducing the
+wide-table workload. Compare the same window dimensions, selected row, inspector
+visibility, monitor settings and wheel input. The stripped release sample from
+this investigation could not reliably attribute Rust functions; it is not
+evidence identifying a remaining hot function.
+
+### Populated object sidebar
+
+The previous whole-workspace fixture had no catalog objects. A new ignored
+`populated_sidebar_frame_benchmark` measures sidebar layout plus tessellation
+with 20, 200 and 2,000 objects, 1440 × 900 logical points, 120 frames with 20
+warmups. The sidebar used to shape text, icons and tooltip strings for every
+entry, even when clipped. It now skips that work after allocating the row,
+preserving layout, IDs and scroll extent.
+
+| Objects | Debug before p50 / p95 | Debug after p50 / p95 |
+| --- | ---: | ---: |
+| 20 | 0.475 / 0.557 ms | 0.484 / 0.611 ms |
+| 200 | 2.275 / 2.523 ms | 1.405 / 1.443 ms |
+| 2,000 | 19.466 / 20.318 ms | 9.499 / 9.900 ms |
+
+This still traverses and allocates each row; full row virtualization remains a
+potential improvement. The regression verifies offscreen names do not produce
+text shapes and that searching finds the last object. This fixture does not
+identify the user's live CPU hot path or establish a new process CPU percentage.
+
+Optimized after-change control: 20 objects p50/p95 0.032/0.042 ms,
+200 objects 0.082/0.094 ms, 2,000 objects 0.473/0.629 ms. No optimized
+before-change measurement was captured, so the debug ratio must not be presented
+as a measured release speedup. All 453 non-ignored library tests pass; strict
+application Clippy passes (vendored egui still emits upstream warnings).
+
+### Object sidebar row virtualization
+
+The follow-up replaces per-object widget allocation with one virtualized list
+containing group headings and filtered object references. Only visible rows
+allocate widgets. Filtering still scans the catalog; an empty filter avoids
+lowercasing every object name. Headings and object rows share a fixed 22-point
+height so scroll geometry remains predictable.
+
+Debug p50/p95: 20 objects 0.463/0.499 ms, 200 objects 0.712/0.796 ms,
+2,000 objects 0.754/0.819 ms. This supersedes the earlier partial culling
+implementation and its remaining per-row allocation cost. The regression now
+also scrolls to the last table, presses it and verifies the selected table name,
+then filters to that object. These measurements remain sidebar-only and do not
+establish live TablePlus CPU parity.
+
+Optimized p50/p95 after virtualization: 20 objects 0.032/0.034 ms,
+200 objects 0.047/0.057 ms, 2,000 objects 0.053/0.059 ms. Compared with
+the immediately preceding optimized culling-only run, the 2,000-object p95
+falls from 0.629 to 0.059 ms. Full library tests (453 passed, 107 ignored),
+strict application Clippy and `git diff --check` pass.
+
+### Symbolized native capture — 2026-11-01
+
+The user opened the optimized profiling executable on their heavy table
+(PID 64758). A 15-second macOS `sample` capture, taken after asking the user
+to scroll normally, is saved locally at
+`/tmp/rustable-wide-table-scroll-profile.txt`. It contains symbolized Rust
+functions and source locations. Physical wheel events and their rate were not
+recorded, and this is not a matched TablePlus comparison.
+
+The capture identifies visible grid cell Label construction, text layout,
+widget registration and allocation as actionable rendering paths; it also
+shows OpenGL/Metal driver submission and display synchronization. The latter
+contains `NSWaitUntilHostTime` / Mach waits, so inclusive stack counts must not
+be interpreted as CPU utilization or summed across nested calls. Sidebar
+virtualization is present in the running binary. The next investigation is
+reducing duplicate per-cell widget/text work while preserving editing,
+selection, clipping, auto-fit and context-menu behavior. No new process CPU
+reduction is claimed from this capture alone.

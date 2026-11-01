@@ -201,9 +201,18 @@ fn font_notices(root: &Path, destination: &Path) -> Result<()> {
     }
     Ok(())
 }
+fn icon_notices(root: &Path, destination: &Path) -> Result<()> {
+    let target = destination.join("Lucide");
+    fs::create_dir_all(&target)?;
+    for name in ["LICENSE", "README.md"] {
+        fs::copy(root.join("assets/icons/lucide").join(name), target.join(name))?;
+    }
+    Ok(())
+}
 fn notices(root: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)?;
     font_notices(root, destination)?;
+    icon_notices(root, destination)?;
     for name in [
         "UPSTREAM.md",
         "postgres-language-server-0.28.1-MIT.txt",

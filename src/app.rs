@@ -4,7 +4,7 @@ mod query_library;
 #[path = "query_history.rs"]
 mod query_history;
 #[path = "navigator.rs"]
-mod navigator;
+pub(crate) mod navigator;
 #[path = "bulk_rows.rs"]
 mod bulk_rows;
 #[path = "change_history.rs"]
@@ -93,6 +93,7 @@ struct Preferences {
     activity_visible: bool,
     column_widths: crate::column_widths::ColumnWidths,
     pane_sizes: crate::pane_sizes::PaneSizes,
+    page_size: usize,
 }
 
 /// Session data contains drafts, never query results. A clean file uses `sql`
@@ -418,6 +419,10 @@ pub struct Rustable {
     focus_filter: bool,
     focus_page_grid: bool,
     filter_column: String,
+    filter_rules: Vec<db::filters::Filter>,
+    filter_rules_table: String,
+    filter_rules_original: Vec<Option<db::filters::Filter>>,
+    paste_requested: bool,
     safe: bool,
     status: String,
     error: Option<String>,
@@ -566,6 +571,11 @@ impl Rustable {
     pub(crate) fn window_error(&mut self, message: &str) {
         self.error = Some(message.into());
     }
+    pub(crate) fn workspace_color(&self) -> Color32 {
+        let color = self.active_connection_style().color;
+        Color32::from_rgb(color[0], color[1], color[2])
+    }
+    pub(crate) fn workspace_database(&self) -> Option<&str> { self.connected_database.as_deref() }
     pub(crate) fn has_connection(&self) -> bool {
         !self.engine.is_empty()
     }
@@ -627,6 +637,7 @@ impl Rustable {
         child.prefs.query_history = self.prefs.query_history.clone();
         child.prefs.column_widths = self.prefs.column_widths.clone();
         child.prefs.pane_sizes = self.prefs.pane_sizes;
+        child.prefs.page_size = self.prefs.page_size;
         child.shared_preferences_revision = self.shared_preferences_revision;
     }
     pub(crate) fn merge_window_preferences(&mut self, child: &mut Self) -> bool {
@@ -642,6 +653,7 @@ impl Rustable {
         self.prefs.query_history = child.prefs.query_history.clone();
         self.prefs.column_widths = child.prefs.column_widths.clone();
         self.prefs.pane_sizes = child.prefs.pane_sizes;
+        self.prefs.page_size = child.prefs.page_size;
         self.prefs.history.truncate(100);
         self.shared_preferences_revision = self.shared_preferences_revision.wrapping_add(1);
         child.shared_preferences_revision = self.shared_preferences_revision;
@@ -662,6 +674,7 @@ impl Rustable {
             activity_visible: self.prefs.activity_visible,
             column_widths: self.prefs.column_widths.clone(),
             pane_sizes: self.prefs.pane_sizes,
+            page_size: self.prefs.page_size,
             connections_migrated: true,
             documents: vec![QueryDocument {
                 sql: String::new(),
@@ -871,6 +884,10 @@ impl Rustable {
             focus_filter: false,
             focus_page_grid: false,
             filter_column: String::new(),
+            filter_rules: Vec::new(),
+            filter_rules_table: String::new(),
+            filter_rules_original: Vec::new(),
+            paste_requested: false,
             safe: false,
             status: "Ready".into(),
             error: None,
@@ -954,7 +971,7 @@ impl Rustable {
         }
     }
 
-    fn poll(&mut self) {
+    pub(crate) fn poll(&mut self) {
         self.poll_query_groups();
         #[cfg(target_arch = "wasm32")]
         self.worker.check_health();
@@ -1239,6 +1256,7 @@ impl Rustable {
                     self.status = format!("Saved SQL: {}", path.display())
                 }
                 Ok(Payload::Schema { objects, schemas }) => {
+                    if matches!(self.engine.as_str(), "MySQL" | "MariaDB") { self.connected_database = schemas.selected.clone(); }
                     self.schemas = schemas;
                     self.objects = objects;
                     self.language.invalidate();
@@ -1361,6 +1379,7 @@ impl Rustable {
         self.selected_column = None;
         self.structure_search.clear();
         self.browse = Browse {
+            limit: self.prefs.page_size,
             table: name,
             ..Default::default()
         };
@@ -1382,11 +1401,11 @@ impl Rustable {
             return;
         }
         let offset = if next {
-            if !self.table.truncated || self.table.rows.len() != db::PAGE_SIZE { return; }
-            let Some(offset) = self.browse.offset.checked_add(db::PAGE_SIZE) else { return; };
+            if !self.table.truncated || self.table.rows.len() != self.browse.page_size() { return; }
+            let Some(offset) = self.browse.offset.checked_add(self.browse.page_size()) else { return; };
             offset
         } else {
-            self.browse.offset.saturating_sub(db::PAGE_SIZE)
+            self.browse.offset.saturating_sub(self.browse.page_size())
         };
         if offset == self.browse.offset || !self.finish_cell_edit() { return; }
         self.browse.offset = offset;
@@ -2176,7 +2195,7 @@ impl Rustable {
                 self.activity.clear();
             }
             if ui
-                .small_button("×")
+                .add(crate::icons::widget("x"))
                 .on_hover_text("Hide activity log")
                 .clicked()
             {
@@ -2212,7 +2231,8 @@ impl Rustable {
         } else {
             Color32::WHITE
         };
-        let width = (ui.available_width() - 230.0).max(100.0);
+        let right_controls = crate::icons::toolbar_group_width(3) + crate::icons::toolbar_group_width(2) + 6.0;
+        let width = (ui.available_width() - right_controls - ui.spacing().item_spacing.x).max(1.0);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, 27.0), egui::Sense::click());
         let painter = ui.painter().with_clip_rect(rect);
@@ -2309,7 +2329,7 @@ impl Rustable {
         }
         if self.pending.is_some()
             && ui
-                .small_button("×")
+                .add(crate::icons::widget("x"))
                 .on_hover_text("Cancel database operation")
                 .clicked()
         {
@@ -2319,7 +2339,7 @@ impl Rustable {
 
     fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top(egui::Id::new((ctx.viewport_id(), "toolbar")))
-            .exact_height(38.0)
+            .exact_height(44.0)
             .show(ctx, |ui| {
                 if self.dialog_owns_workspace_shortcuts() { ui.disable(); }
                 ui.add_space(4.0);
@@ -2343,7 +2363,9 @@ impl Rustable {
                     return;
                 }
                 ui.horizontal(|ui| {
-                    ui.add_space(4.0);
+                    // Equal breathing room between the status pill and each button side.
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    toolbar_group(ui, |ui| {
                     if toolbar_action(ui, 0, self.connections)
                         .on_hover_text("Connections")
                         .clicked()
@@ -2360,16 +2382,21 @@ impl Rustable {
                         self.show_query();
                         self.tabs[self.tab].focus_editor = true;
                     }
+                    });
                     self.connection_status(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(6.0);
+                        ui.spacing_mut().item_spacing.x = 6.0;
                         pane_toggles::show(
                             ui,
                             &mut self.prefs.activity_visible,
                             &mut self.inspector,
                         );
+                        toolbar_group(ui, |ui| {
+                            if toolbar_action(ui, 4, false).on_hover_text("Find anything · Cmd/Ctrl+P").clicked() { self.open_navigator(false); }
+                            if ui.add_enabled_ui(self.pending.is_none(), |ui| toolbar_action(ui, 3, false)).inner.on_hover_text("Refresh · Cmd/Ctrl+R").clicked() { self.refresh_current_view(); }
                         let before = self.prefs.appearance;
-                        ui.menu_button("⚙", |ui| {
+                        let settings = toolbar_action(ui, 5, false).on_hover_text("Appearance");
+                        egui::Popup::menu(&settings).show(|ui| {
                             ui.label("Appearance");
                             for choice in [Appearance::System, Appearance::Light, Appearance::Dark]
                             {
@@ -2384,13 +2411,12 @@ impl Rustable {
                                     ui.close();
                                 }
                             }
-                        })
-                        .response
-                        .on_hover_text("Settings");
+                        });
                         if before != self.prefs.appearance {
                             self.shared_preferences_dirty = true;
                             ctx.set_theme(self.prefs.appearance.preference());
                         }
+                        });
                     });
                 });
             });
@@ -2461,97 +2487,106 @@ impl Rustable {
                     if selected != self.schemas.selected
                         && let Some(schema) = selected
                     {
-                        self.dispatch(Command::SelectSchema(schema), Pending::Export);
+                        if matches!(self.engine.as_str(), "MySQL" | "MariaDB") {
+                            self.open_database_workspace(schema);
+                        } else {
+                            self.dispatch(Command::SelectSchema(schema), Pending::Export);
+                        }
                     }
                     ui.add_space(4.0);
                 }
-                ui.add(
-                    TextEdit::singleline(&mut self.search)
-                        .hint_text("Search for item…")
-                        .desired_width(f32::INFINITY),
-                );
+                sidebar_search(ui, &mut self.search, "Search for item…");
                 ui.add_space(4.0);
                 let filter = self.search.to_lowercase();
                 let changed_tables: std::collections::HashSet<&str> =
                     self.changes.iter().map(Change::table).collect();
                 let mut open = None;
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (kind, title) in [("table", "Tables"), ("view", "Views")] {
-                        ui.label(
-                            RichText::new(format!(
-                                "{} ({})",
-                                title,
-                                self.objects.iter().filter(|o| o.kind == kind).count()
-                            ))
-                            .size(11.0)
-                            .color(MUTED),
-                        );
-                        for object in self.objects.iter().filter(|o| {
-                            o.kind == kind && o.display_name().to_lowercase().contains(&filter)
-                        }) {
-                            let selected =
-                                self.browse.table == object.name && self.view != View::Query;
-                            let changed = changed_tables.contains(object.name.as_str());
-                            ui.add_enabled_ui(self.pending.is_none(), |ui| {
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), 22.0),
-                                    egui::Sense::click(),
-                                );
-                                // Item backgrounds reflect committed selection or pending edits,
-                                // never hover state. Primary press below commits selection.
-                                if selected || changed {
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        4.0,
-                                        if changed {
-                                            pending_fill(ui)
-                                        } else {
-                                            ui.visuals().selection.bg_fill
-                                        },
-                                    );
-                                }
-                                navigator::paint_object_icon(ui.painter(), rect.left_center() + egui::vec2(14.0, 0.0), &object.kind, 13.0);
-                                let painter = ui.painter().with_clip_rect(rect);
-                                painter.text(
-                                    rect.left_center() + egui::vec2(27.0, 0.0),
-                                    egui::Align2::LEFT_CENTER,
-                                    object.display_name(),
-                                    egui::FontId::monospace(12.0),
-                                    if selected && !changed {
-                                        ui.visuals().selection.stroke.color
+                enum CatalogRow<'a> {
+                    Heading(&'static str, usize),
+                    Object(&'a Object),
+                }
+                let mut rows = Vec::with_capacity(self.objects.len() + 2);
+                for (kind, title) in [("table", "Tables"), ("view", "Views")] {
+                    rows.push(CatalogRow::Heading(title, self.objects.iter().filter(|o| o.kind == kind).count()));
+                    rows.extend(self.objects.iter().filter(|o| {
+                        o.kind == kind && (filter.is_empty() || o.display_name().to_lowercase().contains(&filter))
+                    }).map(CatalogRow::Object));
+                }
+                egui::ScrollArea::vertical().show_rows(ui, 22.0, rows.len(), |ui, range| {
+                    for row in &rows[range] {
+                        let object = match row {
+                            CatalogRow::Heading(title, count) => {
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
+                                ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER,
+                                    format!("{title} ({count})"), egui::FontId::proportional(11.0), MUTED);
+                                continue;
+                            }
+                            CatalogRow::Object(object) => object,
+                        };
+                        let selected =
+                            self.browse.table == object.name && self.view != View::Query;
+                        let changed = changed_tables.contains(object.name.as_str());
+                        ui.add_enabled_ui(self.pending.is_none(), |ui| {
+                            let (rect, response) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 22.0),
+                                egui::Sense::click(),
+                            );
+                            // Preserve row layout and IDs, but avoid shaping text,
+                            // icons and tooltips for clipped catalog entries.
+                            if !ui.is_rect_visible(rect) { return; }
+                            // Item backgrounds reflect committed selection or pending edits,
+                            // never hover state. Primary press below commits selection.
+                            if selected || changed {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    4.0,
+                                    if changed {
+                                        pending_fill(ui)
                                     } else {
-                                        ui.visuals().text_color()
+                                        ui.visuals().selection.bg_fill
                                     },
                                 );
-                                let response = response.on_hover_text(match &object.schema {
-                                    Some(schema) => format!("Schema: {schema}\n{}", object.name),
-                                    None => object.name.clone(),
-                                });
-                                let response = if let Some(error) = &object.metadata_error {
-                                    ui.painter().text(
-                                        rect.right_center() - egui::vec2(8.0, 0.0),
-                                        egui::Align2::RIGHT_CENTER,
-                                        "!",
-                                        egui::FontId::proportional(13.0),
-                                        Color32::from_rgb(210, 150, 50),
-                                    );
-                                    response.on_hover_text(format!(
-                                        "Column information unavailable: {error}"
-                                    ))
+                            }
+                            navigator::paint_object_icon(ui.painter(), rect.left_center() + egui::vec2(14.0, 0.0), &object.kind, 13.0);
+                            let painter = ui.painter().with_clip_rect(rect);
+                            painter.text(
+                                rect.left_center() + egui::vec2(27.0, 0.0),
+                                egui::Align2::LEFT_CENTER,
+                                object.display_name(),
+                                egui::FontId::monospace(12.0),
+                                if selected && !changed {
+                                    ui.visuals().selection.stroke.color
                                 } else {
-                                    response
-                                };
-                                let response = if changed {
-                                    response.on_hover_text("Pending changes · ⌘S to review")
-                                } else {
-                                    response
-                                };
-                                if primary_pressed(&response) {
-                                    open = Some(object.name.clone());
-                                }
+                                    ui.visuals().text_color()
+                                },
+                            );
+                            let response = response.on_hover_text(match &object.schema {
+                                Some(schema) => format!("Schema: {schema}\n{}", object.name),
+                                None => object.name.clone(),
                             });
-                        }
-                        ui.add_space(6.0);
+                            let response = if let Some(error) = &object.metadata_error {
+                                ui.painter().text(
+                                    rect.right_center() - egui::vec2(8.0, 0.0),
+                                    egui::Align2::RIGHT_CENTER,
+                                    "!",
+                                    egui::FontId::proportional(13.0),
+                                    Color32::from_rgb(210, 150, 50),
+                                );
+                                response.on_hover_text(format!(
+                                    "Column information unavailable: {error}"
+                                ))
+                            } else {
+                                response
+                            };
+                            let response = if changed {
+                                response.on_hover_text("Pending changes · ⌘S to review")
+                            } else {
+                                response
+                            };
+                            if primary_pressed(&response) {
+                                open = Some(object.name.clone());
+                            }
+                        });
                     }
                 });
                 if let Some(name) = open {
@@ -2612,7 +2647,7 @@ impl Rustable {
                     self.column_inspector(ui);
                     return;
                 }
-                inspector_search(ui, &mut self.field_search);
+                sidebar_search(ui, &mut self.field_search, "Search for field…");
                 let search = self.field_search.to_lowercase();
                 ui.add_space(3.0);
                 if self.row_selection.rows.len() > 1 {
@@ -2630,12 +2665,22 @@ impl Rustable {
 
                     if self.view == View::Data && row_is_deleted(&self.changes, &self.browse.table, row) { ui.colored_label(Color32::from_rgb(220, 90, 90), "Pending deletion · restore from the table toolbar"); }
                     ui.add_space(2.0);
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        compact_inspector_spacing(ui);
-                        for (name, original_value) in grid.columns.iter().zip(row) {
-                            if !name.to_lowercase().contains(&search) {
-                                continue;
-                            }
+                    compact_inspector_spacing(ui);
+                    let visible: Vec<usize> = grid.columns.iter().enumerate()
+                        .filter(|(_, name)| search.is_empty() || name.to_lowercase().contains(&search))
+                        .map(|(index, _)| index).collect();
+                    // Keep an active editor alive when scrolled out of view. Ordinary
+                    // inspection only constructs the fields in the visible viewport.
+                    let editing = self.edit.as_ref().is_some_and(|edit| edit.inspector);
+                    let mut render_fields = |ui: &mut egui::Ui, range: std::ops::Range<usize>| {
+                        for position in range {
+                            let column_index = visible[position];
+                            let name = &grid.columns[column_index];
+                            let original_value = &row[column_index];
+                            ui.push_id(name, |ui| {
+                            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 44.0),
+                                egui::Layout::top_down(egui::Align::Min), |ui| {
+                            ui.set_min_height(44.0);
                             let staged = if self.view == View::Data {
                                 self.changes.iter().find_map(|change| match change {
                                     Change::Cell {
@@ -2656,7 +2701,7 @@ impl Rustable {
                             };
                             let value = staged.unwrap_or(original_value);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new(name).size(11.0).color(ui.visuals().weak_text_color()));
+                                ui.add(egui::Label::new(RichText::new(name).size(11.0).color(ui.visuals().weak_text_color())).truncate()).on_hover_text(name);
                                 if self.view == View::Data
                                     && let Some(column) =
                                         self.columns.iter().find(|c| c.name == *name)
@@ -2702,7 +2747,7 @@ impl Rustable {
                                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
 
                                         if ui.push_id(("copy-field", &self.browse.table, self.view == View::Query, self.tab, index, name), clipboard_button).inner.clicked() {
-                                            ui.ctx().copy_text(db::display(value));
+                                            ui.ctx().copy_text(db::clipboard_text(value));
                                         }
                                         if self.edit.as_ref().is_some_and(|e| e.inspector && e.table == self.browse.table && e.column == *name && e.row == *row) {
                                             finish |= inline_value(ui, &mut self.edit);
@@ -2716,8 +2761,15 @@ impl Rustable {
                                     });
                                 });
                             ui.add_space(1.0);
+                            });
+                            });
                         }
-                    });
+                    };
+                    if editing {
+                        egui::ScrollArea::vertical().show(ui, |ui| render_fields(ui, 0..visible.len()));
+                    } else {
+                        egui::ScrollArea::vertical().show_rows(ui, 44.0, visible.len(), render_fields);
+                    }
                 } else {
                     let empty = ui.available_rect_before_wrap();
                     ui.painter().text(
@@ -2746,7 +2798,7 @@ impl Rustable {
         let schema_editable = self.supports_schema_changes();
         let dialog_open = self.dialog_owns_workspace_shortcuts();
         if self.view != View::Data || dialog_open { self.focus_page_grid = false; }
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).inner_margin(0)).show(ctx, |ui| {
             if dialog_open { ui.disable(); }
             self.activity_panel(ui);
             let mut close = None;
@@ -2758,6 +2810,11 @@ impl Rustable {
                 data.insert_temp(id, active);
                 previous != Some(active)
             });
+            let tab_fill = if ui.visuals().dark_mode { Color32::from_rgb(48, 48, 48) } else { Color32::from_rgb(226, 228, 231) };
+            egui::Frame::new().fill(tab_fill).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            let tab_count = self.tabs.iter().filter(|tab| tab.open).count() + usize::from(!self.browse.table.is_empty());
+            let tab_width = workspace_tab_width(ui.available_width(), tab_count, ui.spacing().item_spacing.x);
             egui::ScrollArea::horizontal()
                 .id_salt("workspace-tabs")
                 .show(ui, |ui| {
@@ -2765,6 +2822,7 @@ impl Rustable {
                         if !self.browse.table.is_empty() {
                             let (response, closed) = workspace_tab(
                                 ui,
+                                tab_width,
                                 self.current_table_name(),
                                 self.view != View::Query,
                                 true,
@@ -2787,6 +2845,7 @@ impl Rustable {
                             }
                             let (response, closed) = workspace_tab(
                                 ui,
+                                tab_width,
                                 &format!("{}{}", if self.tabs[index].dirty { "• " } else { "" }, self.tabs[index].source_name.clone().unwrap_or_else(|| format!("SQL Query {}", index + 1))),
                                 self.view == View::Query && self.tab == index,
                                 self.pending.is_none(),
@@ -2800,16 +2859,17 @@ impl Rustable {
                                 self.activate_query(index);
                             }
                         }
-                        if ui.button("+").on_hover_text("New query tab").clicked() {
+                        if ui.add(crate::icons::widget("plus")).on_hover_text("New query tab").clicked() {
                             self.new_tab();
                         }
                     });
                 });
+            });
+            // The grid header starts directly at the tab strip's bottom edge.
+            ui.add_space(-ui.spacing().item_spacing.y);
             if let Some(index) = close {
                 self.close_tab(index);
             }
-            ui.separator();
-            ui.add_space(8.0);
             if let Some(error) = self.error.clone() {
                 egui::Frame::new()
                     .fill(Color32::from_rgb(100, 38, 40))
@@ -2866,94 +2926,12 @@ impl Rustable {
                         ui.scope_builder(egui::UiBuilder::new().max_rect(control_geometry.left.translate(origin)), |ui| {
                           ui.horizontal_wrapped(|ui| {
                             table_view_switch(ui, &mut self.view);
-                            if self.view == View::Data {
-                                if ui
-                                    .add_enabled(self.can_insert(), egui::Button::new("+ Row"))
+                            if self.view == View::Data && ui
+                                    .add_enabled(self.can_insert(), crate::icons::widget("plus"))
                                     .on_hover_text("Add row · Cmd+I")
                                     .clicked()
                                 {
                                     self.add_insert();
-                                }
-                                ui.menu_button("Rows", |ui| {
-                                    if ui
-                                        .add_enabled(
-                                            self.can_duplicate(),
-                                            egui::Button::new("Duplicate"),
-                                        )
-                                        .on_hover_text(
-                                            "Duplicate row · Cmd+D · primary keys use DEFAULT",
-                                        )
-                                        .clicked()
-                                    {
-                                        self.duplicate_selected();
-                                    }
-                                    if self.selected_insert().is_some()
-                                        && ui.button("Remove new row").clicked()
-                                    {
-                                        self.remove_selected_insert();
-                                    }
-                                    if self.row_selection.rows.len() > 1 {
-                                        let restore = self.selected_rows_deleted();
-                                        let label = format!(
-                                            "{} {} rows",
-                                            if restore { "Restore" } else { "Delete" },
-                                            self.row_selection.rows.len()
-                                        );
-                                        if ui
-                                        .add_enabled(
-                                            self.can_delete_rows(),
-                                            egui::Button::new(label),
-                                        )
-                                        .on_hover_text(
-                                            "Stage selected rows · Cmd+S reviews SQL before saving",
-                                        )
-                                        .clicked()
-                                    {
-                                        self.set_selected_rows_deleted(!restore);
-                                    }
-                                    } else {
-                                        let row = self
-                                            .selected
-                                            .and_then(|index| self.table.rows.get(index))
-                                            .cloned();
-                                        let deleting = row.as_ref().is_some_and(|row| {
-                                            row_is_deleted(&self.changes, &self.browse.table, row)
-                                        });
-                                        let enabled = row.is_some()
-                                            && self.supports_data_changes() && !self.safe
-                                            && self.pending.is_none()
-                                            && self.columns.iter().any(|c| c.pk)
-                                            && self.objects.iter().any(|o| {
-                                                o.name == self.browse.table && o.kind == "table"
-                                            });
-                                        if ui
-                                .add_enabled(
-                                    enabled,
-                                    egui::Button::new(if deleting {
-                                        "Restore row"
-                                    } else {
-                                        "Delete row"
-                                    }),
-                                )
-                                .on_hover_text(
-                                    "Stage or revert deletion · Cmd+S reviews SQL before saving",
-                                )
-                                .clicked()
-                                && self.finish_cell_edit()
-                                && let Some(row) = row
-                            {
-                                toggle_row_deletion(&mut self.changes, &self.browse.table, row);
-                                self.record_changes();
-                                self.review = None;
-                                if !deleting {
-                                    self.row_selection.clear();
-                                    self.selected = self.selected.and_then(|i| {
-                                        (i + 1 < self.table.rows.len()).then_some(i + 1)
-                                    });
-                                }
-                            }
-                                    }
-                                });
                             }
                             if self.view == View::Structure
                                 && ui
@@ -2972,13 +2950,6 @@ impl Rustable {
                                     default_text: String::new(),
                                     error: None,
                                 });
-                            }
-                            if ui
-                                .add_enabled(self.pending.is_none(), egui::Button::new("↻"))
-                                .on_hover_text("Refresh")
-                                .clicked()
-                            {
-                                self.refresh_current_view();
                             }
                             if !self.changes.is_empty() {
                                 ui.separator();
@@ -3010,7 +2981,7 @@ impl Rustable {
                                                     if ui
                                                         .add_enabled(
                                                             self.pending.is_none(),
-                                                            egui::Button::new("×"),
+                                                            crate::icons::widget("x"),
                                                         )
                                                         .on_hover_text("Remove this staged change")
                                                         .clicked()
@@ -3088,13 +3059,32 @@ impl Rustable {
                                             .add_enabled(
                                                 self.pending.is_none()
                                                     && grid.truncated
-                                                    && grid.rows.len() == db::PAGE_SIZE,
+                                                    && grid.rows.len() == self.browse.page_size(),
                                                 navigation_button(true),
                                             )
                                             .clicked()
                                         {
                                             self.change_table_page(true);
                                         }
+                                        let settings = ui.add(pagination_button()).on_hover_text("Pagination · limit and offset");
+                                        let draft_id = settings.id.with("draft");
+                                        if settings.clicked() { ui.ctx().data_mut(|data| data.insert_temp(draft_id, (self.browse.page_size().to_string(), self.browse.offset.to_string()))); }
+                                        egui::Popup::menu(&settings).show(|ui| {
+                                            let (mut limit_text, mut offset_text) = ui.ctx().data_mut(|data| data.get_temp::<(String, String)>(draft_id).unwrap_or_else(|| (self.browse.page_size().to_string(), self.browse.offset.to_string())));
+                                            egui::Grid::new("pagination-fields").num_columns(2).show(ui, |ui| {
+                                                ui.label("Limit"); ui.add(egui::TextEdit::singleline(&mut limit_text).desired_width(110.0)); ui.end_row();
+                                                ui.label("Offset"); ui.add(egui::TextEdit::singleline(&mut offset_text).desired_width(110.0)); ui.end_row();
+                                            });
+                                            let limit = limit_text.parse::<usize>().ok().filter(|n| (1..=5000).contains(n));
+                                            let offset = offset_text.parse::<usize>().ok().filter(|n| *n <= i64::MAX as usize);
+                                            ui.ctx().data_mut(|data| data.insert_temp(draft_id, (limit_text, offset_text)));
+                                            if limit.is_none() || offset.is_none() { ui.weak("Limit: 1–5,000. Offset: zero or greater."); }
+                                            if ui.add_enabled(self.pending.is_none() && limit.is_some() && offset.is_some(), egui::Button::new("Go").min_size(egui::vec2(160.0, 28.0))).clicked() && self.finish_cell_edit() {
+                                                let limit = limit.unwrap(); self.browse.limit = limit; self.browse.offset = offset.unwrap();
+                                                self.prefs.page_size = limit; self.shared_preferences_dirty = true;
+                                                self.refresh(); ui.close();
+                                            }
+                                        });
                                         if ui
                                             .add_enabled(
                                                 self.pending.is_none() && self.browse.offset > 0,
@@ -3137,7 +3127,7 @@ impl Rustable {
                                         && ui
                                             .add(filter_button(
                                                 self.filters_visible
-                                                    || self.browse.filter_column.is_some(),
+                                                    || self.browse.filter_column.is_some() || self.browse.filters.iter().any(|f| f.enabled),
                                             ))
                                             .clicked()
                                     {
@@ -3970,61 +3960,93 @@ impl Rustable {
         }
     }
 
-    fn apply_table_filter(&mut self, clear: bool) {
-        // Keep the displayed rows and their applied filter in agreement when
-        // an invalid draft prevents leaving the current edit.
-        if self.pending.is_some() || self.browse.table.is_empty() || !self.finish_cell_edit() {
-            return;
+    fn apply_filter_rules(&mut self, rules: Vec<db::filters::Filter>) {
+        if self.pending.is_some() || self.browse.table.is_empty() || !self.finish_cell_edit() { return; }
+        let dialect = self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine));
+        if let Err(error) = db::filters::predicate(&rules, &self.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), dialect) {
+            self.error = Some(error); return;
         }
-        if clear { self.filter.clear(); }
+        self.browse.filters = rules;
+        self.browse.filter_column = None;
+        self.browse.filter.clear();
         self.browse.offset = 0;
-        self.browse.filter_column = if self.filter.is_empty() {
-            None
-        } else {
-            Some(self.filter_column.clone())
-        };
-        self.browse.filter = self.filter.clone();
         self.refresh();
     }
 
     fn filters(&mut self, ui: &mut egui::Ui) {
-        ui.add_enabled_ui(self.pending.is_none(), |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Filter").color(MUTED));
-                egui::ComboBox::from_id_salt("filter-column")
-                    .selected_text(&self.filter_column)
-                    .width(130.0)
-                    .show_ui(ui, |ui| {
-                        for column in &self.columns {
-                            ui.selectable_value(
-                                &mut self.filter_column,
-                                column.name.clone(),
-                                &column.name,
-                            );
+        if self.filter_rules_table != self.browse.table {
+            self.filter_rules_table = self.browse.table.clone();
+            self.filter_rules = self.browse.filters.clone();
+            self.filter_rules_original = self.filter_rules.iter().cloned().map(Some).collect();
+            if let Some(column) = &self.browse.filter_column {
+                self.filter_rules.push(db::filters::Filter { enabled: true, column: column.clone(), operator: "Contains".into(), value: self.browse.filter.clone() });
+                self.filter_rules_original.push(None);
+            }
+        }
+        if self.filter_rules.is_empty() { self.filter_rules.push(db::filters::Filter::new(self.filter_column.clone())); self.filter_rules_original.push(None); }
+        let mut apply = None;
+        let mut remove = None;
+        let mut insert = None;
+        let mut clear = false;
+        let mut apply_all = false;
+        egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+            ui.add_enabled_ui(self.pending.is_none(), |ui| {
+                for (index, rule) in self.filter_rules.iter_mut().enumerate() {
+                    ui.push_id(index, |ui| ui.horizontal(|ui| {
+                        ui.checkbox(&mut rule.enabled, "");
+                        egui::ComboBox::from_id_salt("column").width(130.0).selected_text(&rule.column).show_ui(ui, |ui| {
+                            for column in &self.columns { ui.selectable_value(&mut rule.column, column.name.clone(), &column.name); }
+                            ui.separator();
+                            ui.selectable_value(&mut rule.column, "Raw SQL".into(), "Raw SQL");
+                        });
+                        if rule.column != "Raw SQL" {
+                            egui::ComboBox::from_id_salt("operator").width(100.0).selected_text(&rule.operator).show_ui(ui, |ui| {
+                                for op in db::filters::OPERATORS { ui.selectable_value(&mut rule.operator, (*op).into(), *op); }
+                            });
                         }
+                        let no_value = rule.column != "Raw SQL" && rule.operator.starts_with("IS ");
+                        let width = (ui.available_width() - 125.0).max(60.0);
+                        let response = ui.add_enabled(!no_value, TextEdit::singleline(&mut rule.value).id(if index == 0 { egui::Id::new("table-filter-value") } else { egui::Id::new(("table-filter-value", index)) }).desired_width(width).hint_text(if rule.operator.ends_with("IN") { "[1, 2] or [\"a\", \"b\"]" } else if rule.column == "Raw SQL" { "SQL condition…" } else { "Value…" }));
+                        if self.focus_filter { response.request_focus(); self.focus_filter = false; }
+                        if ui.button("Apply").on_hover_text("Apply this condition; other applied conditions stay unchanged").clicked() || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) { apply = Some(index); }
+                        if ui.add_sized([24.0, 24.0], egui::Button::new("−")).on_hover_text("Remove condition (Apply All to update results)").clicked() { remove = Some(index); }
+                        if ui.add_sized([24.0, 24.0], egui::Button::new("+")).on_hover_text("Add condition").clicked() { insert = Some(index + 1); }
+                    }));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("SQL").on_hover_text("Copy the draft WHERE clause").clicked() {
+                        let dialect = self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine));
+                        match db::filters::predicate(&self.filter_rules, &self.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), dialect) {
+                            Ok(sql) => ui.ctx().copy_text(if sql.is_empty() { String::new() } else { format!("WHERE {sql}") }),
+                            Err(error) => self.error = Some(error),
+                        }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    ui.menu_button("Export", |ui| {
+                        if ui.add_enabled(self.supports_table_export(), egui::Button::new("Applied filters as CSV…")).clicked() { self.export_table_dialog(ui.ctx(), db::ExportFormat::Csv); ui.close(); }
+                        if ui.add_enabled(self.supports_table_export(), egui::Button::new("Applied filters as JSON…")).clicked() { self.export_table_dialog(ui.ctx(), db::ExportFormat::Json); ui.close(); }
                     });
-                ui.label(RichText::new("contains").size(11.0).color(MUTED));
-                let response = ui.add(
-                    TextEdit::singleline(&mut self.filter)
-                        .id(egui::Id::new("table-filter-value"))
-                        .hint_text("Filter values…")
-                        .desired_width(170.0),
-                );
-                if self.focus_filter && ui.is_enabled() {
-                    response.request_focus();
-                    self.focus_filter = false;
-                }
-                if ui.button("Apply").clicked()
-                    || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                {
-                    self.apply_table_filter(false);
-                }
-                if self.browse.filter_column.is_some() && ui.small_button("Clear").clicked() {
-                    self.apply_table_filter(true);
-                }
+                    ui.label(RichText::new("Match all enabled conditions").small().color(MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        apply_all = ui.button("Apply All").clicked();
+                        clear = ui.button("Clear").clicked();
+                    });
+                });
             });
         });
-        ui.add_space(12.0);
+        if let Some(index) = remove { self.filter_rules.remove(index); self.filter_rules_original.remove(index); }
+        if let Some(index) = insert { self.filter_rules.insert(index, db::filters::Filter::new(self.filter_column.clone())); self.filter_rules_original.insert(index, None); }
+        if clear { self.apply_filter_rules(Vec::new()); if self.browse.filters.is_empty() { self.filter_rules.clear(); self.filter_rules_original.clear(); } }
+        else if apply_all { self.apply_filter_rules(self.filter_rules.clone()); if self.browse.filters == self.filter_rules { self.filter_rules_original = self.filter_rules.iter().cloned().map(Some).collect(); } }
+        else if let Some(index) = apply {
+            let mut rules = self.browse.filters.clone();
+            let original = self.filter_rules_original[index].as_ref();
+            if let Some(position) = original.and_then(|original| rules.iter().position(|rule| rule == original)) {
+                rules[position] = self.filter_rules[index].clone();
+            } else { rules.push(self.filter_rules[index].clone()); }
+            self.apply_filter_rules(rules.clone());
+            if self.browse.filters == rules { self.filter_rules_original[index] = Some(self.filter_rules[index].clone()); }
+        }
     }
 
     /// Pending requests retain the table's geometry without exposing stale cells.
@@ -4204,6 +4226,11 @@ impl Rustable {
         let mut cell_action = None;
         let mut row_action = None;
         let mut bulk_delete = None;
+        let mut menu_action = None;
+        let mut quick_filter = None;
+        let menu_can_insert = self.can_insert();
+        #[cfg(not(target_arch = "wasm32"))]
+        let menu_can_import = self.supports_csv_import() && self.pending.is_none();
         let selected_deleted = self.selected_rows_deleted();
         let navigation_target = self
             .row_selection
@@ -4312,6 +4339,7 @@ impl Rustable {
         let horizontal_overflow = content_width > ui.available_width() + 0.5;
         with_grid_scrollbars(ui, |ui| {
             egui::ScrollArea::horizontal()
+            .wheel_before_layout(true)
             .scroll_bar_visibility(if horizontal_overflow { egui::scroll_area::ScrollBarVisibility::AlwaysVisible } else { egui::scroll_area::ScrollBarVisibility::AlwaysHidden })
             .id_salt((
                 "data-horizontal",
@@ -4330,7 +4358,9 @@ impl Rustable {
                 let resize_intent_id = table_state_id.with("user-resized-columns");
                 let resized_columns = ui.ctx().data_mut(|data| data.remove_temp::<Vec<usize>>(resize_intent_id).unwrap_or_default());
                 let mut active_cell_overlay = None;
+                let mut horizontal_scroll_target = None;
                 let mut builder = TableBuilder::new(ui)
+                    .wheel_before_layout(true)
                     .id_salt(table_salt)
                     .striped(false)
                     .auto_shrink([false, false])
@@ -4372,7 +4402,11 @@ impl Rustable {
                             }
                         });
                         for name in &grid.columns {
+                            if !fit_columns && header.skip_invisible_column() { continue; }
                             header.col(|ui| {
+                                if !fit_columns && !ui.is_sizing_pass() && !ui.is_rect_visible(ui.max_rect()) {
+                                    return;
+                                }
                                 if self.view == View::Query {
                                     paint_column_header(ui, name, None);
                                     return;
@@ -4422,6 +4456,41 @@ impl Rustable {
                         }
                         let total_width = widths.iter().sum::<f32>() + body.ui_mut().spacing().item_spacing.x * widths.len() as f32;
                         body.ui_mut().ctx().data_mut(|data| data.insert_temp(widths_id, total_width));
+                        // Resolve the press before painting any row. Selecting at the
+                        // end of a row draws both the old highlight and old text colors
+                        // for another frame, even though selection state is already set.
+                        let ui = body.ui_mut();
+                        let origin = ui.available_rect_before_wrap().min;
+                        let pitch = 22.0 + ui.spacing().item_spacing.y;
+                        let press = ui.input(|input| input.events.iter().rev().find_map(|event| {
+                            match event {
+                                egui::Event::PointerButton { pos, button, pressed: true, modifiers } if matches!(button, egui::PointerButton::Primary | egui::PointerButton::Secondary) => Some((*pos, *modifiers, *button == egui::PointerButton::Secondary)),
+                                _ => None,
+                            }
+                        }));
+                        if let Some((pos, modifiers, secondary)) = press
+                            && ui.is_enabled() && !ui.is_sizing_pass()
+                            && ui.rect_contains_pointer(table_clip)
+                            && pos.x >= origin.x && pos.x < origin.x + total_width
+                            && pos.y >= origin.y
+                        {
+                            let index = ((pos.y - origin.y) / pitch).floor() as usize;
+                            if index < grid.rows.len()
+                                && (!self.edit.as_ref().is_some_and(|e| !e.bulk_rows.is_empty()) || self.finish_cell_edit())
+                            {
+                                let mut right = origin.x;
+                                for (column, width) in widths.iter().enumerate() {
+                                    right += width + ui.spacing().item_spacing.x;
+                                    if pos.x < right {
+                                        if column > 0 { self.row_selection.cell_column = column - 1; }
+                                        break;
+                                    }
+                                }
+                                self.selected = if secondary { self.row_selection.context_click(index) } else { self.row_selection.click(index, modifiers.shift, modifiers.command,
+                                    self.selected.filter(|i| *i < grid.rows.len())) };
+                                if self.edit.is_none() { grid_focus.request_focus(); }
+                            }
+                        }
                         paint_grid_backdrop(body.ui_mut(), &widths);
                         body.rows(22.0, grid.rows.len() + insert_ids.len(), |mut row| {
                             let index = row.index();
@@ -4444,7 +4513,6 @@ impl Rustable {
                                         .to_string());
                             });
                             row.set_selected(row_selected);
-                            let mut pressed = false;
                             let mut released = false;
                             for (column, original_value) in grid.rows[index].iter().enumerate() {
                                 let staged = if self.view == View::Data { self.changes.iter().find_map(|change| match change {
@@ -4452,14 +4520,27 @@ impl Rustable {
                                     _ => None,
                                 }) } else { None };
                                 let value = staged.unwrap_or(original_value);
-                                let mut double_clicked = false;
-                                let mut cell_pressed = false;
-                                let mut cell_released = false;
                                 let active_cell = self.row_selection.focused == Some(index)
                                     && self.row_selection.rows.contains(&index)
                                     && self.row_selection.cell_column.min(grid.columns.len().saturating_sub(1)) == column;
                                 let editing = self.edit.as_ref().is_some_and(|e| !e.inspector && e.table == self.browse.table && e.column == grid.columns[column] && e.row == grid.rows[index]);
+                                if !fit_columns && !editing
+                                    && !(active_cell && (self.row_selection.pending_cell_scroll || start_edit_key))
+                                    && row.skip_invisible_column()
+                                {
+                                    continue;
+                                }
                                 let (_, response) = row.col(|ui| {
+                                    // Rows are virtualized by TableBuilder; cull offscreen columns
+                                    // before formatting values or constructing text widgets. Keep
+                                    // sizing and focused editors/navigation alive outside the clip.
+                                    if !fit_columns && !ui.is_sizing_pass()
+                                        && !editing
+                                        && !(active_cell && self.row_selection.pending_cell_scroll)
+                                        && !ui.is_rect_visible(ui.max_rect())
+                                    {
+                                        return;
+                                    }
                                     if deleting {
                                         let fill = if ui.visuals().dark_mode { Color32::from_rgb(100, 35, 40) } else { Color32::from_rgb(255, 210, 213) };
                                         paint_cell_background(ui, table_clip, fill);
@@ -4469,6 +4550,7 @@ impl Rustable {
                                     if active_cell {
                                         active_cell_overlay = Some((ui.max_rect().expand2(ui.spacing().item_spacing * 0.5), table_clip));
                                         if self.row_selection.pending_cell_scroll {
+                                            horizontal_scroll_target = Some(ui.max_rect());
                                             ui.scroll_to_rect(ui.max_rect(), None);
                                             self.row_selection.pending_cell_scroll = false;
                                         }
@@ -4488,35 +4570,70 @@ impl Rustable {
                                         _ if text == "Active" || text == "Paid" => GREEN,
                                         _ => ui.visuals().text_color(),
                                     }};
-                                    let label = ui.add(
-                                        egui::Label::new(
-                                            RichText::new(text.as_ref()).monospace().size(12.0).color(color),
-                                        )
-                                        .wrap_mode(if fit_columns { egui::TextWrapMode::Extend } else { egui::TextWrapMode::Truncate })
-                                        .selectable(false).sense(egui::Sense::click()),
-                                    );
-                                    let label = if self.view == View::Data && self.columns.get(column).is_some_and(|c| c.generated) {
-                                        label.on_hover_text("Generated by the database · read-only")
-                                    } else { label };
-                                    double_clicked = label.double_clicked();
-                                    cell_pressed = primary_pressed(&label);
-                                    cell_released = label.clicked();
-                                    label.context_menu(|ui| {
-                                        if ui.button("Copy cell").clicked() {
-                                            ui.ctx().copy_text(db::display(value));
+                                    paint_grid_text(ui, text.as_ref(), color, fit_columns);
+                                });
+                                let response = if self.view == View::Data && self.columns.get(column).is_some_and(|c| c.generated) {
+                                    response.on_hover_text("Generated by the database · read-only")
+                                } else { response };
+                                if !editing {
+                                    response.context_menu(|ui| {
+                                        let writable = editable && !deleting && !self.columns.get(column).is_some_and(|c| c.generated) && !matches!(value, Value::Blob(_));
+                                        if ui.button("Quick Look Editor").clicked() { menu_action = Some(("inspect", column, index)); ui.close(); }
+                                        ui.add_enabled_ui(writable, |ui| ui.menu_button("Set Value", |ui| {
+                                            if ui.button("Edit value…").clicked() { menu_action = Some(("edit", column, index)); ui.close(); }
+                                            if ui.add_enabled(!self.columns.get(column).is_some_and(|c| c.not_null), egui::Button::new("NULL")).clicked() { menu_action = Some(("null", column, index)); ui.close(); }
+                                            if ui.button("Empty string").clicked() { menu_action = Some(("empty", column, index)); ui.close(); }
+                                        }));
+                                        ui.separator();
+                                        if ui.add_enabled(self.pending.is_none() && self.view == View::Data, egui::Button::new("Refresh")).clicked() { menu_action = Some(("refresh", column, index)); ui.close(); }
+                                        ui.separator();
+                                        if ui.add_enabled(writable, egui::Button::new("Paste value…")).on_hover_text("Paste into the focused cell editor; confirm before staging").clicked() { menu_action = Some(("paste", column, index)); ui.close(); }
+                                        if ui.add_enabled(writable, egui::Button::new("Paste to Selected Cells…")).on_hover_text("Paste one value into the selected rows in this column; confirm before staging").clicked() { menu_action = Some(("paste_selected", column, index)); ui.close(); }
+                                        if ui.add_enabled(menu_can_insert, egui::Button::new("Add Row")).clicked() { menu_action = Some(("add", column, index)); ui.close(); }
+                                        if ui.add_enabled(menu_can_insert && !selected_deleted, egui::Button::new("Duplicate Selected Rows")).clicked() { menu_action = Some(("duplicate", column, index)); ui.close(); }
+                                        ui.separator();
+                                        if ui.button("Copy cell").clicked() { ui.ctx().copy_text(db::clipboard_text(value)); ui.close(); }
+                                        for (label, selected_column) in [("Copy Rows", None), ("Copy Selected Cells", Some(column))] {
+                                            if ui.button(label).clicked() {
+                                                let result = row_copy::formatted(&grid.columns, self.row_selection.copy_indices(index).into_iter().filter_map(|i| grid.rows.get(i).map(Vec::as_slice)), &self.changes, (self.view == View::Data).then_some(self.browse.table.as_str()), selected_column, row_copy::Format::Plain, self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
+                                                match result { Ok(text) => ui.ctx().copy_text(text), Err(error) => self.error = Some(error) }
+                                                ui.close();
+                                            }
+                                            ui.menu_button(format!("{label} As"), |ui| {
+                                                for (label, format) in row_copy::FORMATS {
+                                                    if ui.add_enabled(!matches!(format, row_copy::Format::Insert) || self.view == View::Data, egui::Button::new(*label)).clicked() {
+                                                        let result = row_copy::formatted(&grid.columns, self.row_selection.copy_indices(index).into_iter().filter_map(|i| grid.rows.get(i).map(Vec::as_slice)), &self.changes, (self.view == View::Data).then_some(self.browse.table.as_str()), selected_column, *format, self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
+                                                        match result { Ok(text) => ui.ctx().copy_text(text), Err(error) => self.error = Some(error) }
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        if ui.button("Copy All Column Values (Current Page)").clicked() {
+                                            match row_copy::formatted(&grid.columns, grid.rows.iter().map(Vec::as_slice), &self.changes, (self.view == View::Data).then_some(self.browse.table.as_str()), Some(column), row_copy::Format::Plain, crate::sql::Dialect::for_engine(&self.engine)) { Ok(text) => ui.ctx().copy_text(text), Err(error) => self.error = Some(error) }
                                             ui.close();
                                         }
-                                        ui.menu_button("Copy rows as", |ui| {
-                                            for (label, delimiter, headers) in [("Tab-separated", '\t', false), ("Tab-separated with headers", '\t', true), ("CSV", ',', false), ("CSV with headers", ',', true)] {
-                                                if ui.button(label).clicked() {
-                                                    match row_copy::format_rows(&grid.columns, self.row_selection.copy_indices(index).into_iter().filter_map(|i| grid.rows.get(i).map(Vec::as_slice)), &self.changes, (self.view == View::Data).then_some(self.browse.table.as_str()), delimiter, headers) {
-                                                        Ok(text) => ui.ctx().copy_text(text),
-                                                        Err(error) => self.error = Some(error),
-                                                    }
+                                        ui.separator();
+                                        ui.add_enabled_ui(self.view == View::Data && self.pending.is_none(), |ui| ui.menu_button("Quick Filter", |ui| {
+                                            for op in db::filters::OPERATORS {
+                                                let needs_value = !op.starts_with("IS ");
+                                                if ui.add_enabled(!needs_value || !matches!(value, Value::Null | Value::Blob(_)), egui::Button::new(format!("{} {} {}", grid.columns[column], op, if needs_value { db::preview(value, 36).into_owned() } else { String::new() }))).clicked() {
+                                                    let text = if op.ends_with("IN") { serde_json::to_string(&vec![db::clipboard_text(value)]).unwrap() } else { db::clipboard_text(value) };
+                                                    quick_filter = Some(db::filters::Filter { enabled: true, column: grid.columns[column].clone(), operator: (*op).into(), value: text });
                                                     ui.close();
                                                 }
                                             }
-                                        });
+                                        }));
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        {
+                                            ui.separator();
+                                            if ui.add_enabled(menu_can_import, egui::Button::new("Import CSV…")).clicked() { menu_action = Some(("import", column, index)); ui.close(); }
+                                            ui.menu_button("Export Current Page", |ui| {
+                                                if ui.button("CSV…").clicked() { menu_action = Some(("export_csv", column, index)); ui.close(); }
+                                                if ui.button("JSON…").clicked() { menu_action = Some(("export_json", column, index)); ui.close(); }
+                                            });
+                                        }
+                                        ui.separator();
                                         if self.row_selection.rows.len() > 1 && self.row_selection.rows.contains(&index) {
                                             let restore = selected_deleted;
                                             let label = format!("{} {} selected rows", if restore { "Restore" } else { "Delete" }, self.row_selection.rows.len());
@@ -4529,21 +4646,16 @@ impl Rustable {
                                             ui.close();
                                         }
                                         let writable = editable && !deleting && !self.columns.get(column).is_some_and(|c| c.generated);
-                                        if ui.add_enabled(writable && !self.columns.get(column).is_some_and(|c| c.not_null), egui::Button::new("Set NULL")).clicked() {
-                                            cell_action = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: self.browse.table.clone(), row: grid.rows[index].clone(), original_value: original_value.clone(), column: grid.columns[column].clone(), text: String::new(), kind: 0, focus: false, inspector: false });
-                                            ui.close();
-                                        }
                                         if ui.add_enabled(writable && staged.is_some(), egui::Button::new("Revert cell")).clicked() {
                                             cell_action = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: self.browse.table.clone(), row: grid.rows[index].clone(), original_value: original_value.clone(), column: grid.columns[column].clone(), text: if matches!(original_value, Value::Null) { String::new() } else { db::display(original_value) }, kind: match original_value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, Value::Blob(_) => 4, _ => 3 }, focus: false, inspector: false });
                                             ui.close();
                                         }
                                     });
-                                });
-                                let cell_press = cell_pressed || primary_pressed(&response);
+                                }
+                                let cell_press = primary_pressed(&response);
                                 if cell_press { self.row_selection.cell_column = column; }
-                                pressed |= cell_press;
-                                released |= cell_released || response.clicked();
-                                if (response.double_clicked() || double_clicked || (start_edit_key && active_cell))
+                                released |= response.clicked();
+                                if (response.double_clicked() || (start_edit_key && active_cell))
                                     && editable
                                     && !deleting
                                     && !self.columns.get(column).is_some_and(|c| c.generated)
@@ -4574,21 +4686,13 @@ impl Rustable {
                                     });
                                 }
                             }
-                            if pressed || primary_pressed(&row.response()) {
-                                if self.edit.as_ref().is_some_and(|e| !e.bulk_rows.is_empty()) && !self.finish_cell_edit() {
-                                    return;
-                                }
-                                let modifiers = row.response().ctx.input(|i| i.events.iter().rev().find_map(|event| match event {
-                                    egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: true, modifiers, .. } => Some(*modifiers),
-                                    _ => None,
-                                }).unwrap_or(i.modifiers));
-                                self.selected = self.row_selection.click(index, modifiers.shift, modifiers.command, self.selected.filter(|i| *i < grid.rows.len()));
-                                if self.edit.is_none() && edit.is_none() { grid_focus.request_focus(); grid_focus.ctx.request_repaint(); }
-                            }
                             self.restore_grid_keyboard_focus(&grid_focus, released || row.response().clicked(), edit.is_some());
 
                         });
                     });
+                // The table's vertical ScrollArea consumes child scroll requests;
+                // also forward the target to the enclosing horizontal ScrollArea.
+                if let Some(rect) = horizontal_scroll_target { ui.scroll_to_rect(rect, None); }
                 if let Some((rect, clip)) = active_cell_overlay { paint_active_cell(ui, rect, clip); }
                 // TableBuilder applies drag/Fit geometry after the body callback.
                 // Record the intent now, and capture only those columns' resulting
@@ -4610,6 +4714,54 @@ impl Rustable {
             self.copy_rows_shortcut(&grid_focus.ctx, grid_focus.has_focus());
             if self.row_delete_shortcut(&grid_focus.ctx, grid_focus.has_focus()) {
                 bulk_delete = Some(true);
+            }
+        }
+        if let Some(rule) = quick_filter {
+            let mut rules = self.browse.filters.clone();
+            if let Some(column) = &self.browse.filter_column { rules.push(db::filters::Filter { enabled: true, column: column.clone(), operator: "Contains".into(), value: self.browse.filter.clone() }); }
+            rules.push(rule);
+            self.filter_rules_table = self.browse.table.clone();
+            self.filter_rules = rules.clone();
+            self.filter_rules_original = rules.iter().cloned().map(Some).collect();
+            self.filters_visible = true;
+            self.apply_filter_rules(rules);
+        }
+        if let Some((action, column, index)) = menu_action {
+            match action {
+                "refresh" => { if self.finish_cell_edit() { self.refresh(); } }
+                "add" => self.add_insert(),
+                #[cfg(not(target_arch = "wasm32"))]
+                "import" => self.preview_csv_dialog(ui.ctx()),
+                #[cfg(not(target_arch = "wasm32"))]
+                "export_csv" => self.file_dialog(ui.ctx(), true),
+                #[cfg(not(target_arch = "wasm32"))]
+                "export_json" => self.json_export_dialog(ui.ctx()),
+                "duplicate" => {
+                    let indices = self.row_selection.copy_indices(index);
+                    for index in indices { self.selected = Some(index); self.duplicate_selected(); }
+                }
+                _ => {
+                    if self.finish_cell_edit() {
+                        self.inspector = true;
+                        if action == "paste" { self.selected = self.row_selection.click(index, false, false, None); }
+                        let multiple = self.row_selection.rows.len() > 1;
+                        if multiple { self.start_bulk_edit(column); }
+                        else if editable && !self.columns.get(column).is_some_and(|c| c.generated) && !matches!(grid.rows[index][column], Value::Blob(_)) {
+                            let original = &grid.rows[index][column];
+                            let value = self.changes.iter().find_map(|change| match change { Change::Cell { table, column: name, original: source, value } if table == &self.browse.table && name == &grid.columns[column] && source == &grid.rows[index] => Some(value), _ => None }).unwrap_or(original);
+                            if !matches!(value, Value::Text(t) if t.len() > 65536) {
+                                self.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: self.browse.table.clone(), row: grid.rows[index].clone(), original_value: original.clone(), column: grid.columns[column].clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: true, inspector: true });
+                            }
+                        }
+                        if matches!(action, "null" | "empty") {
+                            if let Some(edit) = &mut self.edit { edit.text.clear(); edit.kind = if action == "null" { 0 } else { 3 }; edit.bulk_changed = true; }
+                            self.finish_cell_edit();
+                        } else if action.starts_with("paste") && self.edit.is_some() {
+                            self.paste_requested = true;
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                        }
+                    }
+                }
             }
         }
         if let Some(order) = explicit_sort {
@@ -5267,7 +5419,7 @@ impl Rustable {
                                 movement = Some((i, i + 1));
                             }
                             if ui
-                                .small_button("×")
+                                .add(crate::icons::widget("x"))
                                 .on_hover_text("Remove column from index")
                                 .clicked()
                             {
@@ -5580,12 +5732,16 @@ impl Rustable {
     }
 }
 
-impl eframe::App for Rustable {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl Rustable {
+    pub(crate) fn begin_workspace_frame(&mut self, ctx: &egui::Context) {
         let start = Instant::now();
         self.poll();
         self.workspace_shortcuts(ctx);
         self.toolbar(ctx);
+        self.frame_ms = start.elapsed().as_secs_f32() * 1000.0;
+    }
+    pub(crate) fn render_workspace_frame(&mut self, ctx: &egui::Context) {
+        let start = Instant::now();
         if cfg!(feature = "qa") { self.footer(ctx); }
         if ctx.content_rect().width() < 720.0 {
             match self.compact_panel {
@@ -5619,7 +5775,32 @@ impl eframe::App for Rustable {
             // The spinner needs animation only while a task is active.
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
-        self.frame_ms = start.elapsed().as_secs_f32() * 1000.0;
+        self.frame_ms += start.elapsed().as_secs_f32() * 1000.0;
+    }
+
+}
+impl eframe::App for Rustable {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.edit.is_none() { self.paste_requested = false; }
+        if self.paste_requested {
+            let pasted = ctx.input_mut(|input| {
+                let index = input.events.iter().position(|e| matches!(e, egui::Event::Paste(_)))?;
+                match input.events.remove(index) { egui::Event::Paste(text) => Some(text), _ => None }
+            });
+            if let Some(text) = pasted {
+                self.paste_requested = false;
+                if text.len() > 65536 { self.error = Some("Pasted value exceeds the 64 KiB editor limit.".into()); }
+                else if let Some(edit) = &mut self.edit {
+                    edit.text = text;
+                    if edit.kind == 0 { edit.kind = 3; }
+                    edit.bulk_changed = true;
+                    edit.focus = true;
+                }
+            }
+        }
+
+        self.begin_workspace_frame(ctx);
+        self.render_workspace_frame(ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -5674,59 +5855,20 @@ fn apply_theme(ctx: &egui::Context, appearance: Appearance) {
     ctx.set_theme(appearance.preference());
 }
 
+fn toolbar_group<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+    crate::icons::toolbar_group(ui, 3, contents)
+}
+
 fn toolbar_action(ui: &mut egui::Ui, kind: u8, selected: bool) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(34.0, 26.0), egui::Sense::click());
-    let visuals = ui.style().interact(&response);
-    ui.painter().rect_filled(
-        rect,
-        12.0,
-        if selected {
-            ui.visuals().widgets.active.bg_fill
-        } else {
-            visuals.weak_bg_fill
-        },
-    );
-    let c = rect.center();
-    let stroke = Stroke::new(1.2_f32, visuals.fg_stroke.color);
-    let line = |a: [f32; 2], b: [f32; 2]| {
-        ui.painter().line_segment(
-            [c + egui::vec2(a[0], a[1]), c + egui::vec2(b[0], b[1])],
-            stroke,
-        );
-    };
-    match kind {
-        0 => {
-            ui.painter().rect_stroke(
-                egui::Rect::from_center_size(c, egui::vec2(16.0, 14.0)),
-                2.0,
-                stroke,
-                egui::StrokeKind::Inside,
-            );
-            line([-3.0, -6.0], [-3.0, 6.0]);
-        }
-        1 => {
-            for y in [-5.0, 5.0] {
-                ui.painter().add(egui::Shape::ellipse_stroke(c + egui::vec2(0.0, y), egui::vec2(7.0, 3.0), stroke));
-            }
-            line([-7.0, -5.0], [-7.0, 5.0]);
-            line([7.0, -5.0], [7.0, 5.0]);
-        }
-        2 => {
-            ui.painter().text(
-                c,
-                egui::Align2::CENTER_CENTER,
-                "SQL",
-                egui::FontId::proportional(10.0),
-                stroke.color,
-            );
-        }
-        _ => {
-            for y in [-5.0, 0.0, 5.0] {
-                line([-7.0, y], [7.0, y]);
-            }
-        }
+    if kind == 2 {
+        let (rect, response) = ui.allocate_exact_size(crate::icons::TOOLBAR_BUTTON, egui::Sense::click());
+        let visuals = ui.style().interact_selectable(&response, selected);
+        if selected || response.hovered() { ui.painter().rect_filled(rect, 12.0, visuals.weak_bg_fill); }
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "SQL", egui::FontId::proportional(12.0), visuals.fg_stroke.color);
+        response
+    } else {
+        crate::icons::button(ui, match kind { 0 => "plug", 1 => "database", 3 => "refresh-cw", 4 => "command", _ => "sliders-horizontal" }, crate::icons::TOOLBAR_BUTTON, selected)
     }
-    response
 }
 
 fn apply_formatted_sql(tab: &mut QueryTab, formatted: crate::sql_format::Formatted, state: &mut egui::text_edit::TextEditState) {
@@ -5761,29 +5903,21 @@ fn accept_completion(tab: &mut QueryTab, value: &str, state: &mut egui::text_edi
     state.set_undoer(undoer);
 }
 
-fn inspector_search(ui: &mut egui::Ui, text: &mut String) {
+fn sidebar_search(ui: &mut egui::Ui, text: &mut String, hint: &str) {
     egui::Frame::new()
         .fill(ui.visuals().extreme_bg_color)
         .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
         .corner_radius(12.0)
-        .inner_margin(egui::Margin::symmetric(7, 3))
+        .inner_margin(egui::Margin::symmetric(7, 2))
         .show(ui, |ui| {
+            ui.spacing_mut().interact_size.y = 18.0;
+            ui.spacing_mut().item_spacing.x = 5.0;
             ui.horizontal(|ui| {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(14.0, 18.0), egui::Sense::hover());
-                let center = rect.center() - egui::vec2(1.5, 1.5);
-                let stroke = Stroke::new(1.3_f32, ui.visuals().weak_text_color());
-                ui.painter().circle_stroke(center, 4.5, stroke);
-                ui.painter().line_segment(
-                    [center + egui::vec2(3.2, 3.2), center + egui::vec2(6.5, 6.5)],
-                    stroke,
-                );
-                ui.add(
-                    TextEdit::singleline(text)
-                        .frame(false)
-                        .hint_text("Search for field…")
-                        .desired_width(f32::INFINITY),
-                );
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 18.0), egui::Sense::hover());
+                crate::icons::paint(ui.painter(), rect.center(), "search", 14.0, ui.visuals().weak_text_color());
+                ui.add_sized([ui.available_width(), 18.0], TextEdit::singleline(text)
+                    .frame(false).margin(egui::Margin::ZERO).vertical_align(egui::Align::Center)
+                    .font(egui::FontId::proportional(13.0)).hint_text(hint));
             });
         });
 }
@@ -5861,16 +5995,13 @@ fn table_control_geometry(
     };
     let gap = 6.0;
     let right = if view == View::Data {
-        76.0 + 56.0 + measure("Import / Export") + 14.0 + gap * 3.0
+        28.0 + 84.0 + measure("Import / Export") + 14.0 + gap * 4.0
     } else {
         measure("Import / Export") + 14.0
     };
     let left = 248.0
-        + measure("↻")
-        + 12.0
-        + gap
         + if view == View::Data {
-            measure("+ Row") + measure("Rows") + 24.0 + gap * 2.0
+            28.0 + gap
         } else if view == View::Structure {
             measure("+ Column") + 12.0 + gap
         } else {
@@ -6038,103 +6169,56 @@ fn rounded_action_buttons(ui: &mut egui::Ui) {
 
 fn filter_button(selected: bool) -> impl egui::Widget {
     move |ui: &mut egui::Ui| {
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(76.0, 28.0), egui::Sense::click());
-        let visuals = ui.style().interact_selectable(&response, selected);
-        ui.painter().rect_filled(rect, 5.0, visuals.weak_bg_fill);
-        let stroke = visuals.fg_stroke;
-        for (y, x) in [(-5.0, -2.0), (0.0, 3.0), (5.0, -1.0)] {
-            let center = egui::pos2(rect.left() + 14.0, rect.center().y + y);
-            ui.painter().line_segment(
-                [
-                    center + egui::vec2(-6.0, 0.0),
-                    center + egui::vec2(6.0, 0.0),
-                ],
-                stroke,
-            );
-            ui.painter()
-                .circle_filled(center + egui::vec2(x, 0.0), 2.0, stroke.color);
-        }
-        ui.painter().text(
-            egui::pos2(rect.left() + 28.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            "Filters",
-            egui::FontId::proportional(12.0),
-            stroke.color,
-        );
+        let response = ui.add(result_search_button());
+        if selected { ui.painter().line_segment([response.rect.left_bottom(), response.rect.right_bottom()], Stroke::new(2.0_f32, ui.visuals().selection.bg_fill)); }
         response.on_hover_text("Show or hide table filters · Cmd/Ctrl+F")
     }
 }
 
+fn pagination_button() -> impl egui::Widget {
+    move |ui: &mut egui::Ui| { crate::icons::button(ui, "sliders-horizontal", egui::vec2(28.0, 28.0), false) }
+}
+
 fn result_pin_button(pinned: bool) -> impl egui::Widget {
-    move |ui: &mut egui::Ui| {
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
-        let visuals = ui.style().interact_selectable(&response, pinned);
-        ui.painter().rect_filled(rect, 5.0, visuals.weak_bg_fill);
-        let center = rect.center();
-        let stroke = Stroke::new(1.5_f32, visuals.fg_stroke.color);
-        let point = |x: f32, y: f32| center + egui::vec2(x, y);
-        ui.painter().add(egui::Shape::closed_line(vec![point(-4.0,-7.0),point(4.0,-7.0),point(3.0,-1.0),point(6.0,3.0),point(-6.0,3.0),point(-3.0,-1.0)], stroke));
-        ui.painter().line_segment([point(0.0,3.0),point(0.0,9.0)], stroke);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), if pinned { "Unpin result" } else { "Pin result" }));
-        response
-    }
+    move |ui: &mut egui::Ui| { crate::icons::button(ui, "pin", egui::vec2(28.0, 28.0), pinned) }
 }
 
 fn result_search_button() -> impl egui::Widget {
-    |ui: &mut egui::Ui| {
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
-        let visuals = ui.style().interact(&response);
-        ui.painter().rect_filled(rect, 5.0, visuals.weak_bg_fill);
-        let center = rect.center() - egui::vec2(2.0, 2.0);
-        let stroke = Stroke::new(1.5_f32, visuals.fg_stroke.color);
-        ui.painter().circle_stroke(center, 5.5, stroke);
-        ui.painter().line_segment([center + egui::vec2(4.0, 4.0), center + egui::vec2(9.0, 9.0)], stroke);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Find in loaded results"));
-        response
-    }
+    move |ui: &mut egui::Ui| { crate::icons::button(ui, "search", egui::vec2(28.0, 28.0), false) }
 }
 
 fn navigation_button(next: bool) -> impl egui::Widget {
-    move |ui: &mut egui::Ui| {
-        let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
-        let visuals = ui.style().interact(&response);
-        ui.painter().rect_filled(rect, 5.0, visuals.weak_bg_fill);
-        let center = rect.center();
-        let direction = if next { 1.0 } else { -1.0 };
-        ui.painter().add(egui::Shape::line(
-            vec![
-                center + egui::vec2(-3.0 * direction, -6.0),
-                center + egui::vec2(3.0 * direction, 0.0),
-                center + egui::vec2(-3.0 * direction, 6.0),
-            ],
-            Stroke::new(1.5_f32, visuals.fg_stroke.color),
-        ));
-        response.on_hover_text(if next { "Next page · Cmd/Ctrl+Right (table grid)" } else { "Previous page · Cmd/Ctrl+Left (table grid)" })
-    }
+    move |ui: &mut egui::Ui| { crate::icons::button(ui, if next { "chevron-right" } else { "chevron-left" }, egui::vec2(28.0, 28.0), false).on_hover_text(if next { "Next page" } else { "Previous page" }) }
+}
+
+fn workspace_tab_width(available: f32, count: usize, spacing: f32) -> f32 {
+    // Reserve the new-tab control. Overflow only once titles/close controls would
+    // otherwise become unusably narrow; the strip remains horizontally scrollable.
+    ((available - 24.0 - spacing * count as f32) / count.max(1) as f32).max(72.0)
 }
 
 fn workspace_tab(
     ui: &mut egui::Ui,
+    width: f32,
     title: &str,
     selected: bool,
     closable: bool,
 ) -> (egui::Response, bool) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(180.0, 27.0), egui::Sense::click());
-    let visuals = ui.style().interact(&response);
-    if selected || response.hovered() {
-        ui.painter().rect_filled(
-            rect.shrink(1.0),
-            12.0,
-            if selected {
-                ui.visuals().widgets.active.bg_fill
-            } else {
-                visuals.weak_bg_fill
-            },
-        );
-    }
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::click());
+    let dark = ui.visuals().dark_mode;
+    let (fill, outline) = match (dark, selected, response.hovered()) {
+        (true, true, _) => (78, 96),
+        (true, false, true) => (64, 82),
+        (true, false, false) => (59, 59),
+        (false, true, _) => (255, 190),
+        (false, false, true) => (240, 192),
+        (false, false, false) => (210, 210),
+    };
+    ui.painter().rect(rect, 10.0, Color32::from_gray(fill),
+        if selected { Stroke::new(1.0_f32, Color32::from_gray(outline)) } else { Stroke::NONE }, egui::StrokeKind::Inside);
     let text_rect = egui::Rect::from_min_max(
-        rect.min + egui::vec2(10.0, 0.0),
-        rect.max - egui::vec2(26.0, 0.0),
+        rect.min + egui::vec2(38.0, 0.0),
+        rect.max - egui::vec2(38.0, 0.0),
     );
     let mut job = egui::text::LayoutJob::simple_singleline(
         title.to_owned(),
@@ -6152,26 +6236,11 @@ fn workspace_tab(
     let mut closed = false;
     if closable {
         let close_rect = egui::Rect::from_center_size(
-            egui::pos2(rect.right() - 12.0, rect.center().y),
+            egui::pos2(rect.right() - 19.0, rect.center().y),
             egui::vec2(20.0, 22.0),
         );
         let close = ui.interact(close_rect, response.id.with("close"), egui::Sense::click());
-        let center = close_rect.center();
-        let stroke = Stroke::new(1.0_f32, ui.style().interact(&close).fg_stroke.color);
-        ui.painter().line_segment(
-            [
-                center + egui::vec2(-3.0, -3.0),
-                center + egui::vec2(3.0, 3.0),
-            ],
-            stroke,
-        );
-        ui.painter().line_segment(
-            [
-                center + egui::vec2(-3.0, 3.0),
-                center + egui::vec2(3.0, -3.0),
-            ],
-            stroke,
-        );
+        crate::icons::paint(ui.painter(), close_rect.center(), "x", 12.0, ui.style().interact(&close).fg_stroke.color);
         closed = close.clicked_by(egui::PointerButton::Middle)
             || close.on_hover_text("Close tab · ⌘W · Reopen ⌘⇧T").clicked();
     }
@@ -6181,15 +6250,8 @@ fn workspace_tab(
 fn field_value_menu(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 22.0), egui::Sense::click());
     let visuals = ui.style().interact(&response);
-    let center = rect.center();
-    ui.painter().add(egui::Shape::line(
-        vec![
-            center + egui::vec2(-3.5, -1.5),
-            center + egui::vec2(0.0, 2.0),
-            center + egui::vec2(3.5, -1.5),
-        ],
-        Stroke::new(1.3_f32, visuals.fg_stroke.color),
-    ));
+    crate::icons::paint(ui.painter(), rect.center(), "chevron-down", 14.0, visuals.fg_stroke.color);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Field value actions"));
     egui::Popup::menu(&response).show(contents);
     response
 }
@@ -6310,29 +6372,8 @@ fn clipboard_button(ui: &mut egui::Ui) -> egui::Response {
         .data(|data| data.get_temp::<f64>(feedback_id))
         .unwrap_or(0.0);
     let copied = now < until;
-    let stroke = ui.style().interact(&response).fg_stroke;
-    if copied {
-        let center = rect.center();
-        ui.painter().add(egui::Shape::line(
-            vec![
-                center + egui::vec2(-5.0, 0.0),
-                center + egui::vec2(-1.0, 4.0),
-                center + egui::vec2(6.0, -4.0),
-            ],
-            egui::Stroke::new(1.8_f32, stroke.color),
-        ));
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_secs_f64(until - now));
-    } else {
-        let r = egui::Rect::from_center_size(rect.center(), egui::vec2(10.0, 12.0));
-        ui.painter()
-            .rect_stroke(r, 2.0, stroke, egui::StrokeKind::Inside);
-        ui.painter().rect_filled(
-            egui::Rect::from_center_size(r.center_top(), egui::vec2(6.0, 3.0)),
-            1.0,
-            stroke.color,
-        );
-    }
+    crate::icons::paint(ui.painter(), rect.center(), if copied { "check" } else { "clipboard" }, 16.0, ui.style().interact(&response).fg_stroke.color);
+    if copied { ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(until - now)); }
     response.on_hover_text(if copied { "Copied" } else { "Copy full value" })
 }
 
@@ -6688,6 +6729,23 @@ fn paint_grid_corner(ui: &mut egui::Ui) {
         ui.painter()
             .line_segment([tip - direction * 2.5 - side, tip], stroke);
     }
+}
+
+// TableRow already owns the cell's interaction response. Painting the text
+// directly avoids registering a second clickable widget for every visible cell.
+fn paint_grid_text(ui: &mut egui::Ui, text: &str, color: Color32, fit: bool) {
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        text.to_owned(), egui::FontId::monospace(12.0), color,
+    );
+    job.break_on_newline = true;
+    if !fit {
+        job.wrap.max_width = ui.available_width();
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+    }
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let (_, rect) = ui.allocate_space(galley.size());
+    ui.painter().galley(rect.min, galley, color);
 }
 
 fn paint_cell_background(ui: &egui::Ui, table_clip: egui::Rect, fill: Color32) {
@@ -7165,6 +7223,213 @@ mod interaction_tests {
             if !columns.is_empty() {
                 assert!(text.contains("known_column"));
             }
+        }
+    }
+
+    #[test]
+    fn painted_grid_text_preserves_label_layout() {
+        for fit in [false, true] {
+            for text in ["日本語 with a long value that truncates", "first\nsecond", "", "123.45"] {
+                let ctx = egui::Context::default();
+                let _ = ctx.run(Default::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let mut sizes = Vec::new();
+                        for direct in [false, true] {
+                            let response = ui.allocate_ui(egui::vec2(90.0, 22.0), |ui| {
+                                if direct { paint_grid_text(ui, text, Color32::WHITE, fit); }
+                                else { ui.add(egui::Label::new(RichText::new(text).monospace().size(12.0).color(Color32::WHITE))
+                                    .wrap_mode(if fit { egui::TextWrapMode::Extend } else { egui::TextWrapMode::Truncate })
+                                    .selectable(false).sense(egui::Sense::click())); }
+                                ui.min_size()
+                            });
+                            sizes.push(response.inner);
+                        }
+                        assert!((sizes[0] - sizes[1]).length() < 0.1, "{fit} {text:?}: {sizes:?}");
+                    });
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn painted_cell_retains_context_menu() {
+        fn text_pos(shapes: &[egui::epaint::ClippedShape], target: &str) -> Option<egui::Pos2> {
+            shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == target => Some(text.pos),
+                _ => None,
+            })
+        }
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_launcher_preferences(&ctx, Preferences::default());
+        app.pending = None;
+        app.view = View::Data;
+        app.table = Arc::new(Grid { columns: vec!["value".into()], rows: vec![vec![Value::Text("right-click me".into())]], ..Default::default() });
+        let render = |app: &mut Rustable, events| ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 500.0))),
+            events, ..Default::default()
+        }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+        render(&mut app, vec![]);
+        let output = render(&mut app, vec![]);
+        let point = text_pos(&output.shapes, "right-click me").unwrap() + egui::vec2(5.0, 5.0);
+        render(&mut app, vec![egui::Event::PointerMoved(point), egui::Event::PointerButton {
+            pos: point, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE,
+        }]);
+        render(&mut app, vec![egui::Event::PointerButton {
+            pos: point, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE,
+        }]);
+        let output = render(&mut app, vec![]);
+        assert!(text_pos(&output.shapes, "Copy cell").is_some());
+    }
+
+    #[test]
+    fn wide_grid_culling_preserves_keyboard_scroll_and_horizontal_extent() {
+        fn has_text(shape: &egui::Shape, needle: &str) -> bool {
+            match shape {
+                egui::Shape::Text(text) => text.galley.job.text == needle,
+                egui::Shape::Vec(shapes) => shapes.iter().any(|s| has_text(s, needle)),
+                _ => false,
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
+        app.view = View::Data;
+        app.table = Arc::new(Grid {
+            columns: (0..120).map(|c| format!("column_{c}")).collect(),
+            rows: vec![(0..120).map(|c| Value::Text(format!("value_{c}"))).collect()],
+            ..Default::default()
+        });
+        let mut last_visible = false;
+        for frame in 0..120 {
+            if frame == 3 {
+                app.selected = Some(0);
+                app.row_selection.rows.insert(0);
+                app.row_selection.focused = Some(0);
+                app.row_selection.cell_column = 119;
+                app.row_selection.pending_cell_scroll = true;
+            }
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0))),
+                time: Some(frame as f64 * 0.1),
+                ..Default::default()
+            }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+            if frame == 2 {
+                assert!(output.shapes.iter().any(|s| has_text(&s.shape, "value_0")));
+                assert!(!output.shapes.iter().any(|s| has_text(&s.shape, "value_119")));
+            }
+            if frame == 119 {
+                last_visible = output.shapes.iter().any(|s| has_text(&s.shape, "value_119"));
+            }
+        }
+        assert!(!app.row_selection.pending_cell_scroll);
+        assert!(last_visible, "keyboard navigation must reveal the last offscreen column");
+    }
+
+    #[test]
+    fn mouse_wheel_moves_the_grid_in_small_steps_without_an_animation_tail() {
+        fn text_position(shape: &egui::Shape, needle: &str) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.job.text == needle => Some(text.pos),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| text_position(s, needle)),
+                _ => None,
+            }
+        }
+        for (horizontal, unit, amount, ticks) in [
+            (false, egui::MouseWheelUnit::Line, 1.0, 1),
+            (false, egui::MouseWheelUnit::Line, 1.0, 4),
+            (true, egui::MouseWheelUnit::Line, 1.0, 1),
+            (true, egui::MouseWheelUnit::Line, 1.0, 4),
+            (false, egui::MouseWheelUnit::Point, 20.0, 1),
+            (false, egui::MouseWheelUnit::Point, 20.0, 4),
+            (true, egui::MouseWheelUnit::Point, 20.0, 1),
+            (true, egui::MouseWheelUnit::Point, 20.0, 4),
+        ] {
+            let ctx = egui::Context::default();
+            crate::scroll_response::install(&ctx);
+            let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+            app.pending = None;
+            app.view = View::Data;
+            app.table = Arc::new(Grid {
+                columns: (0..120).map(|c| format!("column_{c}")).collect(),
+                rows: (0..500).map(|r| (0..120).map(|c| Value::Text(format!("r{r}_c{c}"))).collect()).collect(),
+                ..Default::default()
+            });
+            let mut positions = Vec::new();
+            for frame in 0..65 {
+                let mut events = vec![egui::Event::PointerMoved(egui::pos2(400.0,200.0))];
+                if (4..4+ticks).contains(&frame) {
+                    events.push(egui::Event::MouseWheel { unit, delta:egui::vec2(0.0,-amount), modifiers:if horizontal { egui::Modifiers::SHIFT } else { egui::Modifiers::NONE } });
+                }
+                let output = ctx.run(egui::RawInput {
+                    screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(800.0,400.0))),
+                    time:Some(frame as f64 / 120.0), events, ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+                if frame >= 3 {
+                    assert_eq!(output.platform_output.num_completed_passes, 1, "scrolling must not force a second layout pass");
+                    positions.push(output.shapes.iter().find_map(|s| text_position(&s.shape, "r5_c2")).expect("reference cell remains visible"));
+                }
+            }
+            let axis = if horizontal { 0 } else { 1 };
+            assert!((positions[0][axis] - positions[1][axis] - 20.0).abs() < 1.0,
+                "wheel movement must be painted in the event frame, not the next frame: {positions:?}");
+            assert!((positions[0][axis] - positions.last().unwrap()[axis] - 20.0*ticks as f32).abs() < 1.0);
+            assert!((positions[0][1-axis] - positions.last().unwrap()[1-axis]).abs() < 0.01);
+            let moving_frames = positions.windows(2).filter(|p| (p[0][axis]-p[1][axis]).abs() > 0.01).count();
+            assert_eq!(moving_frames, ticks, "each tick should produce one small step with no animation tail");
+            assert_eq!(positions[positions.len()-1], positions[positions.len()-2]);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual wide-grid frame benchmark"]
+    fn wide_grid_scroll_frame_benchmark() {
+        for (name, unit, horizontal) in [
+            ("vertical precise", egui::MouseWheelUnit::Point, false),
+            ("horizontal precise", egui::MouseWheelUnit::Point, true),
+            ("vertical mouse", egui::MouseWheelUnit::Line, false),
+            ("horizontal mouse", egui::MouseWheelUnit::Line, true),
+        ] {
+            let ctx = egui::Context::default();
+            crate::scroll_response::install(&ctx);
+            let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+            app.pending = None;
+            app.view = View::Data;
+            app.browse.table = "wide_fixture".into();
+            app.table = Arc::new(Grid {
+                columns: (0..120).map(|c| format!("column_{c}")).collect(),
+                rows: (0..500).map(|r| (0..120).map(|c| Value::Text(format!("member {r} field {c} sample data"))).collect()).collect(),
+                ..Default::default()
+            });
+            let mut samples = Vec::new();
+            let mut event_samples = Vec::new();
+            let mut tessellation_samples = Vec::new();
+            for frame in 0..180 {
+                let mut events = vec![egui::Event::PointerMoved(egui::pos2(600.0,400.0))];
+                let has_wheel = unit == egui::MouseWheelUnit::Point || frame % 6 == 0;
+                if has_wheel {
+                    let amount = if unit == egui::MouseWheelUnit::Point { 20.0 } else { 3.0 } * if frame < 90 { -1.0 } else { 1.0 };
+                    events.push(egui::Event::MouseWheel { unit, delta:egui::vec2(0.0, amount), modifiers:if horizontal { egui::Modifiers::SHIFT } else { egui::Modifiers::NONE } });
+                }
+                let started = std::time::Instant::now();
+                let output = ctx.run(egui::RawInput {
+                    screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1200.0,800.0))),
+                    time:Some(frame as f64 / 120.0), events, ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+                let layout_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let tessellation_start = std::time::Instant::now();
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                let tessellation_ms = tessellation_start.elapsed().as_secs_f64() * 1000.0;
+                if frame >= 20 {
+                    samples.push(layout_ms);
+                    tessellation_samples.push(tessellation_ms);
+                    if has_wheel { event_samples.push(layout_ms); }
+                }
+            }
+            samples.sort_by(f64::total_cmp);
+            event_samples.sort_by(f64::total_cmp);
+            tessellation_samples.sort_by(f64::total_cmp);
+            println!("wide grid {name} CPU frame ms: p50={:.3} p95={:.3}",samples[samples.len()/2],samples[samples.len()*95/100]);
+            println!("  wheel-event layout p95={:.3} ms; tessellation p95={:.3} ms", event_samples[event_samples.len()*95/100], tessellation_samples[tessellation_samples.len()*95/100]);
         }
     }
 
@@ -7754,11 +8019,10 @@ mod interaction_tests {
         app.pending = None;
         app.view = View::Data;
         app.table = Arc::new(Grid {
-            columns: vec!["name".into()],
-            rows: vec![
-                vec![Value::Text("press_first_row".into())],
-                vec![Value::Text("press_second_row".into())],
-            ],
+            columns: (0..120).map(|c| format!("column_{c}")).collect(),
+            rows: ["press_first_row", "press_second_row"].into_iter().map(|name| {
+                (0..120).map(|c| Value::Text(if c == 0 { name.into() } else { format!("value_{c}") })).collect()
+            }).collect(),
             ..Default::default()
         });
         let frame = |app: &mut Rustable, events| {
@@ -7805,7 +8069,12 @@ mod interaction_tests {
         };
         frame(&mut app, vec![egui::Event::PointerMoved(first)]);
         assert_eq!(app.selected, None, "hover must not select");
-        frame(&mut app, pointer(first, true, egui::Modifiers::NONE));
+        let pressed_output = frame(&mut app, pointer(first, true, egui::Modifiers::NONE));
+        let selected_fill = ctx.style().visuals.selection.bg_fill;
+        assert!(pressed_output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Rect(rect) if rect.fill == selected_fill && rect.rect.contains(first))),
+            "selection highlight must be painted in the mouse-press frame");
+        assert_eq!(pressed_output.platform_output.num_completed_passes, 1);
         assert_eq!(app.selected, Some(0), "text label must select on press");
         frame(&mut app, pointer(first, false, egui::Modifiers::NONE));
         frame(&mut app, pointer(second, true, egui::Modifiers::COMMAND));
@@ -7825,6 +8094,12 @@ mod interaction_tests {
         assert_eq!(app.selected, Some(1));
         frame(&mut app, pointer(gutter, false, egui::Modifiers::NONE));
         assert_eq!(app.selected, Some(1));
+        let switched = frame(&mut app, pointer(first, true, egui::Modifiers::NONE));
+        let highlighted = |pos| switched.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Rect(rect) if rect.fill == selected_fill && rect.rect.contains(pos)));
+        assert!(highlighted(first), "new row must be highlighted immediately");
+        assert!(!highlighted(second), "old row highlight must clear in the same frame");
+        assert_eq!(switched.platform_output.num_completed_passes, 1);
     }
 
     #[test]
@@ -8639,6 +8914,158 @@ mod workspace_layout_tests {
     }
 
     #[test]
+    #[ignore = "manual complete workspace selection rendering benchmark"]
+    fn wide_workspace_selection_frame_benchmark() {
+        for column_count in [12, 120] {
+            for inspector in [false, true] {
+                let ctx = egui::Context::default();
+                crate::scroll_response::install(&ctx);
+                let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+                app.pending = None;
+                app.view = View::Data;
+                app.inspector = inspector;
+                app.browse.table = "wide_fixture".into();
+                app.table = Arc::new(Grid {
+                    columns: (0..column_count).map(|c| format!("field_{c}")).collect(),
+                    rows: (0..500).map(|r| (0..column_count).map(|c|
+                        Value::Text(format!("member {r} field {c} sample data"))).collect()).collect(),
+                    ..Default::default()
+                });
+                app.columns = app.table.columns.iter().enumerate().map(|(c, name)| Column {
+                    name:name.clone(), data_type:"varchar(100)".into(), not_null:false,
+                    default:String::new(), pk:c == 0, generated:false,
+                }).collect();
+                let mut samples = Vec::new();
+                for frame in 0..120 {
+                    app.selected = Some(frame % 20);
+                    let started = std::time::Instant::now();
+                    let output = ctx.run(egui::RawInput {
+                        screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1440.0,900.0))),
+                        time:Some(frame as f64 / 120.0), ..Default::default()
+                    }, |ctx| {
+                        app.toolbar(ctx);
+                        app.sidebar(ctx);
+                        app.inspector(ctx);
+                        app.workspace(ctx);
+                    });
+                    let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                    if frame >= 20 { samples.push(started.elapsed().as_secs_f64()*1000.0); }
+                }
+                samples.sort_by(f64::total_cmp);
+                println!("workspace selection {column_count} columns inspector={inspector}: CPU layout+tessellation p50={:.3} p95={:.3} ms", samples[samples.len()/2], samples[samples.len()*95/100]);
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_culls_offscreen_text_and_can_find_last_object() {
+        let ctx = egui::Context::default();
+        crate::scroll_response::install(&ctx);
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
+        app.objects = (0..200).map(|i| Object {
+            name: format!("table_{i:04}"), kind: "table".into(), schema: None,
+            display_name: None, metadata_error: None, columns: Vec::new(), ddl: String::new(),
+        }).collect();
+        let render = |app: &mut Rustable, events| {
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 600.0))),
+                events, ..Default::default()
+            }, |ctx| app.sidebar(ctx));
+            let mut text = Vec::new();
+            for shape in output.shapes { text_positions(&shape.shape, &mut text); }
+            text
+        };
+        render(&mut app, vec![]);
+        let visible = render(&mut app, vec![]);
+        assert!(visible.iter().any(|(text, _)| text == "table_0000"));
+        assert!(!visible.iter().any(|(text, _)| text == "table_0199"));
+        assert!(visible.iter().filter(|(text, _)| text.starts_with("table_")).count() < 30);
+        render(&mut app, vec![egui::Event::PointerMoved(egui::pos2(100.0, 300.0)),
+            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -10000.0), modifiers: egui::Modifiers::NONE }]);
+        let bottom = render(&mut app, vec![]);
+        let (_, last_y) = bottom.iter().find(|(text, _)| text == "table_0199").expect("last table reachable by scrolling");
+        let point = egui::pos2(100.0, last_y + 6.0);
+        render(&mut app, vec![egui::Event::PointerMoved(point), egui::Event::PointerButton {
+            pos: point, button: egui::PointerButton::Primary, pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert_eq!(app.browse.table, "table_0199");
+        app.pending = None;
+        app.search = "table_0199".into();
+        render(&mut app, vec![]);
+        let filtered = render(&mut app, vec![]);
+        assert!(filtered.iter().any(|(text, _)| text == "table_0199"));
+    }
+
+    #[test]
+    #[ignore = "manual populated object sidebar rendering benchmark"]
+    fn populated_sidebar_frame_benchmark() {
+        for count in [20, 200, 2000] {
+            let ctx = egui::Context::default();
+            let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+            app.pending = None;
+            app.objects = (0..count).map(|i| Object {
+                name: format!("table_{i:04}"), kind: "table".into(), schema: None,
+                display_name: None, metadata_error: None, columns: Vec::new(), ddl: String::new(),
+            }).collect();
+            let mut times = Vec::new();
+            for frame in 0..120 {
+                let start = std::time::Instant::now();
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 900.0))),
+                    time: Some(frame as f64 / 120.0), ..Default::default()
+                }, |ctx| app.sidebar(ctx));
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                if frame >= 20 { times.push(start.elapsed().as_secs_f64() * 1000.0); }
+            }
+            times.sort_by(f64::total_cmp);
+            println!("sidebar {count} objects p50={:.3} p95={:.3} ms", times[50], times[95]);
+        }
+    }
+
+    #[test]
+    fn wide_inspector_virtualizes_fields_and_keeps_last_field_searchable() {
+        let ctx = egui::Context::default();
+        crate::scroll_response::install(&ctx);
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
+        app.inspector = true;
+        app.view = View::Data;
+        app.selected = Some(0);
+        app.table = Arc::new(Grid {
+            columns: (0..120).map(|c| format!("field_{c}")).collect(),
+            rows: vec![(0..120).map(|c| Value::Text(format!("value_{c}"))).collect()],
+            ..Default::default()
+        });
+        let render = |app: &mut Rustable, events| {
+            let output = ctx.run(egui::RawInput {
+                screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 600.0))),
+                events, ..Default::default()
+            }, |ctx| app.inspector(ctx));
+            let mut text = Vec::new();
+            for shape in output.shapes { text_positions(&shape.shape, &mut text); }
+            text.into_iter().map(|(text, _)| text).collect::<Vec<_>>()
+        };
+        render(&mut app, vec![]);
+        let initial = render(&mut app, vec![]);
+        assert!(initial.iter().any(|text| text == "field_0"));
+        assert!(!initial.iter().any(|text| text == "field_119"));
+        assert!(initial.iter().filter(|text| text.starts_with("field_")).count() < 25);
+        render(&mut app, vec![egui::Event::PointerMoved(egui::pos2(1350.0, 300.0)),
+            egui::Event::MouseWheel { unit:egui::MouseWheelUnit::Point, delta:egui::vec2(0.0,-10000.0), modifiers:egui::Modifiers::NONE }]);
+        let bottom = render(&mut app, vec![]);
+        assert!(bottom.iter().any(|text| text == "field_119"));
+        assert!(bottom.iter().any(|text| text == "value_119"));
+        app.field_search = "field_0".into();
+        render(&mut app, vec![]);
+        let filtered = render(&mut app, vec![]);
+        assert!(filtered.iter().any(|text| text == "value_0"));
+        assert!(!filtered.iter().any(|text| text == "value_119"));
+    }
+
+    #[test]
     fn inspector_fields_stay_compact_in_a_tall_window() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
@@ -8826,8 +9253,8 @@ mod workspace_layout_tests {
                     .iter()
                     .filter_map(|shape| match &shape.shape {
                         egui::Shape::Text(text)
-                            if ["Data", "+ Row", "Rows", "Pending (1)", "Filters", "Import / Export"]
-                                .contains(&text.galley.text()) =>
+                            if ["Data", "Pending (1)", "Import / Export"]
+                                .contains(&text.galley.text()) && text.pos.y > 500.0 =>
                         {
                             Some((
                                 text.galley.text().to_owned(),
@@ -8838,7 +9265,7 @@ mod workspace_layout_tests {
                     })
                     .collect();
             }
-            assert_eq!(controls.len(), 6, "width {width}: {controls:?}");
+            assert_eq!(controls.len(), 3, "width {width}: {controls:?}");
             for (index, (name, rect)) in controls.iter().enumerate() {
                 assert!(
                     rect.left() >= 0.0 && rect.right() <= width && rect.bottom() <= 700.0,
@@ -8906,17 +9333,11 @@ mod workspace_layout_tests {
                         egui::Shape::Text(text) if text.galley.text() == expected => {
                             status_rect = egui::Rect::from_min_size(text.pos, text.galley.size())
                         }
-                        egui::Shape::Text(text) if text.galley.text() == "Filters" => {
-                            filters_rect = egui::Rect::from_min_size(text.pos, text.galley.size())
-                        }
-                        egui::Shape::Rect(rect)
-                            if (rect.rect.width() - 28.0).abs() < 0.1
-                                && (rect.rect.height() - 28.0).abs() < 0.1
-                                && rect.rect.bottom() > 500.0
-                                && (!last_button.is_finite()
-                                    || rect.rect.right() > last_button.right()) =>
-                        {
-                            last_button = rect.rect;
+                        egui::Shape::Mesh(mesh) if mesh.vertices.iter().all(|v| v.pos.y > 500.0) => {
+                            let rect = egui::Rect::from_points(&mesh.vertices.iter().map(|v| v.pos).collect::<Vec<_>>());
+                            let texture = |name| ctx.try_load_texture(&format!("bytes://lucide/{name}.svg"), egui::TextureOptions::LINEAR, egui::load::SizeHint::Width(18)).ok().and_then(|poll| match poll { egui::load::TexturePoll::Ready { texture } => Some(texture.id), _ => None });
+                            if Some(mesh.texture_id) == texture("search") { filters_rect = rect; }
+                            if Some(mesh.texture_id) == texture("chevron-right") { last_button = rect; }
                         }
                         _ => {}
                     }
@@ -9862,11 +10283,13 @@ mod refresh_shortcut_tests {
         }
         assert!(app.pending.is_none());
         app.browse = Browse {
+            filters: Vec::new(),
             table: "customers".into(),
             filter_column: Some("name".into()),
             filter: "Avery".into(),
             sort: Some(("id".into(), true)),
             offset: 500,
+            limit: 0,
         };
         let browse = app.browse.clone();
         app.view = View::Data;
@@ -10675,7 +11098,7 @@ mod result_pin_tests {
         });
         let grid = app.table.clone();
         for clear in [false, true] {
-            app.apply_table_filter(clear);
+            app.apply_filter_rules(if clear { Vec::new() } else { vec![db::filters::Filter::new("email".into())] });
             assert_eq!(app.browse.offset, 500);
             assert_eq!(app.browse.filter_column.as_deref(), Some("name"));
             assert_eq!(app.browse.filter, "applied");
@@ -10688,11 +11111,10 @@ mod result_pin_tests {
         // Resolving the draft permits the same Clear action to reset all
         // applied filter state and dispatch a new first page.
         app.edit = None;
-        app.apply_table_filter(true);
+        app.apply_filter_rules(Vec::new());
         assert_eq!(app.browse.offset, 0);
         assert!(app.browse.filter_column.is_none());
         assert!(app.browse.filter.is_empty());
-        assert!(app.filter.is_empty());
         assert!(matches!(app.pending, Some(Pending::Table)));
         wait(&mut app);
     }

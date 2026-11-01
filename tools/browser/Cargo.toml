@@ -25,6 +25,7 @@ opt-level = "s"
 codegen-units = 1
 
 [patch.crates-io]
+egui = { path = "../../vendor/egui" }
 eframe = { path = "../../vendor/eframe" }
 egui_extras = { path = "../../vendor/egui_extras" }
 postgres = { path = "../../vendor/postgres" }

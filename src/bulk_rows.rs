@@ -518,7 +518,7 @@ impl Rustable {
         }
     }
 
-    fn set_bulk_constant(&mut self, column: usize, null: bool) {
+    pub(super) fn set_bulk_constant(&mut self, column: usize, null: bool) {
         if !self.can_delete_rows()
             || self
                 .columns
@@ -539,7 +539,7 @@ impl Rustable {
         self.finish_cell_edit();
     }
 
-    fn start_bulk_edit(&mut self, column: usize) {
+    pub(super) fn start_bulk_edit(&mut self, column: usize) {
         if !self.can_delete_rows() || !self.finish_cell_edit() {
             return;
         }

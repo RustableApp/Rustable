@@ -36,8 +36,18 @@ enum Destination { Database(String), Schema(String), Object(String), Tab(usize),
 enum Action { Refresh, Connections, Databases, Cancel, OpenSql, ImportCsv, NewQuery, Activity, Inspector }
 struct Entry { label: String, detail: String, destination: Destination }
 impl Rustable {
+    pub(super) fn open_database_workspace(&mut self, name: String) {
+        let current = if matches!(self.engine.as_str(), "MySQL" | "MariaDB") { self.schemas.selected.as_deref() } else { self.connected_database.as_deref() };
+        if current == Some(&name) || self.navigator.config.is_none() { return; }
+        if current.is_none() && matches!(self.navigator.config, Some(ServerConfig::Mysql(_))) {
+            self.dispatch(Command::SelectSchema(name), Pending::Export);
+        } else if let Some(config) = self.navigator.config.clone() {
+            self.window_requests.push(crate::session_windows::WindowRequest { title: format!("{} · {name}", self.active_connection_name()), recover_sql: false, identity: self.active_profile.clone(), connection: config.database(name) });
+        }
+    }
     pub(super) fn open_navigator(&mut self, databases_only: bool) {
         self.navigator.open = true;
+        self.navigator.requested = false;
         self.navigator.databases_only = databases_only;
         self.navigator.query.clear();
         self.navigator.selected = 0;
@@ -55,7 +65,7 @@ impl Rustable {
         }
         let mut entries = Vec::new();
         for name in &self.navigator.databases {
-            entries.push(Entry { label: name.clone(), detail: "Database · opens in a new window".into(), destination: Destination::Database(name.clone()) });
+            entries.push(Entry { label: name.clone(), detail: "Database · opens in this window".into(), destination: Destination::Database(name.clone()) });
         }
         if self.navigator.config.is_none() {
             entries.push(Entry { label: self.label.clone(), detail: "Current SQLite database".into(), destination: Destination::Database(self.label.clone()) });
@@ -172,10 +182,7 @@ impl Rustable {
                     Action::Inspector => self.inspector = !self.inspector,
                 },
                 Destination::Database(name) => {
-                    if self.connected_database.as_deref() == Some(&name) || self.navigator.config.is_none() { return; }
-                    if let Some(config) = self.navigator.config.clone() {
-                        self.window_requests.push(crate::session_windows::WindowRequest { title: format!("{} · {name}", self.active_connection_name()), recover_sql: false, identity: self.active_profile.clone(), connection: config.database(name) });
-                    }
+                    self.open_database_workspace(name);
                 }
                 Destination::Schema(name) => self.dispatch(Command::SelectSchema(name), Pending::Export),
                 Destination::Object(name) => self.open_table(name),
@@ -191,10 +198,7 @@ fn navigation_row(ui: &mut egui::Ui, entry: &Entry, selected: bool, database_onl
     let c = egui::pos2(rect.left() + 18.0, rect.center().y);
     let ink = ui.visuals().text_color();
     if matches!(entry.destination, Destination::Database(_)) {
-        let color = Color32::from_rgb(76, 141, 186);
-        ui.painter().rect_filled(egui::Rect::from_center_size(c, egui::vec2(16.0, 12.0)), 1.0, color);
-        ui.painter().add(egui::Shape::ellipse_filled(c + egui::vec2(0.0, 6.0), egui::vec2(8.0, 3.0), color));
-        ui.painter().add(egui::Shape::ellipse_filled(c - egui::vec2(0.0, 6.0), egui::vec2(8.0, 3.0), Color32::from_rgb(133, 183, 216)));
+        paint_database_icon(ui.painter(), c, Color32::from_rgb(100, 165, 205), 22.0);
     } else if matches!(entry.destination, Destination::Object(_)) {
         paint_object_icon(ui.painter(), c, entry.detail.split(" · ").next().unwrap_or("table"), 19.0);
     } else {
@@ -214,74 +218,28 @@ fn navigation_row(ui: &mut egui::Ui, entry: &Entry, selected: bool, database_onl
     response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, &entry.label));
     response
 }
-pub(super) fn paint_object_icon(painter: &egui::Painter, center: egui::Pos2, kind: &str, size: f32) {
-    let rect = egui::Rect::from_center_size(center, egui::vec2(size, size));
-    if kind.contains("view") {
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(142, 109, 166));
-        let eye = Color32::from_rgb(182, 197, 202);
-        let points = (0..=32).map(|i| { let angle = i as f32 / 32.0 * std::f32::consts::TAU; center + egui::vec2(angle.cos() * size * 0.36, angle.sin() * size * 0.24) }).collect();
-        painter.add(egui::Shape::convex_polygon(points, eye, Stroke::NONE));
-        painter.circle_filled(center, size * 0.14, Color32::from_rgb(142, 109, 166));
-    } else {
-        let color = Color32::from_rgb(67, 130, 159);
-        painter.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(size, size * 0.25)), 0.0, color);
-        let gap = size * 0.07;
-        let cell = (size - gap * 2.0) / 3.0;
-        for row in 0..2 { for column in 0..3 {
-            painter.rect_filled(egui::Rect::from_min_size(rect.min + egui::vec2(column as f32 * (cell + gap), size * 0.34 + row as f32 * (cell + gap)), egui::vec2(cell, cell)), 0.0, color);
-        } }
-    }
+pub(crate) fn paint_database_icon(painter: &egui::Painter, center: egui::Pos2, color: Color32, size: f32) {
+    crate::icons::paint(painter, center, "database", size, color);
 }
-fn paint_navigation_icon(painter: &egui::Painter, c: egui::Pos2, destination: &Destination, ink: Color32) {
-    let stroke = Stroke::new(1.4_f32, ink);
-    let p = |x, y| c + egui::vec2(x, y);
-    let line = |a: [f32; 2], b: [f32; 2]| { painter.line_segment([p(a[0], a[1]), p(b[0], b[1])], stroke); };
-    let rect = |min: [f32; 2], max: [f32; 2], radius| { painter.rect_stroke(egui::Rect::from_min_max(p(min[0], min[1]), p(max[0], max[1])), radius, stroke, egui::StrokeKind::Inside); };
-    match destination {
-        Destination::Action(Action::Refresh) => {
-            let points = (0..=24).map(|i| { let angle = 0.5 + i as f32 / 24.0 * 5.2; p(angle.cos() * 8.0, angle.sin() * 8.0) }).collect();
-            painter.add(egui::Shape::line(points, stroke));
-            line([8.0, -8.0], [7.0, -3.0]); line([7.0, -3.0], [2.0, -4.0]);
-        }
-        Destination::Action(Action::Connections) => {
-            painter.circle_stroke(c, 10.0, stroke);
-            rect([-4.0, -3.0], [4.0, 4.0], 2.0);
-            line([-2.5, -6.0], [-2.5, -2.0]); line([2.5, -6.0], [2.5, -2.0]);
-            line([0.0, 4.0], [0.0, 10.0]);
-        }
-        Destination::Action(Action::Databases) | Destination::Database(_) => {
-            for y in [-6.0, 0.0, 6.0] { painter.add(egui::Shape::ellipse_stroke(p(0.0, y), egui::vec2(8.0, 3.0), stroke)); }
-            line([-8.0, -6.0], [-8.0, 6.0]); line([8.0, -6.0], [8.0, 6.0]);
-        }
-        Destination::Action(Action::Cancel) => {
-            painter.circle_stroke(c, 10.0, stroke);
-            painter.rect_filled(egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0)), 1.0, ink);
-        }
-        Destination::Action(Action::Activity | Action::Inspector) => {
-            rect([-10.0, -7.0], [10.0, 7.0], 2.0);
-            if matches!(destination, Destination::Action(Action::Activity)) {
-                line([-9.0, 2.0], [9.0, 2.0]);
-                for x in [-5.0, 0.0, 5.0] { painter.circle_filled(p(x, 4.5), 0.8, ink); }
-            } else {
-                line([3.0, -6.0], [3.0, 6.0]);
-                for y in [-3.0, 0.0, 3.0] { line([5.0, y], [7.0, y]); }
-            }
-        }
-        Destination::Object(_) | Destination::Schema(_) => {
-            rect([-9.0, -8.0], [9.0, 8.0], 1.0);
-            for x in [-3.0, 3.0] { line([x, -7.0], [x, 7.0]); }
-            for y in [-2.0, 3.0] { line([-8.0, y], [8.0, y]); }
-        }
-        Destination::Action(Action::OpenSql | Action::ImportCsv | Action::NewQuery) | Destination::Tab(_) | Destination::Saved(_) => {
-            painter.add(egui::Shape::closed_line(vec![p(-7.0, -9.0), p(2.0, -9.0), p(7.0, -4.0), p(7.0, 9.0), p(-7.0, 9.0)], stroke));
-            line([2.0, -9.0], [2.0, -4.0]); line([2.0, -4.0], [7.0, -4.0]);
-            if matches!(destination, Destination::Action(Action::NewQuery)) {
-                line([-3.0, 2.0], [3.0, 2.0]); line([0.0, -1.0], [0.0, 5.0]);
-            } else {
-                for y in [-1.0, 3.0, 6.0] { line([-4.0, y], [4.0, y]); }
-            }
-        }
-    }
+pub(super) fn paint_object_icon(painter: &egui::Painter, center: egui::Pos2, kind: &str, size: f32) {
+    let (icon, color) = if kind.contains("view") { ("eye", Color32::from_rgb(162, 129, 186)) } else { ("sheet", Color32::from_rgb(87, 150, 179)) };
+    crate::icons::paint(painter, center, icon, size, color);
+}
+fn paint_navigation_icon(painter: &egui::Painter, center: egui::Pos2, destination: &Destination, ink: Color32) {
+    let name = match destination {
+        Destination::Action(Action::Refresh) => "refresh-cw",
+        Destination::Action(Action::Connections) => "plug",
+        Destination::Action(Action::Databases) | Destination::Database(_) => "database",
+        Destination::Action(Action::Cancel) => "circle-stop",
+        Destination::Action(Action::Activity) => "panel-bottom",
+        Destination::Action(Action::Inspector) => "panel-right",
+        Destination::Object(_) => "sheet",
+        Destination::Schema(_) => "folder",
+        Destination::Action(Action::NewQuery) => "file-plus",
+        Destination::Action(Action::ImportCsv) => "upload",
+        _ => "file-code",
+    };
+    crate::icons::paint(painter, center, name, 20.0, ink);
 }
 fn matches_query(text: &str, query: &str) -> bool {
     let text = text.to_lowercase();
@@ -324,6 +282,32 @@ mod tests {
 #[cfg(test)]
 mod mysql_navigation_tests {
     use super::*;
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_first_database_selection_keeps_session_and_sql_draft() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316,43317].contains(&port));
+        let ctx = egui::Context::default();
+        let config = crate::connection::MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:String::new(), tls:false, ..Default::default() };
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(), Command::OpenMysql(config), None);
+        let settle = |app: &mut Rustable| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while app.pending.is_some() { assert!(std::time::Instant::now() < deadline); app.poll(); std::thread::sleep(std::time::Duration::from_millis(5)); }
+            assert!(app.error.is_none(), "{:?}", app.error);
+        };
+        settle(&mut app);
+        app.tabs[0].sql = "SELECT 'keep this draft'".into();
+        app.open_database_workspace("rustable_test".into());
+        assert!(app.window_requests.is_empty());
+        settle(&mut app);
+        assert_eq!(app.workspace_database(), Some("rustable_test"));
+        assert_eq!(app.tabs[0].sql, "SELECT 'keep this draft'");
+        app.open_database_workspace("information_schema".into());
+        assert_eq!(app.window_requests.len(), 1);
+        assert_eq!(app.workspace_database(), Some("rustable_test"));
+        assert_eq!(app.tabs[0].sql, "SELECT 'keep this draft'");
+    }
+
     #[test]
     fn database_navigation_preserves_mysql_transport_and_changes_only_database() {
         let config = crate::connection::MysqlConfig { password: "session-only".into(), root_certificate: Some("/ca.pem".into()), ..Default::default() };

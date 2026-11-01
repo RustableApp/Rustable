@@ -134,14 +134,14 @@ impl Search {
                 .filter(|f| f.matches(grid, &self.needle, self.case_sensitive));
             let enabled = ready.is_some_and(|f| !f.cells.is_empty());
             if ui
-                .add_enabled(enabled, egui::Button::new("‹"))
+                .add_enabled(enabled, crate::icons::widget("chevron-left"))
                 .on_hover_text("Previous match · Shift+Enter")
                 .clicked()
             {
                 move_by = -1;
             }
             if ui
-                .add_enabled(enabled, egui::Button::new("›"))
+                .add_enabled(enabled, crate::icons::widget("chevron-right"))
                 .on_hover_text("Next match · Enter")
                 .clicked()
             {
@@ -166,7 +166,7 @@ impl Search {
                 "Searching…".into()
             });
             if ui
-                .button("×")
+                .add(crate::icons::widget("x"))
                 .on_hover_text("Close result search · Escape")
                 .clicked()
             {

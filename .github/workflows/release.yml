@@ -74,8 +74,33 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 14
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+      - name: Install WASM tooling
+        run: |
+          mise exec -- rustup target add wasm32-unknown-unknown
+          mise exec -- rustup component add llvm-tools
+          mise exec -- cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - name: Build matching release demo
+        run: |
+          python scripts/build-browser.py --output target/release-demo/demo
+          mkdir -p dist
+          tar -czf dist/Rustable-wasm-demo.tar.gz -C target/release-demo demo
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-browser
+          path: dist/Rustable-wasm-demo.tar.gz
+          if-no-files-found: error
+          retention-days: 14
   draft:
-    needs: build
+    needs: [build, browser]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -91,6 +116,7 @@ jobs:
           merge-multiple: true
       - name: Verify complete asset set and checksum
         run: |
+          test -s dist/Rustable-wasm-demo.tar.gz
           test -s dist/Rustable-macos-arm64.dmg
           test -s dist/Rustable-macos-arm64.zip
           test -s dist/appcast-macos-arm64.xml

@@ -147,3 +147,28 @@ transport-override connections against both fixture engines: a deliberately wron
 configured TCP port proves the override is used, a localhost-only certificate
 proves the peer name is retained despite the IP destination, wrong-peer.invalid
 must fail hostname verification (not DNS), and an untrusted CA must still fail.
+
+
+## egui 0.33.3: same-frame table wheel input
+
+`vendor/egui` is the crates.io egui 0.33.3 source, retaining the upstream
+MIT/Apache-2.0 licenses. Changes to `src/containers/scroll_area.rs`:
+`ScrollArea::wheel_before_layout` is an opt-in path that applies wheel input
+before creating the content UI, using the previous measured content extent.
+It clamps offsets, clears animated targets/drag momentum, respects clipping,
+disabled UI and dragging, and consumes only the enabled axis. The ordinary
+end-of-layout wheel path remains the default and the first-layout fallback.
+Do not opt in for a parent whose children consume wheel input on the same axis.
+
+`egui_extras::TableBuilder::wheel_before_layout` forwards this option to the
+vertical body. Rustable enables it only for its data grid's horizontal area
+and vertical table body. It replaces the temporary repeated `request_discard`
+approach, eliminating the extra layout pass and egui's red performance warning.
+Production-grid tests cover both axes, isolated/continuous line and precise
+point events, same-frame painted movement, one pass and no residual motion.
+
+`src/input_state/mod.rs`: additive `set_scroll_delta_without_smoothing` replaces
+native deltas and clears the otherwise private interpolation accumulator. Zoom
+smoothing is left unchanged. Replacing only the public smooth delta stopped
+visible animation but left the old accumulator requesting invisible repaint
+frames; the idle-repaint regression reproduced that and now passes.

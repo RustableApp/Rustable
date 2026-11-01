@@ -86,6 +86,8 @@ pub(super) fn export_table(
         ));
         parameters.push(&browse.filter);
     }
+    let predicate = crate::db::filters::predicate(&browse.filters, &columns, crate::sql::Dialect::Postgres)?;
+    if !predicate.is_empty() { sql.push_str(if browse.filter_column.is_some() { " AND " } else { " WHERE " }); sql.push_str(&predicate); }
     let sort = browse.sort.clone().or_else(|| {
         metadata
             .iter()
