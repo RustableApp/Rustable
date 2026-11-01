@@ -226,3 +226,16 @@ Evidence: `wasm-csv-options.png` and `wasm-csv-oversized.png` in the session
 visualization directory. This closes delimiter/header-change and oversized-picker
 checks for the in-app browser only; import cancellation, other engines and
 whole-tab memory measurement remain outstanding. No public deployment occurred.
+
+### Deterministic shared-import interruption regression (2026-11-01)
+
+Added a native regression against the SQLite importer shared by desktop and
+WASM. An SQLite update hook observes at least 100 actual destination inserts
+before the progress handler interrupts execution. It covers both interruption
+alone (as with a deadline) and interruption with the explicit cancellation flag.
+Both cases leave zero imported rows, restore autocommit, clear cancellation,
+preserve the interruption error without a spurious rollback-failure message,
+and allow the same 1,000-row request to succeed on retry. All three SQLite CSV
+import tests and strict all-target Clippy pass. This strengthens transaction
+coverage but does not substitute for exercising the browser Cancel import
+button and its shared-memory signal; that UI check remains outstanding.

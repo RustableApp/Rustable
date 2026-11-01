@@ -3466,6 +3466,39 @@ mod csv_import_tests {
         );
     }
     #[test]
+    fn interruption_after_inserted_rows_preserves_error_and_allows_retry() {
+        use std::sync::atomic::AtomicUsize;
+        for explicit_cancel in [false, true] {
+            let (mut driver, cancel) = setup();
+            let text = format!("id,value\n{}", (1..=1000).map(|id| format!("{id},good\n")).collect::<String>());
+            let request = request(&driver, &text, &cancel);
+            let inserted = Arc::new(AtomicUsize::new(0));
+            let seen = inserted.clone();
+            driver.connection.update_hook(Some(move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+                if table == "import_target" { seen.fetch_add(1, Ordering::Relaxed); }
+            })).unwrap();
+            let seen = inserted.clone();
+            let stop = cancel.clone();
+            driver.connection.progress_handler(100, Some(move || {
+                let interrupt = seen.load(Ordering::Relaxed) >= 100;
+                if interrupt && explicit_cancel { stop.store(true, Ordering::Relaxed); }
+                interrupt
+            })).unwrap();
+            let error = driver.import_csv(&request, &cancel).unwrap_err();
+            driver.connection.progress_handler(0, None::<fn() -> bool>).unwrap();
+            driver.connection.update_hook(None::<fn(rusqlite::hooks::Action, &str, &str, i64)>).unwrap();
+            assert!(inserted.load(Ordering::Relaxed) >= 100);
+            assert!(error.contains("interrupt"), "{error}");
+            assert!(!error.contains("rollback failed"), "{error}");
+            assert!(driver.connection.is_autocommit());
+            assert_eq!(count(&driver), 0);
+            assert!(!cancel.load(Ordering::Relaxed));
+            assert_eq!(driver.import_csv(&request, &cancel).unwrap(), 1000);
+            assert_eq!(count(&driver), 1000);
+        }
+    }
+
+    #[test]
     fn late_failure_cancellation_and_schema_change_leave_no_partial_import() {
         let (mut driver, cancel) = setup();
         let mut text = String::from("id,value\n");
