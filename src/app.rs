@@ -3868,23 +3868,28 @@ impl Rustable {
                 }
                 ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    let caret = ui.add_enabled(self.pending.is_none(), egui::Button::image(
+                    let caret = ui.scope(|ui| {
+                        ui.spacing_mut().button_padding.x = 3.0;
+                        let height = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+                        ui.add_enabled(self.pending.is_none(), egui::Button::image(
                         egui::Image::new(egui::include_image!("../assets/icons/lucide/chevron-down.svg"))
-                            .fit_to_exact_size(egui::vec2(14.0, 14.0)))
+                            .fit_to_exact_size(egui::vec2(12.0, 12.0)))
                         .fill(BLUE)
-                        .min_size(egui::vec2(25.0, ui.spacing().interact_size.y))
-                        .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }));
+                        .min_size(egui::vec2(18.0, height.max(ui.spacing().interact_size.y)))
+                        .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }))
+                    }).inner;
                     caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && self.pending.is_none(), "Run options"));
                     ui.painter().line_segment([
                         caret.rect.left_top() + egui::vec2(0.0, 4.0),
                         caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
                     ], Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
                     egui::Popup::menu(&caret).show(|ui| {
-                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_button("Run current", false, "Enter", None)).clicked() {
+                        ui.set_width(170.0);
+                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_menu_item("Run current", false, "Enter")).clicked() {
                             self.run_query(false);
                             ui.close();
                         }
-                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_button("Run all", true, "Enter", None)).clicked() {
+                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_menu_item("Run all", true, "Enter")).clicked() {
                             self.run_query(true);
                             ui.close();
                         }

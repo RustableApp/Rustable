@@ -81,12 +81,21 @@ pub fn toolbar_group<R>(ui: &mut egui::Ui, count: usize, contents: impl FnOnce(&
 /// Shortcut keys are artwork, not font glyphs: identical on native and WASM.
 /// Leave 12 points before the shortcut and 2 points between its keys.
 pub fn shortcut_button(label: &'static str, shift: bool, key: &'static str, fill: Option<egui::Color32>) -> impl egui::Widget {
+    shortcut_widget(label, shift, key, fill, false)
+}
+
+/// Menu rows share a width and grow the label/shortcut spacer, aligning key edges.
+pub fn shortcut_menu_item(label: &'static str, shift: bool, key: &'static str) -> impl egui::Widget {
+    shortcut_widget(label, shift, key, None, true)
+}
+
+fn shortcut_widget(label: &'static str, shift: bool, key: &'static str, fill: Option<egui::Color32>, menu: bool) -> impl egui::Widget {
     move |ui: &mut egui::Ui| {
         egui_extras::install_image_loaders(ui.ctx());
         ui.scope(|ui| {
             ui.spacing_mut().icon_spacing = 2.0;
             let mut atoms = egui::Atoms::new(label);
-            atoms.push_right(egui::Atom { size: Some(egui::vec2(8.0, 0.0)), ..Default::default() });
+            atoms.push_right(egui::Atom { size: Some(egui::vec2(8.0, 0.0)), grow: menu, ..Default::default() });
             let icon = |source| egui::Image::new(source).fit_to_exact_size(egui::vec2(14.0, 14.0));
             let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
             if !mac { atoms.push_right("Ctrl"); }
@@ -97,7 +106,8 @@ pub fn shortcut_button(label: &'static str, shift: bool, key: &'static str, fill
             } else {
                 atoms.push_right(key);
             }
-            let button = egui::Button::new(atoms).image_tint_follows_text_color(fill.is_none());
+            let button = egui::Button::new(atoms).image_tint_follows_text_color(fill.is_none())
+                .min_size(egui::vec2(if menu { ui.available_width() } else { 0.0 }, 0.0));
             if let Some(fill) = fill {
                 ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
                 ui.add(button.fill(fill))
