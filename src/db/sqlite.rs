@@ -25,6 +25,25 @@ impl SqliteDriver {
             None => demo(),
         }
         .map_err(|e| e.to_string())?;
+        Self::from_connection(connection, cancel)
+    }
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub(super) fn open_bytes(bytes: &[u8], cancel: Arc<AtomicBool>) -> Result<Self, String> {
+        if bytes.len() > 8 * 1024 * 1024 { return Err("Browser SQLite files are limited to 8 MiB".into()); }
+        if bytes.len() < 100 || !bytes.starts_with(b"SQLite format 3\0") { return Err("Choose a valid SQLite database file".into()); }
+        if bytes[18] != 1 || bytes[19] != 1 {
+            return Err("This database uses WAL mode. Export a standalone SQLite backup before opening it in the browser.".into());
+        }
+        #[cfg(target_arch = "wasm32")]
+        browser_limits::limit_heap();
+        let mut connection = Connection::open_in_memory().map_err(|e| e.to_string())?;
+        connection.deserialize_read_exact(rusqlite::MAIN_DB, bytes, bytes.len(), false).map_err(|e| e.to_string())?;
+        let driver = Self::from_connection(connection, cancel)?;
+        let check: String = driver.connection.query_row("PRAGMA quick_check", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+        if check != "ok" { return Err(format!("Invalid SQLite database: {check}")); }
+        Ok(driver)
+    }
+    fn from_connection(connection: Connection, cancel: Arc<AtomicBool>) -> Result<Self, String> {
         #[cfg(target_arch = "wasm32")]
         browser_limits::configure(&connection).map_err(|e| e.to_string())?;
         connection

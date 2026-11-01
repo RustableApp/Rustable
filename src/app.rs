@@ -258,6 +258,8 @@ enum Pending {
 }
 enum FileAction {
     #[cfg(target_arch = "wasm32")]
+    BrowserDatabase(String, Vec<u8>),
+    #[cfg(target_arch = "wasm32")]
     BrowserCsv(PathBuf, Arc<db::csv_preview::Source>),
     #[cfg(target_arch = "wasm32")]
     BrowserExportDone(Result<String, String>),
@@ -909,7 +911,7 @@ impl Rustable {
         if self.pending.is_some() {
             return;
         }
-        if matches!(command, Command::Open(_) | Command::OpenPostgres(_))
+        if command.replaces_connection()
             && (self.worker.transaction_state().blocks_replacement()
                 || !self.changes.is_empty()
                 || self.edit.is_some()
@@ -1294,6 +1296,8 @@ impl Rustable {
                     },
                     Pending::Export,
                 ),
+                #[cfg(target_arch = "wasm32")]
+                FileAction::BrowserDatabase(name, bytes) => self.dispatch(Command::OpenBrowserDatabase { name, bytes }, Pending::Connect(None)),
                 FileAction::Open(path) => self.dispatch(
                     Command::Open(Some(path.clone())),
                     Pending::Connect(Some(path)),

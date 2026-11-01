@@ -23,6 +23,6 @@ SQL import/download, loaded-result CSV/JSON downloads, and full-table CSV/JSON d
 
 ## Remaining acceptance
 
-CSV preview, mapping, review and transactional import accept browser-selected files up to 8 MiB using immutable in-memory snapshots. Database-file import still needs a browser adapter. Server connections and OS keychains remain desktop integrations. Browser language-server processes are not started; shared catalog completion remains available.
+CSV preview, mapping, review and transactional import accept browser-selected files up to 8 MiB using immutable in-memory snapshots. Cmd/Ctrl+O opens a standalone SQLite file up to 8 MiB as a writable browser-local copy, without modifying the selected file. Invalid files preserve the current session; WAL-mode files require a standalone backup first. Server connections and OS keychains remain desktop integrations. Browser language-server processes are not started; shared catalog completion remains available.
 
 Verify cancellation, error recovery, keyboard shortcuts, browser memory bounds and more browsers before publishing. The full workspace is not a claim that every native OS integration exists in a browser.

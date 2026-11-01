@@ -5,6 +5,8 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(module = "/src/browser_files.js")]
 extern "C" {
     #[wasm_bindgen(catch)]
+    async fn pick_database() -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch)]
     async fn pick_csv() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
     async fn pick_sql() -> Result<JsValue, JsValue>;
@@ -95,7 +97,19 @@ impl Rustable {
     }
     pub(super) fn json_export_dialog(&self, ctx: &egui::Context) { self.export_browser_results(ctx, db::ExportFormat::Json); }
     pub(super) fn file_dialog(&self, ctx: &egui::Context, export: bool) {
-        if export { self.export_browser_results(ctx, db::ExportFormat::Csv); } else { self.browser_file_unavailable(ctx); }
+        if export { self.export_browser_results(ctx, db::ExportFormat::Csv); return; }
+        let tx = self.files_tx.clone(); let ctx = ctx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = async {
+                let value = pick_database().await.map_err(crate::browser_error)?;
+                if value.is_null() { return Ok(None); }
+                let name = js_sys::Reflect::get(&value, &"name".into()).ok().and_then(|v| v.as_string()).ok_or("Missing database filename")?;
+                let bytes = js_sys::Reflect::get(&value, &"bytes".into()).map_err(|_| "Missing database content")?;
+                Ok::<_, String>(Some(FileAction::BrowserDatabase(name, js_sys::Uint8Array::new(&bytes).to_vec())))
+            }.await;
+            match result { Ok(Some(action)) => { let _ = tx.send(action); }, Ok(None) => {}, Err(error) => { let _ = tx.send(FileAction::QueryLibraryError(error)); } }
+            ctx.request_repaint();
+        });
     }
     pub(super) fn choose_query_directory(&self, ctx: &egui::Context) { self.browser_file_unavailable(ctx); }
 }

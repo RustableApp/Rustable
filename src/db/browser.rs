@@ -28,7 +28,7 @@ pub(crate) fn execute(bytes: &[u8]) -> Vec<u8> {
         let result = command.and_then(|command| {
             validate_command(&command)?;
             match &command {
-                Command::Open(None) | Command::Query { .. } | Command::Browse(_)
+                Command::Open(None) | Command::OpenBrowserDatabase { .. } | Command::Query { .. } | Command::Browse(_)
                 | Command::RefreshSchema | Command::SelectSchema(_) | Command::ListDatabases
                 | Command::Plan(_) | Command::Apply(_) | Command::ImportTarget(_)
                 | Command::DownloadTable { .. } | Command::PreviewCsv { .. } | Command::ImportCsv { .. } => {}

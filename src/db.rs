@@ -267,6 +267,8 @@ pub enum Command {
         source: Option<Arc<csv_preview::Source>>,
     },
     Open(Option<PathBuf>),
+    #[cfg(any(test, target_arch = "wasm32"))]
+    OpenBrowserDatabase { name: String, bytes: Vec<u8> },
     OpenPostgres(#[serde(with = "unavailable_transport")] crate::connection::PostgresConfig),
     Query {
         sql: String,
@@ -287,6 +289,17 @@ pub enum Command {
         path: PathBuf,
         browse: Browse,
     },
+}
+
+impl Command {
+    pub fn replaces_connection(&self) -> bool {
+        match self {
+            Self::Open(_) | Self::OpenPostgres(_) => true,
+            #[cfg(any(test, target_arch = "wasm32"))]
+            Self::OpenBrowserDatabase { .. } => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -481,9 +494,17 @@ fn handle(
     command: Command,
     cancel: &Arc<AtomicBool>,
 ) -> Result<Payload, String> {
-    if matches!(command, Command::Open(_) | Command::OpenPostgres(_))
+    if command.replaces_connection()
         && connection.as_mut().is_some_and(|driver| driver.transaction_state().blocks_replacement()) {
         return Err("Finish the SQL transaction with COMMIT or ROLLBACK before switching connections.".into());
+    }
+    #[cfg(any(test, target_arch = "wasm32"))]
+    if let Command::OpenBrowserDatabase { name, bytes } = command {
+        let mut driver: Box<dyn Driver> = Box::new(sqlite::SqliteDriver::open_bytes(&bytes, cancel.clone())?);
+        let objects = driver.objects()?;
+        let schemas = driver.schema_catalog();
+        *connection = Some(driver);
+        return Ok(Payload::Connected { engine: "SQLite".into(), label: format!("{name} · browser copy"), database: None, objects, schemas });
     }
     if let Command::Open(path) = command {
         let mut driver: Box<dyn Driver> =
@@ -635,6 +656,8 @@ fn handle(
                 objects: driver.objects(),
             })
         }
+        #[cfg(any(test, target_arch = "wasm32"))]
+        Command::OpenBrowserDatabase { .. } => unreachable!(),
         Command::OpenScript(_)
         | Command::SaveScript { .. }
         | Command::Open(_)
@@ -1445,5 +1468,38 @@ mod unavailable_transport {
     }
     pub fn deserialize<'de, T, D: serde::Deserializer<'de>>(_: D) -> Result<T, D::Error> {
         Err(serde::de::Error::custom("This operation requires the desktop app"))
+    }
+}
+
+#[cfg(test)]
+mod browser_database_tests {
+    use super::*;
+    fn fixture() -> Vec<u8> {
+        let source = rusqlite::Connection::open_in_memory().unwrap();
+        source.execute_batch("CREATE TABLE imported(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO imported VALUES(1,'original');").unwrap();
+        source.serialize(rusqlite::MAIN_DB).unwrap().to_vec()
+    }
+    #[test]
+    fn browser_database_is_writable_copy_and_failed_replacement_preserves_session() {
+        let bytes = fixture();
+        let original = bytes.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut connection = None;
+        let result = handle(&mut connection, Command::OpenBrowserDatabase { name: "fixture.sqlite".into(), bytes }, &cancel).unwrap();
+        assert!(matches!(result, Payload::Connected { .. }));
+        let driver = connection.as_mut().unwrap();
+        assert!(driver.execute("UPDATE imported SET name='changed';", false, &cancel).error.is_none());
+        for invalid in [b"not sqlite".to_vec(), original[..100].to_vec(), vec![0; 8 * 1024 * 1024 + 1]] {
+            assert!(handle(&mut connection, Command::OpenBrowserDatabase { name: "invalid".into(), bytes: invalid }, &cancel).is_err());
+        }
+        let mut wal = original.clone(); wal[18] = 2; wal[19] = 2;
+        assert!(handle(&mut connection, Command::OpenBrowserDatabase { name: "wal".into(), bytes: wal }, &cancel).err().unwrap().contains("WAL"));
+        let report = connection.as_mut().unwrap().execute("SELECT name FROM imported", false, &cancel);
+        assert_eq!(report.grids[0].rows[0][0], Value::Text("changed".into()));
+        assert!(connection.as_mut().unwrap().execute("BEGIN", false, &cancel).error.is_none());
+        assert!(handle(&mut connection, Command::OpenBrowserDatabase { name: "replacement".into(), bytes: original.clone() }, &cancel).is_err());
+        assert!(connection.as_mut().unwrap().execute("ROLLBACK", false, &cancel).error.is_none());
+        let mut fresh = sqlite::SqliteDriver::open_bytes(&original, cancel.clone()).unwrap();
+        assert_eq!(fresh.execute("SELECT name FROM imported", false, &cancel).grids[0].rows[0][0], Value::Text("original".into()));
     }
 }

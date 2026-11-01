@@ -1,5 +1,6 @@
 // Only a user-selected file is read. The picker never grants directory access.
 export function pick_sql() { return pick_file('.sql,text/plain,application/sql', 'SQL editor'); }
+export function pick_database() { return pick_file('.sqlite,.sqlite3,.db,application/vnd.sqlite3', 'SQLite'); }
 export function pick_csv() { return pick_file('.csv,text/csv', 'CSV'); }
 function pick_file(accept, label) {
   return new Promise((resolve, reject) => {
