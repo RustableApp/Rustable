@@ -1,3 +1,5 @@
+#[path = "query_library.rs"]
+mod query_library;
 #[path = "query_history.rs"]
 mod query_history;
 #[path = "navigator.rs"]
@@ -76,6 +78,7 @@ struct Preferences {
     history: Vec<String>,
     query_history: Vec<query_history::Entry>,
     favorites: Vec<String>,
+    query_directory: Option<PathBuf>,
     appearance: Appearance,
     // Legacy sessions stored only SQL strings. Read them once during migration.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -251,6 +254,8 @@ enum Pending {
     Apply,
 }
 enum FileAction {
+    QueryDirectory(PathBuf),
+    QueryLibraryError(String),
     ProfilePath(u64, bool, PathBuf),
     OpenScript(PathBuf),
     SaveScript(PathBuf, String, u64, Option<crate::script_file::SaveSource>),
@@ -415,6 +420,7 @@ pub struct Rustable {
     csv_review: Option<(db::csv_import::Request, Vec<String>)>,
     inspector: bool,
     history: bool,
+    query_library: query_library::Library,
     navigator: navigator::Navigator,
     activity: std::collections::VecDeque<String>,
     last_operation_ms: Option<f64>,
@@ -590,6 +596,7 @@ impl Rustable {
         }
         child.prefs.appearance = self.prefs.appearance;
         child.prefs.favorites = self.prefs.favorites.clone();
+        child.prefs.query_directory = self.prefs.query_directory.clone();
         child.prefs.history = self.prefs.history.clone();
         child.prefs.query_history = self.prefs.query_history.clone();
         child.prefs.column_widths = self.prefs.column_widths.clone();
@@ -604,6 +611,7 @@ impl Rustable {
         // exact edits, including removals, instead of append-only union semantics.
         self.prefs.appearance = child.prefs.appearance;
         self.prefs.favorites = child.prefs.favorites.clone();
+        self.prefs.query_directory = child.prefs.query_directory.clone();
         self.prefs.history = child.prefs.history.clone();
         self.prefs.query_history = child.prefs.query_history.clone();
         self.prefs.column_widths = child.prefs.column_widths.clone();
@@ -621,6 +629,7 @@ impl Rustable {
         let prefs = Preferences {
             appearance: self.prefs.appearance,
             favorites: self.prefs.favorites.clone(),
+            query_directory: self.prefs.query_directory.clone(),
             history: self.prefs.history.clone(),
             query_history: self.prefs.query_history.clone(),
             connection_styles: self.prefs.connection_styles.clone(),
@@ -836,6 +845,7 @@ impl Rustable {
             csv_review: None,
             inspector: true,
             history: false,
+            query_library: Default::default(),
             navigator: navigator::Navigator::new(initial.as_ref()),
             activity: Default::default(),
             last_operation_ms: None,
@@ -1163,6 +1173,7 @@ impl Rustable {
                     {
                         tab.saved(path.clone(), sql);
                     }
+                    self.query_library.invalidate();
                     self.status = format!("Saved SQL: {}", path.display())
                 }
                 Ok(Payload::Schema { objects, schemas }) => {
@@ -1185,6 +1196,8 @@ impl Rustable {
                 continue;
             }
             match action {
+                FileAction::QueryLibraryError(error) => self.error = Some(error),
+                FileAction::QueryDirectory(path) => { self.prefs.query_directory = Some(path); self.query_library.invalidate(); self.shared_preferences_dirty = true; }
                 FileAction::ProfilePath(generation, key, path) => {
                     self.connection_manager.set_path(generation, key, path)
                 }
@@ -1685,9 +1698,9 @@ impl Rustable {
                 egui::Key::S,
             )
         }) {
-            self.save_changes(true);
+            if self.view == View::Query { self.save_query_file(ctx, true); } else { self.save_changes(true); }
         } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            self.save_changes(false);
+            if self.view == View::Query { self.save_query_file(ctx, false); } else { self.save_changes(false); }
         }
         // Consume the more specific chord first: Cmd+Shift+Enter must not become Run Current.
         if ctx.input_mut(|i| {
@@ -1914,12 +1927,18 @@ impl Rustable {
         } else {
             None
         };
+        let directory = self.query_directory();
         let name = self.tabs[self.tab]
             .source_name
             .clone()
             .unwrap_or_else(|| "query.sql".into());
         std::thread::spawn(move || {
-            let dialog = rfd::FileDialog::new().add_filter("SQL script", &["sql"]);
+            if save && let Err(error) = std::fs::create_dir_all(&directory) {
+                let _ = tx.send(FileAction::QueryLibraryError(error.to_string()));
+                ctx.request_repaint_of(viewport);
+                return;
+            }
+            let dialog = rfd::FileDialog::new().set_directory(directory).add_filter("SQL script", &["sql"]);
             let action = if let Some(sql) = sql {
                 dialog.set_file_name(name).save_file().map(|path| {
                     let expected = source_path
@@ -2257,44 +2276,8 @@ impl Rustable {
                     self.history_sidebar(ui);
                     return;
                 }
-                if self.sidebar_section != 0 {
-                    let entries = if self.sidebar_section == 1 {
-                        &self.prefs.favorites
-                    } else {
-                        &self.prefs.history
-                    };
-                    let mut chosen = None;
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for (index, sql) in entries.iter().enumerate() {
-                            let preview: String = sql.chars().take(90).collect();
-                            if ui
-                                .add(
-                                    egui::Button::new(format!(
-                                        "{}  {}",
-                                        index + 1,
-                                        preview.replace('\n', " ")
-                                    ))
-                                    .wrap(),
-                                )
-                                .on_hover_text(sql)
-                                .clicked()
-                            {
-                                chosen = Some(sql.clone());
-                            }
-                        }
-                        if entries.is_empty() {
-                            ui.label(if self.sidebar_section == 1 {
-                                "Favorite a query to save it here."
-                            } else {
-                                "Executed queries appear here."
-                            });
-                        }
-                    });
-                    if let Some(sql) = chosen {
-                        self.tabs.push(QueryTab::new(sql));
-                        self.tab = self.tabs.len() - 1;
-                        self.show_query();
-                    }
+                if self.sidebar_section == 1 {
+                    self.query_library_sidebar(ui);
                     return;
                 }
                 if !self.schemas.names.is_empty() {
@@ -3723,12 +3706,8 @@ impl Rustable {
                     .clicked() {
                     tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), crate::sql::Dialect::for_engine(&self.engine));
                 }
-                if ui.button("Favorite").clicked() {
-                    let sql = self.tabs[self.tab].sql.clone();
-                    if !self.prefs.favorites.contains(&sql) {
-                        self.prefs.favorites.push(sql);
-                        self.shared_preferences_dirty = true;
-                    }
+                if ui.button("Save").on_hover_text("Save named SQL query · Cmd/Ctrl+S").clicked() {
+                    self.save_query_file(ui.ctx(), false);
                 }
                 if self.pending.is_some() && ui.button("Cancel").clicked() {
                     self.worker.cancel();
@@ -4186,6 +4165,7 @@ impl Rustable {
                 let table_state_id = ui.id().with(egui::Id::new(table_salt));
                 let resize_intent_id = table_state_id.with("user-resized-columns");
                 let resized_columns = ui.ctx().data_mut(|data| data.remove_temp::<Vec<usize>>(resize_intent_id).unwrap_or_default());
+                let mut active_cell_overlay = None;
                 let mut builder = TableBuilder::new(ui)
                     .id_salt(table_salt)
                     .striped(false)
@@ -4323,7 +4303,7 @@ impl Rustable {
                                         paint_cell_background(ui, table_clip, pending_fill(ui));
                                     }
                                     if active_cell {
-                                        paint_active_cell(ui, table_clip);
+                                        active_cell_overlay = Some((ui.max_rect().expand2(ui.spacing().item_spacing * 0.5), table_clip));
                                         if self.row_selection.pending_cell_scroll {
                                             ui.scroll_to_rect(ui.max_rect(), None);
                                             self.row_selection.pending_cell_scroll = false;
@@ -4442,6 +4422,7 @@ impl Rustable {
 
                         });
                     });
+                if let Some((rect, clip)) = active_cell_overlay { paint_active_cell(ui, rect, clip); }
                 // TableBuilder applies drag/Fit geometry after the body callback.
                 // Record the intent now, and capture only those columns' resulting
                 // widths in the next frame. Layout changes alone are never saved.
@@ -5384,10 +5365,10 @@ impl Rustable {
             }
         }
         let mut history = self.history;
-        egui::Window::new("Query history & favorites")
+        egui::Window::new("Query history & recovered queries")
             .id(egui::Id::new((
                 ctx.viewport_id(),
-                "Query history & favorites",
+                "Query history & recovered queries",
             )))
             .open(&mut history)
             .default_width(600.0)
@@ -5396,7 +5377,7 @@ impl Rustable {
                     .max_height(450.0)
                     .show(ui, |ui| {
                         for (title, entries) in [
-                            ("Favorites", &self.prefs.favorites),
+                            ("Recovered unsaved queries", &self.prefs.favorites),
                             ("Recent queries", &self.prefs.history),
                         ] {
                             ui.heading(title);
@@ -6539,9 +6520,7 @@ fn paint_cell_background(ui: &egui::Ui, table_clip: egui::Rect, fill: Color32) {
     painter.rect_filled(rect, 0.0, fill);
 }
 
-fn paint_active_cell(ui: &egui::Ui, table_clip: egui::Rect) {
-    let cell = ui.max_rect().expand2(ui.spacing().item_spacing * 0.5);
-    let rect = cell;
+fn paint_active_cell(ui: &egui::Ui, rect: egui::Rect, table_clip: egui::Rect) {
     let mut painter = ui.painter().clone();
     painter.set_clip_rect(table_clip);
     let coral = Color32::from_rgb(255, 83, 103);
@@ -8814,7 +8793,7 @@ mod workspace_layout_tests {
         };
         let run = action_rect("Run current");
         let all = action_rect("Run all");
-        let favorite = action_rect("Favorite");
+        let favorite = action_rect("Save");
         let file = action_rect("File");
         let status = action_rect("Line 1, column 1");
         assert!(

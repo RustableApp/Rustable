@@ -14,7 +14,11 @@ It’s written in Rust. Of course it is. We also use mise, and mise is written i
 
 <sub>GitHub’s breakdown covers the app; packaging and benchmark scripts are excluded.</sub>
 
-**Still in development.** You can build from source; signed, packaged releases aren’t ready yet. There are rough edges and unfinished features. This isn’t a claim of complete TablePlus parity.
+**First release: v0.1.0.** Early software, with rough edges and unfinished features. This isn’t a claim of complete TablePlus parity.
+
+[Download for macOS (Apple Silicon)](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-macos-arm64.zip) · [Windows (x64)](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-windows-x86_64.zip) · [Linux (x64)](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-linux-x86_64.tar.gz)
+
+macOS is signed and notarized, with Sparkle updates. Windows and Linux are portable packages; updates are manual for now. Built-in SSH tunnels currently work on macOS and Linux; on Windows use a direct connection or an external tunnel. Linux packages target Ubuntu 24.04 or compatible newer systems.
 
 ## What’s in it
 
@@ -41,7 +45,7 @@ We can have opinions and still support your toy databases. More engines are comi
 
 ### What about Windows and Linux?
 
-We’re even building first-class native versions for operating systems inferior to macOS, like Windows and Linux. Unlike certain database explorers that cost money and are closed sauce. Very generous of us.
+Yes, we support your silly OS as well. Native Windows and Linux builds, alongside macOS. Unlike certain database explorers that cost money and are closed sauce. Very generous of us.
 
 ## Run it
 

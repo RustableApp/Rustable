@@ -51,10 +51,13 @@ pub struct Tunnel {
 
 impl Tunnel {
     pub fn start(config: &Config, cancel: &AtomicBool) -> Result<Self, String> {
-        config.validate()?;
         if cancel.load(Ordering::Relaxed) {
             return Err("SSH connection cancelled".into());
         }
+        if cfg!(windows) {
+            return Err("Built-in SSH tunnels are not available on Windows yet. Use a direct connection or an external SSH tunnel.".into());
+        }
+        config.validate()?;
         let directory = tempfile::Builder::new()
             .prefix("rustable-ssh-")
             .tempdir()
@@ -432,11 +435,12 @@ mod tests {
             user: "qa".into(),
             identity_file: None,
             known_hosts_file: None,
-            config_file: Some("/dev/null".into()),
+            config_file: if cfg!(unix) { Some("/dev/null".into()) } else { None },
             remote_host: "db.internal".into(),
             remote_port: 5432,
         }
     }
+    #[cfg(unix)]
     fn resolved(command: &Command) -> String {
         let output = Command::new(SSH)
             .arg("-G")
@@ -452,6 +456,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn native_config_resolves_includes_aliases_and_explicit_overrides_without_network() {
         let directory = tempfile::tempdir().unwrap();
         let include = directory.path().join("included.conf");
@@ -512,11 +517,13 @@ mod tests {
             args.iter()
                 .any(|arg| arg == "127.0.0.1:12345:db.internal:5432")
         );
+        #[cfg(unix)]
         assert!(args.windows(2).any(|pair| pair == ["-F", "/dev/null"]));
     }
 
     #[test]
     #[ignore = "starts disposable loopback sshd using installed system tools"]
+    #[cfg(unix)]
     fn config_alias_live_forward_and_drop_cleanup() {
         use std::io::Write;
         use std::net::TcpStream;
@@ -694,6 +701,7 @@ mod tests {
         );
     }
     #[test]
+    #[cfg(unix)]
     fn close_and_drop_reap_process_and_remove_private_directory() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().to_owned();
@@ -721,6 +729,7 @@ mod tests {
         assert!(!path.exists());
     }
     #[test]
+    #[cfg(unix)]
     fn failed_local_connection_reports_error_without_external_access() {
         // A bound non-listening-for-SSH port fails locally without contacting an
         // external server; use a closed ephemeral port to fail immediately.
@@ -734,4 +743,11 @@ mod tests {
             .expect("closed local SSH endpoint must fail");
         assert!(error.contains("SSH connection failed"), "{error}");
     }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_reports_unsupported_transport_without_spawning() {
+    let config = Config { host: "localhost".into(), port: 22, user: String::new(), identity_file: None, known_hosts_file: None, config_file: None, remote_host: "localhost".into(), remote_port: 5432 };
+    assert!(Tunnel::start(&config, &AtomicBool::new(false)).err().unwrap().contains("not available on Windows"));
 }

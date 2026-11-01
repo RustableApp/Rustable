@@ -18,7 +18,7 @@ impl Navigator {
     }
 }
 #[derive(Clone)]
-enum Destination { Database(String), Schema(String), Object(String), Tab(usize), Saved(String), Action(Action) }
+enum Destination { Database(String), Schema(String), Object(String), Tab(usize), Saved(PathBuf), Action(Action) }
 #[derive(Clone)]
 enum Action { Refresh, Connections, Databases, Cancel, OpenSql, NewQuery, Activity, Inspector }
 struct Entry { label: String, detail: String, destination: Destination }
@@ -73,8 +73,9 @@ impl Rustable {
             for (index, tab) in self.tabs.iter().enumerate().filter(|(_, tab)| tab.open) {
                 entries.push(Entry { label: tab.source_path.as_ref().and_then(|path| path.file_name()).map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| format!("SQL Query {}", index + 1)), detail: tab.sql.chars().take(100).collect(), destination: Destination::Tab(index) });
             }
-            for sql in &self.prefs.favorites {
-                entries.push(Entry { label: sql.lines().next().unwrap_or(sql).chars().take(100).collect(), detail: "Saved query".into(), destination: Destination::Saved(sql.clone()) });
+            self.query_library.poll(ctx, self.query_directory());
+            for file in &self.query_library.files {
+                entries.push(Entry { label: file.name.clone(), detail: format!("Saved query · {}", file.group), destination: Destination::Saved(file.path.clone()) });
             }
         }
         let mut open = true;
@@ -165,7 +166,7 @@ impl Rustable {
                 Destination::Schema(name) => self.dispatch(Command::SelectSchema(name), Pending::Export),
                 Destination::Object(name) => self.open_table(name),
                 Destination::Tab(index) => self.activate_query(index),
-                Destination::Saved(sql) => { self.tabs.push(QueryTab::new(sql)); self.activate_query(self.tabs.len() - 1); }
+                Destination::Saved(path) => { self.dispatch(Command::OpenScript(path), Pending::Export); }
             }
         }
     }
