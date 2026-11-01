@@ -432,66 +432,19 @@ fn identifier_needs_quotes(name: &str) -> bool {
 }
 
 // Tokenize incomplete SQL without treating strings or comments as table references.
-fn tokens(sql: &str) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut chars = sql.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '-' && chars.peek() == Some(&'-') {
-            for c in chars.by_ref() {
-                if c == '\n' {
-                    break;
-                }
-            }
-        } else if c == '/' && chars.peek() == Some(&'*') {
-            chars.next();
-            while let Some(c) = chars.next() {
-                if c == '*' && chars.peek() == Some(&'/') {
-                    chars.next();
-                    break;
-                }
-            }
-        } else if matches!(c, '\'' | '"' | '`' | '[') {
-            let end = if c == '[' { ']' } else { c };
-            let mut value = String::new();
-            while let Some(c) = chars.next() {
-                if c == end {
-                    if chars.peek() == Some(&end) {
-                        chars.next();
-                        value.push(c);
-                    } else {
-                        break;
-                    }
-                } else {
-                    value.push(c);
-                }
-            }
-            if c != '\'' {
-                result.push(value);
-            }
-        } else if c.is_alphanumeric() || c == '_' {
-            let mut value = c.to_string();
-            while chars
-                .peek()
-                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
-            {
-                value.push(chars.next().unwrap());
-            }
-            result.push(value);
-        } else if !c.is_whitespace() {
-            result.push(c.to_string());
-        }
-    }
-    result
-}
 fn tokens_for_dialect(sql: &str, dialect: Dialect) -> Vec<String> {
     relation_tokens(sql, dialect).into_iter().map(|(text, _)| text).collect()
 }
+fn located_tokens(sql: &str, dialect: Dialect) -> Result<Vec<sqlparser::tokenizer::TokenWithSpan>, sqlparser::tokenizer::TokenizerError> {
+    use sqlparser::{dialect::{PostgreSqlDialect, SQLiteDialect}, tokenizer::Tokenizer};
+    match dialect {
+        Dialect::Mysql(mode) => Tokenizer::new(&crate::sql::mysql::Lexer(mode), sql).tokenize_with_location(),
+        Dialect::Postgres => Tokenizer::new(&PostgreSqlDialect {}, sql).tokenize_with_location(),
+        Dialect::Sqlite => Tokenizer::new(&SQLiteDialect {}, sql).tokenize_with_location(),
+    }
+}
 fn relation_tokens(sql: &str, dialect: Dialect) -> Vec<(String, bool)> {
-    let Dialect::Mysql(mode) = dialect else { return tokens(sql).into_iter().map(|word| (word, false)).collect(); };
-    use sqlparser::tokenizer::Tokenizer;
-    let lexer = crate::sql::mysql::Lexer(mode);
-    let Ok(tokens) = Tokenizer::new(&lexer, sql).tokenize() else { return Vec::new(); };
-    tokens.into_iter().filter_map(relation_token).collect()
+    located_tokens(sql,dialect).unwrap_or_default().into_iter().filter_map(|t| relation_token(t.token)).collect()
 }
 fn relation_token(token: sqlparser::tokenizer::Token) -> Option<(String, bool)> {
     use sqlparser::tokenizer::Token;
@@ -512,10 +465,8 @@ fn relations(sql: &str) -> Vec<(String, String)> {
 // Resolve the caret's query block first, then correlated outer blocks. Child
 // subqueries must not contribute aliases to their parents or sibling queries.
 fn scoped_relations(sql: &str, cursor: usize, dialect: Dialect) -> Vec<(String, String)> {
-    let Dialect::Mysql(mode) = dialect else { return relations_for_dialect(sql, dialect); };
-    use sqlparser::tokenizer::{Token, Tokenizer};
-    let lexer = crate::sql::mysql::Lexer(mode);
-    let Ok(tokens) = Tokenizer::new(&lexer, sql).tokenize_with_location() else { return Vec::new(); };
+    use sqlparser::tokenizer::Token;
+    let Ok(tokens) = located_tokens(sql, dialect) else { return Vec::new(); };
     let tokens: Vec<_> = tokens.into_iter().filter(|t| !matches!(t.token, Token::Whitespace(_))).collect();
     let before = &sql[..cursor.min(sql.len())];
     let location = (before.bytes().filter(|b| *b == b'\n').count() as u64 + 1,
@@ -571,6 +522,7 @@ fn scoped_relations(sql: &str, cursor: usize, dialect: Dialect) -> Vec<(String, 
     result
 }
 
+#[cfg(test)]
 fn relations_for_dialect(sql: &str, dialect: Dialect) -> Vec<(String, String)> {
     relations_from_tokens(relation_tokens(sql, dialect))
 }
@@ -1064,6 +1016,35 @@ mod tests {
             completion.refresh(&sql, cursor, &objects, &[], true, Dialect::Mysql(crate::sql::mysql::Mode::default()));
             assert_eq!(completion.items, expected, "{sql}");
         }
+    }
+
+    #[test]
+    fn postgres_and_sqlite_completion_respect_nested_scopes_and_quoted_aliases() {
+        let objects = [object("customers", &["customer_name"]),object("orders", &["order_total"])];
+        for dialect in [Dialect::Postgres,Dialect::Sqlite] {
+            for (marked,expected) in [
+                ("SELECT x.| FROM customers x WHERE EXISTS (SELECT x.order_total FROM orders x)",vec!["customer_name"]),
+                ("SELECT * FROM customers x WHERE EXISTS (SELECT x.| FROM orders x)",vec!["order_total"]),
+                ("SELECT * FROM customers c WHERE EXISTS (SELECT c.| FROM orders o)",vec!["customer_name"]),
+                ("SELECT * FROM customers c WHERE EXISTS (SELECT o.| FROM orders o",vec!["order_total"]),
+                ("SELECT x.customer_name FROM customers x UNION ALL SELECT x.| FROM orders x",vec!["order_total"]),
+                ("SELECT c.customer_name FROM customers c UNION ALL SELECT c.| FROM orders o",vec![]),
+                ("SELECT \"where\".| FROM customers AS \"where\"",vec!["customer_name"]),
+                ("SELECT \"(\".| FROM customers AS \"(\"",vec!["customer_name"]),
+            ] {
+                let byte = marked.find('|').unwrap();
+                let cursor = marked[..byte].chars().count();
+                let sql = marked.replace('|', "");
+                let mut completion = Completion::default();
+                completion.refresh(&sql,cursor,&objects,&[],true,dialect);
+                assert_eq!(completion.items,expected,"{dialect:?}: {sql}");
+            }
+        }
+        let sql = "SELECT $tag$ FROM orders fake $tag$, c. FROM customers c";
+        let cursor = sql.find("c. FROM").unwrap()+2;
+        let mut completion = Completion::default();
+        completion.refresh(sql,cursor,&objects,&[],true,Dialect::Postgres);
+        assert_eq!(completion.items,["customer_name"]);
     }
 
     #[test]

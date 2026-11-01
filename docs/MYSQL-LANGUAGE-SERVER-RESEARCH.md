@@ -140,3 +140,18 @@ name; an inner alias matching an outer table's name does not leak outer columns.
 Regression coverage includes SQLite, PostgreSQL and MySQL alias/table collisions,
 unaliased relations and MySQL nested scopes. All 22 completion tests passed
 (one manual benchmark ignored); strict all-target Clippy passed.
+
+### Shared PostgreSQL/SQLite local scope resolution (2026-11-01)
+
+PostgreSQL and SQLite local completion now use their sqlparser dialect tokenizers
+and the same nested-query/set-operation scope resolver as MySQL. The previous
+fallback scanned all relations in a statement and discarded quoted-identifier
+identity, allowing inner aliases to leak into outer completions and treating
+quoted keyword aliases as syntax. The custom generic token scanner was removed.
+
+Coverage verifies outer/inner alias isolation, correlated references, incomplete
+subqueries, UNION branch isolation, quoted keyword/punctuation aliases and
+PostgreSQL dollar-quoted strings containing fake FROM clauses. All 23 completion
+tests passed (one manual timing benchmark ignored); strict all-target Clippy
+passed. Derived-table/CTE output inference remains outstanding; this does not
+replace the PostgreSQL language server's deeper semantic analysis.
