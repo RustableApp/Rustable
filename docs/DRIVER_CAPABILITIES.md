@@ -889,3 +889,19 @@ Screenshots are under the local acceptance evidence directory:
 This verifies native update, rejection and correction on MariaDB 11.4. It does not
 cover native insert/delete/cancel, MySQL visual acceptance, or additional server
 versions. The fixture remains with ids 1 and 3 for subsequent checks. No release.
+
+### Live review literal fidelity across SQL modes (2026-11-01)
+
+The live_review_literals_match_bound_values_in_all_sql_modes test compares values
+returned by the server from displayed review SQL against prepared, bound values.
+It passes on both MySQL 8.4 and MariaDB 11.4 with default, ANSI_QUOTES,
+NO_BACKSLASH_ESCAPES and combined modes. Cases cover NULL, empty text, apostrophes,
+double quotes, placeholder-looking text, Japanese/emoji, newlines/tabs, embedded
+NUL/backslashes and binary bytes. A question mark inside a quoted column alias
+also remains untouched.
+
+The existing formatter needs no behavior change for these cases: its hex-to-UTF8
+conversion for NUL/backslash text is independent of these session modes. This
+establishes value fidelity for these tested literal types; it is not a claim that
+arbitrary handwritten SQL can be expanded or that every numeric/server type has
+been covered. Execution continues to bind parameters rather than run preview SQL.

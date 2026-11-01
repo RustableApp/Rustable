@@ -582,6 +582,33 @@ mod tests {
     use super::*;
     use bincode::Options;
     #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_literals_match_bound_values_in_all_sql_modes() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port,
+            user: "rustable".into(), password: "rustable-test-only".into(),
+            database: "rustable_test".into(), tls: false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let values = [Value::Null, Value::Text(String::new()),
+            Value::Text("O'Brien says \"hello\" ? $1".into()),
+            Value::Text("日本 🦀".into()), Value::Text("line one\nline two\r\t".into()),
+            Value::Text("C:\\new\\table\0tail".into()),
+            Value::Blob(vec![0, 39, 92, 255])];
+        for mode in ["", "ANSI_QUOTES", "NO_BACKSLASH_ESCAPES", "ANSI_QUOTES,NO_BACKSLASH_ESCAPES"] {
+            driver.conn().unwrap().exec_drop("SET SESSION sql_mode=?", (mode,)).unwrap();
+            for value in &values {
+                let preview = crate::review_sql::readable_dialect("SELECT ? AS `value?`", std::slice::from_ref(value),
+                    crate::sql::Dialect::Mysql(parse_mode(mode)));
+                let bound: Option<::mysql::Value> = driver.conn().unwrap().exec_first(
+                    "SELECT ? AS `value?`", (::mysql::Value::try_from(value).unwrap(),)).unwrap();
+                let displayed: Option<::mysql::Value> = driver.conn().unwrap().query_first(&preview).unwrap();
+                assert_eq!(displayed, bound, "mode={mode}, preview={preview}");
+            }
+        }
+    }
+
+    #[test]
     fn ssh_failure_and_pre_cancel_do_not_fall_back_to_direct_database() {
         let config = MysqlConfig { ssh:Some(crate::ssh_tunnel::Config {
             host:"-invalid-gateway".into(),port:22,user:String::new(),identity_file:None,
