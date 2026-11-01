@@ -91,3 +91,27 @@ engine coverage, native transaction acceptance, richer visual administration,
 multi-column sorting/filtering, native failure/close/reconnect matrices, and
 platform/version/performance acceptance are unfinished. This matrix closes the
 inventory task only; it does not close any of those implementation requirements.
+
+### MySQL/MariaDB review transaction evidence (2026-11-01)
+
+`live_review_transaction_holds_metadata_and_row_locks_until_rollback` passed
+independently on disposable MySQL 8.4 and MariaDB 11.4 (ports 43316/43317).
+It exercises the generated plan against two real connections:
+
+- `START TRANSACTION` followed by `SELECT * ... LIMIT 0` retains a metadata lock.
+  Competing ALTER TABLE and CREATE TRIGGER both receive lock timeout 1205.
+- The generated original-value `SELECT ... FOR UPDATE` matches exactly one row;
+  a competing update receives timeout 1205 while the review transaction holds it.
+- Executing the planned update then rolling back restores the original value.
+- A competing update succeeds after rollback; the old review precondition then
+  returns no matches. A subsequent ALTER succeeds and changes the fingerprint.
+
+This verifies the lock/revalidation ordering needed by the future apply path;
+`MysqlDriver::apply` is still deliberately unimplemented and GUI editing remains
+disabled. It does not prove trigger privilege visibility, transactional trigger
+side effects, zero-change affected-row handling, cancellation cleanup, or ambiguous
+COMMIT recovery. Those are remaining implementation/acceptance gates.
+
+Reference semantics:
+[MySQL metadata locking](https://dev.mysql.com/doc/refman/8.0/en/metadata-locking.html)
+and [MariaDB transactions](https://mariadb.com/docs/server/reference/sql-statements/transactions/start-transaction).

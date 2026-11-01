@@ -778,6 +778,52 @@ mod tests {
 
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_transaction_holds_metadata_and_row_locks_until_rollback() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut other = Conn::new(OptsBuilder::from(&config)).unwrap();
+        other.query_drop("SET SESSION lock_wait_timeout=1, innodb_lock_wait_timeout=1").unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS review_lock_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE review_lock_probe(id INT PRIMARY KEY, label VARCHAR(30)) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO review_lock_probe VALUES(1,'original')").unwrap();
+        let original = driver.browse(&Browse { table:"review_lock_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
+        let plan = driver.plan(&[Change::Cell { table:"review_lock_probe".into(), column:"label".into(), original, value:Value::Text("edited".into()) }]).unwrap();
+        driver.conn().unwrap().query_drop("START TRANSACTION").unwrap();
+        // Open the table without reading rows, before validating its snapshot.
+        // Both engines must retain this metadata lock until transaction end.
+        driver.conn().unwrap().query_drop("SELECT * FROM review_lock_probe LIMIT 0").unwrap();
+        assert_eq!(driver.edit_schema_snapshot("rustable_test", "review_lock_probe").unwrap(), plan.schemas[0].1);
+        let ddl_error = other.query_drop("ALTER TABLE review_lock_probe ADD COLUMN extra INT").unwrap_err();
+        assert!(matches!(ddl_error, ::mysql::Error::MySqlError(ref e) if e.code == 1205), "{ddl_error}");
+        let trigger_error = other.query_drop("CREATE TRIGGER review_lock_trigger BEFORE UPDATE ON review_lock_probe FOR EACH ROW SET NEW.label='trigger'").unwrap_err();
+        assert!(matches!(trigger_error, ::mysql::Error::MySqlError(ref e) if e.code == 1205), "{trigger_error}");
+        let check = &plan.preconditions[0];
+        let parameters = check.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>,_>>().unwrap();
+        let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, parameters.clone()).unwrap();
+        assert_eq!(matches, [1]);
+        let update_error = other.query_drop("UPDATE review_lock_probe SET label='concurrent' WHERE id=1").unwrap_err();
+        assert!(matches!(update_error, ::mysql::Error::MySqlError(ref e) if e.code == 1205), "{update_error}");
+        let statement = &plan.statements[0];
+        let values = statement.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>,_>>().unwrap();
+        driver.conn().unwrap().exec_drop(&statement.sql, values).unwrap();
+        assert_eq!(driver.conn().unwrap().affected_rows(), 1);
+        driver.conn().unwrap().query_drop("ROLLBACK").unwrap();
+        let value: Option<String> = other.query_first("SELECT label FROM review_lock_probe WHERE id=1").unwrap();
+        assert_eq!(value.as_deref(), Some("original"));
+        other.query_drop("UPDATE review_lock_probe SET label='concurrent' WHERE id=1").unwrap();
+        driver.conn().unwrap().query_drop("START TRANSACTION").unwrap();
+        let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, parameters).unwrap();
+        assert!(matches.is_empty(), "a stale review must not overwrite a committed competing change");
+        driver.conn().unwrap().query_drop("ROLLBACK").unwrap();
+        other.query_drop("ALTER TABLE review_lock_probe ADD COLUMN extra INT").unwrap();
+        assert_ne!(driver.edit_schema_snapshot("rustable_test", "review_lock_probe").unwrap(), plan.schemas[0].1);
+        other.query_drop("DROP TABLE review_lock_probe").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_edit_preconditions_preserve_floating_and_temporal_values() {
         let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
         assert!([43316, 43317].contains(&port));
