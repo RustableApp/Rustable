@@ -1,6 +1,6 @@
 //! Redis-native UI; network and decoding work remain on a dedicated worker.
 use crate::{
-    redis_session::{KeyPage, Session, Snapshot},
+    redis_session::{KeyPage, KeyRow, Session, Snapshot},
     redis_settings::Settings,
 };
 use eframe::egui;
@@ -17,7 +17,7 @@ enum Job {
 }
 enum Reply {
     Connected(u32),
-    Keys(KeyPage),
+    Keys(KeyPage, Vec<KeyRow>),
     Value(Snapshot),
     Output(String),
     Changed(&'static str),
@@ -30,11 +30,17 @@ pub(crate) struct Workspace {
     database: u32,
     database_draft: u32,
     keys: Vec<Vec<u8>>,
+    rows: std::collections::HashMap<Vec<u8>, (String, String, i64)>,
+    commands_visible: bool,
+    inspector_visible: bool,
+    filters_visible: bool,
+    database_picker: bool,
     cursor: u64,
     scan_started: bool,
     pattern: String,
     scan_pattern: Vec<u8>,
     key_limit: bool,
+    selected_key: Option<Vec<u8>>,
     snapshot: Option<Snapshot>,
     value_editor: String,
     preview: String,
@@ -67,7 +73,11 @@ impl Workspace {
             while let Ok(job) = jobs.recv() {
                 let result = match job {
                     Job::Scan(cursor, pattern) => {
-                        session.scan(cursor, &pattern, 200).map(Reply::Keys)
+                        session.scan(cursor, &pattern, 200).and_then(|page| {
+                            let rows =
+                                session.key_rows(&page.keys[..page.keys.len().min(10000)])?;
+                            Ok(Reply::Keys(page, rows))
+                        })
                     }
                     Job::Inspect(key) => session.inspect(&key).map(Reply::Value),
                     Job::Execute(text, safe) => session
@@ -119,11 +129,17 @@ impl Workspace {
             database,
             database_draft: database,
             keys: vec![],
+            rows: Default::default(),
+            commands_visible: false,
+            inspector_visible: true,
+            filters_visible: false,
+            database_picker: false,
             cursor: 0,
             scan_started: false,
             pattern: "*".into(),
             scan_pattern: b"*".to_vec(),
             key_limit: false,
+            selected_key: None,
             snapshot: None,
             value_editor: String::new(),
             preview: String::new(),
@@ -159,8 +175,15 @@ impl Workspace {
             self.error = Some("Save or discard the edited value before changing keys, databases, or running another operation.".into());
             return;
         }
+        let selected = match &job {
+            Job::Inspect(key) => Some(key.clone()),
+            _ => None,
+        };
         match self.sender.try_send(job) {
             Ok(()) => {
+                if let Some(key) = selected {
+                    self.selected_key = Some(key);
+                }
                 self.busy = true;
                 self.error = None;
                 self.notice = None;
@@ -175,7 +198,9 @@ impl Workspace {
             self.error = Some("Save or discard the edited value before refreshing keys.".into());
             return;
         }
+        self.selected_key = None;
         self.keys.clear();
+        self.rows.clear();
         self.cursor = 0;
         self.scan_started = false;
         self.key_limit = false;
@@ -197,7 +222,13 @@ impl Workspace {
                     self.snapshot = None;
                     self.refresh();
                 }
-                Ok(Reply::Keys(page)) => {
+                Ok(Reply::Keys(page, rows)) => {
+                    for row in rows {
+                        self.rows.insert(
+                            row.key,
+                            (grid_preview(&row.value, &row.kind), row.kind, row.ttl_ms),
+                        );
+                    }
                     self.cursor = page.cursor;
                     self.scan_started = true;
                     let mut bytes = self.keys.iter().map(Vec::len).sum::<usize>();
@@ -220,6 +251,14 @@ impl Workspace {
                     self.keys.sort();
                 }
                 Ok(Reply::Value(snapshot)) => {
+                    self.rows.insert(
+                        snapshot.key.clone(),
+                        (
+                            grid_preview(&snapshot.value, &snapshot.kind),
+                            snapshot.kind.clone(),
+                            snapshot.ttl_ms,
+                        ),
+                    );
                     self.value_editor = match &snapshot.value {
                         redis::Value::BulkString(bytes) => crate::redis_commands::quote(bytes),
                         _ => String::new(),
@@ -244,6 +283,7 @@ impl Workspace {
         &mut self,
         ctx: &egui::Context,
         title: &str,
+        color: egui::Color32,
         pane_sizes: &mut crate::pane_sizes::PaneSizes,
         preferences_dirty: &mut bool,
     ) -> bool {
@@ -251,35 +291,58 @@ impl Workspace {
         let mut manager = false;
         egui::TopBottomPanel::top("redis-toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                manager = ui
-                    .add(crate::icons::widget("plug"))
-                    .on_hover_text("Connections")
-                    .clicked();
-                ui.strong(title);
-                ui.label("Redis");
-                ui.separator();
-                ui.label("Database");
-                ui.add_enabled(
-                    !self.busy,
-                    egui::DragValue::new(&mut self.database_draft).range(0..=u32::MAX),
+                crate::icons::toolbar_group(ui, 3, |ui| {
+                    manager = crate::icons::button(ui, "plug", crate::icons::TOOLBAR_BUTTON, false)
+                        .on_hover_text("Connections")
+                        .clicked();
+                    if crate::icons::button(ui, "database", crate::icons::TOOLBAR_BUTTON, false)
+                        .on_hover_text("Database selection")
+                        .clicked()
+                    {
+                        self.database_picker = !self.database_picker;
+                    }
+                    if crate::icons::button(ui, "file-code", crate::icons::TOOLBAR_BUTTON, false)
+                        .on_hover_text("Redis commands")
+                        .clicked()
+                    {
+                        self.commands_visible = !self.commands_visible;
+                    }
+                });
+                ui.add_space(4.0);
+                let status_width =
+                    (ui.available_width() - crate::icons::toolbar_group_width(3) - 12.0).max(40.0);
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(status_width, 28.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 14.0, color);
+                ui.painter().with_clip_rect(rect.shrink(8.0)).text(
+                    rect.left_center() + egui::vec2(12.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    format!("Redis  ·  {title}  ·  db{}", self.database),
+                    egui::FontId::monospace(12.0),
+                    egui::Color32::WHITE,
                 );
-                if ui
-                    .add_enabled(
-                        !self.busy && self.database_draft != self.database,
-                        egui::Button::new("Open"),
-                    )
-                    .clicked()
-                {
-                    self.send(Job::Database(self.database_draft));
-                }
-                ui.separator();
-                ui.checkbox(&mut self.read_only, "Read-only");
-                if !self.connected && !self.busy && ui.button("Reconnect").clicked() {
-                    self.send(Job::Database(self.database));
-                }
-                if self.busy {
-                    ui.spinner();
-                }
+                ui.add_space(4.0);
+                crate::icons::toolbar_group(ui, 3, |ui| {
+                    if crate::icons::button(ui, "refresh-cw", crate::icons::TOOLBAR_BUTTON, false)
+                        .on_hover_text("Refresh keys")
+                        .clicked()
+                        && !self.busy
+                    {
+                        self.refresh();
+                    }
+                    if crate::icons::button(ui, "panel-bottom", crate::icons::TOOLBAR_BUTTON, false)
+                        .on_hover_text("Toggle commands")
+                        .clicked()
+                    {
+                        self.commands_visible = !self.commands_visible;
+                    }
+                    if crate::icons::button(ui, "panel-right", crate::icons::TOOLBAR_BUTTON, false)
+                        .on_hover_text("Toggle row details")
+                        .clicked()
+                    {
+                        self.inspector_visible = !self.inspector_visible;
+                    }
+                });
             });
             if let Some(error) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
@@ -287,169 +350,162 @@ impl Workspace {
             if let Some(notice) = &self.notice {
                 ui.label(notice);
             }
+            if !self.connected && !self.busy && ui.button("Reconnect").clicked() {
+                self.send(Job::Database(self.database));
+            }
         });
-        let keys_id = egui::Id::new((ctx.viewport_id(), "redis-key-browser"));
-        crate::pane_sizes::restore(ctx, keys_id, pane_sizes.redis_keys, 280.0, 0);
-        egui::SidePanel::left(keys_id).default_width(280.0).width_range(180.0..=600.0).resizable(true).show(ctx, |ui| {
-            ui.set_min_width(ui.available_width());
-                ui.heading("Keys");
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.pattern).desired_width((ui.available_width()-65.0).max(40.0)).hint_text("Key pattern, e.g. user:*"));
-                if ui.add_enabled(!self.busy && self.connected, egui::Button::new("Scan")).clicked() { self.refresh(); }
-            });
-            ui.weak(format!("{} keys loaded · incremental scan", self.keys.len()));
-            let can_more = !self.busy && self.connected && (!self.scan_started || self.cursor != 0) && !self.key_limit;
-            if ui.add_enabled(can_more, egui::Button::new("Load more keys")).clicked() { self.send(Job::Scan(self.cursor, self.scan_pattern.clone())); }
-            if self.key_limit { ui.weak("Key browsing limit reached (10,000 keys / 16 MiB). Narrow the pattern and scan again."); }
-            let mut inspect = None;
-            egui::ScrollArea::vertical().show_rows(ui, 24.0, self.keys.len(), |ui, range| {
-                for index in range {
-                    let key = &self.keys[index];
-                    let selected = self.snapshot.as_ref().is_some_and(|snapshot| &snapshot.key == key);
-                    let label = display_key(key);
-                    if ui.add_enabled(!self.busy, egui::Button::selectable(selected, egui::RichText::new(label).monospace()).truncate()).clicked() { inspect = Some(key.clone()); }
+        let keys_id = egui::Id::new((ctx.viewport_id(), "redis-databases"));
+        crate::pane_sizes::restore(ctx, keys_id, pane_sizes.redis_keys, 220.0, 0);
+        egui::SidePanel::left(keys_id)
+            .width_range(160.0..=400.0)
+            .show(ctx, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.strong("Items");
+                });
+                ui.add_space(8.0);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 26.0],
+                        egui::Button::selectable(true, format!("db{}", self.database)),
+                    )
+                    .clicked()
+                    && !self.busy
+                {
+                    self.refresh();
                 }
-            });
-            if let Some(key) = inspect { self.send(Job::Inspect(key)); }
-        });
-        *preferences_dirty |=
-            crate::pane_sizes::record_drag(ctx, keys_id, &mut pane_sizes.redis_keys, 0);
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let commands_id = egui::Id::new((ctx.viewport_id(), "redis-command-pane"));
-            crate::pane_sizes::restore(ctx, commands_id, pane_sizes.redis_commands, 260.0, 1);
-            egui::TopBottomPanel::bottom(commands_id)
-                .default_height(260.0)
-                .height_range(140.0..=600.0)
-                .resizable(true)
-                .show_inside(ui, |ui| {
-                    ui.set_min_height(ui.available_height());
+                ui.add_space(12.0);
+                if self.database_picker {
                     ui.horizontal(|ui| {
-                        ui.strong("Redis commands");
-                        ui.weak("One command per line · quoted arguments and \\xHH escapes");
+                        ui.label("Database");
+                        ui.add(egui::DragValue::new(&mut self.database_draft).range(0..=u32::MAX));
                         if ui
-                            .add_enabled(!self.busy && self.connected, egui::Button::new("Run"))
+                            .add_enabled(
+                                !self.busy && self.database_draft != self.database,
+                                egui::Button::new("Open"),
+                            )
                             .clicked()
                         {
-                            self.send(Job::Execute(self.command.clone(), self.read_only));
+                            self.send(Job::Database(self.database_draft));
                         }
                     });
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.command)
-                            .code_editor()
-                            .desired_rows(3)
-                            .desired_width(f32::INFINITY),
-                    );
-                    egui::ScrollArea::both()
-                        .id_salt("redis-command-output")
-                        .show(ui, |ui| {
-                            ui.monospace(&self.output);
-                        });
+                }
+                ui.separator();
+                ui.checkbox(&mut self.read_only, "Read-only");
+                if self.busy {
+                    ui.spinner();
+                }
+            });
+        *preferences_dirty |=
+            crate::pane_sizes::record_drag(ctx, keys_id, &mut pane_sizes.redis_keys, 0);
+        if self.inspector_visible {
+            let id = egui::Id::new((ctx.viewport_id(), "redis-row-details"));
+            crate::pane_sizes::restore(ctx, id, pane_sizes.inspector, 260.0, 0);
+            egui::SidePanel::right(id)
+                .width_range(220.0..=600.0)
+                .show(ctx, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.strong("Row details");
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("redis-inspector-scroll")
+                        .show(ui, |ui| self.inspector(ui));
                 });
             *preferences_dirty |=
-                crate::pane_sizes::record_drag(ctx, commands_id, &mut pane_sizes.redis_commands, 1);
-            let mut job = None;
-            if let Some(snapshot) = &self.snapshot {
-                ui.heading(display_key(&snapshot.key));
-                ui.horizontal(|ui| {
-                    ui.label(format!("Type: {}", snapshot.kind));
-                    if let Some(length) = snapshot.length {
-                        ui.label(format!("Length: {length}"));
-                    }
-                    ui.label(match snapshot.ttl_ms {
-                        -2 => "Key no longer exists".into(),
-                        -1 => "No expiry".into(),
-                        n => format!("TTL: {:.1}s (at load)", n as f64 / 1000.0),
-                    });
-                    if ui
-                        .add_enabled(!self.busy, egui::Button::new("Refresh"))
-                        .clicked()
-                    {
-                        job = Some(Job::Inspect(snapshot.key.clone()));
-                    }
-                });
-                if snapshot.truncated {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        "Partial preview. Use range/scan commands to inspect the remaining values.",
+                crate::pane_sizes::record_drag(ctx, id, &mut pane_sizes.inspector, 0);
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(ctx.style().visuals.panel_fill))
+            .show(ctx, |ui| {
+                if self.commands_visible {
+                    let commands_id = egui::Id::new((ctx.viewport_id(), "redis-command-pane"));
+                    crate::pane_sizes::restore(
+                        ctx,
+                        commands_id,
+                        pane_sizes.redis_commands,
+                        220.0,
+                        1,
+                    );
+                    egui::TopBottomPanel::bottom(commands_id)
+                        .height_range(140.0..=600.0)
+                        .resizable(true)
+                        .show_inside(ui, |ui| {
+                            ui.set_min_height(ui.available_height());
+                            self.command_pane(ui);
+                        });
+                    *preferences_dirty |= crate::pane_sizes::record_drag(
+                        ctx,
+                        commands_id,
+                        &mut pane_sizes.redis_commands,
+                        1,
                     );
                 }
-                ui.add_enabled_ui(
-                    !self.busy && !self.read_only && snapshot.kind != "none",
-                    |ui| {
+                egui::TopBottomPanel::bottom("redis-grid-footer")
+                    .frame(
+                        egui::Frame::new()
+                            .fill(ui.visuals().panel_fill)
+                            .inner_margin(6),
+                    )
+                    .show_inside(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label("TTL seconds");
-                            ui.add(
-                                egui::DragValue::new(&mut self.ttl_seconds)
-                                    .range(1..=u64::MAX / 1000),
-                            );
-                            if ui.button("Set TTL").clicked() {
-                                job = Some(Job::Expire(
-                                    snapshot.key.clone(),
-                                    Some(self.ttl_seconds * 1000),
-                                    self.read_only,
-                                ));
+                            ui.selectable_label(true, "Data")
+                                .on_hover_text("Redis key/value grid");
+                            ui.separator();
+                            ui.label(format!("{} keys loaded", self.keys.len()));
+                            if ui
+                                .add(crate::icons::widget("search"))
+                                .on_hover_text("Filter keys")
+                                .clicked()
+                            {
+                                self.filters_visible = !self.filters_visible;
                             }
-                            if ui.button("Remove expiry").clicked() {
-                                job = Some(Job::Expire(snapshot.key.clone(), None, self.read_only));
+                            let more = !self.busy
+                                && self.connected
+                                && (!self.scan_started || self.cursor != 0)
+                                && !self.key_limit;
+                            if ui
+                                .add_enabled(more, crate::icons::widget("chevron-right"))
+                                .on_hover_text("Load more keys")
+                                .clicked()
+                            {
+                                self.send(Job::Scan(self.cursor, self.scan_pattern.clone()));
                             }
-                            if ui.button("Delete key…").clicked() {
-                                self.delete_confirmation = true;
+                            if self.key_limit {
+                                ui.weak("Limit reached; narrow the filter.");
                             }
                         });
-                    },
-                );
-                if snapshot.kind == "string" && !snapshot.truncated {
-                    ui.weak("Quoted byte string. Escapes preserve binary data.");
-                    ui.add_enabled(
-                        !self.busy && !self.read_only,
-                        egui::TextEdit::multiline(&mut self.value_editor)
-                            .code_editor()
-                            .desired_rows(8)
-                            .desired_width(f32::INFINITY),
-                    );
-                    if ui.button("Discard value edits").clicked()
-                        && let redis::Value::BulkString(bytes) = &snapshot.value
-                    {
-                        self.value_editor = crate::redis_commands::quote(bytes);
-                    }
-                    if ui
-                        .add_enabled(
-                            !self.busy && !self.read_only,
-                            egui::Button::new("Save string · preserve TTL"),
-                        )
-                        .clicked()
-                    {
-                        match crate::redis_commands::parse(&self.value_editor) {
-                            Ok(args) if args.len() == 1 && args[0].len() == 1 => {
-                                if let redis::Value::BulkString(original) = &snapshot.value {
-                                    job = Some(Job::Save(
-                                        snapshot.key.clone(),
-                                        original.clone(),
-                                        args[0][0].clone(),
-                                        self.read_only,
-                                    ));
-                                }
-                            }
-                            _ => self.error = Some(
-                                "Enter exactly one quoted value, such as \"hello\" or \"\\xff\"."
-                                    .into(),
-                            ),
+                    });
+                egui::Frame::new()
+                    .fill(egui::Color32::from_gray(48))
+                    .inner_margin(6)
+                    .show(ui, |ui| {
+                        ui.add_sized(
+                            [ui.available_width(), 28.0],
+                            egui::Button::new(format!("db{}", self.database))
+                                .fill(egui::Color32::from_gray(76))
+                                .corner_radius(14),
+                        );
+                    });
+                if self.filters_visible {
+                    ui.horizontal(|ui| {
+                        ui.label("Key pattern");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.pattern)
+                                .desired_width((ui.available_width() - 80.0).max(80.0)),
+                        );
+                        if ui
+                            .add_enabled(!self.busy && self.connected, egui::Button::new("Apply"))
+                            .clicked()
+                        {
+                            self.refresh();
                         }
-                    }
-                } else {
-                    egui::ScrollArea::both().show(ui, |ui| {
-                        ui.monospace(&self.preview);
                     });
                 }
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.weak("Select a key to inspect its value and expiry.");
+                ui.scope(|ui| {
+                    ui.set_clip_rect(ui.clip_rect().intersect(ui.available_rect_before_wrap()));
+                    self.key_grid(ui);
                 });
-            }
-            if let Some(job) = job {
-                self.send(job);
-            }
-        });
+            });
         if self.delete_confirmation {
             let mut delete = false;
             let modal =
@@ -489,6 +545,246 @@ impl Workspace {
         }
         manager
     }
+    fn inspector(&mut self, ui: &mut egui::Ui) {
+        let mut job = None;
+        if let Some(snapshot) = &self.snapshot {
+            ui.label("Key");
+            ui.monospace(display_key(&snapshot.key));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Type: {}", snapshot.kind));
+                if let Some(length) = snapshot.length {
+                    ui.label(format!("Length: {length}"));
+                }
+                ui.label(match snapshot.ttl_ms {
+                    -2 => "Key no longer exists".into(),
+                    -1 => "No expiry".into(),
+                    n => format!("TTL: {:.1}s (at load)", n as f64 / 1000.0),
+                });
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Refresh"))
+                    .clicked()
+                {
+                    job = Some(Job::Inspect(snapshot.key.clone()));
+                }
+            });
+            if snapshot.truncated {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Partial preview. Use range/scan commands to inspect the remaining values.",
+                );
+            }
+            ui.add_enabled_ui(
+                !self.busy && !self.read_only && snapshot.kind != "none",
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("TTL seconds");
+                        ui.add(
+                            egui::DragValue::new(&mut self.ttl_seconds).range(1..=u64::MAX / 1000),
+                        );
+                        if ui.button("Set TTL").clicked() {
+                            job = Some(Job::Expire(
+                                snapshot.key.clone(),
+                                Some(self.ttl_seconds * 1000),
+                                self.read_only,
+                            ));
+                        }
+                        if ui.button("Remove expiry").clicked() {
+                            job = Some(Job::Expire(snapshot.key.clone(), None, self.read_only));
+                        }
+                        if ui.button("Delete key…").clicked() {
+                            self.delete_confirmation = true;
+                        }
+                    });
+                },
+            );
+            if snapshot.kind == "string" && !snapshot.truncated {
+                ui.weak("Quoted byte string. Escapes preserve binary data.");
+                ui.add_enabled(
+                    !self.busy && !self.read_only,
+                    egui::TextEdit::multiline(&mut self.value_editor)
+                        .code_editor()
+                        .desired_rows(8)
+                        .desired_width(f32::INFINITY),
+                );
+                if ui.button("Discard value edits").clicked()
+                    && let redis::Value::BulkString(bytes) = &snapshot.value
+                {
+                    self.value_editor = crate::redis_commands::quote(bytes);
+                }
+                if ui
+                    .add_enabled(
+                        !self.busy && !self.read_only,
+                        egui::Button::new("Save string · preserve TTL"),
+                    )
+                    .clicked()
+                {
+                    match crate::redis_commands::parse(&self.value_editor) {
+                        Ok(args) if args.len() == 1 && args[0].len() == 1 => {
+                            if let redis::Value::BulkString(original) = &snapshot.value {
+                                job = Some(Job::Save(
+                                    snapshot.key.clone(),
+                                    original.clone(),
+                                    args[0][0].clone(),
+                                    self.read_only,
+                                ));
+                            }
+                        }
+                        _ => {
+                            self.error = Some(
+                                "Enter exactly one quoted value, such as \"hello\" or \"\\xff\"."
+                                    .into(),
+                            )
+                        }
+                    }
+                }
+            } else {
+                egui::ScrollArea::both().show(ui, |ui| {
+                    ui.monospace(&self.preview);
+                });
+            }
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.weak("Select a key to inspect its value and expiry.");
+            });
+        }
+        if let Some(job) = job {
+            self.send(job);
+        }
+    }
+    fn command_pane(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.strong("Redis commands");
+            ui.weak("One command per line · quoted arguments and \\xHH escapes");
+            if ui
+                .add_enabled(!self.busy && self.connected, egui::Button::new("Run"))
+                .clicked()
+            {
+                self.send(Job::Execute(self.command.clone(), self.read_only));
+            }
+        });
+        ui.add(
+            egui::TextEdit::multiline(&mut self.command)
+                .code_editor()
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        );
+        egui::ScrollArea::both()
+            .id_salt("redis-command-output")
+            .show(ui, |ui| {
+                ui.monospace(&self.output);
+            });
+    }
+    fn key_grid(&mut self, ui: &mut egui::Ui) {
+        use egui_extras::{Column, TableBuilder};
+        let mut inspect = None;
+        let mut delete = None;
+        TableBuilder::new(ui)
+            .id_salt(("redis-key-grid", self.database))
+            .striped(false)
+            .resizable(true)
+            .auto_shrink([false, false])
+            .sense(egui::Sense::click())
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(Column::exact(34.0))
+            .column(Column::initial(200.0).at_least(90.0).clip(true))
+            .column(Column::remainder().at_least(120.0).clip(true))
+            .column(Column::initial(85.0).clip(true))
+            .column(Column::initial(70.0).clip(true))
+            .header(28.0, |mut header| {
+                header.col(crate::app::paint_grid_corner);
+                for name in ["key", "value", "type", "ttl"] {
+                    header.col(|ui| {
+                        crate::app::paint_column_header(ui, name, None);
+                    });
+                }
+            })
+            .body(|mut body| {
+                let widths = body.widths().to_vec();
+                crate::app::paint_grid_backdrop(body.ui_mut(), &widths);
+                body.rows(22.0, self.keys.len(), |mut row| {
+                    let index = row.index();
+                    let key = &self.keys[index];
+                    row.set_selected(self.selected_key.as_ref() == Some(key));
+                    let metadata = self.rows.get(key);
+                    row.col(|ui| {
+                        ui.weak((index + 1).to_string());
+                    });
+                    row.col(|ui| {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(display_key(key)).monospace())
+                                .truncate(),
+                        );
+                    });
+                    row.col(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(
+                                    metadata.map_or("Select to inspect", |row| row.0.as_str()),
+                                )
+                                .monospace(),
+                            )
+                            .truncate(),
+                        );
+                    });
+                    row.col(|ui| {
+                        ui.monospace(metadata.map_or("—".into(), |row| row.1.to_ascii_uppercase()));
+                    });
+                    row.col(|ui| {
+                        ui.monospace(metadata.map_or("—".into(), |row| {
+                            if row.2 < 0 {
+                                row.2.to_string()
+                            } else {
+                                (row.2 / 1000).to_string()
+                            }
+                        }));
+                    });
+                    let response = row.response();
+                    if response.contains_pointer()
+                        && response.ctx.input(|input| input.pointer.primary_pressed())
+                        && !self.busy
+                    {
+                        inspect = Some(key.clone());
+                    }
+                    response.context_menu(|ui| {
+                        if ui.button("Inspect key").clicked() {
+                            inspect = Some(key.clone());
+                            ui.close();
+                        }
+                        if ui.button("Copy key").clicked() {
+                            ui.ctx().copy_text(display_key(key));
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                !self.read_only && !self.busy,
+                                egui::Button::new("Delete key…"),
+                            )
+                            .clicked()
+                        {
+                            delete = Some(key.clone());
+                            ui.close();
+                        }
+                    });
+                });
+            });
+        if let Some(key) = inspect {
+            self.inspector_visible = true;
+            self.send(Job::Inspect(key));
+        }
+        if let Some(key) = delete {
+            if self
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.key == key)
+            {
+                self.delete_confirmation = true;
+            } else {
+                self.inspector_visible = true;
+                self.send(Job::Inspect(key));
+                self.notice = Some("Inspect this key, then choose Delete key to confirm.".into());
+            }
+        }
+    }
 }
 fn display_key(key: &[u8]) -> String {
     if key.len() > 512 {
@@ -502,6 +798,48 @@ fn display_key(key: &[u8]) -> String {
         Ok(text) if !text.chars().any(char::is_control) => text.to_owned(),
         _ => crate::redis_commands::quote(key),
     }
+}
+fn grid_preview(value: &redis::Value, kind: &str) -> String {
+    fn json(value: &redis::Value) -> serde_json::Value {
+        match value {
+            redis::Value::BulkString(bytes) => {
+                serde_json::Value::String(match std::str::from_utf8(bytes) {
+                    Ok(text) if !text.contains('\0') => text.to_owned(),
+                    _ => crate::redis_commands::quote(bytes),
+                })
+            }
+            redis::Value::Array(values) => {
+                serde_json::Value::Array(values.iter().map(json).collect())
+            }
+            redis::Value::Int(n) => (*n).into(),
+            redis::Value::SimpleString(text) => text.clone().into(),
+            _ => serde_json::Value::Null,
+        }
+    }
+    let text = if kind == "hash"
+        && let redis::Value::Array(values) = value
+    {
+        let mut map = serde_json::Map::new();
+        for pair in values.as_chunks::<2>().0 {
+            map.insert(
+                json(&pair[0]).as_str().unwrap_or("").to_owned(),
+                json(&pair[1]),
+            );
+        }
+        serde_json::Value::Object(map).to_string()
+    } else if let redis::Value::BulkString(bytes) = value {
+        match std::str::from_utf8(bytes) {
+            Ok(text) if !text.chars().any(char::is_control) => text.to_owned(),
+            _ => crate::redis_commands::quote(bytes),
+        }
+    } else {
+        json(value).to_string()
+    };
+    let mut output: String = text.chars().take(256).collect();
+    if text.chars().count() > 256 {
+        output.push('…');
+    }
+    output
 }
 fn render_inspection(snapshot: &Snapshot) -> String {
     if matches!(snapshot.kind.as_str(), "hash" | "zset")
@@ -603,6 +941,23 @@ fn render_values(values: &[redis::Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grid_previews_render_strings_hashes_and_binary_safely() {
+        let bulk = |text: &str| redis::Value::BulkString(text.as_bytes().to_vec());
+        assert_eq!(grid_preview(&bulk("hello"), "string"), "hello");
+        assert_eq!(
+            grid_preview(
+                &redis::Value::Array(vec![bulk("name"), bulk("Alice")]),
+                "hash"
+            ),
+            r#"{"name":"Alice"}"#
+        );
+        assert_eq!(
+            grid_preview(&redis::Value::BulkString(vec![255, 0]), "string"),
+            r#""\xff\x00""#
+        );
+        assert!(grid_preview(&bulk(&"x".repeat(300)), "string").ends_with('…'));
+    }
     #[test]
     fn reply_previews_distinguish_empty_nil_and_preserve_binary() {
         assert_ne!(

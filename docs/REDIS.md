@@ -16,7 +16,18 @@ selection failures. Connect and read/write timeouts default to five seconds.
 The workspace starts read-only. Network requests and reply decoding run on a
 dedicated worker, away from the UI thread.
 
-The key browser uses incremental SCAN with a glob pattern and Load more keys.
+The workspace uses a database sidebar, a key/value/type/ttl data grid, and a
+resizable row inspector on the right. Select a row to inspect or edit it.
+The command pane starts closed; toggle it from the toolbar. The database toolbar
+button opens the logical database selector.
+
+The key browser uses incremental SCAN with a glob pattern and a Load more caret.
+The search icon reveals the key-pattern filter. Grid previews are fetched in
+pipelines, in batches of 200 keys, with short string/collection previews.
+Grid values are previews, not complete exports: strings show up to 256 bytes,
+collections show a small sample, and rendered text is capped at 256 characters.
+Select a row for the larger inspector preview. TTL is shown in seconds (-1
+means no expiry; -2 means the key disappeared).
 It deduplicates results, but a scan is not a consistent snapshot when other
 clients change keys. It retains up to 10,000 keys or 16 MiB of key names;
 narrow the pattern to browse more. It never issues KEYS automatically.
@@ -80,7 +91,7 @@ client-certificate authentication, module-specific inspectors, live pub/sub,
 saved command history, and bulk import/export are not included.
 Redis server connections are desktop-only; the WASM demo remains SQLite.
 
-The key-pane width and command-pane height use the app's saved pane preferences.
+The database-sidebar width, inspector width, and command-pane height use the app's saved pane preferences.
 
 ## Reproduce integration tests
 
@@ -99,10 +110,14 @@ expect Redis 7.4 on 127.0.0.1:16379 with password
 
 Tests create their own prefixed keys/users. Run only against disposable fixtures.
 
-Verification on 2026-11-01: 470 native library tests passed; the six-test Redis
+Verification on 2026-11-01: 471 native library tests passed; the six-test Redis
 suite passed against freshly created Redis 7.4 plaintext/TLS containers.
 Strict native all-target Clippy passed. The WASM check passed with its existing
 52 browser-only warnings. The optimized desktop build passed. Native UI checks
 covered connection testing, key selection, command results, string-save
 feedback and protection of unsaved edits. A synthetic pointer-drag regression
 test verifies pane-width persistence across UI contexts.
+
+The Redis layout was checked against TablePlus using the same disposable Redis
+fixture. Follow-up UI verification covered grid selection, hash previews and the
+right-hand inspector; all six integration tests also cover grid metadata reads.

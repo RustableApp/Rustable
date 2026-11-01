@@ -17,6 +17,13 @@ pub(crate) struct KeyPage {
     pub keys: Vec<Vec<u8>>,
 }
 #[derive(Clone, Debug)]
+pub(crate) struct KeyRow {
+    pub key: Vec<u8>,
+    pub kind: String,
+    pub ttl_ms: i64,
+    pub value: redis::Value,
+}
+#[derive(Clone, Debug)]
 pub(crate) struct Snapshot {
     pub key: Vec<u8>,
     pub kind: String,
@@ -165,6 +172,99 @@ impl Session {
             .arg(count.clamp(1, 1000));
         let (cursor, keys) = self.typed(&command)?;
         Ok(KeyPage { cursor, keys })
+    }
+
+    fn pipeline(&mut self, pipeline: &redis::Pipeline) -> Result<Vec<redis::Value>, String> {
+        let connection = self
+            .connection
+            .as_mut()
+            .ok_or("Redis connection closed. Reconnect before continuing.")?;
+        match pipeline.query(connection) {
+            Ok(values) => Ok(values),
+            Err(error) => {
+                if error.is_io_error() || !connection.is_open() {
+                    self.connection = None;
+                }
+                Err(format!("Redis preview: {error}"))
+            }
+        }
+    }
+    /// Two pipelined read rounds per chunk, rather than one network trip per cell.
+    pub fn key_rows(&mut self, keys: &[Vec<u8>]) -> Result<Vec<KeyRow>, String> {
+        let mut rows = Vec::new();
+        for chunk in keys.chunks(200) {
+            let mut metadata = redis::pipe();
+            for key in chunk {
+                metadata.cmd("TYPE").arg(key).cmd("PTTL").arg(key);
+            }
+            let values = self.pipeline(&metadata)?;
+            let mut previews = redis::pipe();
+            let mut kinds = Vec::new();
+            for (key, pair) in chunk.iter().zip(values.as_chunks::<2>().0) {
+                let kind: String =
+                    redis::from_redis_value(pair[0].clone()).map_err(|e| e.to_string())?;
+                let ttl: i64 =
+                    redis::from_redis_value(pair[1].clone()).map_err(|e| e.to_string())?;
+                match kind.as_str() {
+                    "string" => {
+                        previews.cmd("GETRANGE").arg(key).arg(0).arg(255);
+                    }
+                    "hash" => {
+                        previews.cmd("HSCAN").arg(key).arg(0).arg("COUNT").arg(4);
+                    }
+                    "set" => {
+                        previews.cmd("SSCAN").arg(key).arg(0).arg("COUNT").arg(4);
+                    }
+                    "list" => {
+                        previews.cmd("LRANGE").arg(key).arg(0).arg(3);
+                    }
+                    "zset" => {
+                        previews
+                            .cmd("ZRANGE")
+                            .arg(key)
+                            .arg(0)
+                            .arg(3)
+                            .arg("WITHSCORES");
+                    }
+                    "stream" => {
+                        previews
+                            .cmd("XRANGE")
+                            .arg(key)
+                            .arg("-")
+                            .arg("+")
+                            .arg("COUNT")
+                            .arg(2);
+                    }
+                    _ => {
+                        previews.cmd("TYPE").arg(key);
+                    }
+                }
+                kinds.push((kind, ttl));
+            }
+            // A key may change type between rounds. Keep its metadata and let
+            // selection obtain a fresh inspector instead of hiding the whole page.
+            let previews = match self.pipeline(&previews) {
+                Ok(values) => values,
+                Err(_) if self.is_connected() => vec![redis::Value::Nil; chunk.len()],
+                Err(error) => return Err(error),
+            };
+            for ((key, (kind, ttl_ms)), mut value) in chunk.iter().zip(kinds).zip(previews) {
+                if matches!(kind.as_str(), "hash" | "set")
+                    && let redis::Value::Array(parts) = &mut value
+                    && parts.len() == 2
+                {
+                    value = parts.pop().unwrap();
+                }
+                bound_preview(&mut value, &mut 4096, &mut 32);
+                rows.push(KeyRow {
+                    key: key.clone(),
+                    kind,
+                    ttl_ms,
+                    value,
+                });
+            }
+        }
+        Ok(rows)
     }
     pub fn inspect(&mut self, key: &[u8]) -> Result<Snapshot, String> {
         let kind: String = self.typed(redis::cmd("TYPE").arg(key))?;
@@ -650,6 +750,11 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(session.inspect(key.as_bytes()).unwrap().kind, kind);
+            let rows = session.key_rows(&[key.as_bytes().to_vec()]).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].kind, kind);
+            assert_eq!(rows[0].ttl_ms, -1);
+            assert_ne!(rows[0].value, redis::Value::Nil);
             session.delete(key.as_bytes(), false).unwrap();
         }
         let wrong = Session::connect_diagnostic(&settings(), "wrong")

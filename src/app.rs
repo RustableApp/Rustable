@@ -5794,7 +5794,7 @@ impl Rustable {
     pub(crate) fn render_workspace_frame(&mut self, ctx: &egui::Context) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(workspace) = &mut self.redis_workspace {
-            if workspace.show(ctx, &self.label, &mut self.prefs.pane_sizes, &mut self.shared_preferences_dirty) { self.manager_requested = true; }
+            if workspace.show(ctx, &self.label, self.active_profile.as_ref().map_or(egui::Color32::from_rgb(40, 83, 65), |profile| egui::Color32::from_rgb(profile.color[0], profile.color[1], profile.color[2])), &mut self.prefs.pane_sizes, &mut self.shared_preferences_dirty) { self.manager_requested = true; }
             return;
         }
         let start = Instant::now();
@@ -6634,7 +6634,7 @@ fn with_grid_scrollbars(ui: &mut egui::Ui, render: impl FnOnce(&mut egui::Ui)) {
     ui.spacing_mut().scroll = previous;
 }
 
-fn paint_column_header(ui: &mut egui::Ui, name: &str, direction: Option<bool>) -> egui::Response {
+pub(crate) fn paint_column_header(ui: &mut egui::Ui, name: &str, direction: Option<bool>) -> egui::Response {
     let rect = ui.max_rect();
     let response = ui.interact(rect, ui.id().with("sort-column"), egui::Sense::click());
     let color = ui.visuals().text_color();
@@ -6713,7 +6713,7 @@ fn content_column_widths(ui: &egui::Ui, grid: &Grid) -> Vec<f32> {
     })
 }
 
-fn paint_grid_backdrop(ui: &egui::Ui, widths: &[f32]) {
+pub(crate) fn paint_grid_backdrop(ui: &egui::Ui, widths: &[f32]) {
     let clip = ui.clip_rect();
     let spacing = ui.spacing().item_spacing;
     let origin = ui.cursor().min;
@@ -6766,7 +6766,7 @@ fn paint_row_number(ui: &mut egui::Ui, number: &str) {
     );
 }
 
-fn paint_grid_corner(ui: &mut egui::Ui) {
+pub(crate) fn paint_grid_corner(ui: &mut egui::Ui) {
     let center = ui.max_rect().center();
     let stroke = egui::Stroke::new(1.2_f32, MUTED);
     // Small vector expansion mark: independent of installed icon fonts.
