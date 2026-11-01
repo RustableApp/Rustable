@@ -1408,7 +1408,13 @@ impl Rustable {
         ) else {
             return;
         };
-        let sql = tab.sql[range].trim().to_owned();
+        let sql = match crate::sql::Dialect::for_engine(&self.engine) {
+            crate::sql::Dialect::Mysql(mode) => match crate::sql::mysql::execution_text(&tab.sql, range, mode) {
+                Ok(sql) => sql,
+                Err(error) => { self.error = Some(error); return; }
+            },
+            _ => tab.sql[range].trim().to_owned(),
+        };
         if sql.is_empty() {
             return;
         }

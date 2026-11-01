@@ -9,14 +9,27 @@ pub struct Mode {
 }
 
 pub fn ranges(sql: &str, mode: Mode, strict: bool) -> Result<Vec<Range<usize>>, String> {
-    scan(sql, mode, strict, false)
+    scan(sql, mode, strict, false).map(|(ranges, _)| ranges)
 }
 
 pub fn editor_ranges(sql: &str, mode: Mode) -> Vec<Range<usize>> {
-    scan(sql, mode, false, true).unwrap_or_default()
+    scan(sql, mode, false, true).map(|(ranges, _)| ranges).unwrap_or_default()
 }
 
-fn scan(sql: &str, mode: Mode, strict: bool, include_delimiter: bool) -> Result<Vec<Range<usize>>, String> {
+/// Preserve the client delimiter active at the beginning of an editor slice.
+/// Without this context, running a routine alone would split its body at `;`.
+pub fn execution_text(sql: &str, range: Range<usize>, mode: Mode) -> Result<String, String> {
+    let prefix = sql.get(..range.start).ok_or("Invalid SQL selection")?;
+    let selected = sql.get(range).ok_or("Invalid SQL selection")?;
+    let (_, delimiter) = scan(prefix, mode, false, false)?;
+    if delimiter == ";" {
+        Ok(selected.trim().to_owned())
+    } else {
+        Ok(format!("DELIMITER {delimiter}\n{}", selected.trim()))
+    }
+}
+
+fn scan(sql: &str, mode: Mode, strict: bool, include_delimiter: bool) -> Result<(Vec<Range<usize>>, &str), String> {
     let bytes = sql.as_bytes();
     let (mut i, mut start, mut code) = (0, 0, false);
     let mut delimiter = ";";
@@ -84,7 +97,7 @@ fn scan(sql: &str, mode: Mode, strict: bool, include_delimiter: bool) -> Result<
         }
     }
     if code { result.push(start..sql.len()); }
-    Ok(result)
+    Ok((result, delimiter))
 }
 
 #[cfg(test)]
@@ -124,5 +137,33 @@ mod tests {
             assert!(ranges(sql, Mode::default(), true).is_err());
             assert!(ranges(sql, Mode::default(), false).is_ok());
         }
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn isolated_routine_retains_delimiter_for_execution() {
+        let sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT '日本'; SELECT 2; END$$\nDELIMITER ;\nSELECT 3;";
+        let range = editor_ranges(sql, Mode::default()).remove(0);
+        let extracted = execution_text(sql, range, Mode::default()).unwrap();
+        let parts = ranges(&extracted, Mode::default(), true).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(&extracted[parts[0].clone()], "CREATE PROCEDURE p() BEGIN SELECT '日本'; SELECT 2; END");
+        let range = editor_ranges(sql, Mode::default()).remove(1);
+        assert_eq!(execution_text(sql, range, Mode::default()).unwrap(), "SELECT 3;");
+    }
+
+    #[test]
+    fn selected_script_can_override_inherited_delimiter() {
+        let sql = "DELIMITER //\nSELECT 1//\nDELIMITER ;\nSELECT 2; SELECT 3;";
+        let start = sql.find("DELIMITER ;").unwrap();
+        let extracted = execution_text(sql, start..sql.len(), Mode::default()).unwrap();
+        let parts = ranges(&extracted, Mode::default(), true).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(extracted[parts[0].clone()].trim(), "SELECT 2");
+        assert_eq!(extracted[parts[1].clone()].trim(), "SELECT 3");
     }
 }

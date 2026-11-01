@@ -227,7 +227,7 @@ pub fn execution_range_for_dialect(
         // completed. Only moving into the following text selects the next one.
         .find(|r| r.start <= start && start <= r.end)
         .cloned()
-        .or_else(|| ranges.last().cloned())
+        .or_else(|| ranges.last().filter(|range| start >= range.end).cloned())
 }
 
 #[cfg(test)]
@@ -244,6 +244,15 @@ mod tests {
         let caret = sql.find("SELECT 2").unwrap();
         let range = execution_range_for_dialect(sql, caret..caret, false, dialect).unwrap();
         assert_eq!(&sql[range], "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$");
+    }
+
+    #[test]
+    fn mysql_caret_on_client_directive_does_not_run_an_unrelated_statement() {
+        let sql = "DELIMITER $$\nSELECT 1$$\nDELIMITER ;\nSELECT 2;";
+        for caret in [0, sql.find("DELIMITER ;").unwrap() + 3] {
+            assert_eq!(execution_range_for_dialect(sql, caret..caret, false,
+                Dialect::for_engine("MySQL")), None);
+        }
     }
 
     #[test]

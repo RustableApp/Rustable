@@ -34,3 +34,19 @@ Official database support also requires working connection, metadata, query, edi
 - Ran `cargo test --locked -p dsl-parse --no-default-features --features sqlparser` in duck-sqllsp: the parser suite passed. This establishes that the pure-Rust parser configuration builds locally; it does not establish MySQL/MariaDB completeness or WASM compatibility.
 
 Decision remains open. Existing Rust code is substantial enough that a rewrite from another language is not justified yet. Next evaluation should exercise our SQL-mode and MariaDB-specific fixtures before selecting an integration.
+
+### Editor execution preparation (2026-11-01)
+
+Run-current and selected SQL now retain the MySQL/MariaDB client delimiter
+active at the slice start. Previously a routine extracted without its earlier
+DELIMITER directive could be split at internal semicolons by the execution
+scanner. The prepared script carries that directive; the driver-facing scanner
+still strips directives and delimiters from server statements. Selection can
+change the inherited delimiter again. A caret on an excluded client-directive
+line no longer falls back to executing the final unrelated statement.
+
+Verification: 20 filtered SQL/review tests passed, including isolated Unicode
+routine bodies, delimiter resets, selected-script overrides, and directive-line
+caret handling. Strict native all-target Clippy passed. This is editor/lexical
+preparation, not evidence of completed drivers or live MySQL/MariaDB execution.
+Session SQL mode propagation remains required when wiring the drivers.
