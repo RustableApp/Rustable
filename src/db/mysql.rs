@@ -475,6 +475,27 @@ mod tests {
     use super::*;
     use bincode::Options;
     #[test]
+    #[ignore = "requires disposable TLS fixture and RUSTABLE_MYSQL_TEST_CA"]
+    fn live_driver_over_verified_tls() {
+        let port = std::env::var("RUSTABLE_MYSQL_TLS_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43318, 43319].contains(&port));
+        let config = MysqlConfig { host: "localhost".into(), port, user: "rustable".into(),
+            password: "rustable-test-only".into(), database: "rustable_test".into(),
+            root_certificate: Some(std::env::var_os("RUSTABLE_MYSQL_TEST_CA").unwrap().into()), ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let id = driver.conn().unwrap().connection_id();
+        let cancel = AtomicBool::new(false);
+        let result = driver.execute("SELECT '日本 🦀';", false, &cancel);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.grids[0].rows[0][0], Value::Text("日本 🦀".into()));
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        assert!(driver.objects().is_ok());
+        assert_eq!(driver.conn().unwrap().connection_id(), id);
+        let (_, cipher): (String, String) = driver.conn().unwrap().query_first("SHOW SESSION STATUS LIKE 'Ssl_cipher'").unwrap().unwrap();
+        assert!(!cipher.is_empty());
+    }
+
+    #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_driver_catalog_query_and_browse() {
         let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();

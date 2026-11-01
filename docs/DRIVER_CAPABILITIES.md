@@ -334,3 +334,13 @@ benchmark. Assertions check packet counts and result equality, not wall-clock
 thresholds. Both engine runs and strict all-target Clippy passed. Reproduce with
 `RUSTABLE_MYSQL_TEST_PORT=43316 mise exec -- cargo test --lib db::mysql::transport_tests::metadata_batch_uses_one_wire_request -- --ignored --nocapture`
 (use port 43317 for MariaDB).
+
+### Verified TLS connections (2026-11-01)
+
+Added separate disposable TLS-required MySQL/MariaDB fixtures and generated,
+short-lived localhost certificates. Both actual servers now pass trusted-CA
+success, untrusted-CA rejection, explicit hostname-verification failure, and
+plaintext rejection tests. The native Rustable driver also passes initialization,
+Unicode queries, catalog loading and same-connection reuse over verified TLS.
+No verification bypass or fallback to plaintext was introduced. See
+`tools/database-fixtures/README.md` for commands and remaining TLS UI coverage.

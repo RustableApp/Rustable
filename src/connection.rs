@@ -126,6 +126,35 @@ mod mysql_tests {
     }
 
     #[test]
+    #[ignore = "requires disposable TLS MySQL/MariaDB fixture and RUSTABLE_MYSQL_TEST_CA"]
+    fn live_tls_verifies_ca_hostname_and_rejects_plaintext() {
+        use mysql::prelude::Queryable;
+        let port = std::env::var("RUSTABLE_MYSQL_TLS_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43318, 43319].contains(&port));
+        let config = MysqlConfig {
+            host: "localhost".into(), port, user: "rustable".into(),
+            password: "rustable-test-only".into(), database: "rustable_test".into(),
+            root_certificate: Some(std::env::var_os("RUSTABLE_MYSQL_TEST_CA").unwrap().into()),
+            ..Default::default()
+        };
+        let mut conn = mysql::Conn::new(mysql::OptsBuilder::from(&config)).unwrap();
+        let (_, cipher): (String, String) = conn.query_first("SHOW SESSION STATUS LIKE 'Ssl_cipher'").unwrap().unwrap();
+        assert!(!cipher.is_empty(), "connection must actually use TLS");
+        let version: String = conn.query_first("SELECT VERSION()").unwrap().unwrap();
+        eprintln!("TLS verified: {version}; {cipher}");
+        let mut untrusted = config.clone(); untrusted.root_certificate = None;
+        let error = mysql::Conn::new(mysql::OptsBuilder::from(&untrusted)).expect_err("untrusted CA must be rejected").to_string();
+        assert!(error.to_lowercase().contains("certificate"), "expected certificate verification failure: {error}");
+        let mut wrong_host = config.clone(); wrong_host.host = "127.0.0.1".into();
+        let error = mysql::Conn::new(mysql::OptsBuilder::from(&wrong_host)).expect_err("wrong hostname must be rejected").to_string();
+        assert!(error.to_lowercase().contains("not valid for name"), "expected hostname verification failure: {error}");
+        let mut plaintext = config.clone(); plaintext.tls = false;
+        assert!(mysql::Conn::new(mysql::OptsBuilder::from(&plaintext)).is_err(), "fixture requires encrypted transport");
+        let value: String = conn.query_first("SELECT '日本 🦀'").unwrap().unwrap();
+        assert_eq!(value, "日本 🦀");
+    }
+
+    #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_config_connects_with_utf8_and_rejects_untrusted_tls() {
         use mysql::prelude::Queryable;

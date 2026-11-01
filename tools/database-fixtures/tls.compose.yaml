@@ -1,0 +1,34 @@
+name: rustable-tls-tests
+services:
+  mysql:
+    image: mysql:8.4
+    command: ["--skip-log-bin", "--ssl-ca=/certs/ca.pem", "--ssl-cert=/certs/server.pem", "--ssl-key=/certs/server-key.pem", "--require-secure-transport=ON"]
+    ports: ["127.0.0.1:43318:3306", "[::1]:43318:3306"]
+    volumes: ["${RUSTABLE_TLS_FIXTURE_DIR:?Set certificate directory}:/certs:ro"]
+    environment:
+      MYSQL_ROOT_PASSWORD: rustable-test-only
+      MYSQL_DATABASE: rustable_test
+      MYSQL_USER: rustable
+      MYSQL_PASSWORD: rustable-test-only
+    tmpfs: [/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "--silent"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  mariadb:
+    image: mariadb:11.4
+    command: ["--ssl-ca=/certs/ca.pem", "--ssl-cert=/certs/server.pem", "--ssl-key=/certs/server-key.pem", "--require-secure-transport=ON"]
+    ports: ["127.0.0.1:43319:3306", "[::1]:43319:3306"]
+    volumes: ["${RUSTABLE_TLS_FIXTURE_DIR:?Set certificate directory}:/certs:ro"]
+    environment:
+      MARIADB_ROOT_PASSWORD: rustable-test-only
+      MARIADB_DATABASE: rustable_test
+      MARIADB_USER: rustable
+      MARIADB_PASSWORD: rustable-test-only
+    tmpfs: [/var/lib/mysql]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 2s
+      retries: 60

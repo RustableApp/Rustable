@@ -439,3 +439,34 @@ Validation: native library 410 passed, 63 existing manual/integration tests
 ignored; db::mysql selection 19 passed against each fixture; strict all-target
 Clippy passed. Disk-full fault injection and native UI interaction verification
 remain outstanding. No release or main push performed.
+
+## Verified TLS fixtures
+
+These separate servers require TLS and bind IPv4/IPv6 loopback ports 43318 and
+43319. The certificate is signed by a generated local CA and valid for
+`localhost` only, so connecting by IP tests hostname verification independently
+of CA trust. Certificate files are generated outside the repository and expire
+after two days. Regenerate them for later runs.
+
+```sh
+export RUSTABLE_TLS_FIXTURE_DIR="$(mktemp -d)/certs"
+sh tools/database-fixtures/generate-tls.sh "$RUSTABLE_TLS_FIXTURE_DIR"
+docker compose -f tools/database-fixtures/tls.compose.yaml up -d --wait
+export RUSTABLE_MYSQL_TEST_CA="$RUSTABLE_TLS_FIXTURE_DIR/ca.pem"
+for tls_port in 43318 43319; do
+  RUSTABLE_MYSQL_TLS_TEST_PORT="$tls_port" mise exec -- cargo test --lib live_tls_verifies -- --ignored --nocapture
+  RUSTABLE_MYSQL_TLS_TEST_PORT="$tls_port" mise exec -- cargo test --lib live_driver_over_verified_tls -- --ignored --nocapture
+done
+docker compose -f tools/database-fixtures/tls.compose.yaml down
+```
+
+When running all ignored `db::mysql` tests, also set
+`RUSTABLE_MYSQL_TLS_TEST_PORT` and `RUSTABLE_MYSQL_TEST_CA`; the ordinary
+`RUSTABLE_MYSQL_TEST_PORT` still selects the separate plaintext fixture.
+
+Verified on MySQL 8.4.11 and MariaDB 11.4.13: CA-trusted connection succeeds with
+`TLS_AES_256_GCM_SHA384`, omitted CA fails certificate verification, IP hostname
+mismatch fails name verification, and plaintext is rejected by the server.
+Rustable's driver initializes over TLS, returns exact Unicode text, loads its
+catalog and preserves the connection ID. This does not yet verify client
+certificates, remote certificate rotation or the native certificate-picker UI.
