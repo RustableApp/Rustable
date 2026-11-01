@@ -2,7 +2,7 @@
 use crate::sql::Dialect;
 use eframe::egui;
 use sqlparser::{
-    dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect},
+    dialect::{PostgreSqlDialect, SQLiteDialect},
     tokenizer::{Token, Tokenizer, Whitespace},
 };
 use std::{ops::Range, sync::mpsc};
@@ -116,24 +116,8 @@ impl Formatter {
         }
     }
 }
-// Tokenizer-only adapter: retain MySQL token categories while honoring the
-// session's quote rules. Parsing/execution still use the shared SQL scanner.
-#[derive(Debug)]
-struct MysqlLexer(crate::sql::mysql::Mode);
-impl sqlparser::dialect::Dialect for MysqlLexer {
-    fn dialect(&self) -> std::any::TypeId { std::any::TypeId::of::<MySqlDialect>() }
-    fn is_identifier_start(&self, ch: char) -> bool { MySqlDialect {}.is_identifier_start(ch) }
-    fn is_identifier_part(&self, ch: char) -> bool { MySqlDialect {}.is_identifier_part(ch) }
-    fn is_delimited_identifier_start(&self, ch: char) -> bool { ch == '`' || (self.0.ansi_quotes && ch == '"') }
-    fn supports_string_literal_backslash_escape(&self) -> bool { !self.0.no_backslash_escapes }
-    fn ignores_wildcard_escapes(&self) -> bool { true }
-    fn supports_numeric_prefix(&self) -> bool { true }
-    fn supports_multiline_comment_hints(&self) -> bool { true }
-    fn requires_single_line_comment_whitespace(&self) -> bool { true }
-}
-
 fn signature(sql: &str, dialect: Dialect) -> Result<Vec<(Token, bool)>, String> {
-    let mysql = MysqlLexer(match dialect { Dialect::Mysql(mode) => mode, _ => Default::default() });
+    let mysql = crate::sql::mysql::Lexer(match dialect { Dialect::Mysql(mode) => mode, _ => Default::default() });
     let dialect: &dyn sqlparser::dialect::Dialect = match dialect {
         Dialect::Postgres => &PostgreSqlDialect {},
         Dialect::Sqlite => &SQLiteDialect {},
@@ -166,7 +150,7 @@ fn signature(sql: &str, dialect: Dialect) -> Result<Vec<(Token, bool)>, String> 
 // Give the formatter opaque stand-ins for text it must never rewrite. Locations
 // are consumed monotonically, avoiding repeated scans of long one-line scripts.
 fn protected_format(input: &str, dialect: Dialect) -> Result<String, String> {
-    let mysql = MysqlLexer(match dialect { Dialect::Mysql(mode) => mode, _ => Default::default() });
+    let mysql = crate::sql::mysql::Lexer(match dialect { Dialect::Mysql(mode) => mode, _ => Default::default() });
     let lexer: &dyn sqlparser::dialect::Dialect = match dialect {
         Dialect::Postgres => &PostgreSqlDialect {},
         Dialect::Sqlite => &SQLiteDialect {},

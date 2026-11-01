@@ -398,3 +398,21 @@ Live SELECT comparisons on both disposable MySQL and MariaDB servers confirm
 identical results before/after Beautify for each mode combination. Strict
 all-target Clippy passes. This verifies those mode-sensitive expressions, not
 complete MySQL/MariaDB grammar support or every stored-program construct.
+
+### Local MySQL/MariaDB schema completion (2026-11-01)
+
+Catalog completions now insert backtick-quoted MySQL schema, table and column
+identifiers, escaping embedded backticks. Unqualified tables include their
+catalog schema; schema-qualified suggestions replace only the table fragment.
+This fixes SQLite/PostgreSQL double quotes being emitted as MySQL string
+literals in normal SQL mode. Columns such as rank are quoted without relying
+on SQLite's reserved-word list.
+
+Completion and Beautify now share the mode-aware MySQL tokenizer. Caret checks
+suppress suggestions inside hash comments, whitespace-qualified dash comments,
+strings and quoted identifiers. Relation discovery ignores string/comment
+contents and honors backslash escape modes. Tests cover names with spaces and
+backticks, schema qualification, column suggestions and false FROM/JOIN text
+inside literals/comments. Seventeen completion tests, six formatter tests (one
+manual benchmark ignored) and strict all-target Clippy pass. This remains local
+catalog-based completion, not a complete MySQL semantic language server.

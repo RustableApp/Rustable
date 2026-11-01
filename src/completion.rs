@@ -62,7 +62,7 @@ impl Completion {
         let byte = char_to_byte(sql, cursor);
         let before = &sql[..byte];
         // Suppress suggestions inside SQL strings, quoted identifiers and comments.
-        if !code_position(before) {
+        if !local_code_position(before, dialect) {
             return;
         }
         let prefix = before
@@ -72,7 +72,7 @@ impl Completion {
         let qualifier = before[..before.len() - prefix.len()]
             .trim_end()
             .strip_suffix('.')
-            .and_then(|s| tokens(s).last().cloned());
+            .and_then(|s| tokens_for_dialect(s, dialect).last().cloned());
         if prefix.chars().count() < 2 && !explicit && qualifier.is_none() {
             return;
         }
@@ -81,7 +81,7 @@ impl Completion {
         let prefix = prefix.to_lowercase();
         let range = crate::sql::execution_range_for_dialect(sql, cursor..cursor, false, dialect)
             .unwrap_or(0..sql.len());
-        let references = relations(&sql[range]);
+        let references = relations_for_dialect(&sql[range], dialect);
         let relevant: Vec<_> = objects
             .iter()
             .filter(|object| {
@@ -122,13 +122,18 @@ impl Completion {
                     .as_deref()
                     .unwrap_or(&object.name)
                     .to_owned();
-                let replacement = object.schema.as_ref().map(|_| {
+                let replacement = if matches!(dialect, Dialect::Mysql(_)) {
+                    Some(match (&qualifier, &object.schema) {
+                        (None, Some(schema)) => format!("{}.{}", mysql_identifier(schema), mysql_identifier(&name)),
+                        _ => mysql_identifier(&name),
+                    })
+                } else { object.schema.as_ref().map(|_| {
                     if qualifier.is_some() {
                         format!("\"{}\"", name.replace('"', "\"\""))
                     } else {
                         object.name.clone()
                     }
-                });
+                }) };
                 names.push((name, true, replacement));
             }
         }
@@ -149,6 +154,9 @@ impl Completion {
                     self.identifiers.insert(name.clone());
                 }
                 let replacement = replacement.or_else(|| {
+                    if identifier && matches!(dialect, Dialect::Mysql(_)) {
+                        return Some(mysql_identifier(&name));
+                    }
                     (identifier
                         && dialect == Dialect::Postgres
                         && name.chars().any(char::is_uppercase))
@@ -424,6 +432,10 @@ impl Completion {
 }
 // Use the bundled engine's keyword inventory rather than the smaller suggestion
 // list. This does not open a connection or perform database work.
+fn mysql_identifier(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
+
 fn identifier_needs_quotes(name: &str) -> bool {
     let mut chars = name.chars();
     if !chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
@@ -491,8 +503,27 @@ fn tokens(sql: &str) -> Vec<String> {
     }
     result
 }
+fn tokens_for_dialect(sql: &str, dialect: Dialect) -> Vec<String> {
+    let Dialect::Mysql(mode) = dialect else { return tokens(sql); };
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let lexer = crate::sql::mysql::Lexer(mode);
+    let Ok(tokens) = Tokenizer::new(&lexer, sql).tokenize() else { return Vec::new(); };
+    tokens.into_iter().filter_map(|token| match token {
+        Token::Word(word) => Some(word.value),
+        Token::Period => Some(".".into()),
+        Token::Comma => Some(",".into()),
+        Token::LParen => Some("(".into()),
+        Token::RParen => Some(")".into()),
+        Token::SemiColon => Some(";".into()),
+        _ => None,
+    }).collect()
+}
+#[cfg(test)]
 fn relations(sql: &str) -> Vec<(String, String)> {
-    let words = tokens(sql);
+    relations_for_dialect(sql, Dialect::Sqlite)
+}
+fn relations_for_dialect(sql: &str, dialect: Dialect) -> Vec<(String, String)> {
+    let words = tokens_for_dialect(sql, dialect);
     let mut result = Vec::new();
     let mut i = 0;
     // A comma introduces another relation only within the FROM list at its
@@ -663,6 +694,16 @@ fn quoted_token_end(sql: &str, start: usize) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+fn local_code_position(sql: &str, dialect: Dialect) -> bool {
+    let Dialect::Mysql(mode) = dialect else { return code_position(sql); };
+    // A sentinel remains a Word only when the caret is outside a literal,
+    // identifier or comment. Use the same mode-aware lexer as Beautify.
+    let input = format!("{sql}__rustable_caret__");
+    let lexer = crate::sql::mysql::Lexer(mode);
+    let Ok(tokens) = sqlparser::tokenizer::Tokenizer::new(&lexer, &input).tokenize() else { return false; };
+    matches!(tokens.last(), Some(sqlparser::tokenizer::Token::Word(word)) if word.value.ends_with("__rustable_caret__"))
 }
 
 fn code_position(sql: &str) -> bool {
@@ -863,6 +904,47 @@ mod tests {
                 .collect(),
         }
     }
+    #[test]
+    fn mysql_completion_respects_comments_and_session_string_escapes() {
+        let normal = Dialect::Mysql(crate::sql::mysql::Mode::default());
+        let no_escape = Dialect::Mysql(crate::sql::mysql::Mode { no_backslash_escapes: true, ansi_quotes: false });
+        for sql in ["SELECT 1 # FR", "SELECT 1 -- FR", "SELECT /* FR", "SELECT 'FR", "SELECT `FR", "SELECT \"FR"] {
+            assert!(!local_code_position(sql, normal), "{sql}");
+        }
+        assert!(local_code_position("SELECT 1 # ignored\n FR", normal));
+        assert!(local_code_position("SELECT 1--2 + FR", normal));
+        assert_eq!(relations_for_dialect("SELECT 'escaped \\' FROM fake' FROM customers # JOIN bogus\n", normal), vec![("customers".into(), "customers".into())]);
+        assert_eq!(relations_for_dialect("SELECT \"FROM fake\" FROM customers", normal), vec![("customers".into(), "customers".into())]);
+        assert!(!local_code_position("SELECT 'escaped \\' FR", normal));
+        assert!(local_code_position("SELECT 'escaped \\' FR", no_escape));
+        assert!(!local_code_position("SELECT 'escaped \\' FR", Dialect::Mysql(crate::sql::mysql::Mode { no_backslash_escapes: false, ansi_quotes: true })));
+    }
+
+    #[test]
+    fn mysql_schema_table_and_column_candidates_insert_backtick_identifiers() {
+        let mut table = object("order details", &["rank", "display name", "tick`field"]);
+        table.schema = Some("shop`data".into());
+        for mode in [crate::sql::mysql::Mode::default(), crate::sql::mysql::Mode { ansi_quotes: true, no_backslash_escapes: true }] {
+            let dialect = Dialect::Mysql(mode);
+            for (input, label, expected) in [
+                ("SELECT * FROM ord", "order details", "SELECT * FROM `shop``data`.`order details`"),
+                ("SELECT * FROM `shop``data`.ord", "order details", "SELECT * FROM `shop``data`.`order details`"),
+                ("SELECT ra FROM `order details`", "rank", "SELECT `rank` FROM `order details`"),
+                ("SELECT dis FROM `order details`", "display name", "SELECT `display name` FROM `order details`"),
+                ("SELECT tic FROM `order details`", "tick`field", "SELECT `tick``field` FROM `order details`"),
+                ("SELECT * FROM sho", "shop`data", "SELECT * FROM `shop``data`"),
+            ] {
+                let cursor = input.find(" FROM `order details`").unwrap_or(input.len());
+                let mut completion = Completion::default();
+                completion.refresh(input, cursor, &[table.clone()], &[], true, dialect);
+                assert!(completion.items.iter().any(|item| item == label), "{input}: {:?}", completion.items);
+                let mut sql = input.to_owned();
+                completion.apply(&mut sql, label);
+                assert_eq!(sql, expected);
+            }
+        }
+    }
+
     #[test]
     fn popup_labels_share_left_edge() {
         let ctx = egui::Context::default();

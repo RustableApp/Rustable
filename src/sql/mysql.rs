@@ -327,3 +327,19 @@ mod server_tests {
         assert_eq!(conn.transaction_status(), None);
     }
 }
+
+// Tokenizer-only adapter: retain MySQL token categories while honoring the
+// session's quote rules. Parsing/execution still use the shared SQL scanner.
+#[derive(Debug)]
+pub(crate) struct Lexer(pub Mode);
+impl sqlparser::dialect::Dialect for Lexer {
+    fn dialect(&self) -> std::any::TypeId { std::any::TypeId::of::<sqlparser::dialect::MySqlDialect>() }
+    fn is_identifier_start(&self, ch: char) -> bool { sqlparser::dialect::MySqlDialect {}.is_identifier_start(ch) }
+    fn is_identifier_part(&self, ch: char) -> bool { sqlparser::dialect::MySqlDialect {}.is_identifier_part(ch) }
+    fn is_delimited_identifier_start(&self, ch: char) -> bool { ch == '`' || (self.0.ansi_quotes && ch == '"') }
+    fn supports_string_literal_backslash_escape(&self) -> bool { !self.0.no_backslash_escapes }
+    fn ignores_wildcard_escapes(&self) -> bool { true }
+    fn supports_numeric_prefix(&self) -> bool { true }
+    fn supports_multiline_comment_hints(&self) -> bool { true }
+    fn requires_single_line_comment_whitespace(&self) -> bool { true }
+}
