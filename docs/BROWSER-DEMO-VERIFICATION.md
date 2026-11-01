@@ -203,3 +203,26 @@ Installation uses two directory renames with rollback on an installation error;
 it is not a claim of atomic replacement for concurrent HTTP readers. Build into
 staging before deploying. Existing WASM warnings remain. No public deployment
 or desktop release was performed for this change.
+
+### CSV parser controls and oversized picker (2026-11-01)
+
+Verified the newly rebuilt full app in the localhost:8768 landing-page iframe.
+Opened this UTF-8 fixture through Export → Preview CSV file:
+
+```csv
+name;email
+"Browser; visitor";browser@example.invalid
+```
+
+The default comma parser showed one column. Choosing Semicolon reparsed the
+same 54-byte snapshot into two columns and one data row, preserving the quoted
+semicolon in `Browser; visitor`. Disabling First row is header reparsed it into
+two data rows with generic Column 1/Column 2 headings. No import was committed.
+
+A separate 8 MiB + 1 byte CSV selected through the actual file chooser was
+rejected with `CSV files are limited to 8 MiB`. Dismissing the error and refreshing
+customers succeeded on the same session, with its original sample data visible.
+Evidence: `wasm-csv-options.png` and `wasm-csv-oversized.png` in the session
+visualization directory. This closes delimiter/header-change and oversized-picker
+checks for the in-app browser only; import cancellation, other engines and
+whole-tab memory measurement remain outstanding. No public deployment occurred.
