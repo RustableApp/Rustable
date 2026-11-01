@@ -1,0 +1,98 @@
+name: Signed release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to package
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+      - name: Validate version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, re, tomllib
+          tag = os.environ['RELEASE_TAG']
+          version = tomllib.load(open('Cargo.toml','rb'))['package']['version']
+          assert re.fullmatch(r'v\d+\.\d+\.\d+', tag) and tag == 'v'+version, 'Tag must match Cargo version'
+          PY
+      - name: Linux development libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev clang libclang-dev
+      - run: mise exec -- cargo test --locked
+      - run: mise run build-lsps
+      - name: Prepare Sparkle
+        if: runner.os == 'macOS'
+        run: python scripts/prepare-sparkle.py
+      - name: Build macOS with updater
+        if: runner.os == 'macOS'
+        run: SPARKLE_FRAMEWORK_PATH="$PWD/target/sparkle" mise exec -- cargo build --locked --release --features sparkle-updater
+      - name: Build Windows and Linux
+        if: runner.os != 'macOS'
+        run: mise exec -- cargo build --locked --release
+      - run: python scripts/package-release.py
+      - name: Sign and notarize macOS; sign update feed
+        if: runner.os == 'macOS'
+        run: python scripts/sign-macos-release.py
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          SPARKLE_PUBLIC_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+  draft:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify complete asset set and checksum
+        run: |
+          test -s dist/Rustable-macos-arm64.zip
+          test -s dist/appcast-macos-arm64.xml
+          test -s dist/Rustable-windows-x86_64.zip
+          test -s dist/Rustable-linux-x86_64.tar.gz
+          cd dist
+          sha256sum *.zip *.tar.gz *.xml > SHA256SUMS
+      - name: Create draft release for verification
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --title "Rustable $RELEASE_TAG" --generate-notes

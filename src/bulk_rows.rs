@@ -703,8 +703,8 @@ mod tests {
     use super::*;
     fn app() -> Rustable {
         let ctx = egui::Context::default();
-        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
-        app.pending = None;
+        // UI-only fixture: do not race a queued demo-open command against paging.
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
         app.engine = "SQLite".into();
         app.safe = false;
         app.view = View::Data;
