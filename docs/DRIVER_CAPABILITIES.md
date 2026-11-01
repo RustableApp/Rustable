@@ -296,3 +296,19 @@ fixture test now completes and executes qualified column SQL using actual catalo
 metadata on both MySQL 8.4 and MariaDB 11.4; both passed. Strict all-target clippy
 also passed. This improves local suggestions; it does not establish complete
 CTE/subquery scope resolution or language-server parity.
+
+### Batched table metadata reads (2026-11-01)
+
+MySQL/MariaDB table browsing now sends SHOW CREATE TABLE and SHOW INDEX together
+in one COM_QUERY on the existing connection, removing one sequential request
+from each base-table metadata fetch. All result sets are consumed with errors
+propagated, including errors after a successful first set. Catalog, data and
+trigger requests remain separate; this is not yet parallel metadata/data loading
+and no WAN timing improvement has been measured.
+
+Both disposable engine suites passed (31 tests each), including temporary-table
+metadata, unchanged connection ID, active-transaction preservation and rollback,
+a deterministic later-statement error followed by successful connection reuse,
+restricted trigger visibility, cancellation, and transport failures. Strict
+all-target Clippy passed. The test also established that MariaDB SHOW INDEX on a
+view need not fail; it is not used as a cross-engine error-injection assumption.

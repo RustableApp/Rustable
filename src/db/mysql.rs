@@ -182,12 +182,26 @@ impl MysqlDriver {
             }
         }
     }
+    fn metadata_query_sets(&mut self, sql: &str) -> Result<Vec<Vec<::mysql::Row>>, String> {
+        self.with_connection(|conn| {
+            let mut results = conn.query_iter(sql)?;
+            let mut sets = Vec::new();
+            while let Some(set) = results.iter() {
+                sets.push(set.collect::<Result<Vec<::mysql::Row>, ::mysql::Error>>()?);
+            }
+            Ok(sets)
+        })
+    }
     fn table_metadata(&mut self, schema: &str, table: &str) -> Result<(Vec<Index>, Vec<Object>), String> {
         let qualified = format!("{}.{}", quote(schema), quote(table));
-        let definition: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(format!("SHOW CREATE TABLE {qualified}")))?;
-        let ddl = definition.and_then(|row| row.get::<String, _>(1)).ok_or("Missing table definition")?;
+        // These independent reads share one COM_QUERY round trip. Keep the
+        // existing session (including temporary tables and transaction state),
+        // and consume every result so a later server error cannot be hidden.
+        let mut sets = self.metadata_query_sets(&format!("SHOW CREATE TABLE {qualified}; SHOW INDEX FROM {qualified}"))?;
+        if sets.len() != 2 { return Err("Missing table metadata results".into()); }
+        let rows = sets.pop().unwrap();
+        let ddl = sets.pop().unwrap().into_iter().next().and_then(|row| row.get::<String, _>(1)).ok_or("Missing table definition")?;
         let mut indexes = std::collections::BTreeMap::<String, Index>::new();
-        let rows: Vec<::mysql::Row> = self.with_connection(|conn| conn.query(format!("SHOW INDEX FROM {qualified}")))?;
         // SHOW INDEX is ordered by index then sequence by the server. Sort
         // explicitly so multipart keys remain ordered across server versions.
         let mut entries = Vec::new();
@@ -630,6 +644,32 @@ mod tests {
         assert_eq!(driver.sql_dialect(), crate::sql::Dialect::Mysql(parse_mode(&server_mode)));
         let cleanup = driver.execute("DROP PROCEDURE driver_tracking_failure;", false, &cancel);
         assert!(cleanup.error.is_none(), "{:?}", cleanup.error);
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn batched_metadata_preserves_session_and_reports_later_errors() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let id = driver.conn().unwrap().connection_id();
+        driver.conn().unwrap().query_drop("CREATE TEMPORARY TABLE `batch``metadata` (id INT PRIMARY KEY, label VARCHAR(20), INDEX by_label(label)) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("START TRANSACTION").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO `batch``metadata` VALUES (1,'uncommitted')").unwrap();
+        let (indexes, triggers) = driver.table_metadata("rustable_test", "batch`metadata").unwrap();
+        assert!(indexes.iter().any(|index| index.name == "by_label" && index.columns == ["label"]));
+        assert!(triggers.is_empty());
+        assert_eq!(driver.conn().unwrap().connection_id(), id);
+        assert_eq!(driver.transaction_state(), TransactionState::Active);
+        driver.conn().unwrap().query_drop("ROLLBACK").unwrap();
+        assert_eq!(driver.conn().unwrap().query_first::<u64, _>("SELECT COUNT(*) FROM `batch``metadata`").unwrap(), Some(0));
+        // A later statement error must propagate after a successful first set,
+        // leaving the protocol synchronized for the next command.
+        assert!(driver.metadata_query_sets("SELECT 1; SELECT * FROM missing_batch_metadata_probe_741").is_err());
+        assert_eq!(driver.conn().unwrap().query_first::<u64, _>("SELECT 42").unwrap(), Some(42));
+        assert_eq!(driver.conn().unwrap().connection_id(), id);
     }
 
     #[test]
