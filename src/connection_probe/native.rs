@@ -21,6 +21,7 @@ pub(super) fn run(connection: ConnectionKind, password: String, cancel: &AtomicB
         ConnectionKind::Mysql(profile) | ConnectionKind::MariaDb(profile) => {
             let mut fields = vec![Host, Port, Database, User, Password];
             if profile.tls { fields.push(Tls); }
+            if profile.ssh.is_some() { fields.extend([SshHost, SshPort, SshUser, SshIdentity]); }
             emit(Event::Running(fields.clone()));
             let mut config = profile.with_password(password);
             config.connect_timeout = std::time::Duration::from_secs(5);

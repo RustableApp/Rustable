@@ -1,0 +1,16 @@
+Port 22
+ListenAddress 0.0.0.0
+HostKey /run/fixture/host
+AuthorizedKeysFile /run/fixture/client.pub
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthenticationMethods publickey
+AllowTcpForwarding local
+PermitOpen localhost:43318 localhost:43319
+X11Forwarding no
+AllowAgentForwarding no
+PermitTTY no
+StrictModes yes
+PidFile /run/sshd.pid
+LogLevel VERBOSE

@@ -495,3 +495,33 @@ RUSTABLE_MYSQL_TEST_PORT=43316 RUSTABLE_MYSQL_PARTIAL_REVOKES_TEST=1 \
 Ordinary driver-suite runs leave this server-wide branch disabled. Both engines
 still exercise unrestricted global grants, actual triggers, late grants, and
 revocation in the ordinary ignored integration suite.
+
+### MySQL/MariaDB over SSH with verified database TLS
+
+This disposable Docker Desktop gateway forwards only localhost:43318 and
+localhost:43319 to the TLS fixtures on the host. Start the TLS fixtures first.
+Keys are generated locally; known_hosts is derived from the generated host key,
+not accepted from a network scan. The gateway is exposed only on loopback:43320.
+It permits key authentication and local forwarding, with no password login.
+
+```sh
+sh tools/database-fixtures/generate-ssh.sh /tmp/rustable-ssh-fixture
+RUSTABLE_SSH_FIXTURE_DIR=/tmp/rustable-ssh-fixture \
+  docker compose -f tools/database-fixtures/ssh.compose.yaml up -d --build
+RUSTABLE_SSH_FIXTURE_DIR=/tmp/rustable-ssh-fixture \
+RUSTABLE_MYSQL_TLS_TEST_PORT=43318 \
+RUSTABLE_MYSQL_TEST_CA=/tmp/rustable-tls-fixture/ca.pem \
+  mise exec -- cargo test --lib live_ssh_tls -- --ignored
+```
+
+Repeat with TLS port 43319 for MariaDB. Provide RUSTABLE_SSH_FIXTURE_DIR as well
+when running the full ignored driver suite. Test coverage includes retained TLS,
+transaction-preserving cancellation using the same tunnel even with the direct
+port invalidated, connection reuse, listener closure on drop, rejected unknown
+SSH hosts, and rejected database CAs. This fixture does not verify Windows SSH
+(OpenSSH transport remains unavailable there) or arbitrary remote jump-host setups.
+
+```sh
+RUSTABLE_SSH_FIXTURE_DIR=/tmp/rustable-ssh-fixture \
+  docker compose -f tools/database-fixtures/ssh.compose.yaml down
+```

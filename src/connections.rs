@@ -157,6 +157,9 @@ impl Manager {
         if let Some(draft) = &mut self.draft {
             match &mut draft.connection {
                 ConnectionKind::SQLite { path: target } if !key => *target = path,
+                ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) if key => {
+                    if let Some(ssh) = &mut config.ssh { ssh.identity_file = Some(path); }
+                }
                 ConnectionKind::Postgres(config) if key => {
                     if let Some(ssh) = &mut config.ssh {
                         ssh.identity_file = Some(path);
@@ -714,7 +717,7 @@ impl Rustable {
                                 form_row(ui, "", |ui| { if ui.button("Choose file…").clicked() { pick = Some(false); } });
                             }
                             ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) => {
-                                ui.weak("Experimental · SQL, browsing and exports available. Table editing, CSV import and SSH are not ready yet.");
+                                ui.weak("Experimental · SQL, browsing and exports available. Table editing and CSV import are not ready yet.");
                                 form_text(ui, "Host", &mut config.host, false, Some(ProbeField::Host));
                                 ports_valid &= form_port(ui, &mut config.port, ProbeField::Port, self.connection_manager.generation);
                                 form_text(ui, "Database", &mut config.database, false, Some(ProbeField::Database));
@@ -737,6 +740,7 @@ impl Rustable {
                                         }
                                     });
                                 }
+                                ports_valid &= ssh_form(ui, &mut config.ssh, self.connection_manager.generation, &mut pick);
                             }
                             ConnectionKind::Postgres(config) => {
                                 if ui.available_width() >= 500.0 {
@@ -762,31 +766,7 @@ impl Rustable {
                                         ui.selectable_value(&mut config.tls, false, "Disabled (unencrypted)");
                                     });
                                 });
-                                let mut ssh = config.ssh.is_some();
-                                form_row(ui, "SSH tunnel", |ui| { if form_checkbox(ui, &mut ssh, "Enabled").changed() { config.ssh = ssh.then(SshOptions::default); } });
-                                if let Some(ssh) = &mut config.ssh {
-                                    form_section(ui, "SSH gateway");
-                                    form_text(ui, "Host", &mut ssh.host, false, Some(ProbeField::SshHost));
-                                    status_row(ui, "Port", Some(ProbeField::SshPort), |ui| {
-                                        let mut inherit = ssh.port == 0;
-                                        if form_checkbox(ui, &mut inherit, "Use SSH config").changed() { ssh.port = if inherit { 0 } else { 22 }; }
-                                    });
-                                    if ssh.port != 0 { ports_valid &= form_port(ui, &mut ssh.port, ProbeField::SshPort, self.connection_manager.generation); }
-                                    form_text(ui, "User", &mut ssh.user, false, Some(ProbeField::SshUser));
-                                    status_row(ui, "Identity", Some(ProbeField::SshIdentity), |ui| {
-                                        let mut use_agent = ssh.identity_file.is_none();
-                                        if form_checkbox(ui, &mut use_agent, "Use config / SSH agent").changed() {
-                                            if use_agent { ssh.identity_file = None; } else { pick = Some(true); }
-                                        }
-                                    });
-                                    form_row(ui, "", |ui| {
-                                        if ui.button("Choose key…").clicked() { pick = Some(true); }
-                                        if let Some(path) = &ssh.identity_file {
-                                            ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
-                                        }
-                                    });
-                                    ui.add(egui::Label::new(RichText::new("Host aliases use ~/.ssh/config. Blank user and automatic port inherit configuration. Selected keys are tried alongside configured keys. Gateway must already be trusted.").weak().small()).wrap());
-                                }
+                                ports_valid &= ssh_form(ui, &mut config.ssh, self.connection_manager.generation, &mut pick);
                             }
                         }
                         });
@@ -1307,6 +1287,37 @@ fn connection_search(ui: &mut egui::Ui, text: &mut String) {
                 }
             });
         });
+}
+
+
+fn ssh_form(ui: &mut egui::Ui, options: &mut Option<SshOptions>, generation: u64, pick: &mut Option<bool>) -> bool {
+    let mut ports_valid = true;
+    let mut ssh = options.is_some();
+    form_row(ui, "SSH tunnel", |ui| { if form_checkbox(ui, &mut ssh, "Enabled").changed() { *options = ssh.then(SshOptions::default); } });
+    if let Some(ssh) = options {
+        form_section(ui, "SSH gateway");
+        form_text(ui, "Host", &mut ssh.host, false, Some(ProbeField::SshHost));
+        status_row(ui, "Port", Some(ProbeField::SshPort), |ui| {
+            let mut inherit = ssh.port == 0;
+            if form_checkbox(ui, &mut inherit, "Use SSH config").changed() { ssh.port = if inherit { 0 } else { 22 }; }
+        });
+        if ssh.port != 0 { ports_valid &= form_port(ui, &mut ssh.port, ProbeField::SshPort, generation); }
+        form_text(ui, "User", &mut ssh.user, false, Some(ProbeField::SshUser));
+        status_row(ui, "Identity", Some(ProbeField::SshIdentity), |ui| {
+            let mut use_agent = ssh.identity_file.is_none();
+            if form_checkbox(ui, &mut use_agent, "Use config / SSH agent").changed() {
+                if use_agent { ssh.identity_file = None; } else { *pick = Some(true); }
+            }
+        });
+        form_row(ui, "", |ui| {
+            if ui.button("Choose key…").clicked() { *pick = Some(true); }
+            if let Some(path) = &ssh.identity_file {
+                ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
+            }
+        });
+        ui.add(egui::Label::new(RichText::new("Host aliases use ~/.ssh/config. Blank user and automatic port inherit configuration. Selected keys are tried alongside configured keys. Gateway must already be trusted.").weak().small()).wrap());
+    }
+    ports_valid
 }
 
 #[cfg(test)]
@@ -2124,6 +2135,32 @@ mod tests {
             assert!(content.y <= rect.height() + 1.0, "form unexpectedly overflows: {content:?} {rect:?}");
         }
     }
+    #[test]
+    fn mysql_ssh_forms_show_gateway_and_accept_key_picker() {
+        for maria in [false,true] {
+            let ctx = egui::Context::default();
+            let mut app = app();
+            app.connection_action(Action::NewMysql(maria)).unwrap();
+            let draft = app.connection_manager.draft.as_mut().unwrap();
+            let (ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config)) = &mut draft.connection else { unreachable!() };
+            config.ssh = Some(SshOptions { host:"gateway".into(),..Default::default() });
+            let generation = app.connection_manager.generation;
+            app.connection_manager.set_path(generation,true,"/keys/client".into());
+            let draft = app.connection_manager.draft.as_ref().unwrap();
+            let (ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config)) = &draft.connection else { unreachable!() };
+            assert_eq!(config.ssh.as_ref().unwrap().identity_file.as_deref(),Some(std::path::Path::new("/keys/client")));
+            app.connections = true;
+            let mut output = None;
+            for _ in 0..5 {
+                output = Some(ctx.run(egui::RawInput { screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1440.0,1200.0))),..Default::default() },|ctx|app.connections_window(ctx)));
+            }
+            let output = output.unwrap();
+            for label in ["SSH gateway","Use SSH config","Choose key…","Connect","Test"] {
+                assert!(painted_text(&output,label).is_some(),"missing {label}");
+            }
+        }
+    }
+
     #[test]
     fn expanded_ssh_fits_large_screen_and_agent_checkbox_tracks_key_choice() {
         let ctx = egui::Context::default();

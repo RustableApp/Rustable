@@ -437,3 +437,23 @@ pre-cancelled/invalid SSH connections without direct fallback. Strict all-target
 Clippy passed. These runs did not establish a live SSH tunnel: live SSH lifecycle,
 TLS-through-tunnel/cancellation acceptance and connection-form/probe presentation
 remain pending. The UI still labels SSH unavailable until that work is verified.
+
+### Live MySQL/MariaDB SSH and form controls (2026-11-01)
+
+Verified each TLS fixture through a disposable, key-authenticated OpenSSH gateway.
+The driver overrides stale remote settings with the selected database endpoint,
+retains TLS cipher verification, cancels a slow transactional write in under two
+seconds and preserves the prior transaction value. The test invalidates the direct
+config port after connecting, proving the cancellation connection uses the tunnel.
+The next query succeeds on the same database connection; rollback restores the
+original value, and driver drop closes the loopback listener. Unknown SSH hosts
+and untrusted database certificates both fail closed. Both engine tests passed.
+
+MySQL and MariaDB connection forms now use the same SSH controls as PostgreSQL,
+including gateway/config-inherited port, user, agent and key-file picker. Their
+connection probes include SSH fields in status reporting. Native form tests cover
+both expanded engine forms and key selection; all 31 connection-manager tests
+passed, and strict all-target Clippy passed. No desktop visual click-through was
+performed in this pass. Built-in Windows SSH remains unsupported; remote jump-host
+and gateway interruption acceptance remain follow-up coverage. This does not lift
+the experimental database support or reviewed-editing gates.

@@ -677,9 +677,40 @@ mod tests {
         assert!(driver.connection.is_none());
     }
 
+    #[test]
+    #[ignore = "requires disposable SSH gateway, TLS fixture and RUSTABLE_SSH_FIXTURE_DIR"]
+    fn live_ssh_tls_cancellation_and_tunnel_cleanup() {
+        let port = std::env::var("RUSTABLE_MYSQL_TLS_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43318,43319].contains(&port));
+        let directory = std::path::PathBuf::from(std::env::var_os("RUSTABLE_SSH_FIXTURE_DIR").unwrap());
+        let config = MysqlConfig { host:"localhost".into(),port,database:"rustable_test".into(),
+            user:"rustable".into(),password:"rustable-test-only".into(),read_timeout:Duration::from_secs(3),
+            root_certificate:Some(std::env::var_os("RUSTABLE_MYSQL_TEST_CA").unwrap().into()),
+            ssh:Some(crate::ssh_tunnel::Config { host:"127.0.0.1".into(),port:43320,user:"root".into(),
+                identity_file:Some(directory.join("client")),known_hosts_file:Some(directory.join("known_hosts")),
+                config_file:Some("/dev/null".into()),remote_host:"stale.invalid".into(),remote_port:1 }),
+            ..Default::default() };
+        check_driver_cancellation(&config);
+        let empty = tempfile::NamedTempFile::new().unwrap();
+        let mut untrusted = config.clone();
+        untrusted.ssh.as_mut().unwrap().known_hosts_file = Some(empty.path().into());
+        let error = MysqlDriver::connect(&untrusted).err().expect("unknown SSH host must fail");
+        assert!(error.to_lowercase().contains("host key"), "{error}");
+        let mut untrusted_ca = config;
+        untrusted_ca.root_certificate = None;
+        let error = MysqlDriver::connect(&untrusted_ca).err().expect("SSH must not bypass database certificate validation");
+        assert!(error.to_lowercase().contains("certificate"), "{error}");
+    }
+
     fn check_driver_cancellation(config: &MysqlConfig) {
         let mut driver = MysqlDriver::connect(config).unwrap();
         let connection_id = driver.conn().unwrap().connection_id();
+        let tunnel_port = driver.tunnel.as_ref().map(|t| t.local_port());
+        if tunnel_port.is_some() {
+            // The cancellation socket must use the tunnel destination, not open
+            // a fresh direct connection to the profile's database address.
+            driver.config.port = 1;
+        }
         let cancel = AtomicBool::new(false);
         assert!(driver.execute("CREATE TEMPORARY TABLE cancel_driver_probe(value INT) ENGINE=InnoDB; INSERT INTO cancel_driver_probe VALUES(7); START TRANSACTION; UPDATE cancel_driver_probe SET value=8;", false, &cancel).error.is_none());
         let started = std::time::Instant::now();
@@ -703,6 +734,10 @@ mod tests {
         if config.tls {
             let (_, cipher): (String, String) = driver.conn().unwrap().query_first("SHOW SESSION STATUS LIKE 'Ssl_cipher'").unwrap().unwrap();
             assert!(!cipher.is_empty());
+        }
+        drop(driver);
+        if let Some(port) = tunnel_port {
+            assert!(std::net::TcpStream::connect(("127.0.0.1",port)).is_err(), "driver drop must close its tunnel listener");
         }
     }
 

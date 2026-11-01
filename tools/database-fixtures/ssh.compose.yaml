@@ -1,0 +1,12 @@
+name: rustable-ssh-tests
+services:
+  gateway:
+    build: ./ssh
+    ports: ["127.0.0.1:43320:22"]
+    volumes: ["${RUSTABLE_SSH_FIXTURE_DIR:?Set disposable SSH key directory}:/keys:ro"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -s /run/sshd.pid && kill -0 $(cat /run/sshd.pid)"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
