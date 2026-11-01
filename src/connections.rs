@@ -1135,6 +1135,14 @@ fn connection_destination_action(ui: &mut egui::Ui, enabled: bool, label: &str) 
 }
 
 /// One hit target per connection: the badge, title and endpoint select the same row.
+fn network_endpoint(host: &str, database: &str, ssh: Option<&SshOptions>) -> String {
+    let endpoint = match ssh {
+        Some(ssh) => format!("SSH: {}", ssh.host),
+        None => host.to_owned(),
+    };
+    if database.is_empty() { endpoint } else { format!("{endpoint} · {database}") }
+}
+
 fn connection_row(ui: &mut egui::Ui, profile: &Profile, selected: bool) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 55.0), egui::Sense::click());
@@ -1155,15 +1163,12 @@ fn connection_row(ui: &mut egui::Ui, profile: &Profile, selected: bool) -> egui:
             Color32::from_rgb(137, 72, 224),
             path.display().to_string(),
         ),
-        ConnectionKind::Mysql(config) => ("My", Color32::from_rgb(216, 140, 48), format!("{} · {}", config.host, config.database)),
-        ConnectionKind::MariaDb(config) => ("Ma", Color32::from_rgb(45, 156, 167), format!("{} · {}", config.host, config.database)),
+        ConnectionKind::Mysql(config) => ("My", Color32::from_rgb(216, 140, 48), network_endpoint(&config.host, &config.database, config.ssh.as_ref())),
+        ConnectionKind::MariaDb(config) => ("Ma", Color32::from_rgb(45, 156, 167), network_endpoint(&config.host, &config.database, config.ssh.as_ref())),
         ConnectionKind::Postgres(config) => (
             "Pg",
             Color32::from_rgb(0, 141, 204),
-            match &config.ssh {
-                Some(ssh) => format!("SSH: {} · {}", ssh.host, config.database),
-                None => format!("{} · {}", config.host, config.database),
-            },
+            network_endpoint(&config.host, &config.database, config.ssh.as_ref()),
         ),
     };
     let center = egui::pos2(rect.left() + 23.0, rect.center().y);

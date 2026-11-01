@@ -457,3 +457,13 @@ passed, and strict all-target Clippy passed. No desktop visual click-through was
 performed in this pass. Built-in Windows SSH remains unsupported; remote jump-host
 and gateway interruption acceptance remain follow-up coverage. This does not lift
 the experimental database support or reviewed-editing gates.
+
+### SSH connection-browser discoverability (2026-11-01)
+
+MySQL/MariaDB saved connections now match searches by SSH gateway, user and port,
+in addition to database endpoint metadata. The connection row displays the SSH
+gateway using the same format as PostgreSQL. Empty database names no longer leave
+a dangling separator in network endpoint rows. Key-file paths are not searched.
+All 12 connection-profile tests passed, including case-insensitive gateway search,
+engine filtering, stable result order and exclusion of key-file paths. Strict
+all-target Clippy passed. This was not a new live database or visual acceptance run.

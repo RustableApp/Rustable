@@ -265,6 +265,9 @@ impl ConnectionProfiles {
                     ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) => {
                         contains(if matches!(profile.connection, ConnectionKind::MariaDb(_)) { "MariaDB" } else { "MySQL" })
                             || contains(&format!("{}@{}:{}/{}", config.user, config.host, config.port, config.database))
+                            || config.ssh.as_ref().is_some_and(|ssh| {
+                                contains(&format!("{}@{}:{}", ssh.user, ssh.host, ssh.port))
+                            })
                     }
                     ConnectionKind::Postgres(config) => {
                         contains("PostgreSQL")
@@ -810,6 +813,23 @@ mod mysql_profile_tests {
         invalid.ssh.as_mut().unwrap().host.clear();
         assert!(invalid.validate().unwrap_err().contains("SSH host"));
     }
+    #[test]
+    fn mysql_gateway_search_finds_profiles_without_matching_private_key_paths() {
+        let mut model = ConnectionProfiles::default();
+        let config = MysqlProfile { host:"db.internal".into(),database:"warehouse".into(),
+            ssh:Some(SshOptions { host:"gateway.example.test".into(),user:"jump-user".into(),port:2222,
+                identity_file:Some("/private/key-sentinel".into()) }),..Default::default() };
+        let mysql = model.add_profile(Profile::draft("Orders".into(),ConnectionKind::Mysql(config.clone()))).unwrap();
+        let maria = model.add_profile(Profile::draft("Reporting".into(),ConnectionKind::MariaDb(config))).unwrap();
+        let direct = model.add_profile(Profile::draft("Direct".into(),ConnectionKind::Mysql(MysqlProfile::default()))).unwrap();
+        for query in [" GATEWAY.EXAMPLE ","JUMP-USER","2222","DB.INTERNAL","WAREHOUSE"] {
+            assert_eq!(model.matching_profiles(query),vec![mysql,maria],"{query}");
+        }
+        assert!(model.matching_profiles("key-sentinel").is_empty());
+        assert_eq!(model.matching_profiles(""),vec![mysql,maria,direct]);
+        assert_eq!(model.matching_profiles("MariaDB"),vec![maria]);
+    }
+
     #[test]
     fn mysql_profile_defaults_and_validation_allow_database_selection_later() {
         let mut profile: MysqlProfile = serde_json::from_str("{}").unwrap();
