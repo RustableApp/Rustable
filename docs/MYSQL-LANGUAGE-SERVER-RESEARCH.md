@@ -73,3 +73,19 @@ upstream ping discards its OK packet; it now parses the status. A validity flag
 avoids stale status after sending a command or receiving a server error. Live
 checks cover ordinary errors inside transactions, implicit DDL commits and a
 killed connection; integration into the Rustable driver remains outstanding.
+
+### Local nested-query completion (2026-11-01)
+
+MySQL/MariaDB completion now resolves the caret's parenthesized query block
+before its enclosing blocks. Inner aliases shadow outer aliases; aliases in
+child or sibling subqueries do not leak into the caret's suggestions. Correlated
+outer references remain available, including while the inner query is missing
+its closing parenthesis. Token quote information is preserved without SQL
+string reconstruction, including escaped identifier delimiters.
+
+Verification: 20 completion tests passed, covering shadowing, sibling isolation,
+correlation, incomplete subqueries, and the earlier quoted-alias cases. The live
+catalog/completion/execution regression passed against both fixture engines;
+strict all-target Clippy passed. Full CTE/derived-table projected-column inference,
+UNION arm scoping, and semantic legality of every correlation remain outstanding.
+This is local cached-catalog completion, not a completed language server.

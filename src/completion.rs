@@ -81,7 +81,7 @@ impl Completion {
         let prefix = prefix.to_lowercase();
         let range = crate::sql::execution_range_for_dialect(sql, cursor..cursor, false, dialect)
             .unwrap_or(0..sql.len());
-        let references = relations_for_dialect(&sql[range], dialect);
+        let references = scoped_relations(&sql[range.clone()], byte.saturating_sub(range.start), dialect);
         let relevant: Vec<_> = objects
             .iter()
             .filter(|object| {
@@ -508,10 +508,14 @@ fn tokens_for_dialect(sql: &str, dialect: Dialect) -> Vec<String> {
 }
 fn relation_tokens(sql: &str, dialect: Dialect) -> Vec<(String, bool)> {
     let Dialect::Mysql(mode) = dialect else { return tokens(sql).into_iter().map(|word| (word, false)).collect(); };
-    use sqlparser::tokenizer::{Token, Tokenizer};
+    use sqlparser::tokenizer::Tokenizer;
     let lexer = crate::sql::mysql::Lexer(mode);
     let Ok(tokens) = Tokenizer::new(&lexer, sql).tokenize() else { return Vec::new(); };
-    tokens.into_iter().filter_map(|token| match token {
+    tokens.into_iter().filter_map(relation_token).collect()
+}
+fn relation_token(token: sqlparser::tokenizer::Token) -> Option<(String, bool)> {
+    use sqlparser::tokenizer::Token;
+    match token {
         Token::Word(word) => Some((word.value, word.quote_style.is_some())),
         Token::Period => Some((".".into(), false)),
         Token::Comma => Some((",".into(), false)),
@@ -519,14 +523,62 @@ fn relation_tokens(sql: &str, dialect: Dialect) -> Vec<(String, bool)> {
         Token::RParen => Some((")".into(), false)),
         Token::SemiColon => Some((";".into(), false)),
         _ => None,
-    }).collect()
+    }
 }
 #[cfg(test)]
 fn relations(sql: &str) -> Vec<(String, String)> {
     relations_for_dialect(sql, Dialect::Sqlite)
 }
+// Resolve the caret's query block first, then correlated outer blocks. Child
+// subqueries must not contribute aliases to their parents or sibling queries.
+fn scoped_relations(sql: &str, cursor: usize, dialect: Dialect) -> Vec<(String, String)> {
+    let Dialect::Mysql(mode) = dialect else { return relations_for_dialect(sql, dialect); };
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let lexer = crate::sql::mysql::Lexer(mode);
+    let Ok(tokens) = Tokenizer::new(&lexer, sql).tokenize_with_location() else { return Vec::new(); };
+    let tokens: Vec<_> = tokens.into_iter().filter(|t| !matches!(t.token, Token::Whitespace(_))).collect();
+    let before = &sql[..cursor.min(sql.len())];
+    let location = (before.bytes().filter(|b| *b == b'\n').count() as u64 + 1,
+        before.rsplit('\n').next().unwrap_or("").chars().count() as u64 + 1);
+    let caret = tokens.iter().position(|t| (t.span.start.line, t.span.start.column) >= location).unwrap_or(tokens.len());
+    let mut blocks = vec![(0, tokens.len())];
+    let mut stack = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        match token.token {
+            Token::LParen => stack.push(i),
+            Token::RParen => if let Some(start) = stack.pop()
+                && tokens.get(start + 1).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && (w.value.eq_ignore_ascii_case("SELECT") || w.value.eq_ignore_ascii_case("WITH")))) {
+                blocks.push((start + 1, i));
+            },
+            _ => {}
+        }
+    }
+    // Incomplete subqueries are common while typing.
+    for start in stack {
+        if tokens.get(start + 1).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && (w.value.eq_ignore_ascii_case("SELECT") || w.value.eq_ignore_ascii_case("WITH")))) {
+            blocks.push((start + 1, tokens.len()));
+        }
+    }
+    let mut containing: Vec<_> = blocks.iter().copied().filter(|(start, end)| *start <= caret && caret <= *end).collect();
+    containing.sort_by_key(|(start, end)| end - start);
+    let mut result: Vec<(String, String)> = Vec::new();
+    for (start, end) in containing {
+        let mut lexemes = Vec::new();
+        for (i, token) in tokens.iter().enumerate().take(end).skip(start) {
+            if blocks.iter().any(|&(child_start, child_end)| child_start > start && child_end <= end && child_start <= i && i < child_end) { continue; }
+            if let Some(lexeme) = relation_token(token.token.clone()) { lexemes.push(lexeme); }
+        }
+        for relation in relations_from_tokens(lexemes) {
+            if !result.iter().any(|(_, alias)| alias.eq_ignore_ascii_case(&relation.1)) { result.push(relation); }
+        }
+    }
+    result
+}
+
 fn relations_for_dialect(sql: &str, dialect: Dialect) -> Vec<(String, String)> {
-    let lexemes = relation_tokens(sql, dialect);
+    relations_from_tokens(relation_tokens(sql, dialect))
+}
+fn relations_from_tokens(lexemes: Vec<(String, bool)>) -> Vec<(String, String)> {
     let words = lexemes.iter().map(|(text, _)| text.clone()).collect::<Vec<_>>();
     let mut result = Vec::new();
     let mut i = 0;
@@ -925,6 +977,24 @@ mod tests {
         assert!(!local_code_position("SELECT 'escaped \\' FR", normal));
         assert!(local_code_position("SELECT 'escaped \\' FR", no_escape));
         assert!(!local_code_position("SELECT 'escaped \\' FR", Dialect::Mysql(crate::sql::mysql::Mode { no_backslash_escapes: false, ansi_quotes: true })));
+    }
+
+    #[test]
+    fn mysql_completion_isolates_nested_aliases_and_keeps_correlations() {
+        let objects = [object("customers", &["customer_name"]), object("orders", &["order_total"])];
+        for (marked, expected) in [
+            ("SELECT x.| FROM customers x WHERE EXISTS (SELECT x.order_total FROM orders x)", vec!["customer_name"]),
+            ("SELECT * FROM customers x WHERE EXISTS (SELECT x.| FROM orders x)", vec!["order_total"]),
+            ("SELECT * FROM customers c WHERE EXISTS (SELECT c.| FROM orders o)", vec!["customer_name"]),
+            ("SELECT * FROM customers c WHERE EXISTS (SELECT o.| FROM orders o", vec!["order_total"]),
+            ("SELECT * FROM customers c WHERE EXISTS (SELECT o.| FROM orders o) AND EXISTS (SELECT o.customer_name FROM customers o)", vec!["order_total"]),
+        ] {
+            let cursor = marked.find('|').unwrap();
+            let sql = marked.replace('|', "");
+            let mut completion = Completion::default();
+            completion.refresh(&sql, cursor, &objects, &[], true, Dialect::Mysql(crate::sql::mysql::Mode::default()));
+            assert_eq!(completion.items, expected, "{sql}");
+        }
     }
 
     #[test]
