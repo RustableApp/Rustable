@@ -133,6 +133,7 @@ fn metadata_batch_uses_one_wire_request() {
     driver.conn().unwrap().query_drop("CREATE TEMPORARY TABLE wire_metadata_probe(id INT PRIMARY KEY, label VARCHAR(20), INDEX by_label(label))").unwrap();
     let definition = "SHOW CREATE TABLE `rustable_test`.`wire_metadata_probe`";
     let indexes = "SHOW INDEX FROM `rustable_test`.`wire_metadata_probe`";
+    let triggers = "SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='rustable_test' AND EVENT_OBJECT_TABLE='wire_metadata_probe' ORDER BY TRIGGER_NAME";
     enabled.store(true, Ordering::Release);
     let mut separate_times = Vec::new();
     let mut batched_times = Vec::new();
@@ -141,14 +142,15 @@ fn metadata_batch_uses_one_wire_request() {
         let started = std::time::Instant::now();
         let mut separate = driver.metadata_query_sets(definition).unwrap();
         separate.extend(driver.metadata_query_sets(indexes).unwrap());
+        separate.extend(driver.metadata_query_sets(triggers).unwrap());
         separate_times.push(started.elapsed());
-        assert_eq!(commands.lock().unwrap().len(), 2);
+        assert_eq!(commands.lock().unwrap().len(), 3);
         commands.lock().unwrap().clear();
         let started = std::time::Instant::now();
-        let batched = driver.metadata_query_sets(&format!("{definition}; {indexes}")).unwrap();
+        let batched = driver.metadata_query_sets(&format!("{definition}; {indexes}; {triggers}")).unwrap();
         batched_times.push(started.elapsed());
-        assert_eq!(commands.lock().unwrap().as_slice(), [format!("{definition}; {indexes}").into_bytes()]);
-        assert_eq!(batched, separate, "batching preserves both complete result sets");
+        assert_eq!(commands.lock().unwrap().as_slice(), [format!("{definition}; {indexes}; {triggers}").into_bytes()]);
+        assert_eq!(batched, separate, "batching preserves all three complete result sets");
     }
     separate_times.sort();
     batched_times.sort();
@@ -158,7 +160,9 @@ fn metadata_batch_uses_one_wire_request() {
     assert!(indexes.iter().any(|index| index.name == "by_label"));
     let captured = commands.lock().unwrap().clone();
     assert_eq!(captured.iter().filter(|query| query.starts_with(b"SHOW ")).count(), 1);
-    assert!(captured.iter().any(|query| query == format!("{definition}; SHOW INDEX FROM `rustable_test`.`wire_metadata_probe`").as_bytes()));
+    assert_eq!(captured.len(), 1, "definition, indexes and trigger list share one request");
+    let metadata_sql = String::from_utf8(captured[0].clone()).unwrap();
+    assert!(metadata_sql.starts_with(&format!("{definition}; SHOW INDEX FROM `rustable_test`.`wire_metadata_probe`; SELECT TRIGGER_NAME")));
     drop(driver);
     proxy.join().unwrap();
 }

@@ -231,8 +231,12 @@ impl MysqlDriver {
         // These independent reads share one COM_QUERY round trip. Keep the
         // existing session (including temporary tables and transaction state),
         // and consume every result so a later server error cannot be hidden.
-        let mut sets = self.metadata_query_sets(&format!("SHOW CREATE TABLE {qualified}; SHOW INDEX FROM {qualified}"))?;
-        if sets.len() != 2 { return Err("Missing table metadata results".into()); }
+        let schema_literal = ::mysql::Value::from(schema).as_sql(self.mode.no_backslash_escapes);
+        let table_literal = ::mysql::Value::from(table).as_sql(self.mode.no_backslash_escapes);
+        let mut sets = self.metadata_query_sets(&format!("SHOW CREATE TABLE {qualified}; SHOW INDEX FROM {qualified}; SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA={schema_literal} AND EVENT_OBJECT_TABLE={table_literal} ORDER BY TRIGGER_NAME"))?;
+        if sets.len() != 3 { return Err("Missing table metadata results".into()); }
+        let names = sets.pop().unwrap().into_iter().map(::mysql::from_row_opt::<(String,)>)
+            .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
         let rows = sets.pop().unwrap();
         let ddl = sets.pop().unwrap().into_iter().next().and_then(|row| row.get::<String, _>(1)).ok_or("Missing table definition")?;
         let mut indexes = std::collections::BTreeMap::<String, Index>::new();
@@ -259,10 +263,8 @@ impl MysqlDriver {
             });
             index.columns.push(column);
         }
-        let names: Vec<String> = self.with_connection(|conn| conn.exec(
-            "SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME", (schema, table)))?;
         let mut triggers = Vec::new();
-        for name in names {
+        for (name,) in names {
             let definition = self.with_connection(|conn| {
                 match conn.query_first::<::mysql::Row, _>(format!("SHOW CREATE TRIGGER {}.{}", quote(schema), quote(&name))) {
                     // MariaDB can expose a trigger name while refusing its DDL.
@@ -539,6 +541,31 @@ mod tests {
         assert_eq!(driver.conn().unwrap().connection_id(), id);
         let (_, cipher): (String, String) = driver.conn().unwrap().query_first("SHOW SESSION STATUS LIKE 'Ssl_cipher'").unwrap().unwrap();
         assert!(!cipher.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_metadata_batch_preserves_quoted_names_and_sql_modes() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316,43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(),port,database:"rustable_test".into(),user:"rustable".into(),password:"rustable-test-only".into(),tls:false,..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let table = "metadata'日本`probe";
+        let trigger = "metadata'日本`trigger";
+        driver.conn().unwrap().query_drop(format!("DROP TABLE IF EXISTS {}",quote(table))).unwrap();
+        driver.conn().unwrap().query_drop(format!("CREATE TABLE {}(id INT PRIMARY KEY,n INT,INDEX by_n(n)) ENGINE=InnoDB",quote(table))).unwrap();
+        driver.conn().unwrap().query_drop(format!("CREATE TRIGGER {} BEFORE UPDATE ON {} FOR EACH ROW SET NEW.n=NEW.n+1",quote(trigger),quote(table))).unwrap();
+        for mode in ["", "NO_BACKSLASH_ESCAPES", "ANSI_QUOTES,NO_BACKSLASH_ESCAPES"] {
+            assert!(driver.execute(&format!("SET SESSION sql_mode='{mode}'"),false,&AtomicBool::new(false)).error.is_none());
+            let (indexes,triggers) = driver.table_metadata("rustable_test",table).unwrap();
+            assert_eq!(indexes.len(),2);
+            assert!(indexes.iter().any(|index| index.name == "by_n" && index.columns == ["n"]));
+            assert_eq!(triggers.len(),1);
+            assert_eq!(triggers[0].name,trigger);
+            assert!(triggers[0].metadata_error.is_none());
+            assert!(!triggers[0].ddl.is_empty());
+        }
+        driver.conn().unwrap().query_drop(format!("DROP TABLE {}",quote(table))).unwrap();
     }
 
     #[test]

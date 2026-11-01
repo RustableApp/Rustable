@@ -467,3 +467,23 @@ a dangling separator in network endpoint rows. Key-file paths are not searched.
 All 12 connection-profile tests passed, including case-insensitive gateway search,
 engine filtering, stable result order and exclusion of key-file paths. Strict
 all-target Clippy passed. This was not a new live database or visual acceptance run.
+
+### One request for table definition, indexes and trigger names (2026-11-01)
+
+MySQL/MariaDB table metadata now includes the trigger-name list in the same
+COM_QUERY as SHOW CREATE TABLE and SHOW INDEX. This removes the additional
+prepared request for that list. Trigger definitions are still fetched separately,
+so unreadable MariaDB definitions keep their existing per-trigger warning behavior.
+Schema/table literals use the driver's SQL-mode-aware serializer; identifiers
+remain backtick-quoted. No additional connection or implicit transaction is used.
+
+The wire-proxy test verifies one actual table_metadata COM_QUERY and identical
+result sets versus three separate text requests. With 30 ms injected per request,
+five-sample medians were MySQL 118.05 ms separate / 43.61 ms batched, and MariaDB
+118.46 ms / 42.95 ms. This is the three-read metadata comparison, not total browse
+latency or a comparison to the previous two-read-batch implementation.
+
+All 40 driver tests passed on each engine, including SSH/TLS and unreadable trigger
+metadata. New live coverage preserves indexes and trigger DDL for apostrophe,
+backtick and Unicode table/trigger names under default, NO_BACKSLASH_ESCAPES and
+ANSI_QUOTES+NO_BACKSLASH_ESCAPES modes. Strict all-target Clippy passed.
