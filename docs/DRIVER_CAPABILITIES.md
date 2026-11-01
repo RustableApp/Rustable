@@ -789,3 +789,13 @@ visual acceptance remain outstanding (both engines already have app integration
 and driver failure/cancellation coverage). Discoverability issue observed: the
 CSV entry point is currently named Preview CSV file under Export; improve the
 import/export entry point before declaring the workflow polished.
+
+### CSV import discovery (2026-11-01)
+
+The table toolbar now labels its menu Import / Export, and the file picker entry
+is Import CSV file. Cmd+P Find Anything also includes Import CSV file, using the
+existing preview/mapping workflow and respecting the navigator's busy guard.
+The toolbar geometry measures the longer label rather than allocating the old
+Export width. Existing narrow-window/pending-change toolbar layout and navigator
+keyboard ownership tests pass; all-target Clippy passes. The native acceptance
+binary remains at 95cce29 until the next rebuild.

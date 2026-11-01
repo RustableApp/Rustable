@@ -3092,8 +3092,8 @@ impl Rustable {
                                         }
 
                                     }
-                                    ui.menu_button("Export", |ui| {
-                                        if ui.add_enabled(self.pending.is_none(), egui::Button::new("Preview CSV file…")).clicked() {
+                                    ui.menu_button("Import / Export", |ui| {
+                                        if ui.add_enabled(self.pending.is_none(), egui::Button::new("Import CSV file…")).clicked() {
                                             self.preview_csv_dialog(ctx);
                                             ui.close();
                                         }
@@ -5841,9 +5841,9 @@ fn table_control_geometry(
     };
     let gap = 6.0;
     let right = if view == View::Data {
-        76.0 + 56.0 + measure("Export") + 14.0 + gap * 3.0
+        76.0 + 56.0 + measure("Import / Export") + 14.0 + gap * 3.0
     } else {
-        measure("Export") + 14.0
+        measure("Import / Export") + 14.0
     };
     let left = 248.0
         + measure("↻")
@@ -8801,7 +8801,7 @@ mod workspace_layout_tests {
                     .iter()
                     .filter_map(|shape| match &shape.shape {
                         egui::Shape::Text(text)
-                            if ["Data", "+ Row", "Rows", "Pending (1)", "Filters", "Export"]
+                            if ["Data", "+ Row", "Rows", "Pending (1)", "Filters", "Import / Export"]
                                 .contains(&text.galley.text()) =>
                         {
                             Some((

@@ -33,7 +33,7 @@ impl Navigator {
 #[derive(Clone)]
 enum Destination { Database(String), Schema(String), Object(String), Tab(usize), Saved(PathBuf), Action(Action) }
 #[derive(Clone)]
-enum Action { Refresh, Connections, Databases, Cancel, OpenSql, NewQuery, Activity, Inspector }
+enum Action { Refresh, Connections, Databases, Cancel, OpenSql, ImportCsv, NewQuery, Activity, Inspector }
 struct Entry { label: String, detail: String, destination: Destination }
 impl Rustable {
     pub(super) fn open_navigator(&mut self, databases_only: bool) {
@@ -68,6 +68,7 @@ impl Rustable {
                 ("Open Database", format!("{command} K"), Action::Databases),
                 ("Cancel Running Queries", String::new(), Action::Cancel),
                 ("Open SQL File…", format!("{command} Shift O"), Action::OpenSql),
+                ("Import CSV file…", String::new(), Action::ImportCsv),
                 ("New SQL Query", format!("{command} T"), Action::NewQuery),
                 ("Toggle SQL Activity", String::new(), Action::Activity),
                 ("Toggle Inspector", String::new(), Action::Inspector),
@@ -165,6 +166,7 @@ impl Rustable {
                     Action::Databases => self.open_navigator(true),
                     Action::Cancel => self.worker.cancel(),
                     Action::OpenSql => self.script_dialog(ctx, false),
+                    Action::ImportCsv => self.preview_csv_dialog(ctx),
                     Action::NewQuery => { self.tabs.push(QueryTab::new(String::new())); self.activate_query(self.tabs.len() - 1); }
                     Action::Activity => self.prefs.activity_visible = !self.prefs.activity_visible,
                     Action::Inspector => self.inspector = !self.inspector,
@@ -270,7 +272,7 @@ fn paint_navigation_icon(painter: &egui::Painter, c: egui::Pos2, destination: &D
             for x in [-3.0, 3.0] { line([x, -7.0], [x, 7.0]); }
             for y in [-2.0, 3.0] { line([-8.0, y], [8.0, y]); }
         }
-        Destination::Action(Action::OpenSql | Action::NewQuery) | Destination::Tab(_) | Destination::Saved(_) => {
+        Destination::Action(Action::OpenSql | Action::ImportCsv | Action::NewQuery) | Destination::Tab(_) | Destination::Saved(_) => {
             painter.add(egui::Shape::closed_line(vec![p(-7.0, -9.0), p(2.0, -9.0), p(7.0, -4.0), p(7.0, 9.0), p(-7.0, 9.0)], stroke));
             line([2.0, -9.0], [2.0, -4.0]); line([2.0, -4.0], [7.0, -4.0]);
             if matches!(destination, Destination::Action(Action::NewQuery)) {
