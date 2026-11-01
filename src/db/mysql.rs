@@ -9,6 +9,8 @@ mod import;
 mod expressions;
 #[cfg(test)]
 mod transport_tests;
+#[cfg(test)]
+mod cascade_tests;
 
 type CatalogRow = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
 

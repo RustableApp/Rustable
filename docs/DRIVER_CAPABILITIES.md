@@ -799,3 +799,25 @@ The toolbar geometry measures the longer label rather than allocating the old
 Export width. Existing narrow-window/pending-change toolbar layout and navigator
 keyboard ownership tests pass; all-target Clippy passes. The native acceptance
 binary remains at 95cce29 until the next rebuild.
+
+### Reviewed foreign-key cascade acceptance (2026-11-01)
+
+A new disposable integration test verifies parent-key updates and deletes with
+both CASCADE and SET NULL children. For each operation, a later duplicate-key
+failure restores the child rows/foreign-key values and leaves the session idle;
+retrying the valid parent change commits the expected child effects. The test
+passes on MySQL 8.4.11 and MariaDB 11.4.13. Child UPDATE/DELETE triggers write to a
+MyISAM audit table so even a rolled-back accidental trigger effect would remain
+observable. The audit stays empty throughout cascaded changes; a direct child
+update then verifies the trigger/audit fixture is functional. Clippy passes.
+
+Version-specific behavior matters:
+https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html
+https://mariadb.com/docs/server/ha-and-performance/optimization-and-tuning/optimization-and-indexes/foreign-keys
+https://dev.mysql.com/doc/refman/9.7/en/create-table-foreign-keys.html
+
+MySQL 9.7 documents configurable cascade-trigger execution, unlike the tested
+8.4 behavior. Do not extrapolate the test to that mode or declare all MySQL
+versions equivalent. Native editing acceptance, generated-expression effects in
+indirectly changed tables, and compatibility with newer cascade modes remain
+open before enabling table editing.
