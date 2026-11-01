@@ -45,11 +45,19 @@ mod ssh_tunnel;
 mod updates;
 
 #[cfg(not(target_arch = "wasm32"))]
+fn application_icon() -> eframe::egui::IconData {
+    // eframe sets the macOS Dock icon at runtime, overriding the bundle icon.
+    // Always supply our artwork, including when launched through cargo run.
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/rustable-logo-1024.png"))
+        .expect("embedded Rustable application icon must be a valid PNG")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result {
     #[cfg(feature = "qa")]
     if std::env::var_os("RUSTABLE_UI_PREVIEW").is_some() {
         return eframe::run_native("Rustable UI Preview", eframe::NativeOptions {
-            viewport: eframe::egui::ViewportBuilder::default().with_title("Rustable UI Preview").with_inner_size([1280.0, 820.0]),
+            viewport: eframe::egui::ViewportBuilder::default().with_icon(application_icon()).with_title("Rustable UI Preview").with_inner_size([1280.0, 820.0]),
             vsync: true, ..Default::default()
         }, Box::new(|cc| {
             crate::scroll_response::install(&cc.egui_ctx);
@@ -66,6 +74,7 @@ pub fn run_native() -> eframe::Result {
         },
         eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
+                .with_icon(application_icon())
                 .with_title("Connections — Rustable")
                 .with_inner_size(session_windows::LAUNCHER_SIZE)
                 .with_min_inner_size([760.0, 560.0]),

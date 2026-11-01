@@ -273,12 +273,14 @@ fn notices(root: &Path, destination: &Path) -> Result<()> {
 fn bundle(root: &Path, binary: &Path, destination: &Path, plist: &Path) -> Result<()> {
     let sqlite = root.join(format!("target/lsp-tools/bin/syntaqlite{}", env::consts::EXE_SUFFIX));
     let pg = root.join(format!("target/pg-language-server/release/rustable-postgres-language-server{}", env::consts::EXE_SUFFIX));
+    let icon = root.join("assets/Rustable.icns");
     // Validate everything before touching an existing application bundle.
     for (path, reason) in [
         (binary, "build Rustable first"),
         (sqlite.as_path(), "run mise run build-lsps"),
         (pg.as_path(), "run mise run build-lsps"),
         (plist, "provide a valid Info.plist"),
+        (icon.as_path(), "provide the Rustable application icon"),
     ] {
         require(path, reason)?;
     }
@@ -299,6 +301,7 @@ fn bundle(root: &Path, binary: &Path, destination: &Path, plist: &Path) -> Resul
         contents.join("MacOS/rustable-postgres-language-server"),
     )?;
     copy_atomic(plist, &contents.join("Info.plist"))?;
+    copy_atomic(&icon, &contents.join("Resources/Rustable.icns"))?;
     copy_tree(&license_dir, &contents.join("Resources/Licenses"))?;
     println!(
         "Bundled Rustable and both required language servers: {}",
