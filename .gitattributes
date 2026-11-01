@@ -1,0 +1,3 @@
+# Keep release tooling and benchmarks out of the application's language breakdown.
+scripts/*.py linguist-detectable=false
+tools/postgres-language-server/benchmark_protocol.py linguist-detectable=false
