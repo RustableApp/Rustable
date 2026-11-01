@@ -30,9 +30,19 @@ pub fn execution_text(sql: &str, range: Range<usize>, mode: Mode) -> Result<Stri
 }
 
 fn scan(sql: &str, mode: Mode, strict: bool, include_delimiter: bool) -> Result<(Vec<Range<usize>>, &str), String> {
+    scan_from(sql, mode, strict, include_delimiter, ";", false).map(|(ranges, delimiter, _)| (ranges, delimiter))
+}
+
+/// Scan only the next statement so a preceding SET can change lexical modes.
+pub fn next_statement(sql: &str, mode: Mode, delimiter: &str) -> Result<(Option<Range<usize>>, usize, String), String> {
+    scan_from(sql, mode, true, false, delimiter, true)
+        .map(|(ranges, delimiter, consumed)| (ranges.into_iter().next(), consumed, delimiter.to_owned()))
+}
+
+fn scan_from<'a>(sql: &'a str, mode: Mode, strict: bool, include_delimiter: bool, initial: &'a str, one: bool) -> Result<(Vec<Range<usize>>, &'a str, usize), String> {
     let bytes = sql.as_bytes();
     let (mut i, mut start, mut code) = (0, 0, false);
-    let mut delimiter = ";";
+    let mut delimiter = initial;
     let mut result = Vec::new();
     while i < bytes.len() {
         // Directives are recognized only at the beginning of a logical line,
@@ -55,6 +65,7 @@ fn scan(sql: &str, mode: Mode, strict: bool, include_delimiter: bool) -> Result<
         if bytes[i..].starts_with(delimiter.as_bytes()) {
             if code { result.push(start..i + if include_delimiter { delimiter.len() } else { 0 }); }
             i += delimiter.len();
+            if one && code { return Ok((result, delimiter, i)); }
             start = i;
             code = false;
             continue;
@@ -97,7 +108,7 @@ fn scan(sql: &str, mode: Mode, strict: bool, include_delimiter: bool) -> Result<
         }
     }
     if code { result.push(start..sql.len()); }
-    Ok((result, delimiter))
+    Ok((result, delimiter, sql.len()))
 }
 
 #[cfg(test)]
@@ -143,6 +154,21 @@ mod tests {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+
+    #[test]
+    fn incremental_scanning_carries_delimiters_and_uses_new_mode() {
+        let sql = "DELIMITER $$\nSET sql_mode='NO_BACKSLASH_ESCAPES'$$\nSELECT 'a\\'$$\nDELIMITER ;\nSELECT 3;";
+        let (first, consumed, delimiter) = next_statement(sql, Mode::default(), ";").unwrap();
+        assert_eq!(&sql[first.unwrap()], "SET sql_mode='NO_BACKSLASH_ESCAPES'");
+        assert_eq!(delimiter, "$$");
+        let tail = &sql[consumed..];
+        let (second, consumed, delimiter) = next_statement(tail, Mode { no_backslash_escapes: true, ansi_quotes: false }, &delimiter).unwrap();
+        assert_eq!(tail[second.unwrap()].trim(), "SELECT 'a\\'");
+        let tail = &tail[consumed..];
+        let (third, _, delimiter) = next_statement(tail, Mode::default(), &delimiter).unwrap();
+        assert_eq!(tail[third.unwrap()].trim(), "SELECT 3");
+        assert_eq!(delimiter, ";");
+    }
 
     #[test]
     fn isolated_routine_retains_delimiter_for_execution() {

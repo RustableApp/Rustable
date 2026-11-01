@@ -104,6 +104,7 @@ impl From<&MysqlConfig> for mysql::OptsBuilder {
             .read_timeout(Some(config.read_timeout))
             .write_timeout(Some(std::time::Duration::from_secs(10)))
             .max_allowed_packet(Some(32 * 1024 * 1024))
+            .additional_capabilities(mysql::consts::CapabilityFlags::CLIENT_SESSION_TRACK)
             .stmt_cache_size(32)
             .init(vec!["SET NAMES utf8mb4"])
     }

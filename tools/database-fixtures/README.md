@@ -102,7 +102,7 @@ to switch databases during a transaction. SQL result byte budgets span statement
 
 Before exposing this driver in the connection picker: extend cancellation to
 metadata/table browsing,
-refresh SQL-mode/delimiter semantics when a script changes session modes,
+finish session tracking/editor-mode integration and tracking-disable recovery,
 implement table-edit concurrency checks and commits, optimize metadata round trips,
 add SSH/TLS fixtures, and connect profile storage/editor dialect state. Safe-mode
 requests currently return an explicit unsupported error. Stream collection preserves typed connectivity classification: ordinary SQL
@@ -146,3 +146,18 @@ The disposable MySQL fixture disables binary logging so its database-scoped test
 user can create triggers without SUPER. Existing developer databases are unchanged.
 Metadata fetching is currently sequential; batching and cancellation of metadata
 work remain outstanding before performance parity is claimed.
+
+
+Driver execution now scans one statement at a time, carrying the active client
+DELIMITER and consuming SQL-mode updates from protocol session tracking. The
+connection negotiates CLIENT_SESSION_TRACK and tracks sql_mode. Live tests on
+both engines toggle NO_BACKSLASH_ESCAPES and ANSI_QUOTES mid-script, verify the
+following statement's boundaries and values, and run another query using the
+retained mode. Ordinary queries add no mode-refresh SQL round trip. A scanner
+regression combines custom delimiters with a mode change and delimiter reset.
+A malformed later statement stops at that point; earlier autocommitted statements
+remain executed, matching the sequential execution model.
+
+Still required: propagation of active mode into editor selection/completion,
+handling deliberate changes to session_track_system_variables, and SQL USE/schema
+tracking. These are prerequisites for exposing the driver as supported.

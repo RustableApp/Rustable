@@ -17,6 +17,7 @@ impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
     type Error = String;
     fn try_from(config: &MysqlConfig) -> Result<Self, String> {
         let mut connection = Conn::new(OptsBuilder::from(config)).map_err(|e| e.to_string())?;
+        connection.query_drop("SET SESSION session_track_system_variables = 'sql_mode'").map_err(|e| e.to_string())?;
         let (version, database, sql_mode): (String, Option<String>, String) = connection.query_first(
             "SELECT VERSION(), DATABASE(), @@SESSION.sql_mode").map_err(|e| e.to_string())?
             .ok_or("Server did not return session metadata")?;
@@ -183,12 +184,18 @@ impl Driver for MysqlDriver {
         let started = std::time::Instant::now();
         let mut report = ScriptResult::default();
         if safe { report.error = Some("MySQL read-only execution is not yet available.".into()); return report; }
-        let statements = match crate::sql::mysql::ranges(sql, self.mode, true) {
-            Ok(statements) => statements,
-            Err(error) => { report.error = Some(error); return report; }
-        };
         let mut remaining = BYTE_LIMIT;
-        for range in statements {
+        let mut offset = 0;
+        let mut delimiter = ";".to_owned();
+        while offset < sql.len() {
+            let (range, consumed, next_delimiter) = match crate::sql::mysql::next_statement(&sql[offset..], self.mode, &delimiter) {
+                Ok(next) => next,
+                Err(error) => { report.error = Some(error); break; }
+            };
+            delimiter = next_delimiter;
+            let Some(range) = range else { break; };
+            let range = offset + range.start..offset + range.end;
+            offset += consumed;
             if report.grids.len() >= 128 {
                 report.error = Some("Stopped after 128 result sets; later statements were not executed.".into());
                 break;
@@ -209,6 +216,27 @@ impl Driver for MysqlDriver {
                     break;
                 }
             };
+            // Session tracking reports sql_mode changes in the existing OK packet,
+            // avoiding a metadata round trip after ordinary editor queries.
+            if !disconnected {
+                let changes = self.connection.as_ref().unwrap().session_state_changes();
+                match changes {
+                    Ok(changes) => {
+                        for change in changes {
+                            match change.decode() {
+                                Ok(::mysql::session_state_change::SessionStateChange::SystemVariables(variables)) => {
+                                    for variable in variables {
+                                        if variable.name_str().eq_ignore_ascii_case("sql_mode") { self.mode = parse_mode(&variable.value_str()); }
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => { report.error = Some(format!("Invalid MySQL session-state update: {error}")); }
+                            }
+                        }
+                    }
+                    Err(error) => { report.error = Some(format!("Invalid MySQL session-state update: {error}")); }
+                }
+            }
             report.grids.extend(result.grids);
             if result.error.is_some() || report.error.is_some() {
                 if result.error.is_some() { report.error = result.error; }
@@ -368,6 +396,27 @@ mod tests {
         assert!(driver.execute("ROLLBACK", false, &cancel).error.is_none());
         let result = driver.execute("SELECT value FROM cancel_driver_probe", false, &cancel);
         assert_eq!(result.grids[0].rows, [vec![Value::Integer(7)]]);
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_sql_mode_changes_apply_to_following_statements() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false, ..Default::default() };
+        let mut driver = Box::<dyn Driver>::try_from(&config).unwrap();
+        let cancel = AtomicBool::new(false);
+        let script = r#"SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'; SELECT 'a\' AS value; SET SESSION sql_mode=''; SELECT 'a\'b' AS value; SET SESSION sql_mode='ANSI_QUOTES'; SELECT 1 AS "a\";"#;
+        let result = driver.execute(script, false, &cancel);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.grids.len(), 6);
+        assert_eq!(result.grids[1].rows, [vec![Value::Text("a\\".into())]]);
+        assert_eq!(result.grids[3].rows, [vec![Value::Text("a'b".into())]]);
+        assert_eq!(result.grids[5].columns, ["a\\"]);
+        let result = driver.execute(r#"SELECT 2 AS "b\";"#, false, &cancel);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.grids[0].columns, ["b\\"]);
     }
 
 }
