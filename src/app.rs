@@ -3825,6 +3825,7 @@ impl Rustable {
             .on_hover_text(&self.language.status);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 rounded_action_buttons(ui);
+                ui.add_space(8.0);
                 ui.menu_button("File", |ui| {
                     if ui
                         .add_enabled(self.pending.is_none(), egui::Button::new("Save SQL"))
@@ -3859,34 +3860,47 @@ impl Rustable {
                     .clicked() {
                     tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
                 }
-                if ui.button("Save").on_hover_text("Save named SQL query · Cmd/Ctrl+S").clicked() {
+                if ui.add(crate::icons::shortcut_button("Save", false, "S", None)).on_hover_text("Save named SQL query · Cmd/Ctrl+S").clicked() {
                     self.save_query_file(ui.ctx(), false);
                 }
                 if self.pending.is_some() && ui.button("Cancel").clicked() {
                     self.worker.cancel();
                 }
-                if ui
-                    .add_enabled(
-                        self.pending.is_none(),
-                        crate::icons::shortcut_button("Run all", true, "Enter", None),
-                    )
-                    .on_hover_text("Cmd/Ctrl + Shift + Enter")
-                    .clicked()
-                {
-                    self.run_query(true);
-                }
-                if ui
-                    .add_enabled(
-                        self.pending.is_none(),
-                        crate::icons::shortcut_button(
-                            if self.tabs[self.tab].cursor.is_empty() { "Run current" } else { "Run selection" },
-                            false, "Enter", Some(BLUE),
-                        ),
-                    )
-                    .clicked()
-                {
-                    self.run_query(false);
-                }
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let caret = ui.add_enabled(self.pending.is_none(), egui::Button::image(
+                        egui::Image::new(egui::include_image!("../assets/icons/lucide/chevron-down.svg"))
+                            .fit_to_exact_size(egui::vec2(14.0, 14.0)))
+                        .fill(BLUE)
+                        .min_size(egui::vec2(25.0, ui.spacing().interact_size.y))
+                        .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }));
+                    caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && self.pending.is_none(), "Run options"));
+                    ui.painter().line_segment([
+                        caret.rect.left_top() + egui::vec2(0.0, 4.0),
+                        caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
+                    ], Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
+                    egui::Popup::menu(&caret).show(|ui| {
+                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_button("Run current", false, "Enter", None)).clicked() {
+                            self.run_query(false);
+                            ui.close();
+                        }
+                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_button("Run all", true, "Enter", None)).clicked() {
+                            self.run_query(true);
+                            ui.close();
+                        }
+                    });
+                    caret.on_hover_text("Run options");
+                    let widgets = &mut ui.visuals_mut().widgets;
+                    for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active, &mut widgets.noninteractive] {
+                        widget.corner_radius = egui::CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 };
+                    }
+                    if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_button(
+                        if self.tabs[self.tab].cursor.is_empty() { "Run current" } else { "Run selection" },
+                        false, "Enter", Some(BLUE),
+                    )).clicked() {
+                        self.run_query(false);
+                    }
+                });
             });
         });
         if self.tabs[self.tab].results.len() > 1 || !self.tabs[self.tab].pins.items.is_empty() {
@@ -9377,7 +9391,6 @@ mod workspace_layout_tests {
                 .unwrap_or_else(|| panic!("missing action {label}"))
         };
         let run = action_rect("Run current");
-        let all = action_rect("Run all");
         let favorite = action_rect("Save");
         let file = action_rect("File");
         let status = action_rect("Line 1, column 1");
@@ -9387,9 +9400,7 @@ mod workspace_layout_tests {
         );
         assert!(status.right() < run.left());
         assert!(
-            run.right() < all.left()
-                && all.right() < favorite.left()
-                && favorite.right() < file.left()
+            run.right() < favorite.left() && favorite.right() < file.left()
         );
         assert!(
             file.right() > 1230.0,
