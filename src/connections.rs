@@ -11,7 +11,7 @@ pub(super) struct Manager {
     draft: Option<Profile>,
     password: String,
     generation: u64,
-    group_name: String,
+    focus_group_name: bool,
     search: String,
     scroll_to_profile: Option<ProfileId>,
     rename_group: Option<(GroupId, String)>,
@@ -498,10 +498,7 @@ impl Rustable {
                                 .on_hover_text("Drafts are restored without executing SQL.");
                         }
                     }).response.on_hover_text("New connection");
-                    ui.menu_button("New group", |ui| {
-                        ui.add(TextEdit::singleline(&mut self.connection_manager.group_name).hint_text("Group name").desired_width(180.0));
-                        if ui.button("Create group").clicked() { action = Some(Action::AddGroup); ui.close(); }
-                    });
+                    if ui.button("New group").clicked() { action = Some(Action::AddGroup); }
                     if let Some(id) = self.connection_search_navigation(ctx) {
                         action = Some(Action::Select(id));
                         keyboard_selection = Some(id);
@@ -553,10 +550,30 @@ impl Rustable {
                                 && !self.prefs.saved_connections.in_group(group_id).any(|profile| visible.contains(&profile.id)) { continue; }
                             let collapsed = self.connection_manager.collapsed_groups.contains(&group_id) && !filtering;
 
+                            let editing = self.connection_manager.rename_group.as_ref().is_some_and(|(id, _)| Some(*id) == group_id);
                             let frame = egui::Frame::new().inner_margin(egui::Margin { left: 24, right: 4, top: 7, bottom: 5 });
                             let header = frame.show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
-                                if let Some(id) = group_id.filter(|_| !filtering) {
+                                if editing {
+                                    let (id, value) = self.connection_manager.rename_group.as_mut().unwrap();
+                                    let response = ui.add(TextEdit::singleline(value).id(egui::Id::new(("rename-connection-group", id.0))).desired_width(ui.available_width()));
+                                    if self.connection_manager.focus_group_name {
+                                        self.connection_manager.focus_group_name = false;
+                                        response.request_focus();
+                                        response.scroll_to_me(Some(egui::Align::Center));
+                                        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+                                            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(value.chars().count()))));
+                                            state.store(ui.ctx(), response.id);
+                                        }
+                                    }
+                                    let escape = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+                                    let enter = ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                                    if escape { self.connection_manager.rename_group = None; response.surrender_focus(); }
+                                    else if enter || response.lost_focus() {
+                                        action = Some(Action::RenameGroup(*id, value.clone()));
+                                    }
+                                    response
+                                } else if let Some(id) = group_id.filter(|_| !filtering) {
                                     ui.dnd_drag_source(egui::Id::new(("connection-group", id.0)), Drag::Group(id), |ui| ui.strong(&name)).response
                                 } else { ui.strong(&name) }
 
@@ -572,6 +589,7 @@ impl Rustable {
                                 }
                             }
                             ui.painter().text(egui::pos2(header.response.rect.left() + 10.0, header.response.rect.center().y), egui::Align2::CENTER_CENTER, if collapsed { "›" } else { "⌄" }, egui::FontId::proportional(14.0), ui.visuals().weak_text_color());
+                            if !editing {
                             let heading_response = header.inner.interact(egui::Sense::click()) | header.response.interact(egui::Sense::click());
                             if heading_response.clicked() {
                                 heading_response.request_focus();
@@ -585,9 +603,10 @@ impl Rustable {
                                         if connection_menu_action(ui, index + 1 < self.prefs.saved_connections.groups.len(), "Move down").clicked() { action = Some(Action::MoveGroup(id, index + 1)); ui.close(); }
                                     });
                                     ui.separator();
-                                    if connection_menu_action(ui, true, "Rename group").clicked() { self.connection_manager.rename_group = Some((id, name.clone())); ui.close(); }
+                                    if connection_menu_action(ui, true, "Rename group").clicked() { self.connection_manager.rename_group = Some((id, name.clone())); self.connection_manager.focus_group_name = true; ui.close(); }
                                     if ui.button("Delete group · keep connections").clicked() { action = Some(Action::DeleteGroup(id)); ui.close(); }
                                 });
+                            }
                             }
                             if collapsed { continue; }
                             for (index, profile) in self.prefs.saved_connections.in_group(group_id).enumerate() {
@@ -636,12 +655,6 @@ impl Rustable {
                             ui.add_space(6.0);
                         }
                     });
-                    if let Some((id, name)) = &mut self.connection_manager.rename_group {
-                        ui.horizontal(|ui| {
-                            ui.add(TextEdit::singleline(name).desired_width((ui.available_width() - 70.0).max(40.0)));
-                            if ui.button("Rename").clicked() { action = Some(Action::RenameGroup(*id, name.clone())); }
-                        });
-                    }
                     });
                     if self.connection_manager.draft.is_none() { return; }
                     ui.separator();
@@ -1009,10 +1022,15 @@ impl Rustable {
                 }
             }
             Action::AddGroup => {
-                self.prefs
-                    .saved_connections
-                    .add_group(self.connection_manager.group_name.clone())?;
-                self.connection_manager.group_name.clear();
+                let mut name = "New group".to_owned();
+                let mut suffix = 2;
+                while self.prefs.saved_connections.groups.iter().any(|group| group.name == name) {
+                    name = format!("New group {suffix}"); suffix += 1;
+                }
+                let id = self.prefs.saved_connections.add_group(name.clone())?;
+                self.connection_manager.search.clear();
+                self.connection_manager.rename_group = Some((id, name));
+                self.connection_manager.focus_group_name = true;
             }
             Action::RenameGroup(id, name) => {
                 self.prefs.saved_connections.rename_group(id, name)?;
@@ -1644,6 +1662,30 @@ mod tests {
                 ],
             );
         }
+    }
+    #[test]
+    fn new_group_is_created_and_named_inline() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.connections = true;
+        manager_frame(&ctx, &mut app, vec![]);
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        let button = painted_text(&output, "New group").unwrap();
+        manager_click(&ctx, &mut app, button, egui::PointerButton::Primary);
+        assert_eq!(app.prefs.saved_connections.groups.len(), 1);
+        let id = app.prefs.saved_connections.groups[0].id;
+        manager_frame(&ctx, &mut app, vec![]);
+        assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new(("rename-connection-group", id.0)))));
+        manager_frame(&ctx, &mut app, vec![egui::Event::Text("Production".into())]);
+        manager_frame(&ctx, &mut app, vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
+        assert_eq!(app.prefs.saved_connections.groups[0].name, "Production");
+        assert!(app.connection_manager.rename_group.is_none());
+        app.connection_action(Action::AddGroup).unwrap();
+        manager_frame(&ctx, &mut app, vec![]);
+        manager_frame(&ctx, &mut app, vec![egui::Event::Text("Discard this name".into())]);
+        manager_frame(&ctx, &mut app, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]);
+        assert_eq!(app.prefs.saved_connections.groups[1].name, "New group");
+        assert!(app.connection_manager.rename_group.is_none());
     }
     #[test]
     fn search_enter_connects_only_visible_valid_selection() {
