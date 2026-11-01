@@ -17,6 +17,8 @@ pub(super) struct Library {
     selected: Option<Selection>,
     rename_group: Option<(PathBuf, String)>,
     focus_group: bool,
+    rename_file: Option<(PathBuf, String)>,
+    focus_file: bool,
     group_operation: Option<mpsc::Receiver<GroupChange>>,
     error: Option<String>,
 }
@@ -57,6 +59,21 @@ fn scan(root: &std::path::Path) -> Result<(Vec<QueryFile>, Vec<String>), String>
     files.sort_by(|a,b| (&a.group, &a.name).cmp(&(&b.group, &b.name)));
     Ok((files, groups))
 }
+fn query_row(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+    let selected = selected || response.clicked() || response.secondary_clicked();
+    if selected {
+        ui.painter().rect_filled(rect, 8.0, ui.visuals().selection.bg_fill);
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, 8.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let color = if selected { egui::Color32::WHITE } else { ui.visuals().text_color() };
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), egui::FontId::monospace(13.0), color, (rect.width() - 16.0).max(1.0));
+    job.wrap.max_rows = 1;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    ui.painter().galley(egui::pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, color);
+    response
+}
 fn change_group(root: &std::path::Path, rename: Option<(PathBuf, String)>) -> Result<PathBuf, String> {
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     if let Some((old, name)) = rename {
@@ -64,6 +81,13 @@ fn change_group(root: &std::path::Path, rename: Option<(PathBuf, String)>) -> Re
         if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', ':']) { return Err("Choose a nonempty folder name without path separators.".into()); }
         let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
         if !old.canonicalize().map_err(|e| e.to_string())?.starts_with(&canonical_root) || old == root { return Err("Choose a group inside the saved queries folder.".into()); }
+        let filename;
+        let name = if old.is_file() {
+            let stem = name.strip_suffix(".sql").or_else(|| name.strip_suffix(".SQL")).unwrap_or(name).trim();
+            if stem.is_empty() { return Err("Choose a query name.".into()); }
+            filename = format!("{stem}.sql");
+            &filename
+        } else { name };
         let target = old.parent().ok_or("Missing group parent")?.join(name);
         if target == old { return Ok(old); }
         if target.try_exists().map_err(|e| e.to_string())? { return Err("A folder with that name already exists.".into()); }
@@ -101,11 +125,16 @@ impl Rustable {
             Ok((root, old, path)) => {
                 if let Some(old) = old {
                     for tab in self.tabs.iter_mut().chain(self.closed_tabs.iter_mut()) {
-                        if let Some(source) = &tab.source_path && let Ok(relative) = source.strip_prefix(&old) { tab.source_path = Some(path.join(relative)); }
+                        if let Some(source) = &tab.source_path && let Ok(relative) = source.strip_prefix(&old) {
+                            let destination = if relative.as_os_str().is_empty() { path.clone() } else { path.join(relative) };
+                            tab.source_name = destination.file_name().map(|name| name.to_string_lossy().into_owned());
+                            tab.source_path = Some(destination);
+                        }
                     }
                     if let Some(Selection::File(selected)) = &mut self.query_library.selected
-                        && let Ok(relative) = selected.strip_prefix(&old) { *selected = path.join(relative); }
+                        && let Ok(relative) = selected.strip_prefix(&old) { *selected = if relative.as_os_str().is_empty() { path.clone() } else { path.join(relative) }; }
                     self.query_library.rename_group = None;
+                    self.query_library.rename_file = None;
                 } else if root == self.query_directory() {
                     self.query_library.search.clear();
                     self.query_library.rename_group = Some((path.clone(), path.file_name().unwrap().to_string_lossy().into_owned()));
@@ -114,7 +143,7 @@ impl Rustable {
                 self.query_library.error = None;
                 self.query_library.invalidate();
             }
-            Err(error) => { self.query_library.error = Some(error); self.query_library.focus_group = true; }
+            Err(error) => { self.query_library.error = Some(error); self.query_library.focus_group = true; self.query_library.focus_file = true; }
         }
     }
     pub(super) fn query_directory(&self) -> PathBuf {
@@ -196,9 +225,30 @@ impl Rustable {
                     for file in files {
                         let selection = Selection::File(file.path.clone());
                         let active = self.query_library.selected.as_ref() == Some(&selection);
-                        let response = ui.add_enabled(self.query_library.group_operation.is_none(), egui::Button::new(format!("▤ {}", file.name)).selected(active).frame(false)).on_hover_text(file.path.display().to_string());
-                        if response.clicked() { self.query_library.selected = Some(selection); }
-                        if response.double_clicked() { chosen = Some(file.path.clone()); }
+                        if self.query_library.rename_file.as_ref().is_some_and(|(path, _)| path == &file.path) {
+                            let (_, name) = self.query_library.rename_file.as_mut().unwrap();
+                            let response = ui.add(TextEdit::singleline(name).id_salt(("rename-query", &file.path)).desired_width(ui.available_width()));
+                            if self.query_library.focus_file {
+                                self.query_library.focus_file = false;
+                                response.request_focus();
+                                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), response.id) {
+                                    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(name.chars().count()))));
+                                    state.store(ui.ctx(), response.id);
+                                }
+                            }
+                            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) { self.query_library.rename_file = None; response.surrender_focus(); }
+                            else if response.lost_focus() || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) { rename = Some((file.path.clone(), name.clone())); }
+                        } else {
+                            let response = ui.add_enabled_ui(self.query_library.group_operation.is_none(), |ui| query_row(ui, &format!("▤ {}", file.name), active)).inner.on_hover_text(file.path.display().to_string());
+                            if response.clicked() || response.secondary_clicked() { self.query_library.selected = Some(selection); }
+                            if response.double_clicked() { chosen = Some(file.path.clone()); }
+                            response.context_menu(|ui| {
+                                if ui.button("Rename query").clicked() {
+                                    self.query_library.rename_file = Some((file.path.clone(), file.name.clone()));
+                                    self.query_library.focus_file = true; ui.close();
+                                }
+                            });
+                        }
                     }
                 });
             }
@@ -207,7 +257,7 @@ impl Rustable {
                     for (index, sql) in self.prefs.favorites.iter().enumerate() {
                         let selection = Selection::Recovered(index);
                         let active = self.query_library.selected.as_ref() == Some(&selection);
-                        let response = ui.add(egui::Button::new(format!("Recovered query {}", index + 1)).selected(active).frame(false)).on_hover_text("Double-click to open, then Cmd/Ctrl+S to name and save as a file");
+                        let response = query_row(ui, &format!("Recovered query {}", index + 1), active).on_hover_text("Double-click to open, then Cmd/Ctrl+S to name and save as a file");
                         if response.clicked() { self.query_library.selected = Some(selection); }
                         if response.double_clicked() { self.tabs.push(QueryTab::new(sql.clone())); self.tab = self.tabs.len()-1; self.view = View::Query; }
                     }
@@ -226,6 +276,32 @@ impl Rustable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn query_rename_preserves_sql_and_rejects_an_existing_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("Old.sql");
+        std::fs::write(&old, "SELECT 'unchanged';").unwrap();
+        std::fs::write(root.path().join("Existing.sql"), "SELECT 2;").unwrap();
+        assert!(change_group(root.path(), Some((old.clone(), "Existing".into()))).is_err());
+        assert!(change_group(root.path(), Some((old.clone(), ".sql".into()))).is_err());
+        let new = change_group(root.path(), Some((old.clone(), "Customer report".into()))).unwrap();
+        assert_eq!(new, root.path().join("Customer report.sql"));
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "SELECT 'unchanged';");
+        assert!(!old.exists());
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.tabs[0].saved(old.clone(), "SELECT 'unchanged';".into());
+        app.tabs[0].sql = "SELECT 'unsaved edit';".into();
+        app.tabs[0].refresh_dirty();
+        let (tx, rx) = mpsc::channel();
+        app.query_library.group_operation = Some(rx);
+        tx.send(Ok((root.path().to_owned(), Some(old), new.clone()))).unwrap();
+        app.poll_query_groups();
+        assert_eq!(app.tabs[0].source_path, Some(new));
+        assert_eq!(app.tabs[0].source_name.as_deref(), Some("Customer report.sql"));
+        assert_eq!(app.tabs[0].sql, "SELECT 'unsaved edit';");
+        assert!(app.tabs[0].dirty);
+    }
     #[test]
     fn groups_create_uniquely_and_rename_without_overwriting_files() {
         let root = tempfile::tempdir().unwrap();
@@ -295,6 +371,8 @@ mod tests {
                 frame(&mut app, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }]);
             }
             assert!(app.query_library.selected == Some(Selection::File(path.clone())));
+            let painted = frame(&mut app, vec![]);
+            assert!(painted.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == ctx.style().visuals.selection.bg_fill && rect.rect.width() > 400.0)), "selection must paint a persistent full-width background");
             assert_eq!(app.tab, if click == 0 { original_tab } else { saved_tab });
             assert!(app.pending.is_none(), "Opening an already loaded query must not execute SQL");
         }
