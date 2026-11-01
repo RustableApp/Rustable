@@ -390,3 +390,15 @@ provenance into `Licenses/NotoEmoji`. Browser output was byte-compared against t
 source notices. All five native packaging tests and strict packaging Clippy pass.
 This does not imply native MySQL/MariaDB release readiness or broader browser
 workflow acceptance beyond the interactions listed above.
+
+## Production refresh, 2026-11-01
+
+Rebuilt from `91fc513` and deployed to rustable.app with Cloudflare version
+`0b36fccc-5d85-4f82-987c-1825b0c41eb7`. WASM and bindings match the locally accepted
+CTE/emoji bundle byte for byte. Public WASM SHA-256 is
+`8d13f0a772d9f7ee1d55f4a3355adece9c8e39c3cf74600c6267d7dcf554f0be`.
+Live browser startup displayed the shared app with the virtual SQLite customers
+table, four tables and one view. Embedding fallback checks passed (3 tests), and
+public COOP/COEP/CSP headers remain present. Evidence:
+`wasm-production-completion-font-update.png` in the session visualization folder.
+No main push or native release build was performed.
