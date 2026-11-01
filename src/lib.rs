@@ -30,6 +30,7 @@ mod sql_language_server;
 mod sqlite_language_server;
 mod ssh_tunnel;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result {
     eframe::run_native(
         if cfg!(feature = "qa") {

@@ -7,8 +7,10 @@ mod row_export;
 pub enum ExportFormat { Csv, Json }
 pub mod csv_import;
 pub mod csv_preview;
+#[cfg(not(target_arch = "wasm32"))]
 mod postgres;
 pub mod progress;
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use postgres::async_client_config as probe_client_config;
 mod sqlite;
 
@@ -470,6 +472,11 @@ fn handle(
             schemas,
         });
     }
+    #[cfg(target_arch = "wasm32")]
+    if matches!(&command, Command::OpenPostgres(_)) {
+        return Err("Direct server connections require the desktop app.".into());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Command::OpenPostgres(config) = command {
         let mut driver: Box<dyn Driver> =
             Box::new(postgres::PostgresDriver::open(&config, cancel.clone())?);

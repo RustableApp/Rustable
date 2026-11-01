@@ -3,7 +3,7 @@ mod export_path;
 mod schema;
 use super::*;
 use rusqlite::{Connection, OpenFlags, fallible_iterator::FallibleIterator, params_from_iter};
-use std::time::Instant;
+use web_time::Instant;
 
 pub(super) struct SqliteDriver {
     connection: Connection,
@@ -27,7 +27,8 @@ impl SqliteDriver {
         connection
             .pragma_update(None, "foreign_keys", true)
             .map_err(|e| e.to_string())?;
-        connection.progress_handler(1_000, Some(move || cancel.load(Ordering::Relaxed)));
+        connection.progress_handler(1_000, Some(move || cancel.load(Ordering::Relaxed)))
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             connection,
             cursor: None,
@@ -1926,7 +1927,7 @@ mod tests {
         let grid = query(&conn, sql, true).unwrap();
         assert_eq!(grid.rows.len(), QUERY_LIMIT);
         assert!(grid.truncated);
-        conn.progress_handler(100, Some(|| true));
+        conn.progress_handler(100, Some(|| true)).unwrap();
         assert!(query(&conn, sql, true).is_err());
     }
 
@@ -2681,7 +2682,7 @@ mod performance_tests {
         assert!(grid.truncated);
         let cancel = Arc::new(AtomicBool::new(false));
         let callback = cancel.clone();
-        conn.progress_handler(1000, Some(move || callback.load(Ordering::Relaxed)));
+        conn.progress_handler(1000, Some(move || callback.load(Ordering::Relaxed))).unwrap();
         std::thread::scope(|scope| {
             let trigger = cancel.clone();
             scope.spawn(move || {
@@ -3420,9 +3421,9 @@ mod csv_import_tests {
                 stop.store(true, Ordering::Relaxed);
                 true
             }),
-        );
+        ).unwrap();
         assert!(driver.import_csv(&good, &cancel).is_err());
-        driver.connection.progress_handler(0, None::<fn() -> bool>);
+        driver.connection.progress_handler(0, None::<fn() -> bool>).unwrap();
         assert!(driver.connection.is_autocommit());
         assert_eq!(count(&driver), 0);
         cancel.store(false, Ordering::Relaxed);

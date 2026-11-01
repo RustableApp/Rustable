@@ -1,3 +1,4 @@
+use web_time::Instant;
 #[path = "query_library.rs"]
 mod query_library;
 #[path = "query_history.rs"]
@@ -28,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
     sync::{Arc, mpsc},
-    time::Instant,
 };
 
 const BLUE: Color32 = Color32::from_rgb(50, 104, 224);

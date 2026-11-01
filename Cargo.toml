@@ -12,23 +12,29 @@ sparkle-updater = ["dep:sparkle-updater"]
 [dependencies]
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "persistence"] }
 egui_extras = "0.33"
-rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rfd = "0.15"
-postgres = "0.19"
-postgres-native-tls = "0.5"
-native-tls = "0.2"
 regex = "1"
 tempfile = "3"
 same-file = "1"
 csv = "1"
-keyring = { version = "4.2", default-features = false, features = ["v1"] }
 sqlformat = "0.5"
 sqlparser = { version = "0.63.0", default-features = false, features = ["std"] }
+chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+web-time = "1.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+postgres = "0.19"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+keyring = { version = "4.2", default-features = false, features = ["v1"] }
 tokio = { version = "1.54.1", features = ["rt", "time"] }
 tokio-postgres = "0.7.18"
-chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [profile.release]
 lto = "thin"

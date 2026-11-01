@@ -1,4 +1,5 @@
 //! Isolated, asynchronous LSP processes. SQL is never executed by this transport.
+use web_time::Instant;
 use serde_json::{Value, json};
 use std::{
     ffi::OsString,
@@ -11,7 +12,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub struct ServerSpec {

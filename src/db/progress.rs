@@ -1,5 +1,6 @@
 //! Approximate lock-free observations of retained decoded result payloads.
 //! These are NOT socket bytes, protocol bytes, total server rows, or a completion fraction.
+use web_time::Instant;
 use super::Value;
 use std::{
     cell::RefCell,
@@ -7,7 +8,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -22,9 +22,9 @@ pub trait Backend: Send + Sync + 'static {
     fn write(&self, account: &str, password: &str) -> Result<(), String>;
     fn delete(&self, account: &str) -> Result<(), String>;
 }
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 struct Native;
-#[cfg(not(test))]
+#[cfg(all(not(test), not(target_arch = "wasm32")))]
 impl Backend for Native {
     fn read(&self, account: &str) -> Result<Option<String>, String> {
         let entry = keyring::Entry::new(SERVICE, account).map_err(|e| e.to_string())?;
@@ -57,24 +57,31 @@ pub struct Response {
     pub token: u64,
     pub result: Result<Option<String>, String>,
 }
+#[cfg(not(target_arch = "wasm32"))]
 struct Request {
     token: u64,
     id: ProfileId,
     operation: Operation,
 }
 pub struct Worker {
+    #[cfg(not(target_arch = "wasm32"))]
     requests: Sender<Request>,
+    #[cfg(target_arch = "wasm32")]
+    backend: Arc<dyn Backend>,
+    #[cfg(target_arch = "wasm32")]
+    results: Sender<Response>,
     responses: Receiver<Response>,
     next_token: u64,
 }
 impl Worker {
     pub fn new() -> Self {
-        #[cfg(not(test))]
+        #[cfg(all(not(test), not(target_arch = "wasm32")))]
         let backend = Arc::new(Native);
-        #[cfg(test)]
+        #[cfg(any(test, target_arch = "wasm32"))]
         let backend = Arc::new(MemoryBackend::default());
         Self::with_backend(backend)
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
         let (requests, receiver) = mpsc::channel::<Request>();
         let (sender, responses) = mpsc::channel();
@@ -98,14 +105,30 @@ impl Worker {
             next_token: 0,
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
+        let (results, responses) = mpsc::channel();
+        Self { backend, results, responses, next_token: 0 }
+    }
     pub fn request(&mut self, id: ProfileId, operation: Operation) -> u64 {
         self.next_token = self.next_token.wrapping_add(1);
         let token = self.next_token;
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = self.requests.send(Request {
             token,
             id,
             operation,
         });
+        #[cfg(target_arch = "wasm32")]
+        {
+            let name = account(id);
+            let result = match operation {
+                Operation::Read => self.backend.read(&name),
+                Operation::Write(password) => self.backend.write(&name, &password).map(|()| None),
+                Operation::Delete => self.backend.delete(&name).map(|()| None),
+            };
+            let _ = self.results.send(Response { token, result });
+        }
         token
     }
     pub fn poll(&self) -> Option<Response> {
@@ -113,12 +136,12 @@ impl Worker {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, target_arch = "wasm32"))]
 #[derive(Default)]
 pub struct MemoryBackend {
     values: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
-#[cfg(test)]
+#[cfg(any(test, target_arch = "wasm32"))]
 impl Backend for MemoryBackend {
     fn read(&self, account: &str) -> Result<Option<String>, String> {
         Ok(self.values.lock().unwrap().get(account).cloned())
