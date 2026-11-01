@@ -1755,7 +1755,10 @@ impl Rustable {
             }
             return;
         }
-        if self.dialog_owns_workspace_shortcuts() { return; }
+        let renaming_query = self.sidebar_section == 1
+            && (ctx.content_rect().width() >= 720.0 || self.compact_panel == 1)
+            && self.query_library.renaming_inline();
+        if self.dialog_owns_workspace_shortcuts() || renaming_query { return; }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
             self.open_navigator(false);
             return;

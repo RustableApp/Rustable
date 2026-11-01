@@ -31,6 +31,9 @@ pub(super) struct Library {
     document_operation: Option<mpsc::Receiver<Result<browser::Document, String>>>,
 }
 impl Library {
+    pub fn renaming_inline(&self) -> bool {
+        self.rename_group.is_some() || self.rename_file.is_some()
+    }
     pub fn owns_keyboard(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         { self.save_dialog.is_some() }
@@ -384,6 +387,36 @@ mod tests {
         assert_eq!(app.tabs[0].sql, "SELECT 'unsaved edit';");
         assert!(app.tabs[0].dirty);
     }
+    #[test]
+    fn inline_library_rename_owns_workspace_shortcuts_without_disabling_sidebar() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.prefs.query_directory = Some(root.path().to_owned());
+        app.sidebar_section = 1;
+        app.compact_panel = 1;
+        for group in [false, true] {
+            app.query_library.rename_group = group.then(|| (root.path().join("Reports"), "Reports".into()));
+            app.query_library.rename_file = (!group).then(|| (root.path().join("Query.sql"), "Query".into()));
+            assert!(!app.dialog_owns_workspace_shortcuts(), "an inline editor must not disable its own sidebar");
+            for key in [egui::Key::T, egui::Key::W, egui::Key::P, egui::Key::K, egui::Key::S, egui::Key::Enter] {
+                let tabs = app.tabs.len();
+                let _ = ctx.run(egui::RawInput { events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }], ..Default::default() }, |ctx| {
+                    app.workspace_shortcuts(ctx);
+                    assert!(ctx.input(|input| input.key_pressed(key)), "workspace must leave {key:?} to the inline editor");
+                });
+                assert_eq!(app.tabs.len(), tabs);
+                assert!(app.pending.is_none());
+                assert!(!app.navigator.open);
+            }
+        }
+        app.query_library.rename_group = None;
+        app.query_library.rename_file = None;
+        let tabs = app.tabs.len();
+        let _ = ctx.run(egui::RawInput { events: vec![egui::Event::Key { key: egui::Key::T, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }], ..Default::default() }, |ctx| app.workspace_shortcuts(ctx));
+        assert_eq!(app.tabs.len(), tabs + 1, "workspace shortcuts resume when renaming ends");
+    }
+
     #[test]
     fn groups_create_uniquely_and_rename_without_overwriting_files() {
         let root = tempfile::tempdir().unwrap();
