@@ -234,3 +234,16 @@ row successfully. All 11 driver tests pass on each engine. Full native suite:
 399 passed, 56 ignored; strict Clippy and WASM cargo check pass. Initial connection
 setup and session-state refresh cancellation still need coverage; cancellation
 permission/control-connection failures also remain to exercise.
+
+Cancellation control-connection failure is now exercised with intentionally invalid
+credentials only on the future control connection, after establishing the main
+fixture session. Both SQL and metadata paths retain the cancellation diagnostic
+alongside the main read-timeout error and discard the timed-out socket. Browse
+also preserves disconnected-stream state if a cancellation diagnostic arrives
+at the same time. The driver never claims that the failed cancellation stopped
+the server query; connection read timeout is the fallback.
+
+All 12 driver tests pass on MySQL and MariaDB after this change, with strict
+Clippy passing. The new case uses a 300 ms read timeout and a two-second SLEEP,
+requests cancellation after 50 ms, and checks disconnection and both diagnostics.
+Actual KILL privilege denial and initial connection cancellation still need tests.

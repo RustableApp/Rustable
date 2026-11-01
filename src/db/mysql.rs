@@ -156,19 +156,23 @@ impl MysqlDriver {
         self.connection.as_mut().ok_or_else(|| "MySQL connection is disconnected".into())
     }
     fn with_connection<T>(&mut self, operation: impl FnOnce(&mut Conn) -> Result<T, ::mysql::Error>) -> Result<T, String> {
+        let (value, cancellation_error) = self.with_connection_status(operation)?;
+        match cancellation_error { Some(error) => Err(error), None => Ok(value) }
+    }
+    fn with_connection_status<T>(&mut self, operation: impl FnOnce(&mut Conn) -> Result<T, ::mysql::Error>) -> Result<(T, Option<String>), String> {
         if self.cancel.load(Ordering::Acquire) { return Err("Cancelled before metadata request".into()); }
         let config = self.config.clone();
         let cancel = self.cancel.clone();
         let conn = self.conn()?;
         let (result, cancellation_error) = with_cancel(&config, conn.connection_id(), &cancel, || operation(conn));
         match result {
-            Ok(value) => match cancellation_error {
-                Some(error) => Err(error),
-                None => Ok(value),
-            },
+            Ok(value) => Ok((value, cancellation_error)),
             Err(error) => {
                 if error.is_connectivity_error() { self.connection = None; }
-                Err(error.to_string())
+                Err(match cancellation_error {
+                    Some(cancel_error) => format!("{error}\n{cancel_error}"),
+                    None => error.to_string(),
+                })
             }
         }
     }
@@ -290,7 +294,10 @@ impl Driver for MysqlDriver {
                 Ok(result) => result,
                 Err(error) => {
                     let disconnected = error.is_connectivity_error();
-                    report.error = Some(error.to_string());
+                    report.error = Some(match report.error.take() {
+                        Some(cancel_error) => format!("{error}\n{cancel_error}"),
+                        None => error.to_string(),
+                    });
                     if disconnected { self.connection = None; }
                     break;
                 }
@@ -321,7 +328,12 @@ impl Driver for MysqlDriver {
             }
             report.grids.extend(result.grids);
             if result.error.is_some() || report.error.is_some() {
-                if result.error.is_some() { report.error = result.error; }
+                if let Some(error) = result.error {
+                    report.error = Some(match report.error.take() {
+                        Some(previous) => format!("{error}\n{previous}"),
+                        None => error,
+                    });
+                }
                 if disconnected { self.connection = None; }
                 break;
             }
@@ -363,10 +375,13 @@ impl Driver for MysqlDriver {
             Value::Text(text) => ::mysql::Value::Bytes(text.as_bytes().to_vec()), _ => unreachable!(),
         }).collect();
         let mut remaining = BYTE_LIMIT;
-        let (report, disconnected) = self.with_connection(|conn| conn.exec_iter(&sql, params).map(|results|
+        let ((report, disconnected), cancellation_error) = self.with_connection_status(|conn| conn.exec_iter(&sql, params).map(|results|
             super::mysql_results::collect_budget(results, &mut remaining, PAGE_SIZE + 1, 1)))?;
         if disconnected { self.connection = None; }
-        if let Some(error) = report.error { return Err(error); }
+        if let Some(error) = report.error {
+            return Err(match cancellation_error { Some(cancel_error) => format!("{error}\n{cancel_error}"), None => error });
+        }
+        if let Some(error) = cancellation_error { return Err(error); }
         let mut grid = Arc::unwrap_or_clone(report.grids.into_iter().next().ok_or("Missing table result")?);
         if grid.rows.len() > PAGE_SIZE { grid.rows.truncate(PAGE_SIZE); grid.truncated = true; }
         grid.set_browse_total(request.offset, None);
@@ -601,6 +616,37 @@ mod tests {
         let table = driver.browse(&Browse { table: "driver_locked_browse".into(), ..Default::default() }).unwrap();
         assert_eq!(table.grid.rows, [vec![Value::Integer(1)]]);
         lock.query_drop("DROP TABLE driver_locked_browse").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn failed_cancel_connection_reports_both_errors_and_discards_timed_out_session() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false,
+            read_timeout: Duration::from_millis(300), ..Default::default() };
+        for metadata in [false, true] {
+            let mut driver = MysqlDriver::connect(&config).unwrap();
+            // Only the future control connection gets bad credentials.
+            driver.config.password = "deliberately-invalid-fixture-password".into();
+            let cancel = Arc::new(AtomicBool::new(false));
+            driver.set_cancellation(cancel.clone());
+            let began = std::time::Instant::now();
+            let error = std::thread::scope(|scope| {
+                scope.spawn(|| { std::thread::sleep(Duration::from_millis(50)); cancel.store(true, Ordering::Release); });
+                if metadata {
+                    driver.with_connection(|conn| conn.query_first::<u8, _>("SELECT SLEEP(2)")).unwrap_err()
+                } else {
+                    driver.execute("SELECT SLEEP(2); SELECT 123;", false, &cancel).error.unwrap()
+                }
+            });
+            assert!(error.contains("Could not connect to cancel query"), "{error}");
+            assert!(error.lines().count() >= 2, "retain primary and cancellation failure: {error}");
+            assert!(began.elapsed() < Duration::from_secs(2));
+            assert!(driver.connection.is_none());
+            assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
+        }
     }
 
 }
