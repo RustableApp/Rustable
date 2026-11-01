@@ -654,3 +654,18 @@ The UI preserves the schema when re-previewing the same CSV with changed options
 Both CSV live tests passed on both engines. Full library suite: 433 passed,
 92 fixture/manual tests ignored. Strict all-target Clippy passed. GUI import is
 still gated pending transport failure, expression/privilege and native acceptance.
+
+### CSV transaction reply-loss acceptance (2026-11-01)
+
+Extended the disposable protocol fault proxy to exercise both CSV import and
+reviewed edits. For CSV COMMIT it consumes the real server OK packet and closes
+the connection before the client sees it: the independent observer sees exactly
+one committed row, while the driver reports unknown commit outcome, publishes
+Disconnected, and rejects replay. For ROLLBACK, non-strict conversion warnings
+force cleanup; withholding the server OK likewise disconnects without claiming
+rollback was confirmed. The observer sees zero rows and repeat import is rejected.
+
+All four reply-loss tests passed independently on MySQL and MariaDB. Strict
+all-target Clippy passed. These checks cover lost transaction acknowledgements;
+other transport phases, effective-privilege/expression coverage and native import
+acceptance remain distinct work. UI import remains gated.

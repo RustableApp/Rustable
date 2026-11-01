@@ -19,17 +19,32 @@ fn packet(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 #[test]
 #[ignore = "requires disposable MySQL/MariaDB fixture"]
 fn lost_mysql_commit_reply_reports_unknown_outcome_without_replay() {
-    lost_transaction_reply(true);
+    lost_transaction_reply(true, false);
 }
 
 #[test]
 #[ignore = "requires disposable MySQL/MariaDB fixture"]
 fn lost_mysql_rollback_reply_disconnects_without_claiming_cleanup_succeeded() {
-    lost_transaction_reply(false);
+    lost_transaction_reply(false, false);
 }
 
-fn lost_transaction_reply(commit: bool) {
-    let table = if commit { "lost_commit_probe" } else { "lost_rollback_probe" };
+#[test]
+#[ignore = "requires disposable MySQL/MariaDB fixture"]
+fn lost_csv_commit_reply_reports_unknown_outcome_without_replay() {
+    lost_transaction_reply(true, true);
+}
+
+#[test]
+#[ignore = "requires disposable MySQL/MariaDB fixture"]
+fn lost_csv_rollback_reply_disconnects_without_claiming_cleanup_succeeded() {
+    lost_transaction_reply(false, true);
+}
+
+fn lost_transaction_reply(commit: bool, csv: bool) {
+    let table = match (commit, csv) {
+        (true, false) => "lost_commit_probe", (false, false) => "lost_rollback_probe",
+        (true, true) => "lost_csv_commit_probe", (false, true) => "lost_csv_rollback_probe",
+    };
     let command = if commit { b"COMMIT".as_slice() } else { b"ROLLBACK".as_slice() };
     let target_port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
     assert!([43316, 43317].contains(&target_port));
@@ -76,16 +91,30 @@ fn lost_transaction_reply(commit: bool) {
     // Non-strict truncation forces apply to roll back after the insert executes.
     if !commit { driver.conn().unwrap().query_drop("SET sql_mode=''").unwrap(); }
     let label = if commit { "saved once" } else { "this value is longer than twenty characters" };
-    let plan = driver.plan(&[Change::InsertRow { id:1, table:table.into(), fields:vec![("label".into(),Value::Text(label.into()))] }]).unwrap();
-    let error = driver.apply(&plan).unwrap_err();
-    assert!(error.contains(if commit { "Commit outcome is unknown" } else { "Rollback could not be confirmed" }), "{error}");
+    let (request, plan) = if csv {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!("label\n{label}\n")).unwrap();
+        let preview = csv_preview::load(file.path(), Default::default(), None, &AtomicBool::new(false)).unwrap();
+        (Some(csv_import::Request { source:preview.source.unwrap(), options:preview.options,
+            table:table.into(), schema:Some("rustable_test".into()),
+            columns:driver.catalog_objects(Some(table)).unwrap().remove(0).columns,
+            destinations:vec![Some(1)], empty_as_null:false, postgres_inserts:false }), ChangePlan::default())
+    } else {
+        (None, driver.plan(&[Change::InsertRow { id:1, table:table.into(), fields:vec![("label".into(),Value::Text(label.into()))] }]).unwrap())
+    };
+    let run = |driver: &mut MysqlDriver| match &request {
+        Some(request) => driver.import_csv(request, &AtomicBool::new(false)).map(|_| ()),
+        None => driver.apply(&plan),
+    };
+    let error = run(&mut driver).unwrap_err();
+    assert!(error.to_lowercase().contains(if commit { "commit outcome is unknown" } else { "rollback could not be confirmed" }), "{error}");
     assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
     let reply = received.recv_timeout(Duration::from_secs(3)).unwrap();
     assert_eq!(reply.get(4), Some(&0), "server actually acknowledged the transaction command with an OK packet");
     proxy.join().unwrap();
     let rows: Vec<String> = observer.query(format!("SELECT label FROM {table}")).unwrap();
     assert_eq!(rows, if commit { vec!["saved once"] } else { vec![] });
-    assert!(driver.apply(&plan).unwrap_err().contains("disconnected"), "disconnected session cannot replay the batch");
+    assert!(run(&mut driver).unwrap_err().contains("disconnected"), "disconnected session cannot replay the batch");
     let count: Option<u64> = observer.query_first(format!("SELECT COUNT(*) FROM {table}")).unwrap();
     assert_eq!(count,Some(if commit { 1 } else { 0 }));
     observer.query_drop(format!("DROP TABLE {table}")).unwrap();
