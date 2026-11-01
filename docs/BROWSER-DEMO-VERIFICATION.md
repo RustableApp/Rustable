@@ -46,6 +46,8 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 - Full native library regression after the shared browser adapters: 391 passed, 0 failed, 44 existing manual/integration tests ignored. This does not replace live database integration coverage.
 - Startup now dynamically imports its JS module inside the error handler. Temporarily removing the built module from local preview produced the visible startup failure and screenshot fallback, rather than an endless loading screen. The module was restored after the check.
 
+- Clean full-app build embedded in a copy of the actual landing page at localhost:8768. Production `_headers` now include COOP same-origin and COEP require-corp, and the preview served these plus the existing CSP. The app rendered without console errors and Cmd+Enter inside the iframe returned 42. A 390×844 responsive check exposed a cramped desktop workspace; mobile presentation remains to fix before publication. Temporary viewport override was reset. Website copy now describes actual file-copy/import/export and browser-local saved-query behavior.
+
 ## Required before replacement deployment
 
 - Extend CSV failure-path verification and verify database-copy opening with additional browser engines and larger files. Verify recovery after storage failures, and file transfers in additional browser engines.
