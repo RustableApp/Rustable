@@ -821,3 +821,17 @@ MySQL 9.7 documents configurable cascade-trigger execution, unlike the tested
 versions equivalent. Native editing acceptance, generated-expression effects in
 indirectly changed tables, and compatibility with newer cascade modes remain
 open before enabling table editing.
+
+### Generated columns on cascade destinations (2026-11-01)
+
+Extended the reviewed-cascade fixture with virtual parent_twice=parent_id*2 on
+both CASCADE and SET NULL children, plus stored row_twice=id*2 on the CASCADE
+child. On both MySQL 8.4.11 and MariaDB 11.4.13, the virtual value changes from 2
+to 6 when the parent key changes 1 to 3, becomes NULL after SET NULL, and returns
+to its original value after a later duplicate-key failure rolls back the batch.
+The independent stored value remains 20. All assertions pass; strict Clippy passes.
+This establishes common builtin generated-expression behavior on indirect writes,
+not arbitrary child UDF effects or newer MySQL cascade-trigger modes. The directly
+edited-table expression gate remains unchanged. Next editing work should address
+server-mode compatibility and the app/native edit-review-confirm path rather than
+repeating these successful cascade tests without a relevant change.
