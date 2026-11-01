@@ -25,6 +25,7 @@ impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
 
 impl MysqlDriver {
     fn connect(config: &MysqlConfig) -> Result<Self, String> {
+        crate::connection_profiles::MysqlProfile::from(config).validate()?;
         let mut connection = Conn::new(OptsBuilder::from(config)).map_err(|e| e.to_string())?;
         connection.query_drop("SET SESSION session_track_system_variables = 'sql_mode'").map_err(|e| e.to_string())?;
         let (version, database, sql_mode): (String, Option<String>, String) = connection.query_first(

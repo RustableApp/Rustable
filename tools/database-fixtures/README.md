@@ -266,3 +266,15 @@ Validation: 13 driver tests pass on each engine; native suite 399 passed, 58
 ignored; strict Clippy and release WASM linking pass. Connection-profile UI,
 credential storage, SSH and safe table editing are not yet wired for these engines;
 this is worker integration, not official support or a released feature.
+
+MysqlProfile now defines the persistable nonsecret host/port/database/user, TLS
+and CA-file path, and timeout settings. It excludes passwords and derives only
+from nonsecret fields of MysqlConfig. Serde defaults preserve verified TLS and
+bounded timeouts for missing fields; an empty database is allowed for choosing
+one after connection. Driver opening validates required host/user, nonzero port
+and timeouts, and rejects an empty CA path before network I/O.
+
+Ten connection-profile tests pass, including password-free serialization/Debug
+and settings roundtrip, default behavior and invalid configuration rejection;
+strict Clippy passes. This profile type is not yet a ConnectionKind variant or
+part of the manager form, so saved MySQL/MariaDB connections remain unfinished.

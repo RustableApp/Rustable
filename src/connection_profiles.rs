@@ -87,6 +87,45 @@ impl From<&crate::connection::PostgresConfig> for PostgresProfile {
     }
 }
 
+/// Persistable MySQL/MariaDB address and TLS settings. Passwords are session-only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MysqlProfile {
+    pub host: String,
+    pub port: u16,
+    /// Empty selects no default database, allowing the database browser to choose.
+    pub database: String,
+    pub user: String,
+    pub tls: bool,
+    pub root_certificate: Option<PathBuf>,
+    pub connect_timeout: std::time::Duration,
+    pub read_timeout: std::time::Duration,
+}
+impl Default for MysqlProfile {
+    fn default() -> Self { Self::from(&crate::connection::MysqlConfig::default()) }
+}
+impl From<&crate::connection::MysqlConfig> for MysqlProfile {
+    fn from(config: &crate::connection::MysqlConfig) -> Self {
+        Self { host: config.host.clone(), port: config.port, database: config.database.clone(),
+            user: config.user.clone(), tls: config.tls, root_certificate: config.root_certificate.clone(),
+            connect_timeout: config.connect_timeout, read_timeout: config.read_timeout }
+    }
+}
+impl MysqlProfile {
+    pub fn validate(&self) -> Result<(), String> {
+        required(&self.host, "Database host")?;
+        required(&self.user, "Database user")?;
+        if self.port == 0 { return Err("Database port must be between 1 and 65535.".into()); }
+        if self.connect_timeout.is_zero() || self.read_timeout.is_zero() {
+            return Err("Connection and read timeouts must be greater than zero.".into());
+        }
+        if self.root_certificate.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
+            return Err("Choose a CA certificate file or leave it unset to use system roots.".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConnectionKind {
     SQLite { path: PathBuf },
@@ -712,5 +751,40 @@ mod tests {
         assert_eq!(model.remove_profile(id).unwrap().group, Some(a));
         assert!(model.remove_profile(id).is_err());
         assert!(model.profile(id).is_none());
+    }
+}
+
+#[cfg(test)]
+mod mysql_profile_tests {
+    use super::*;
+    #[test]
+    fn mysql_profile_roundtrip_never_retains_credentials() {
+        let config = crate::connection::MysqlConfig { host: "db.example.test".into(), port: 3307,
+            database: "metrics".into(), user: "reader".into(), password: "PRIVATE_PASSWORD_SENTINEL".into(),
+            root_certificate: Some("/certs/company.pem".into()), ..Default::default() };
+        let profile = MysqlProfile::from(&config);
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(!json.contains("password") && !json.contains(&config.password));
+        assert!(!format!("{profile:?}").contains(&config.password));
+        let restored: MysqlProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, profile);
+        assert!(restored.validate().is_ok());
+    }
+    #[test]
+    fn mysql_profile_defaults_and_validation_allow_database_selection_later() {
+        let mut profile: MysqlProfile = serde_json::from_str("{}").unwrap();
+        assert!(profile.tls);
+        assert_eq!(profile.port, 3306);
+        assert!(profile.database.is_empty());
+        assert!(profile.validate().is_ok());
+        profile.port = 0; assert!(profile.validate().is_err());
+        profile.port = 3306;
+        profile.connect_timeout = std::time::Duration::ZERO; assert!(profile.validate().is_err());
+        profile.connect_timeout = std::time::Duration::from_secs(5);
+        profile.read_timeout = std::time::Duration::ZERO; assert!(profile.validate().is_err());
+        profile.read_timeout = std::time::Duration::from_secs(120);
+        profile.root_certificate = Some(PathBuf::new()); assert!(profile.validate().is_err());
+        profile.root_certificate = None;
+        profile.host = "  ".into(); assert!(profile.validate().is_err());
     }
 }
