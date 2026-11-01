@@ -725,3 +725,19 @@ privileges, temporary replacements and metadata locks. Strict Clippy also passes
 This does not enable the editing UI. Indirect effects through foreign-key cascades,
 effective privilege coverage and native editing/import acceptance still require
 verification before declaring these workflows supported.
+
+### Limited-account CSV acceptance and MariaDB metadata panic (2026-11-01)
+
+A disposable account with only SELECT/INSERT on one table exposed a real MariaDB
+11.4 failure: information_schema.TRIGGERS returned a visible trigger name but NULL
+ACTION_STATEMENT and DEFINER. Converting those fields to String panicked while
+building a review/schema snapshot. Both fields now preserve NULL; imports also
+establish trigger visibility before reading the snapshot. Apply still requires
+complete visibility and rejects tables containing triggers.
+
+The new live test verifies that both review/apply and CSV import reject the limited
+account without mutation, that granting table-level TRIGGER reveals and rejects the
+actual trigger, that removing the trigger permits import, and that revoking INSERT
+rejects a subsequent import without changing existing data. Both engines pass.
+All 11 reviewed-save regression tests pass on each engine; strict Clippy passes.
+Import UI enablement/native acceptance remains pending.

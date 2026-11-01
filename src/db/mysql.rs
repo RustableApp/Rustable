@@ -302,7 +302,10 @@ impl MysqlDriver {
         let definition = editing::schema_signature(&definition, self.mode)?;
         // Trigger execution depends on its creation context, not just its body.
         // Capture order, definer, SQL mode and character settings as well.
-        type Trigger = (String, String, String, String, u64, String, String, String, String, String);
+        // MariaDB exposes trigger names to some table readers while hiding
+        // the body and definer. Preserve NULL instead of panicking in FromRow;
+        // apply independently requires full trigger visibility and rejects triggers.
+        type Trigger = (String, String, String, Option<String>, u64, String, Option<String>, String, String, String);
         let triggers: Vec<Trigger> = self.with_connection(|conn| conn.exec(
             "SELECT TRIGGER_NAME,ACTION_TIMING,EVENT_MANIPULATION,ACTION_STATEMENT,ACTION_ORDER,SQL_MODE,DEFINER,CHARACTER_SET_CLIENT,COLLATION_CONNECTION,DATABASE_COLLATION FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME",
             (schema, table)))?;

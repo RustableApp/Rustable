@@ -21,8 +21,8 @@ pub(super) fn table(driver: &mut MysqlDriver, request: &csv_import::Request, can
         driver.with_connection(|conn| conn.query_drop("START TRANSACTION"))?;
         // Hold metadata through validation and every batch, including commit.
         driver.with_connection(|conn| conn.query_drop(format!("SELECT * FROM {qualified} LIMIT 0")))?;
-        driver.edit_schema_snapshot(&schema, &request.table)?; // Reject temporary replacements.
         editing::require_trigger_visibility(driver, &schema, &request.table)?;
+        driver.edit_schema_snapshot(&schema, &request.table)?; // Reject temporary replacements.
         let engine = driver.with_connection(|conn| conn.exec_first::<String,_,_>(
             "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", (&schema,&request.table)))?;
         if engine.as_deref() != Some("InnoDB") { return Err("CSV import requires an InnoDB base table.".into()); }
@@ -105,6 +105,48 @@ mod tests {
             table:table.into(), columns:driver.catalog_objects(Some(table)).unwrap().remove(0).columns,
             destinations:vec![Some(1),Some(0)], empty_as_null:true, postgres_inserts:false }
     }
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_csv_table_privileges_and_hidden_triggers() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316,43317].contains(&port));
+        let mut config = MysqlConfig { host:"127.0.0.1".into(),port,user:"root".into(),
+            password:"rustable-test-only".into(),database:"rustable_test".into(),tls:false,..Default::default() };
+        let mut admin = Conn::new(OptsBuilder::from(&config)).unwrap();
+        admin.query_drop("DROP USER IF EXISTS 'rustable_csv_limited'@'%'").unwrap();
+        admin.query_drop("CREATE USER 'rustable_csv_limited'@'%' IDENTIFIED BY 'rustable-test-only'").unwrap();
+        admin.query_drop("DROP TABLE IF EXISTS csv_privilege_probe").unwrap();
+        admin.query_drop("CREATE TABLE csv_privilege_probe(id INT PRIMARY KEY,label VARCHAR(20)) ENGINE=InnoDB").unwrap();
+        admin.query_drop("CREATE TRIGGER csv_privilege_trigger BEFORE INSERT ON csv_privilege_probe FOR EACH ROW SET NEW.label='triggered'").unwrap();
+        admin.query_drop("GRANT SELECT, INSERT ON rustable_test.csv_privilege_probe TO 'rustable_csv_limited'@'%'").unwrap();
+        config.user = "rustable_csv_limited".into();
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let cancel = AtomicBool::new(false);
+        let request = request_for(&mut driver,"csv_privilege_probe","label,id\noriginal,1\n");
+        driver.edit_schema_snapshot("rustable_test","csv_privilege_probe").unwrap();
+        let plan = driver.plan(&[Change::InsertRow { id:1, table:"csv_privilege_probe".into(),
+            fields:vec![("id".into(),Value::Integer(1)),("label".into(),Value::Text("original".into()))] }]).unwrap();
+        assert!(driver.apply(&plan).unwrap_err().contains("direct privileges"));
+        assert!(driver.import_csv(&request,&cancel).unwrap_err().contains("direct privileges"));
+        assert_eq!(driver.transaction_state(),TransactionState::Idle);
+        admin.query_drop("GRANT TRIGGER ON rustable_test.csv_privilege_probe TO 'rustable_csv_limited'@'%'").unwrap();
+        // Fresh login also covers engines that cache privilege changes.
+        driver = MysqlDriver::connect(&config).unwrap();
+        assert!(driver.import_csv(&request,&cancel).unwrap_err().contains("tables with triggers"));
+        assert_eq!(admin.query_first::<u64,_>("SELECT COUNT(*) FROM csv_privilege_probe").unwrap(),Some(0));
+        admin.query_drop("DROP TRIGGER csv_privilege_trigger").unwrap();
+        assert_eq!(driver.import_csv(&request,&cancel).unwrap(),1);
+        admin.query_drop("REVOKE INSERT ON rustable_test.csv_privilege_probe FROM 'rustable_csv_limited'@'%'").unwrap();
+        driver = MysqlDriver::connect(&config).unwrap();
+        let retry = request_for(&mut driver,"csv_privilege_probe","label,id\nsecond,2\n");
+        assert!(driver.import_csv(&retry,&cancel).is_err());
+        assert_eq!(driver.transaction_state(),TransactionState::Idle);
+        assert_eq!(admin.query_first::<u64,_>("SELECT COUNT(*) FROM csv_privilege_probe").unwrap(),Some(1));
+        drop(driver);
+        admin.query_drop("DROP TABLE csv_privilege_probe").unwrap();
+        admin.query_drop("DROP USER 'rustable_csv_limited'@'%'").unwrap();
+    }
+
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_csv_cancel_after_batch_rolls_back_and_reuses_session() {
