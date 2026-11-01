@@ -124,6 +124,7 @@ impl Manager {
                     let transport = self.draft.as_ref().and_then(|draft| match &draft.connection {
                         ConnectionKind::Mysql(profile) | ConnectionKind::MariaDb(profile) => Some(profile.tls),
                         ConnectionKind::Postgres(profile) => Some(profile.tls),
+                        ConnectionKind::Redis(profile) => Some(profile.tls),
                         ConnectionKind::SQLite { .. } => None,
                     });
                     self.probe_message = Some(match transport {
@@ -224,6 +225,7 @@ enum Drag {
 }
 enum Action {
     NewMysql(bool),
+    NewRedis,
     Select(ProfileId),
     New(bool),
     Save(bool),
@@ -711,11 +713,12 @@ impl Rustable {
                     ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(6);
                     let form_height = (ctx.content_rect().height() - 160.0).clamp(180.0, 850.0);
                     let form = egui::ScrollArea::vertical().id_salt("connection-form").max_height(form_height).auto_shrink([false, true]).show(ui, |ui| {
-                        let title = match draft.connection { ConnectionKind::SQLite { .. } => "SQLite Connection", ConnectionKind::Postgres(_) => "PostgreSQL Connection", ConnectionKind::Mysql(_) => "MySQL Connection", ConnectionKind::MariaDb(_) => "MariaDB Connection" };
+                        let title = match draft.connection { ConnectionKind::SQLite { .. } => "SQLite Connection", ConnectionKind::Postgres(_) => "PostgreSQL Connection", ConnectionKind::Mysql(_) => "MySQL Connection", ConnectionKind::MariaDb(_) => "MariaDB Connection", ConnectionKind::Redis(_) => "Redis Connection" };
                         ui.horizontal(|ui| {
                             use crate::icons::DatabaseEngine;
                             let engine = match draft.connection {
                                 ConnectionKind::SQLite { .. } => DatabaseEngine::Sqlite, ConnectionKind::Postgres(_) => DatabaseEngine::Postgres,
+                                ConnectionKind::Redis(_) => DatabaseEngine::Redis,
                                 ConnectionKind::Mysql(_) => DatabaseEngine::Mysql, ConnectionKind::MariaDb(_) => DatabaseEngine::MariaDb,
                             };
                             egui::Frame::new().fill(Color32::from_rgb(244, 241, 234)).corner_radius(7).inner_margin(4).show(ui, |ui| {
@@ -743,6 +746,21 @@ impl Rustable {
                         form_card(ui).show(ui, |ui| {
                         form_section(ui, "Database");
                         match &mut draft.connection {
+                            ConnectionKind::Redis(config) => {
+                                ui.weak("Standalone Redis · key browser and command editor · desktop only");
+                                form_text(ui, "Host", &mut config.host, false, Some(ProbeField::Host));
+                                ports_valid &= form_port(ui, &mut config.port, ProbeField::Port, self.connection_manager.generation);
+                                status_row(ui, "Database", Some(ProbeField::Database), |ui| { ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut config.database).range(0..=u32::MAX)); });
+                                form_text(ui, "User", &mut config.username, false, Some(ProbeField::User));
+                                if form_text(ui, "Password", &mut self.connection_manager.password, true, Some(ProbeField::Password)) { self.connection_manager.password_revision = self.connection_manager.password_revision.wrapping_add(1); }
+                                form_row(ui, "", |ui| { form_checkbox(ui, &mut draft.remember_password, "Remember password"); });
+                                status_row(ui, "TLS", Some(ProbeField::Tls), |ui| { form_checkbox(ui, &mut config.tls, "Verify certificate and hostname"); });
+                                let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
+                                if form_text(ui, "CA file", &mut ca, false, Some(ProbeField::Tls)) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
+                                form_row(ui, "Connect timeout", |ui| { let mut seconds = config.connect_timeout.as_secs_f64(); if ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut seconds).range(0.1..=300.0).speed(0.1).suffix(" s")).changed() { config.connect_timeout = std::time::Duration::from_secs_f64(seconds); } });
+                                form_row(ui, "Read timeout", |ui| { let mut seconds = config.read_timeout.as_secs_f64(); if ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut seconds).range(0.1..=300.0).speed(0.1).suffix(" s")).changed() { config.read_timeout = std::time::Duration::from_secs_f64(seconds); } });
+                            }
+
                             ConnectionKind::SQLite { path } => {
                                 status_row(ui, "SQLite file", Some(ProbeField::File), |ui| {
                                     ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
@@ -850,7 +868,7 @@ impl Rustable {
             let mut create = false;
             let mut cancel = false;
             let picker = egui::Modal::new(egui::Id::new("new-connection-picker")).show(ctx, |ui| {
-                ui.set_width(456.0);
+                ui.set_width(572.0);
                 ui.heading("New connection");
                 ui.weak("Choose your database");
                 ui.add_space(16.0);
@@ -877,6 +895,7 @@ impl Rustable {
                 use crate::icons::DatabaseEngine;
                 action = Some(match engine {
                     DatabaseEngine::Postgres => Action::New(true), DatabaseEngine::Sqlite => Action::New(false),
+                    DatabaseEngine::Redis => Action::NewRedis,
                     DatabaseEngine::Mysql => Action::NewMysql(false), DatabaseEngine::MariaDb => Action::NewMysql(true),
                 });
             }
@@ -978,6 +997,10 @@ impl Rustable {
                     .clone();
                 self.connection_manager.select(profile);
             }
+            Action::NewRedis => {
+                if self.connection_manager.dirty(&self.prefs.saved_connections) { return Err("Save or discard the connection form before adding another.".into()); }
+                self.connection_manager.select(Profile::draft(String::new(), ConnectionKind::Redis(Default::default())));
+            }
             Action::NewMysql(maria) => {
                 if self.connection_manager.dirty(&self.prefs.saved_connections) { return Err("Save or discard the connection form before adding another.".into()); }
                 let config = crate::connection_profiles::MysqlProfile::default();
@@ -999,6 +1022,10 @@ impl Rustable {
                 ));
             }
             Action::OpenWindow => {
+                #[cfg(target_arch = "wasm32")]
+                if self.connection_manager.draft.as_ref().is_some_and(|draft| matches!(draft.connection, ConnectionKind::Redis(_))) {
+                    return Err("Redis server connections require the desktop app. Use Back to database to return to the demo.".into());
+                }
                 self.connection_action(Action::Save(false))?;
                 let profile = self
                     .connection_manager
@@ -1006,6 +1033,7 @@ impl Rustable {
                     .as_ref()
                     .ok_or("Choose a connection first.")?;
                 let connection = match &profile.connection {
+                    ConnectionKind::Redis(settings) => crate::session_windows::WindowConnection::Redis { settings: settings.clone(), password: self.connection_manager.password.clone() },
                     ConnectionKind::SQLite { path } => {
                         crate::session_windows::WindowConnection::Sqlite(path.clone())
                     }
@@ -1057,7 +1085,7 @@ impl Rustable {
                 self.profiles_changed();
                 self.connection_manager.error = None;
                 self.connection_manager.saved_feedback = self.connection_manager.draft.clone().map(|saved| (saved, self.connection_manager.password_revision));
-                if matches!(profile.connection, ConnectionKind::Postgres(_) | ConnectionKind::Mysql(_) | ConnectionKind::MariaDb(_)) {
+                if matches!(profile.connection, ConnectionKind::Postgres(_) | ConnectionKind::Mysql(_) | ConnectionKind::MariaDb(_) | ConnectionKind::Redis(_)) {
                     if profile.remember_password {
                         self.connection_manager.queue_credential(
                             profile.id,
@@ -1232,6 +1260,7 @@ fn connection_row(ui: &mut egui::Ui, profile: &Profile, selected: bool) -> egui:
         );
     }
     let (_badge, color, endpoint) = match &profile.connection {
+        ConnectionKind::Redis(config) => ("Re", Color32::from_rgb(210, 60, 50), format!("{}:{}/{}", config.host, config.port, config.database)),
         ConnectionKind::SQLite { path } => (
             "Sl",
             Color32::from_rgb(137, 72, 224),

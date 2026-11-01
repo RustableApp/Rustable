@@ -388,6 +388,8 @@ pub struct Rustable {
     manager_requested: bool,
     window_requests: Vec<crate::session_windows::WindowRequest>,
     connection_manager: connections::Manager,
+    #[cfg(not(target_arch = "wasm32"))]
+    redis_workspace: Option<crate::redis_workspace::Workspace>,
     language: crate::editor_language::LanguageSession,
     active_profile: Option<ProfileIdentity>,
     profiles_revision: u64,
@@ -577,9 +579,13 @@ impl Rustable {
     }
     pub(crate) fn workspace_database(&self) -> Option<&str> { self.connected_database.as_deref() }
     pub(crate) fn has_connection(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(workspace) = &self.redis_workspace { return workspace.connected; }
         !self.engine.is_empty()
     }
     pub(crate) fn close_blocked(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.redis_workspace.as_ref().is_some_and(|workspace| workspace.busy()) { return true; }
         self.worker.transaction_state().blocks_replacement()
             || !self.changes.is_empty()
             || self.edit.is_some()
@@ -684,7 +690,22 @@ impl Rustable {
             }],
             ..Default::default()
         };
+        if let crate::session_windows::WindowConnection::Redis { settings, password } = request.connection {
+            let mut app = Self::with_optional_connection(ctx, prefs, None, None);
+            app.active_profile = request.identity;
+            app.child_window = true;
+            app.connections = false;
+            app.shared_preferences_revision = self.shared_preferences_revision;
+            app.profiles_revision = self.profiles_revision;
+            #[cfg(not(target_arch = "wasm32"))]
+            { app.engine = "Redis".into(); app.label = request.title;
+              app.redis_workspace = Some(crate::redis_workspace::Workspace::new(settings, password, ctx.clone())); }
+            #[cfg(target_arch = "wasm32")]
+            { let _ = (settings, password); app.error = Some("Redis connections require the desktop app.".into()); }
+            return app;
+        }
         let command = match request.connection {
+            crate::session_windows::WindowConnection::Redis { .. } => unreachable!(),
             crate::session_windows::WindowConnection::Demo => Command::Open(None),
             crate::session_windows::WindowConnection::Sqlite(path) => Command::Open(Some(path)),
             crate::session_windows::WindowConnection::Mysql(config) => Command::OpenMysql(*config),
@@ -865,6 +886,8 @@ impl Rustable {
             connected_database: None,
             table_display_name: None,
             connection_manager: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            redis_workspace: None,
             language: Default::default(),
             active_profile: None,
             profiles_revision: 0,
@@ -5760,6 +5783,8 @@ impl Rustable {
 
 impl Rustable {
     pub(crate) fn begin_workspace_frame(&mut self, ctx: &egui::Context) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.redis_workspace.is_some() { return; }
         let start = Instant::now();
         self.poll();
         self.workspace_shortcuts(ctx);
@@ -5767,6 +5792,11 @@ impl Rustable {
         self.frame_ms = start.elapsed().as_secs_f32() * 1000.0;
     }
     pub(crate) fn render_workspace_frame(&mut self, ctx: &egui::Context) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(workspace) = &mut self.redis_workspace {
+            if workspace.show(ctx, &self.label, &mut self.prefs.pane_sizes, &mut self.shared_preferences_dirty) { self.manager_requested = true; }
+            return;
+        }
         let start = Instant::now();
         if cfg!(feature = "qa") { self.footer(ctx); }
         if ctx.content_rect().width() < 720.0 {

@@ -9,6 +9,8 @@ pub struct PaneSizes {
     pub inspector: Option<f32>,
     pub activity: Option<f32>,
     pub query_editor: Option<f32>,
+    pub redis_keys: Option<f32>,
+    pub redis_commands: Option<f32>,
 }
 
 pub fn restore(
@@ -55,6 +57,64 @@ pub fn record_drag(
 mod tests {
     use super::*;
 
+    #[test]
+    fn dragged_width_is_saved_and_restored_in_a_new_context() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("redis-resize-test");
+        let mut preferred = None;
+        let draw = |ctx: &egui::Context, preferred: &mut Option<f32>| {
+            restore(ctx, id, *preferred, 280.0, 0);
+            egui::SidePanel::left(id)
+                .resizable(true)
+                .width_range(180.0..=600.0)
+                .show(ctx, |ui| {
+                    ui.set_min_width(ui.available_width());
+                });
+            record_drag(ctx, id, preferred, 0);
+        };
+        let point = |x| egui::pos2(x, 200.0);
+        let button = |x, pressed| egui::Event::PointerButton {
+            pos: point(x),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        for events in [
+            vec![],
+            vec![egui::Event::PointerMoved(point(280.0))],
+            vec![button(280.0, true)],
+            vec![egui::Event::PointerMoved(point(350.0))],
+            vec![button(350.0, false)],
+            vec![],
+        ] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| draw(ctx, &mut preferred),
+            );
+        }
+        assert!(
+            preferred.is_some_and(|width| (width - 350.0).abs() < 2.0),
+            "{preferred:?}"
+        );
+        let restored = egui::Context::default();
+        let _ = restored.run(egui::RawInput::default(), |ctx| draw(ctx, &mut preferred));
+        assert!(
+            (egui::containers::panel::PanelState::load(&restored, id)
+                .unwrap()
+                .size()
+                .x
+                - 350.0)
+                .abs()
+                < 2.0
+        );
+    }
     #[test]
     fn layout_clamps_do_not_replace_preferred_sizes_or_create_preferences() {
         for axis in [0, 1] {

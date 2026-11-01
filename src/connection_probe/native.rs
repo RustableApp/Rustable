@@ -4,6 +4,18 @@ use std::error::Error;
 pub(super) fn run(connection: ConnectionKind, password: String, cancel: &AtomicBool, emit: &impl Fn(Event)) {
     use ProbeField::*;
     match connection {
+        ConnectionKind::Redis(settings) => {
+            let mut fields = vec![Host, Port, Database, User, Password];
+            if settings.tls { fields.push(Tls); }
+            emit(Event::Running(fields.clone()));
+            match crate::redis_session::Session::connect_diagnostic(&settings, &password) {
+                Ok(_) => emit(Event::Success(fields)),
+                Err(error) => {
+                    if !error.passed.is_empty() { emit(Event::Success(error.passed)); }
+                    emit(Event::Failed(error.failed, error.message));
+                }
+            }
+        }
         ConnectionKind::SQLite { path } => {
             emit(Event::Running(vec![File]));
             let result = rusqlite::Connection::open_with_flags(

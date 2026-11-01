@@ -151,11 +151,11 @@ mod tests {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DatabaseEngine { Postgres, Sqlite, Mysql, MariaDb }
+pub enum DatabaseEngine { Postgres, Sqlite, Mysql, MariaDb, Redis }
 impl DatabaseEngine {
-    pub const ALL: [Self; 4] = [Self::Postgres, Self::Sqlite, Self::Mysql, Self::MariaDb];
+    pub const ALL: [Self; 5] = [Self::Postgres, Self::Sqlite, Self::Mysql, Self::MariaDb, Self::Redis];
     pub fn name(self) -> &'static str {
-        match self { Self::Postgres => "PostgreSQL", Self::Sqlite => "SQLite", Self::Mysql => "MySQL", Self::MariaDb => "MariaDB" }
+        match self { Self::Postgres => "PostgreSQL", Self::Sqlite => "SQLite", Self::Mysql => "MySQL", Self::MariaDb => "MariaDB", Self::Redis => "Redis" }
     }
     pub fn description(self) -> &'static str {
         match self {
@@ -163,6 +163,7 @@ impl DatabaseEngine {
             Self::Sqlite => "Open a local SQLite database file.",
             Self::Mysql => "Connect to a MySQL server.",
             Self::MariaDb => "Connect to a MariaDB server.",
+            Self::Redis => "Browse Redis keys and run Redis commands (desktop only).",
         }
     }
     pub fn image(self) -> egui::Image<'static> {
@@ -171,6 +172,7 @@ impl DatabaseEngine {
             Self::Sqlite => egui::include_image!("../assets/icons/databases/sqlite.svg"),
             Self::Mysql => egui::include_image!("../assets/icons/databases/mysql.svg"),
             Self::MariaDb => egui::include_image!("../assets/icons/databases/mariadb.svg"),
+            Self::Redis => egui::include_image!("../assets/icons/databases/redis.svg"),
         })
     }
     pub fn tile(self, ui: &mut egui::Ui, selected: bool) -> egui::Response {

@@ -11,6 +11,7 @@ pub enum WindowConnection {
     Sqlite(PathBuf),
     Postgres(Box<PostgresConfig>),
     Mysql(Box<crate::connection::MysqlConfig>),
+    Redis { settings: crate::redis_settings::Settings, password: String },
 }
 pub struct WindowRequest {
     pub recover_sql: bool,

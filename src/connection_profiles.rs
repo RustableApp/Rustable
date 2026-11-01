@@ -146,10 +146,12 @@ pub enum ConnectionKind {
     Postgres(PostgresProfile),
     Mysql(MysqlProfile),
     MariaDb(MysqlProfile),
+    Redis(crate::redis_settings::Settings),
 }
 impl ConnectionKind {
     pub fn validate(&self) -> Result<(), String> {
         match self {
+            Self::Redis(settings) => settings.validate(),
             Self::SQLite { path } if path.as_os_str().is_empty() => {
                 Err("Choose a SQLite file.".into())
             }
@@ -259,6 +261,7 @@ impl ConnectionProfiles {
                     return true;
                 }
                 match &profile.connection {
+                    ConnectionKind::Redis(config) => contains("Redis") || contains(&format!("{}@{}:{}/{}", config.username, config.host, config.port, config.database)),
                     ConnectionKind::SQLite { path } => {
                         contains("SQLite") || contains(&path.to_string_lossy())
                     }
@@ -511,6 +514,23 @@ mod tests {
             name.into(),
             ConnectionKind::Postgres(PostgresProfile::default()),
         )
+    }
+
+    #[test]
+    fn redis_profile_roundtrips_with_settings_and_no_embedded_password() {
+        let profile = Profile::draft("Redis".into(), ConnectionKind::Redis(crate::redis_settings::Settings {
+            host: "cache.example.test".into(), database: 3, username: "app".into(),
+            root_certificate: Some("/tmp/ca.crt".into()), ..Default::default()
+        }));
+        assert!(profile.validate().is_ok());
+        let mut storage = Storage::default();
+        eframe::set_value(&mut storage, "redis", &profile);
+        let restored: Profile = eframe::get_value(&storage, "redis").unwrap();
+        assert_eq!(restored, profile);
+        let ConnectionKind::Redis(config) = restored.connection else { panic!() };
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(!serialized.contains("password"));
+        assert_eq!(config.database, 3);
     }
     #[test]
     fn ssh_inheritance_roundtrips_without_changing_legacy_explicit_ports() {

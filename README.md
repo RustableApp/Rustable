@@ -43,7 +43,7 @@ You already have a browser. No need to ship another one to display some rows.
 
 ## Database support
 
-PostgreSQL, SQLite, MySQL, and MariaDB are available. MySQL 8.4 and MariaDB 11.4 have been tested for browsing, SQL, TLS/SSH connections, import/export, and reviewed row edits. Reviewed MySQL/MariaDB writes require a primary key, InnoDB, and supported effective privileges; visual schema administration and a full MySQL language server remain unfinished. See [capabilities and limits](docs/MYSQL-MARIADB-RELEASE.md). Redis remains planned.
+PostgreSQL, SQLite, MySQL, and MariaDB are available. MySQL 8.4 and MariaDB 11.4 have been tested for browsing, SQL, TLS/SSH connections, import/export, and reviewed row edits. Reviewed MySQL/MariaDB writes require a primary key, InnoDB, and supported effective privileges; visual schema administration and a full MySQL language server remain unfinished. See [capabilities and limits](docs/MYSQL-MARIADB-RELEASE.md). Standalone Redis is available in development for the next release, with a native key browser, command editor, TLS/ACL authentication, string edits, and TTL controls. See [Redis capabilities and limits](docs/REDIS.md).
 
 ### Why start with PostgreSQL and SQLite?
 
