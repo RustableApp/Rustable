@@ -178,3 +178,19 @@ row values on each engine. MariaDB returns one unavailable trigger; MySQL hides
 it entirely. Both still reject the reviewed save. These tests passed independently
 on both fixtures, and strict all-target Clippy passed. Native visual acceptance
 of the unavailable-definition label remains unverified.
+
+### Mid-batch MySQL/MariaDB save cancellation (2026-11-01)
+
+`live_review_cancel_after_first_write_rolls_back_batch_and_reuses_connection`
+passed on each engine. A competing transaction locks the second row. A separate
+test observer uses READ UNCOMMITTED to directly observe the first tentative write
+before setting the save cancellation flag. The save returns an error within the
+three-second bound, both rows retain their original committed values, transaction
+state is Idle, and the connection ID remains unchanged. Clearing cancellation and
+retrying the same reviewed batch then commits both rows successfully.
+
+This covers cancellation after a real write during a later row-lock wait, rather
+than just pre-cancellation. The original INNODB_TRX counter observation did not
+reliably expose the first write, so the regression uses direct row evidence instead.
+Strict all-target Clippy passed. Lost rollback/COMMIT replies and the other editing
+gates above remain outstanding; the native UI save capability remains disabled.

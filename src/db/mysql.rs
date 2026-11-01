@@ -790,6 +790,58 @@ mod tests {
 
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_cancel_after_first_write_rolls_back_batch_and_reuses_connection() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, read_timeout:Duration::from_secs(5), ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut blocker = Conn::new(OptsBuilder::from(&config)).unwrap();
+        let mut observer = Conn::new(OptsBuilder::from(&config)).unwrap();
+        // Test-only dirty reads observe the first uncommitted write directly.
+        observer.query_drop("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED").unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS apply_cancel_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE apply_cancel_probe(id INT PRIMARY KEY, label VARCHAR(20)) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO apply_cancel_probe VALUES(1,'before1'),(2,'before2')").unwrap();
+        let rows = driver.browse(&Browse { table:"apply_cancel_probe".into(), sort:Some(("id".into(),false)), ..Default::default() }).unwrap().grid;
+        let changes = rows.rows.iter().map(|original| Change::Cell { table:"apply_cancel_probe".into(), column:"label".into(), original:original.clone(), value:Value::Text("saved".into()) }).collect::<Vec<_>>();
+        let plan = driver.plan(&changes).unwrap();
+        let retry = plan.clone();
+        let id = driver.conn().unwrap().connection_id();
+        let cancel = driver.cancel.clone();
+        blocker.query_drop("START TRANSACTION").unwrap();
+        blocker.query_drop("SELECT * FROM apply_cancel_probe WHERE id=2 FOR UPDATE").unwrap();
+        let worker = std::thread::spawn(move || {
+            let result = driver.apply(&plan);
+            (driver, result)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut wrote_first = false;
+        while std::time::Instant::now() < deadline {
+            let label: Option<String> = observer.query_first("SELECT label FROM apply_cancel_probe WHERE id=1").unwrap();
+            if label.as_deref() == Some("saved") { wrote_first = true; break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let waiting: Option<(String, Option<String>)> = observer.exec_first("SELECT STATE, INFO FROM information_schema.PROCESSLIST WHERE ID=?", (id,)).unwrap();
+        let cancelled_at = std::time::Instant::now();
+        cancel.store(true, Ordering::Release);
+        let (mut driver, result) = worker.join().unwrap();
+        blocker.query_drop("ROLLBACK").unwrap();
+        assert!(wrote_first, "must observe a real first write before requesting cancellation; result={result:?}; waiting={waiting:?}");
+        assert!(cancelled_at.elapsed() < Duration::from_secs(3));
+        assert!(result.is_err(), "cancelled save must not commit");
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        let labels: Vec<String> = observer.query("SELECT label FROM apply_cancel_probe ORDER BY id").unwrap();
+        assert_eq!(labels, ["before1", "before2"]);
+        cancel.store(false, Ordering::Release);
+        assert_eq!(driver.conn().unwrap().connection_id(), id, "successful rollback keeps the original session");
+        driver.apply(&retry).unwrap();
+        let labels: Vec<String> = observer.query("SELECT label FROM apply_cancel_probe ORDER BY id").unwrap();
+        assert_eq!(labels, ["saved", "saved"]);
+        observer.query_drop("DROP TABLE apply_cancel_probe").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_review_apply_rejects_hidden_trigger_metadata() {
         let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
         assert!([43316, 43317].contains(&port));
