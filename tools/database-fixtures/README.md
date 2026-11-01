@@ -38,3 +38,23 @@ fractional/negative TIME values against Rustable's shared grid representation.
 Empty-result column headers are checked without rerunning the query.
 Unsigned values beyond i64 and DECIMAL are stored as exact text, avoiding f64
 rounding. Text connections must request utf8mb4; invalid UTF-8 is rejected.
+
+Bounded result-stream checks:
+
+```sh
+RUSTABLE_MYSQL_TEST_PORT=43316 mise exec -- cargo test --lib db::mysql_results -- --ignored
+RUSTABLE_MYSQL_TEST_PORT=43317 mise exec -- cargo test --lib db::mysql_results -- --ignored
+```
+
+The collector preserves multiple result sets and headers for empty SELECTs,
+retains earlier results when a later statement errors, caps each grid at 5,000
+rows, shares a 16 MiB retained-data budget across grids, and caps result sets at
+128. Structural/header costs are included in the budget. Rejected rows are
+not converted or cloned into the UI grid; transport rows are still received
+and drained to preserve protocol synchronization. This is not a bound on total
+process memory or network traffic. The owning driver's packet limits, socket
+deadlines and cancellation remain required before exposing connections in UI.
+
+Live checks on both fixture engines exercise 10,000 rows, a deliberately small
+byte budget, 130 result sets, a later-statement error, and successful subsequent
+queries on the same connection.
