@@ -51,7 +51,7 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 ## Required before replacement deployment
 
 - Extend CSV failure-path verification and verify database-copy opening with additional browser engines and larger files. Verify recovery after storage failures, and file transfers in additional browser engines.
-- Verify manual cancellation during transactional writes, whole-tab memory, and worker failure during transactional writes. Transactional write timeout rollback passed. Worker startup crash/no-response recovery passed. Basic timeout/cancel/read recovery passed; shared cancellation requires cross-origin-isolated hosting and fallback deadline is two seconds.
+- Measure whole-tab memory under sustained use. Manual transactional-write cancellation, transactional timeout rollback, and worker loss after an uncommitted write have passed in the in-app browser (details below). Worker startup crash/no-response recovery also passed. Shared cancellation requires cross-origin-isolated hosting and fallback deadline is two seconds.
 - Extend keyboard verification to additional browsers and grid navigation. Cell select-all and current/selected/all query execution passed in the in-app browser with browser-native key events.
 - Verify reset/reload isolation, download actions, same-origin embedding headers, responsive layout and additional browser engines. Keep website claims synchronized with tested capabilities.
 - Remove stale miniature-demo build assets from the deployment staging directory when publishing the replacement. No desktop release or main push is needed for each iteration.
@@ -112,3 +112,28 @@ verifies database disposal independently from persistent browser-local queries
 in the in-app browser. Evidence: `wasm-reload-isolation.png` in the session
 visualization directory. The public replacement remains undeployed; additional
 engine, storage-failure and transactional-worker-failure checks remain open.
+
+
+### Worker loss after an uncommitted write (2026-11-01)
+
+Verified in the actual landing-page iframe with a preview-only fault inserted
+immediately after `database_command(data)` and before `postMessage`. The fault
+threw when the command bytes contained `FAULT_WRITE_20261101`. No fault code was
+added to repository or production assets; the preview worker was restored from
+`tools/browser/web/database-worker.js` before recovery verification.
+
+1. Executed `BEGIN; UPDATE customers SET name='Transaction pending' WHERE id=1;`.
+   The UI showed TRANSACTION OPEN and both statements completed.
+2. Executed `UPDATE customers SET name='FAULT_WRITE_20261101' WHERE id=1;`.
+   The worker executed the command, then failed before acknowledging it. The UI
+   showed CONNECTION LOST and explicitly said the failed database was unrecoverable.
+3. Tried `SELECT 42;`. The UI rejected it as disconnected and kept Start fresh demo
+   available; it did not silently reconnect or replay the write.
+4. Restored the clean worker script and clicked Start fresh demo. The transaction
+   warning cleared and the sample database returned. Executing
+   `SELECT name FROM customers WHERE id=1;` returned `Avery Chen`.
+
+This proves disposal and recovery of the in-memory worker session, not rollback
+or recovery of its lost contents. Screenshot evidence:
+`wasm-transaction-worker-failure.png` and `wasm-transaction-worker-recovery.png`
+in the session visualization directory. The public replacement is still pending.
