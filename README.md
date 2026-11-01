@@ -14,7 +14,7 @@ It’s written in Rust. Of course it is. We also use mise, and mise is written i
 
 <sub>GitHub’s breakdown covers the app; packaging and benchmark scripts are excluded.</sub>
 
-**Current release: v0.2.0.** Early software, with rough edges and unfinished features. This isn’t a claim of complete TablePlus parity.
+**Current release: v0.3.0.** Early software, with rough edges and unfinished features. This isn’t a claim of complete TablePlus parity.
 
 [Download for macOS (Apple Silicon)](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-macos-arm64.dmg) · [Windows (x64)](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-windows-x86_64.zip) · [Linux (x64)](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-linux-x86_64.tar.gz)
 
@@ -43,7 +43,7 @@ You already have a browser. No need to ship another one to display some rows.
 
 ## Database support
 
-PostgreSQL, SQLite, MySQL, and MariaDB are available. MySQL 8.4 and MariaDB 11.4 have been tested for browsing, SQL, TLS/SSH connections, import/export, and reviewed row edits. Reviewed MySQL/MariaDB writes require a primary key, InnoDB, and supported effective privileges; visual schema administration and a full MySQL language server remain unfinished. See [capabilities and limits](docs/MYSQL-MARIADB-RELEASE.md). Standalone Redis is available in development for the next release, with a native key browser, command editor, TLS/ACL authentication, string edits, and TTL controls. See [Redis capabilities and limits](docs/REDIS.md).
+PostgreSQL, SQLite, MySQL, and MariaDB are available. MySQL 8.4 and MariaDB 11.4 have been tested for browsing, SQL, TLS/SSH connections, import/export, and reviewed row edits. Reviewed MySQL/MariaDB writes require a primary key, InnoDB, and supported effective privileges; visual schema administration and a full MySQL language server remain unfinished. See [capabilities and limits](docs/MYSQL-MARIADB-RELEASE.md). Standalone Redis is included in v0.3.0, with a native key browser, command editor, TLS/ACL authentication, string edits, and TTL controls. See [Redis capabilities and limits](docs/REDIS.md).
 
 ### Why start with PostgreSQL and SQLite?
 

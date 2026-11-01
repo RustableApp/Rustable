@@ -1,7 +1,7 @@
 # Redis support
 
-Redis is available in the development build, for the next release. The published
-v0.2.0 download does not include it.
+Redis is included in v0.3.0 for standalone servers. Earlier releases do not
+include Redis support.
 
 ## Connection and browsing
 
