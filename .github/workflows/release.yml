@@ -42,6 +42,10 @@ jobs:
           tag = os.environ['RELEASE_TAG']
           version = tomllib.load(open('Cargo.toml','rb'))['package']['version']
           assert re.fullmatch(r'v\d+\.\d+\.\d+', tag) and tag == 'v'+version, 'Tag must match Cargo version'
+          for lock in ['Cargo.lock', 'tools/browser/Cargo.lock']:
+              packages = tomllib.load(open(lock, 'rb'))['package']
+              app = next(package for package in packages if package['name'] == 'rustable')
+              assert app['version'] == version, f'{lock}: stale Rustable version'
           PY
       - name: Linux development libraries
         if: runner.os == 'Linux'

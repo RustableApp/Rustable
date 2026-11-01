@@ -1,6 +1,6 @@
 # Redis support
 
-Redis is included in v0.3.0 for standalone servers. Earlier releases do not
+Redis is included in v0.3.1 for standalone servers. Earlier releases do not
 include Redis support.
 
 ## Connection and browsing

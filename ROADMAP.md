@@ -1,12 +1,12 @@
 # Rustable roadmap
 
-Updated 2026-11-01 for v0.3.0. This distinguishes implemented functionality from
+Updated 2026-11-01 for v0.3.1. This distinguishes implemented functionality from
 future work; engine-specific limitations are in [the capability audit](docs/DRIVER_CAPABILITIES.md),
 [MySQL/MariaDB support](docs/MYSQL-MARIADB-RELEASE.md), and [Redis support](docs/REDIS.md).
 
 ## Implemented baseline
 
-- SQLite, PostgreSQL, MySQL and MariaDB connections; standalone Redis in v0.3.0.
+- SQLite, PostgreSQL, MySQL and MariaDB connections; standalone Redis in v0.3.1.
 - SQL browsing, compound filtering, sorting, query tabs, saved-query groups,
   history, command palette, formatting and basic schema-aware completion.
 - Reviewed SQL row edits and CSV workflows, subject to each driver's restrictions.

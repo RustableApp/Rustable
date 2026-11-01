@@ -38,6 +38,9 @@ For each release:
 
 1. Batch work on the development branch, run local regression/Clippy and relevant
    driver fixtures, update the Cargo version/lockfiles and release notes.
+   Check both the root and separate browser package lockfiles before tagging:
+   `mise exec -- cargo check --locked --target wasm32-unknown-unknown --manifest-path tools/browser/Cargo.toml`.
+   A root-only WASM check does not validate the browser package lockfile.
 2. Promote the checked commit to main and push one matching version tag. Ordinary
    development does not push main or trigger repeated package builds.
 3. Verify all draft packages, signed/notarized macOS DMG, checksums and updater

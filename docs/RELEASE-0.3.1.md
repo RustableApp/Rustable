@@ -1,4 +1,4 @@
-# Rustable v0.3.0
+# Rustable v0.3.1
 
 ## Redis joins the workspace
 
