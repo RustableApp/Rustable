@@ -23,3 +23,7 @@ User direction, November 1, 2026: continue overnight without routine input, comp
 `src/db.rs` already owns a worker-side Driver trait, but its required execute/browse/plan/apply methods assume relational SQL. PostgreSQL configuration and profile/session plumbing are engine-specific. MySQL needs dialect and value conversion audits (including unsigned integers and decimals); Redis needs a non-relational capability model and dedicated UI. Do not add selectable engine names before their connection and browsing workflows work.
 
 Use only disposable fixtures for write/cancellation/failure experiments; do not mutate the user's live databases or close their TablePlus workspaces for reference access. Continue independently when a reference window or platform is unavailable, recording the unverified gate rather than claiming parity.
+
+### MySQL lexical groundwork (unreleased)
+
+The shared SQL dialect layer now recognizes MySQL/MariaDB, with tested quoted identifiers, backslash/ANSI SQL modes, executable comments and DELIMITER script ranges. Seventeen SQL/range tests and strict all-target Clippy pass. This does not expose a MySQL connection yet. Driver integration must propagate server SQL mode, retain custom-delimiter context when executing a current statement, and cover stored routines against a live disposable server before enabling the engine.

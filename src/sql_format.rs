@@ -2,7 +2,7 @@
 use crate::sql::Dialect;
 use eframe::egui;
 use sqlparser::{
-    dialect::{PostgreSqlDialect, SQLiteDialect},
+    dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect},
     tokenizer::{Token, Tokenizer, Whitespace},
 };
 use std::{ops::Range, sync::mpsc};
@@ -75,6 +75,7 @@ fn signature(sql: &str, dialect: Dialect) -> Result<Vec<(Token, bool)>, String> 
     let dialect: &dyn sqlparser::dialect::Dialect = match dialect {
         Dialect::Postgres => &PostgreSqlDialect {},
         Dialect::Sqlite => &SQLiteDialect {},
+        Dialect::Mysql(_) => &MySqlDialect {},
     };
     let tokens = Tokenizer::new(dialect, sql)
         .with_unescape(false)
@@ -106,6 +107,7 @@ fn protected_format(input: &str, dialect: Dialect) -> Result<String, String> {
     let lexer: &dyn sqlparser::dialect::Dialect = match dialect {
         Dialect::Postgres => &PostgreSqlDialect {},
         Dialect::Sqlite => &SQLiteDialect {},
+        Dialect::Mysql(_) => &MySqlDialect {},
     };
     let tokens = Tokenizer::new(lexer, input)
         .with_unescape(false)
@@ -250,6 +252,10 @@ fn format_document(
     selection: Range<usize>,
     dialect: Dialect,
 ) -> Result<Formatted, String> {
+    if let Dialect::Mysql(mode) = dialect
+        && (mode.no_backslash_escapes || mode.ansi_quotes) {
+        return Err("Beautify is not yet available for this MySQL SQL mode.".into());
+    }
     if original.len() > INPUT_LIMIT {
         return Err("Document exceeds Beautify limit.".into());
     }

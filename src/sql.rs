@@ -1,16 +1,20 @@
 //! Dialect-aware statement boundaries shared by editor and execution.
 use std::{ffi::CString, ops::Range};
+pub mod mysql;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Dialect {
     #[default]
     Sqlite,
     Postgres,
+    Mysql(mysql::Mode),
 }
 impl Dialect {
     pub fn for_engine(engine: &str) -> Self {
         if engine.eq_ignore_ascii_case("postgresql") {
             Self::Postgres
+        } else if engine.eq_ignore_ascii_case("mysql") || engine.eq_ignore_ascii_case("mariadb") {
+            Self::Mysql(mysql::Mode::default())
         } else {
             Self::Sqlite
         }
@@ -202,6 +206,7 @@ pub fn execution_range_for_dialect(
     let contains_code = |text: &str| match dialect {
         Dialect::Sqlite => has_code(text),
         Dialect::Postgres => pg_has_code(text),
+        Dialect::Mysql(mode) => mysql::ranges(text, mode, false).is_ok_and(|ranges| !ranges.is_empty()),
     };
     if all {
         return contains_code(sql).then_some(0..sql.len());
@@ -214,6 +219,7 @@ pub fn execution_range_for_dialect(
     let ranges = match dialect {
         Dialect::Sqlite => statements(sql),
         Dialect::Postgres => postgres_ranges(sql, false).unwrap_or_default(),
+        Dialect::Mysql(mode) => mysql::editor_ranges(sql, mode),
     };
     ranges
         .iter()
@@ -227,6 +233,19 @@ pub fn execution_range_for_dialect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mysql_editor_and_execution_share_boundaries_including_after_delimiter() {
+        let dialect = Dialect::for_engine("MariaDB");
+        let sql = "SELECT '日本;'; SELECT `a;b`;";
+        let caret = "SELECT '日本;';".chars().count();
+        let range = execution_range_for_dialect(sql, caret..caret, false, dialect).unwrap();
+        assert_eq!(&sql[range], "SELECT '日本;';");
+        let sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;\nSELECT 3;";
+        let caret = sql.find("SELECT 2").unwrap();
+        let range = execution_range_for_dialect(sql, caret..caret, false, dialect).unwrap();
+        assert_eq!(&sql[range], "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$");
+    }
+
     #[test]
     fn postgres_quotes_comments_and_function_bodies_are_single_statements() {
         let sql = "/* outer /* ; */ still comment */ DO $body$ BEGIN PERFORM ';'; END $body$; SELECT E'it\\'s;escaped'; SELECT $日本$値;値$日本$;";

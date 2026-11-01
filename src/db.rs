@@ -378,6 +378,10 @@ impl Worker {
 fn query_needs_catalog_refresh(sql: &str, dialect: crate::sql::Dialect) -> bool {
     let ranges = match dialect {
         crate::sql::Dialect::Sqlite => crate::sql::statements(sql),
+        crate::sql::Dialect::Mysql(mode) => match crate::sql::mysql::ranges(sql, mode, true) {
+            Ok(ranges) => ranges,
+            Err(_) => return true,
+        },
         crate::sql::Dialect::Postgres => match crate::sql::postgres_statements(sql) {
             Ok(ranges) => ranges,
             Err(_) => return true,
