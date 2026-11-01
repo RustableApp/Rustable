@@ -3729,7 +3729,7 @@ impl Rustable {
                 let tab = &mut self.tabs[self.tab];
                 if ui.add_enabled(!tab.formatter.busy() && !tab.sql.trim().is_empty(),
                     egui::Button::new(if tab.formatter.busy() { "Formatting…" } else { "Beautify" })
-                        .shortcut_text(if cfg!(target_os = "macos") { "⌘I" } else { "Ctrl+I" }))
+                        .shortcut_text(if ui.ctx().os() == egui::os::OperatingSystem::Mac { "⌘I" } else { "Ctrl+I" }))
                     .on_hover_text("Format selection, or the whole SQL document. Undo with Cmd/Ctrl+Z.")
                     .clicked() {
                     tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), crate::sql::Dialect::for_engine(&self.engine));
@@ -3743,8 +3743,8 @@ impl Rustable {
                 if ui
                     .add_enabled(
                         self.pending.is_none(),
-                        egui::Button::new("Run all").shortcut_text(if cfg!(target_os = "macos") {
-                            "⇧⌘↵"
+                        egui::Button::new("Run all").shortcut_text(if ui.ctx().os() == egui::os::OperatingSystem::Mac {
+                            if cfg!(target_arch = "wasm32") { "Shift+⌘Enter" } else { "⇧⌘↵" }
                         } else {
                             "Ctrl+Shift+Enter"
                         }),
@@ -3767,8 +3767,8 @@ impl Rustable {
                         )
                         .fill(BLUE)
                         .shortcut_text(
-                            RichText::new(if cfg!(target_os = "macos") {
-                                "⌘↵"
+                            RichText::new(if ui.ctx().os() == egui::os::OperatingSystem::Mac {
+                                if cfg!(target_arch = "wasm32") { "⌘Enter" } else { "⌘↵" }
                             } else {
                                 "Ctrl+Enter"
                             })
