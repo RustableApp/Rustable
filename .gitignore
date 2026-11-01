@@ -1,0 +1,17 @@
+/target
+.DS_Store
+*.db
+*.db-wal
+*.db-shm
+**/target/
+**/node_modules/
+**/.wrangler/
+.secret.env
+.env
+.env.*
+*.tfstate
+*.tfstate.*
+*.tfplan
+/GOAL.md
+/PROGRESS.md
+/docs/screenshots/

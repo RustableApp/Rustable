@@ -1,0 +1,21 @@
+[tools]
+rust = "stable"
+
+[tasks.dev]
+run = "cargo run"
+
+[tasks.check]
+run = "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test"
+
+[tasks.build]
+run = "cargo build --release"
+
+[tasks.build-lsps]
+run = "cargo run --locked --manifest-path tools/package/Cargo.toml -- build-lsps"
+
+[tasks.licenses]
+run = "cargo run --locked --manifest-path tools/package/Cargo.toml -- licenses"
+
+[tasks.bundle]
+depends = ["build"]
+run = "cargo run --locked --manifest-path tools/package/Cargo.toml -- bundle"

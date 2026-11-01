@@ -1,0 +1,48 @@
+[package]
+name = "rustable"
+version = "0.1.0"
+edition = "2024"
+description = "A responsive native database workspace built with Rust and egui"
+license = "MIT"
+
+[features]
+qa = ["objc2-app-kit/NSEvent"]
+sparkle-updater = ["dep:sparkle-updater"]
+
+[dependencies]
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "persistence"] }
+egui_extras = "0.33"
+rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rfd = "0.15"
+postgres = "0.19"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+regex = "1"
+tempfile = "3"
+same-file = "1"
+csv = "1"
+keyring = { version = "4.2", default-features = false, features = ["v1"] }
+sqlformat = "0.5"
+sqlparser = { version = "0.63.0", default-features = false, features = ["std"] }
+tokio = { version = "1.54.1", features = ["rt", "time"] }
+tokio-postgres = "0.7.18"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSObject", "NSArray"] }
+sparkle-updater = { version = "=0.1.0", optional = true }
+
+
+# Preserve typed empty-result metadata without an extra prepare round trip.
+# See vendor/README.md for the minimal upstream patches.
+[patch.crates-io]
+postgres = { path = "vendor/postgres" }
+tokio-postgres = { path = "vendor/tokio-postgres" }
