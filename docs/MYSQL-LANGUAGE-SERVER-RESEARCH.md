@@ -235,3 +235,38 @@ sources, recursive anchors and an unnamed expression between two named columns.
 SQLite/MySQL explicit alias lists retain their existing whole-list behavior.
 All 26 completion tests passed (one manual timing test ignored). Before this change,
 the full library suite passed 432 tests with 90 fixture/manual tests ignored.
+
+### Candidate completion acceptance probe (2026-11-01)
+
+Ran the repository-owned observation harness
+`tools/language-evaluation/mysql_candidate.rs` against the unchanged lsp_sqls
+revision `5a3c53065701cf74e334d8b70ba548f6657ad4e0` (only the probe was added to its
+checkout). Injected a fictional shop.customers catalog with id, name and 日本語;
+no database connection or user SQL execution occurred.
+
+| Input context | Observed completion behavior |
+| --- | --- |
+| `SELECT c. FROM customers c` | Correct catalog columns |
+| Backtick-quoted alias | Correct catalog columns |
+| Derived `SELECT name AS label` projected as `d.` | No suggestions; label missing |
+| CTE `SELECT name AS label` projected as `c.` | No suggestions; label missing |
+| Unicode column prefix with UTF-16 caret | 日本語 present, alongside unfiltered columns |
+| Inside a string | Suppressed |
+| Inside a block comment | Incorrectly suggests columns and SQL keywords |
+| Double-quoted alias | Columns present, without an ANSI_QUOTES mode input |
+
+The parser returned no diagnostics for ordinary SELECT, MariaDB INSERT RETURNING,
+a backslash-sensitive literal, or a double-quoted expression. Accepting those
+strings without errors is not evidence of mode-correct semantics. The inspected
+MysqlDialect completion/parse API takes SQL and Schema, with no SQL-mode input.
+The other candidate, duck-sqllsp, selects a fixed sqlparser MySqlDialect in
+`dsl-parse/src/backend/sqlparser/dialect_pick.rs`, likewise without session mode.
+
+Decision: do not replace Rustable's mode-aware cached-catalog completion with
+lsp_sqls at this revision. It would lose existing CTE/derived completion and
+comment suppression. No rewrite from another language is justified by this
+probe; Rust candidates exist but need integration/adaptation work. Duck's full
+completion acceptance and MariaDB-specific semantic behavior remain unverified.
+The harness completed successfully; it intentionally reports capability gaps
+rather than asserting a passing acceptance suite. Candidate compilation also
+emitted a bundled C grammar signedness warning. No dependency was added.
