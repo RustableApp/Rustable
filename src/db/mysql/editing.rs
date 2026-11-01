@@ -196,6 +196,15 @@ pub(super) fn apply(driver: &mut MysqlDriver, plan: &ChangePlan) -> Result<(), S
     if plan.rebuild || plan.schemas.is_empty() || plan.preconditions.iter().any(|c| c.before_statement >= plan.statements.len()) {
         return Err("Invalid data review. Review the changes again.".into());
     }
+    let checks_sql = if driver.engine == "MariaDB" {
+        "SELECT @@SESSION.foreign_key_checks, @@SESSION.unique_checks, @@SESSION.check_constraint_checks"
+    } else {
+        "SELECT @@SESSION.foreign_key_checks, @@SESSION.unique_checks, 1"
+    };
+    let checks: Option<(u8, u8, u8)> = driver.with_connection(|conn| conn.query_first(checks_sql))?;
+    if checks != Some((1, 1, 1)) {
+        return Err("Reviewed saves require foreign_key_checks, unique_checks and CHECK constraint enforcement to be enabled. Restore the session settings and review again.".into());
+    }
     let mut tables = plan.schemas.iter().map(|(key, snapshot)| {
         snapshot_table(key).map(|(schema, table)| (schema, table, snapshot))
     }).collect::<Result<Vec<_>,_>>()?;

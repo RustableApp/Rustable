@@ -194,3 +194,17 @@ than just pre-cancellation. The original INNODB_TRX counter observation did not
 reliably expose the first write, so the regression uses direct row evidence instead.
 Strict all-target Clippy passed. Lost rollback/COMMIT replies and the other editing
 gates above remain outstanding; the native UI save capability remains disabled.
+
+### Session constraint enforcement guard (2026-11-01)
+
+Before starting a reviewed save, MySQL/MariaDB now read session foreign_key_checks
+and unique_checks; MariaDB additionally reads check_constraint_checks. A disabled
+check rejects the save without altering the user's settings. Ordinary editor SQL
+keeps its existing semantics and does not acquire this extra metadata round trip.
+The live regression disables each supported setting separately, verifies the row
+is unchanged and the setting remains disabled, restores it, and then saves the same
+review successfully. All 26 driver tests passed on each engine; strict all-target
+Clippy passed. This closes the session enforcement guard, not the other apply gates.
+
+References: [MySQL session variables](https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html)
+and [MariaDB CHECK enforcement](https://mariadb.com/docs/server/reference/sql-statements/data-definition/constraint).

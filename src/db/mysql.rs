@@ -790,6 +790,37 @@ mod tests {
 
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_rejects_disabled_session_constraints_without_changing_settings() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS apply_constraints_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE apply_constraints_probe(id INT PRIMARY KEY, n INT CHECK(n>0)) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO apply_constraints_probe VALUES(1,1)").unwrap();
+        let original = driver.browse(&Browse { table:"apply_constraints_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
+        let plan = driver.plan(&[Change::Cell { table:"apply_constraints_probe".into(), column:"n".into(), original, value:Value::Integer(2) }]).unwrap();
+        let mut settings = vec!["foreign_key_checks", "unique_checks"];
+        if port == 43317 { settings.push("check_constraint_checks"); }
+        for setting in settings {
+            driver.conn().unwrap().query_drop(format!("SET SESSION {setting}=0")).unwrap();
+            let error = driver.apply(&plan).unwrap_err();
+            assert!(error.contains("constraint enforcement"), "{error}");
+            assert_eq!(driver.transaction_state(), TransactionState::Idle);
+            let enabled: Option<u8> = driver.conn().unwrap().query_first(format!("SELECT @@SESSION.{setting}")).unwrap();
+            assert_eq!(enabled, Some(0), "do not silently override the user's SQL settings");
+            let n: Option<i64> = driver.conn().unwrap().query_first("SELECT n FROM apply_constraints_probe WHERE id=1").unwrap();
+            assert_eq!(n, Some(1));
+            driver.conn().unwrap().query_drop(format!("SET SESSION {setting}=1")).unwrap();
+        }
+        driver.apply(&plan).unwrap();
+        let n: Option<i64> = driver.conn().unwrap().query_first("SELECT n FROM apply_constraints_probe WHERE id=1").unwrap();
+        assert_eq!(n, Some(2));
+        driver.conn().unwrap().query_drop("DROP TABLE apply_constraints_probe").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_review_cancel_after_first_write_rolls_back_batch_and_reuses_connection() {
         let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
         assert!([43316, 43317].contains(&port));
