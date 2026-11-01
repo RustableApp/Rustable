@@ -48,7 +48,6 @@ mod tests {
 
 /// MySQL/MariaDB credentials exist only for the live session, never persisted
 /// or included in Debug output. Both engines use this wire configuration.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub struct MysqlConfig {
     pub host: String,
@@ -62,7 +61,6 @@ pub struct MysqlConfig {
     pub read_timeout: std::time::Duration,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Default for MysqlConfig {
     fn default() -> Self {
         Self {
@@ -79,7 +77,6 @@ impl Default for MysqlConfig {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Display for MysqlConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}@{}:{}/{}", self.user, self.host, self.port, self.database)

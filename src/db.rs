@@ -278,6 +278,7 @@ pub enum Command {
     #[cfg(any(test, target_arch = "wasm32"))]
     OpenBrowserDatabase { name: String, bytes: Vec<u8> },
     OpenPostgres(#[serde(with = "unavailable_transport")] crate::connection::PostgresConfig),
+    OpenMysql(#[serde(with = "unavailable_transport")] crate::connection::MysqlConfig),
     Query {
         sql: String,
         safe: bool,
@@ -302,7 +303,7 @@ pub enum Command {
 impl Command {
     pub fn replaces_connection(&self) -> bool {
         match self {
-            Self::Open(_) | Self::OpenPostgres(_) => true,
+            Self::Open(_) | Self::OpenPostgres(_) | Self::OpenMysql(_) => true,
             #[cfg(any(test, target_arch = "wasm32"))]
             Self::OpenBrowserDatabase { .. } => true,
             _ => false,
@@ -538,7 +539,7 @@ fn handle(
         });
     }
     #[cfg(target_arch = "wasm32")]
-    if matches!(&command, Command::OpenPostgres(_)) {
+    if matches!(&command, Command::OpenPostgres(_) | Command::OpenMysql(_)) {
         return Err("Direct server connections require the desktop app.".into());
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -559,6 +560,21 @@ fn handle(
             objects,
             schemas,
         });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Command::OpenMysql(config) = command {
+        if cancel.load(Ordering::Acquire) { return Err("Connection cancelled".into()); }
+        let mut driver = Box::<dyn Driver>::try_from(&config)?;
+        driver.set_cancellation(cancel.clone());
+        let objects = driver.objects()?;
+        let schemas = driver.schema_catalog();
+        let engine = driver.engine_name().to_owned();
+        let dialect = driver.sql_dialect();
+        let database = schemas.selected.clone();
+        let label = config.to_string();
+        if cancel.load(Ordering::Acquire) { return Err("Connection cancelled".into()); }
+        *connection = Some(driver);
+        return Ok(Payload::Connected { dialect, engine, label, database, objects, schemas });
     }
     if let Command::PreviewCsv {
         path,
@@ -678,6 +694,7 @@ fn handle(
         | Command::SaveScript { .. }
         | Command::Open(_)
         | Command::OpenPostgres(_)
+        | Command::OpenMysql(_)
         | Command::Export { .. }
         | Command::PreviewCsv { .. } => unreachable!(),
     }

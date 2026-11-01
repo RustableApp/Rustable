@@ -247,3 +247,22 @@ All 12 driver tests pass on MySQL and MariaDB after this change, with strict
 Clippy passing. The new case uses a 300 ms read timeout and a two-second SLEEP,
 requests cancellation after 50 ms, and checks disconnection and both diagnostics.
 Actual KILL privilege denial and initial connection cancellation still need tests.
+
+The application worker now accepts OpenMysql for both engines. Candidate
+connection, catalog and SQL dialect are prepared before replacing the old driver.
+An existing open transaction blocks replacement; failed or pre-cancelled opens
+preserve the current session. Cancellation is attached before catalog loading and
+checked again before replacement. Network handshake cancellation remains bounded
+by connect_timeout rather than interruptible mid-handshake.
+
+A live worker-handler regression starts with SQLite, tests failed/cancelled opens
+and transaction protection, then connects to the fixture and executes SELECT 42
+through Command/Payload. Connected includes the detected MySQL/MariaDB engine,
+selected database, active dialect and password-free label. MysqlConfig is still
+not serializable: the browser transport explicitly rejects OpenMysql credentials,
+and WASM rejects direct server opening. Native/browser enum shapes remain aligned.
+
+Validation: 13 driver tests pass on each engine; native suite 399 passed, 58
+ignored; strict Clippy and release WASM linking pass. Connection-profile UI,
+credential storage, SSH and safe table editing are not yet wired for these engines;
+this is worker integration, not official support or a released feature.

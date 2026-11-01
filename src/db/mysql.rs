@@ -400,6 +400,7 @@ impl Driver for MysqlDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bincode::Options;
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_driver_catalog_query_and_browse() {
@@ -647,6 +648,38 @@ mod tests {
             assert!(driver.connection.is_none());
             assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
         }
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn worker_open_is_atomic_and_protects_existing_transactions() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false, ..Default::default() };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut session = None;
+        handle(&mut session, Command::Open(None), &cancel).unwrap();
+        let mut bad = config.clone(); bad.password = "invalid-fixture-password".into();
+        assert!(handle(&mut session, Command::OpenMysql(bad), &cancel).is_err());
+        assert_eq!(session.as_ref().unwrap().engine_name(), "SQLite");
+        cancel.store(true, Ordering::Release);
+        assert!(handle(&mut session, Command::OpenMysql(config.clone()), &cancel).is_err());
+        assert_eq!(session.as_ref().unwrap().engine_name(), "SQLite");
+        cancel.store(false, Ordering::Release);
+        handle(&mut session, Command::Query { sql: "BEGIN".into(), safe: false }, &cancel).unwrap();
+        assert!(handle(&mut session, Command::OpenMysql(config.clone()), &cancel).is_err());
+        handle(&mut session, Command::Query { sql: "ROLLBACK".into(), safe: false }, &cancel).unwrap();
+        let reply = handle(&mut session, Command::OpenMysql(config.clone()), &cancel).unwrap();
+        let Payload::Connected { engine, database, dialect, label, .. } = reply else { panic!("connected payload expected"); };
+        assert_eq!(engine, if port == 43317 { "MariaDB" } else { "MySQL" });
+        assert_eq!(database.as_deref(), Some("rustable_test"));
+        assert!(matches!(dialect, crate::sql::Dialect::Mysql(_)));
+        assert!(!label.contains(&config.password));
+        let reply = handle(&mut session, Command::Query { sql: "SELECT 42".into(), safe: false }, &cancel).unwrap();
+        let Payload::Query { report, .. } = reply else { panic!("query payload expected"); };
+        assert_eq!(report.grids[0].rows, [vec![Value::Integer(42)]]);
+        assert!(super::super::transport::codec().serialize(&Command::OpenMysql(config)).is_err(), "credentials must never cross browser transport");
     }
 
 }
