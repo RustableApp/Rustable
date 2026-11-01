@@ -548,11 +548,15 @@ impl Conn {
         let stream = if let Some(socket) = opts.get_socket() {
             Stream::connect_socket(socket, read_timeout, write_timeout)?
         } else {
-            let port = opts.get_tcp_port();
-            let ip_or_hostname = match opts.get_host() {
-                url::Host::Domain(domain) => domain,
-                url::Host::Ipv4(ip) => ip.to_string(),
-                url::Host::Ipv6(ip) => ip.to_string(),
+            let (ip_or_hostname, port) = if let Some(destination) = opts.get_tcp_destination() {
+                (destination.ip().to_string(), destination.port())
+            } else {
+                let host = match opts.get_host() {
+                    url::Host::Domain(domain) => domain,
+                    url::Host::Ipv4(ip) => ip.to_string(),
+                    url::Host::Ipv6(ip) => ip.to_string(),
+                };
+                (host, opts.get_tcp_port())
             };
             Stream::connect_tcp(
                 &ip_or_hostname,

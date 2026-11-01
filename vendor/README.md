@@ -131,3 +131,19 @@ idle/read, explicit transaction, failed statement -> unknown -> ping -> active,
 rollback, implicit DDL commit, and server-killed connection -> unknown. Run via
 tools/database-fixtures/README.md. Preserve these semantics when updating the
 vendored crate, or remove the patch when upstream exposes an equivalent API.
+
+### MySQL TCP destination separate from TLS peer
+
+The additive `OptsBuilder::tcp_destination(Option<SocketAddr>)` overrides only the
+TCP address/port, retaining `ip_or_hostname` for TLS peer verification. This is
+needed for SSH forwarding: connecting to loopback must not verify the database
+certificate against loopback or disable verification. Setting an override disables
+implicit local socket probing; an explicitly configured socket still wins.
+Default options and direct connections are unchanged. The patch does not expose
+URL parsing for the override or alter TLS verification settings.
+
+Rustable's opted-in `connection::mysql_tests::live_tls` tests cover direct and
+transport-override connections against both fixture engines: a deliberately wrong
+configured TCP port proves the override is used, a localhost-only certificate
+proves the peer name is retained despite the IP destination, wrong-peer.invalid
+must fail hostname verification (not DNS), and an untrusted CA must still fail.

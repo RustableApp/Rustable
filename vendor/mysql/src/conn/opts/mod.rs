@@ -154,6 +154,8 @@ impl SslOpts {
 pub(crate) struct InnerOpts {
     /// Address of mysql server (defaults to `127.0.0.1`). Host names should also work.
     ip_or_hostname: url::Host,
+    /// Optional TCP transport endpoint; TLS still verifies ip_or_hostname.
+    tcp_destination: Option<std::net::SocketAddr>,
     /// TCP port of mysql server (defaults to `3306`).
     tcp_port: u16,
     /// Path to unix socket on unix or pipe name on windows (defaults to `None`).
@@ -306,6 +308,7 @@ impl Default for InnerOpts {
     fn default() -> Self {
         InnerOpts {
             ip_or_hostname: url::Host::Domain(String::from("localhost")),
+            tcp_destination: None,
             tcp_port: 3306,
             socket: None,
             max_allowed_packet: None,
@@ -377,6 +380,11 @@ impl Opts {
     /// Address of mysql server (defaults to `127.0.0.1`). Host names should also work.
     pub fn get_ip_or_hostname(&self) -> Cow<'_, str> {
         self.0.ip_or_hostname.to_string().into()
+    }
+
+    /// Explicit TCP endpoint, without changing the TLS peer name.
+    pub fn get_tcp_destination(&self) -> Option<std::net::SocketAddr> {
+        self.0.tcp_destination
     }
     /// TCP port of mysql server (defaults to `3306`).
     pub fn get_tcp_port(&self) -> u16 {
@@ -1018,6 +1026,17 @@ impl OptsBuilder {
             .unwrap_or_else(|| "127.0.0.1".into());
         self.opts.0.ip_or_hostname =
             url::Host::parse(&new).unwrap_or_else(|_| url::Host::Domain(new.to_owned()));
+        self
+    }
+
+    /// Override only the TCP destination (for example, an SSH tunnel).
+    /// TLS continues to verify `ip_or_hostname`. Disables implicit socket probing.
+    /// An explicitly configured socket still takes precedence over TCP.
+    pub fn tcp_destination(mut self, destination: Option<std::net::SocketAddr>) -> Self {
+        self.opts.0.tcp_destination = destination;
+        if destination.is_some() {
+            self.opts.0.prefer_socket = false;
+        }
         self
     }
 

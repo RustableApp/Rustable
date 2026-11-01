@@ -155,6 +155,29 @@ mod mysql_tests {
     }
 
     #[test]
+    #[ignore = "requires disposable TLS MySQL/MariaDB fixture and RUSTABLE_MYSQL_TEST_CA"]
+    fn live_tls_transport_destination_keeps_original_peer_verification() {
+        use mysql::prelude::Queryable;
+        let port = std::env::var("RUSTABLE_MYSQL_TLS_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43318,43319].contains(&port));
+        let config = MysqlConfig { host:"localhost".into(), port:1, user:"rustable".into(),
+            password:"rustable-test-only".into(), database:"rustable_test".into(),
+            root_certificate:Some(std::env::var_os("RUSTABLE_MYSQL_TEST_CA").unwrap().into()), ..Default::default() };
+        let destination = std::net::SocketAddr::from(([127,0,0,1],port));
+        let opts = mysql::OptsBuilder::from(&config).tcp_destination(Some(destination));
+        let mut conn = mysql::Conn::new(opts).unwrap();
+        let (_, cipher): (String,String) = conn.query_first("SHOW SESSION STATUS LIKE 'Ssl_cipher'").unwrap().unwrap();
+        assert!(!cipher.is_empty());
+        assert_eq!(conn.query_first::<String,_>("SELECT '東京 🦀'").unwrap().as_deref(),Some("東京 🦀"));
+        let mut wrong_name = config.clone(); wrong_name.host = "wrong-peer.invalid".into();
+        let error = mysql::Conn::new(mysql::OptsBuilder::from(&wrong_name).tcp_destination(Some(destination))).unwrap_err().to_string();
+        assert!(error.to_lowercase().contains("not valid for name"), "must verify original name rather than transport address: {error}");
+        let mut untrusted = config; untrusted.root_certificate = None;
+        let error = mysql::Conn::new(mysql::OptsBuilder::from(&untrusted).tcp_destination(Some(destination))).unwrap_err().to_string();
+        assert!(error.to_lowercase().contains("certificate"), "transport override must not bypass trust: {error}");
+    }
+
+    #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_config_connects_with_utf8_and_rejects_untrusted_tls() {
         use mysql::prelude::Queryable;

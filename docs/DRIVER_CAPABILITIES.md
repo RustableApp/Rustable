@@ -405,3 +405,16 @@ leaves the session idle, and preserves the base value.
 The focused live test passed on each engine; strict all-target Clippy passed.
 This verifies built-in expressions and computed-field behavior, not arbitrary
 MariaDB UDF side effects. The broader expression/trigger and UI gates remain open.
+
+### MySQL SSH transport prerequisite (2026-11-01)
+
+The vendored MySQL client now supports a TCP destination independent of its TLS
+peer name, allowing a future SSH loopback endpoint without weakening certificate
+verification. Direct and overridden transport TLS tests passed on MySQL 8.4 and
+MariaDB 11.4 (two tests each). The override uses a distinct destination port and
+IP while keeping localhost as the certificate identity; wrong peer names and
+untrusted certificates fail. Strict all-target Clippy passed.
+
+This is transport plumbing only: MySQL/MariaDB SSH profile fields, tunnel lifetime,
+connection probes and cancellation routing still need integration and live SSH
+acceptance. The UI continues to describe SSH as unavailable.
