@@ -3062,6 +3062,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "web-time",
 ]

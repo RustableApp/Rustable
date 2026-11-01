@@ -37,6 +37,7 @@ tokio-postgres = "0.7.18"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
 wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Worker", "WorkerOptions", "WorkerType", "MessageEvent", "ErrorEvent"] }
 

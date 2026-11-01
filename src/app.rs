@@ -257,6 +257,10 @@ enum Pending {
     Apply,
 }
 enum FileAction {
+    #[cfg(target_arch = "wasm32")]
+    BrowserScript(String, String),
+    #[cfg(target_arch = "wasm32")]
+    BrowserDownload(String),
     QueryDirectory(PathBuf),
     QueryLibraryError(String),
     ProfilePath(u64, bool, PathBuf),
@@ -1204,6 +1208,25 @@ impl Rustable {
             }
         }
         while let Ok(action) = self.files_rx.try_recv() {
+            // Browser file reads are independent of database requests. Never discard
+            // a completed import merely because a query is still running.
+            #[cfg(target_arch = "wasm32")]
+            let action = match action {
+                FileAction::BrowserScript(name, sql) => {
+                    let activate = self.finish_cell_edit();
+                    let mut tab = QueryTab::new(sql);
+                    tab.source_name = Some(name.clone());
+                    self.tabs.push(tab);
+                    if activate { self.activate_query(self.tabs.len() - 1); }
+                    self.status = format!("Imported SQL: {name}");
+                    continue;
+                }
+                FileAction::BrowserDownload(name) => {
+                    self.status = format!("Download requested: {name}");
+                    continue;
+                }
+                action => action,
+            };
             if self.pending.is_some() {
                 self.error = Some(
                     "A database operation is running. Try the file action again when it finishes."
@@ -1212,6 +1235,8 @@ impl Rustable {
                 continue;
             }
             match action {
+                #[cfg(target_arch = "wasm32")]
+                FileAction::BrowserScript(..) | FileAction::BrowserDownload(..) => unreachable!(),
                 FileAction::QueryLibraryError(error) => self.error = Some(error),
                 FileAction::QueryDirectory(path) => { self.prefs.query_directory = Some(path); self.query_library.invalidate(); self.shared_preferences_dirty = true; }
                 FileAction::ProfilePath(generation, key, path) => {
@@ -3680,28 +3705,10 @@ impl Rustable {
                 rounded_action_buttons(ui);
                 ui.menu_button("File", |ui| {
                     if ui
-                        .add_enabled(self.pending.is_none(), egui::Button::new("Save SQL"))
+                        .add_enabled(self.pending.is_none(), egui::Button::new(if cfg!(target_arch = "wasm32") { "Download SQL" } else { "Save SQL" }))
                         .clicked()
                     {
-                        let tab = &self.tabs[self.tab];
-                        if let Some(path) = tab.source_path.clone() {
-                            self.dispatch(
-                                Command::SaveScript {
-                                    path,
-                                    sql: tab.sql.clone(),
-                                    tab_id: tab.id,
-                                    expected: tab.saved_sql.clone().map(|sql| {
-                                        crate::script_file::SaveSource {
-                                            path: tab.source_path.clone().unwrap(),
-                                            sql,
-                                        }
-                                    }),
-                                },
-                                Pending::Export,
-                            );
-                        } else {
-                            self.script_dialog(ui.ctx(), true);
-                        }
+                        self.save_query_file(ui.ctx(), false);
                         ui.close();
                     }
                     if ui
@@ -3711,7 +3718,7 @@ impl Rustable {
                         self.script_dialog(ui.ctx(), false);
                         ui.close();
                     }
-                    if ui
+                    if !cfg!(target_arch = "wasm32") && ui
                         .add_enabled(self.pending.is_none(), egui::Button::new("Save SQL As…"))
                         .clicked()
                     {
@@ -3727,7 +3734,7 @@ impl Rustable {
                     .clicked() {
                     tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), crate::sql::Dialect::for_engine(&self.engine));
                 }
-                if ui.button("Save").on_hover_text("Save named SQL query · Cmd/Ctrl+S").clicked() {
+                if ui.button(if cfg!(target_arch = "wasm32") { "Download" } else { "Save" }).on_hover_text(if cfg!(target_arch = "wasm32") { "Download a SQL copy; the original file is not overwritten" } else { "Save named SQL query · Cmd/Ctrl+S" }).clicked() {
                     self.save_query_file(ui.ctx(), false);
                 }
                 if self.pending.is_some() && ui.button("Cancel").clicked() {

@@ -38,7 +38,7 @@ pub fn same_source(path: &Path, resolved: &Path, source: &SaveSource) -> bool {
         || destination(&source.path).is_ok_and(|original| original == resolved)
 }
 
-const MAX_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub fn read(path: &Path) -> Result<String, String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
@@ -48,6 +48,11 @@ pub fn read(path: &Path) -> Result<String, String> {
     file.take(MAX_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
+    decode(bytes)
+}
+
+/// Shared validation for disk reads and browser-imported documents.
+pub(crate) fn decode(bytes: Vec<u8>) -> Result<String, String> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err("SQL editor files are limited to 8 MiB".into());
     }

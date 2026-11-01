@@ -164,10 +164,15 @@ impl Rustable {
     }
     pub(super) fn save_query_file(&mut self, ctx: &egui::Context, save_as: bool) {
         if self.pending.is_some() || self.query_library.group_operation.is_some() { return; }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = save_as; self.script_dialog(ctx, true); }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
         let tab = &self.tabs[self.tab];
         if !save_as && let Some(path) = tab.source_path.clone() {
             self.dispatch(Command::SaveScript { path: path.clone(), sql: tab.sql.clone(), tab_id: tab.id, expected: tab.saved_sql.clone().map(|sql| crate::script_file::SaveSource { path, sql }) }, Pending::Export);
         } else { self.script_dialog(ctx, true); }
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn choose_query_directory(&self, ctx: &egui::Context) {

@@ -22,7 +22,8 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 
 ## Required before replacement deployment
 
-- Implement browser file handling and saved-query storage; current explicit capability errors are temporary.
+- SQL import/download adapters now compile in the full WASM build. Imported files use shared UTF-8/BOM/NUL/8 MiB validation and are opened as copies without an owned filesystem path. Download requests do not mark a disk file as saved. Native script-file tests (3) and strict Clippy pass. Actual picker import/download still requires end-to-end verification: the in-app browser picker did not expose an accessible dialog and native Codex UI control is prohibited.
+- Implement saved-query storage, CSV/database import and data export; those capabilities still report temporary explicit errors.
 - Verify cancellation and timeout rollback/recovery, bounds on SQLite memory and SQL input, and worker error recovery. Shared cancellation requires cross-origin-isolated hosting; fallback deadline is two seconds.
 - Fix and verify browser keyboard behavior and shortcut labels, including cell selection, current/selected/all query execution.
 - Verify reset/reload isolation, download actions, same-origin embedding headers, responsive layout and additional browser engines. Keep website claims synchronized with tested capabilities.
