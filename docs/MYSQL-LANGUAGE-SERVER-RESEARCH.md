@@ -176,3 +176,26 @@ recursive CTEs, and incomplete derived-query recovery remain outstanding.
 Validation: 24 completion tests pass (one manual benchmark ignored), including
 seven derived-table scenarios across all three dialects. Strict all-target
 Clippy passes. No native release or website deployment is included in this change.
+
+### CTE output completion (2026-11-01)
+
+WITH bindings now participate in local column suggestions across the three SQL
+dialects. Chained CTE wildcard projections resolve against preceding definitions;
+a CTE shadows the same-named catalog table. Nested WITH declarations override
+outer declarations only within their query block. Derived-table wildcard
+inference can use visible CTEs, including WITH clauses inside complete derived
+queries. Recursive CTEs use declared output columns or the nonrecursive UNION
+anchor's projected names, even when the recursive term is unfinished at the caret.
+Non-recursive forward references are not inferred.
+
+The environment is bounded to 128 bindings per scope; existing projection depth,
+source-count, output-count and parsed-text limits remain in effect. This extends
+rather than completes SQL semantic analysis: PostgreSQL recursive forward
+references, SEARCH/CYCLE output columns, full quoted-identifier case semantics,
+and recovery from arbitrary incomplete declarations remain outstanding. Current
+inference also omits engine-generated names for unaliased expressions.
+
+Validation: nine CTE visibility/output scenarios across PostgreSQL, SQLite and
+MySQL dialects; all 25 completion tests pass (one manual benchmark ignored).
+Strict all-target Clippy passes. Native UI acceptance of these new suggestions
+and browser rebuild/deployment remain pending; no release was triggered.

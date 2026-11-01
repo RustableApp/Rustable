@@ -501,8 +501,15 @@ fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]
     }
     let mut containing: Vec<_> = blocks.iter().copied().filter(|(start, end)| *start <= caret && caret <= *end).collect();
     containing.sort_by_key(|(start, end)| end - start);
+    let mut environments = std::collections::HashMap::new();
+    let mut bindings = projection::Bindings::new();
+    for &(start, end) in containing.iter().rev() {
+        bindings = projection::with_bindings(&tokens[start..end], caret.saturating_sub(start), dialect, objects, &bindings);
+        environments.insert(start, bindings.clone());
+    }
     let mut result: Vec<(String, String)> = Vec::new();
     for (start, end) in containing {
+        let bindings = &environments[&start];
         // Set-operation arms have independent relation namespaces. Split only
         // at this block's top level, leaving nested expressions/subqueries alone.
         let mut arm_start = start;
@@ -528,7 +535,7 @@ fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]
                 // FROM/JOIN (scalar subqueries never become table sources).
                 let name = format!("__rustable_derived_{child_start}");
                 let query = tokens[child_start..child_end].iter().map(|t| t.token.to_string()).collect::<Vec<_>>().join(" ");
-                let mut columns = projection::columns(&query, dialect, objects);
+                let mut columns = projection::columns(&query, dialect, objects, bindings);
                 let mut alias = child_end + 1;
                 if tokens.get(alias).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("AS"))) { alias += 1; }
                 if matches!(tokens.get(alias).map(|t| &t.token), Some(Token::Word(_)))
@@ -545,7 +552,12 @@ fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]
             if blocks.iter().any(|&(cs, ce)| cs > start && ce < end && i == ce) { continue; }
             if let Some(lexeme) = relation_token(token.token.clone()) { lexemes.push(lexeme); }
         }
-        for relation in relations_from_tokens(lexemes) {
+        for mut relation in relations_from_tokens(lexemes) {
+            if let Some(columns) = bindings.get(&relation.0.to_lowercase()) {
+                let key = format!("__rustable_cte_{start}_{}", relation.0);
+                projected.insert(key.clone(), columns.clone());
+                relation.0 = key;
+            }
             if !result.iter().any(|(_, alias)| alias.eq_ignore_ascii_case(&relation.1)) { result.push(relation); }
         }
     }
@@ -941,6 +953,31 @@ mod tests {
                 .collect(),
         }
     }
+    #[test]
+    fn cte_completion_resolves_outputs_shadowing_and_nested_visibility() {
+        let objects = [object("customers", &["customer_id", "private_value"])];
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql(Default::default())] {
+            for (sql, expected, excluded) in [
+                ("WITH customers AS (SELECT 1 AS public_id) SELECT c.| FROM customers c", vec!["public_id"], vec!["private_value", "customer_id"]),
+                ("WITH first_cte AS (SELECT customer_id AS renamed_id FROM customers), second_cte AS (SELECT * FROM first_cte) SELECT s.| FROM second_cte s", vec!["renamed_id"], vec!["customer_id", "private_value"]),
+                ("WITH cte(explicit_name) AS (SELECT 1) SELECT cte.| FROM cte", vec!["explicit_name"], vec![]),
+                ("WITH cte AS (SELECT 1 AS outer_name) SELECT * FROM customers WHERE EXISTS (WITH cte AS (SELECT 2 AS inner_name) SELECT cte.| FROM cte)", vec!["inner_name"], vec!["outer_name"]),
+                ("WITH cte AS (SELECT 1 AS outer_name) SELECT cte.| FROM cte WHERE EXISTS (WITH cte AS (SELECT 2 AS inner_name) SELECT * FROM cte)", vec!["outer_name"], vec!["inner_name"]),
+                ("WITH cte AS (SELECT customer_id AS renamed_id FROM customers) SELECT d.| FROM (SELECT * FROM cte) d", vec!["renamed_id"], vec!["private_value"]),
+                ("WITH RECURSIVE cte(counter) AS (SELECT 1 UNION ALL SELECT cte.| FROM cte) SELECT * FROM cte", vec!["counter"], vec![]),
+                ("WITH RECURSIVE cte AS (SELECT 1 AS counter UNION ALL SELECT cte.| FROM cte) SELECT * FROM cte", vec!["counter"], vec![]),
+                ("WITH earlier AS (SELECT later.| FROM later), later AS (SELECT 1 AS future_name) SELECT * FROM earlier", vec![], vec!["future_name"]),
+            ] {
+                let cursor = sql.find('|').unwrap();
+                let sql = sql.replace('|', "");
+                let mut completion = Completion::default();
+                completion.refresh(&sql, cursor, &objects, &[], true, dialect);
+                for name in expected { assert!(completion.items.iter().any(|item| item == name), "missing {name}: {sql}: {:?}", completion.items); }
+                for name in excluded { assert!(!completion.items.iter().any(|item| item == name), "leaked {name}: {sql}"); }
+            }
+        }
+    }
+
     #[test]
     fn derived_table_projection_completion_respects_scope_and_output_names() {
         let objects = [object("customers", &["customer_id", "customer_name", "private_value"])];
