@@ -16,6 +16,9 @@ impl Rustable {
         self.query_library.document_operation = None;
         match result {
             Ok(document) => {
+                if self.error.as_deref().is_some_and(|error| error.starts_with("Browser query storage:")) {
+                    self.error = None;
+                }
                 if let Some(id) = document.tab_id {
                     if let Some(tab) = self.tabs.iter_mut().chain(self.closed_tabs.iter_mut()).find(|tab| tab.id == id) {
                         tab.saved(document.path.clone(), document.sql);
