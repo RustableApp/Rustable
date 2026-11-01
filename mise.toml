@@ -1,5 +1,6 @@
 [tools]
 rust = "stable"
+python = "3.13.15"
 
 [tasks.dev]
 run = "cargo run"
