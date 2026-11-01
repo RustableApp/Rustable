@@ -15,6 +15,11 @@ mise exec -- python scripts/build-browser.py --output /tmp/rustable-full-preview
 
 Dependencies are locked. The build script uses LLVM's archiver: Apple's system archiver cannot index the SQLite WASM objects. All runtime assets are self-hosted.
 
+The UI asynchronously loads a separate 16,467,736-byte Noto Sans CJK font after
+startup, with a 30-second timeout and pinned size/hash validation. The font is
+not embedded in WASM or loaded by database/background workers. Download failure
+retains the default faces; CJK glyphs require that asset to finish loading.
+
 Serve the preview with Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp to enable shared-memory cancellation. Database operations have a two-second progress deadline, including when shared-memory cancellation is unavailable. Transport decoding is capped at 32 MiB; existing desktop row/result bounds also apply. Closing/reloading the page discards this sample database.
 
 ## Browser adapters

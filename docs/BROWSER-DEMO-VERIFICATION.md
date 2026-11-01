@@ -471,3 +471,20 @@ coverage is therefore an outstanding visual defect, not completed parity.
 Evidence: `wasm-saved-query-selection.png`, `wasm-saved-query-reopened.png`, and
 `wasm-saved-query-renamed.png` in the session visualization directory. Temporary
 server and tab were closed. No website deployment or release.
+
+### CJK rendering fix verified locally
+
+Added the unmodified, OFL-licensed Noto Sans CJK JP regular face as a separate
+self-hosted asset. It loads asynchronously after UI startup, with exact size and
+SHA-256 verification, a bounded receive buffer and a 30-second timeout. Native
+font handling is unchanged; database/background workers do not fetch this asset.
+The packaged font uses Japanese regional forms and does not claim every Unicode
+character or locale-specific typography.
+
+Three native font tests pass (including both text families and atlas rendering),
+as do three browser loader tests covering valid, truncated, corrupted, oversized
+and HTTP-error responses. The release WASM build succeeds with the existing 52
+browser warnings. In the actual browser, `SELECT '日本語かなカナ中文한국어 🦀' AS unicode`
+now renders CJK in both editor and result cells. Screenshot:
+`wasm-cjk-font-fixed.png`. Preview at /tmp/rustable-browser-cjk/demo; temporary
+server/tab closed after verification. This fix has not been deployed.

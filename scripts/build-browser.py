@@ -43,6 +43,13 @@ with tempfile.TemporaryDirectory(prefix='.rustable-demo-', dir=destination.paren
     for name in ['NotoEmoji-OFL.txt', 'README.md']:
         shutil.copy2(root/'assets/fonts'/name,font_notices/name)
     index=['Noto Emoji: OFL-1.1 (see NotoEmoji/NotoEmoji-OFL.txt)']
+    (out/'fonts').mkdir()
+    shutil.copy2(root/'assets/fonts/NotoSansCJKjp-Regular.otf',out/'fonts/NotoSansCJKjp-Regular.otf')
+    cjk_notices=licenses/'NotoSansCJK'
+    cjk_notices.mkdir()
+    for name in ['NotoSansCJK-OFL.txt', 'README.md']:
+        shutil.copy2(root/'assets/fonts'/name,cjk_notices/name)
+    index.append('Noto Sans CJK: OFL-1.1 (see NotoSansCJK/NotoSansCJK-OFL.txt)')
     for dependency in metadata['packages']:
         name=f"{dependency['name']}-{dependency['version']}"
         directory=Path(dependency['manifest_path']).parent
