@@ -8,6 +8,8 @@ extern "C" {
     async fn pick_sql() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
     fn download_sql(name: &str, sql: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch)]
+    fn download_bytes(name: &str, bytes: &[u8], mime: &str) -> Result<(), JsValue>;
 }
 
 impl Rustable {
@@ -47,7 +49,25 @@ impl Rustable {
             ctx.request_repaint();
         });
     }
-    pub(super) fn json_export_dialog(&self, ctx: &egui::Context) { self.browser_file_unavailable(ctx); }
-    pub(super) fn file_dialog(&self, ctx: &egui::Context, _export: bool) { self.browser_file_unavailable(ctx); }
+    fn export_browser_results(&self, ctx: &egui::Context, format: db::ExportFormat) {
+        use crate::browser_jobs::{self, Request, Response};
+        if self.browser_export.borrow().is_some() { return; }
+        let tx = self.files_tx.clone();
+        let (name, mime) = match format { db::ExportFormat::Csv => ("results.csv", "text/csv;charset=utf-8"), db::ExportFormat::Json => ("results.json", "application/json") };
+        match browser_jobs::start(Request::Export { grid: self.grid(), format }, ctx.clone(), move |reply| {
+            let result = reply.and_then(|reply| match reply {
+                Response::Exported(bytes) => download_bytes(name, &bytes, mime).map(|()| name.to_owned()).map_err(|e| format!("Download failed: {e:?}")),
+                _ => Err("Unexpected export response".into()),
+            });
+            let _ = tx.send(FileAction::BrowserExportDone(result));
+        }) {
+            Ok(worker) => *self.browser_export.borrow_mut() = Some(worker),
+            Err(error) => { let _ = self.files_tx.send(FileAction::QueryLibraryError(error)); ctx.request_repaint(); }
+        }
+    }
+    pub(super) fn json_export_dialog(&self, ctx: &egui::Context) { self.export_browser_results(ctx, db::ExportFormat::Json); }
+    pub(super) fn file_dialog(&self, ctx: &egui::Context, export: bool) {
+        if export { self.export_browser_results(ctx, db::ExportFormat::Csv); } else { self.browser_file_unavailable(ctx); }
+    }
     pub(super) fn choose_query_directory(&self, ctx: &egui::Context) { self.browser_file_unavailable(ctx); }
 }

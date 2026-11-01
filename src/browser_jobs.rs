@@ -9,6 +9,7 @@ use std::{ops::Range, sync::Arc};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Request {
+    Export { grid: Arc<Grid>, format: crate::db::ExportFormat },
     Format {
         sql: String,
         selection: Range<usize>,
@@ -22,6 +23,7 @@ pub(crate) enum Request {
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Response {
+    Exported(Vec<u8>),
     Formatted(crate::sql_format::Formatted),
     Found(crate::result_search::Found),
 }
@@ -30,6 +32,7 @@ pub(crate) fn execute(bytes: &[u8]) -> Vec<u8> {
         .deserialize::<Request>(bytes)
         .map_err(|e| e.to_string())
         .and_then(|request| match request {
+            Request::Export { grid, format } => crate::db::browser_export::encode(&grid, format).map(Response::Exported),
             Request::Format {
                 sql,
                 selection,

@@ -2,6 +2,8 @@
 mod csv;
 mod json;
 mod row_export;
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) mod browser_export;
 
 #[derive(Clone, Copy)]
 #[derive(serde::Serialize, serde::Deserialize)]

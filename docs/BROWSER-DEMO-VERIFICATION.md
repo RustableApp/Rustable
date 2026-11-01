@@ -26,10 +26,12 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 
 - Browser SQLite now has a 64 MiB SQLite allocator limit, 8 MiB SQL/value limits, and no attached databases. This is not a whole-tab or WASM-heap bound. Two native tests verify oversized-value rejection, subsequent query recovery, and explicit rollback after rejection. In the browser, `zeroblob(8388609)` failed cleanly; a billion-step recursive aggregate stopped at 2000.1 ms; Cancel stopped the rerun at 24.2 ms; the same connection then returned 42.
 
+- Loaded-result CSV/JSON export now runs in a separate WASM worker using the desktop streaming encoders, with a 16 MiB encoded-output cap and ten-second worker deadline. Two tests verify exact large integers, NULL, Unicode, binary data, duplicate JSON-name rejection, and bounded writes. The browser JSON export action completed without console errors, but no resulting download file was available at the expected Downloads path: completed-download content is not yet verified.
+
 ## Required before replacement deployment
 
 - SQL import/download adapters now compile in the full WASM build. Imported files use shared UTF-8/BOM/NUL/8 MiB validation and are opened as copies without an owned filesystem path. Download requests do not mark a disk file as saved. Native script-file tests (3) and strict Clippy pass. Actual picker import/download still requires end-to-end verification: the in-app browser picker did not expose an accessible dialog and native Codex UI control is prohibited.
-- Finish CSV/database import and data export; those capabilities still report temporary explicit errors. Verify browser saved-query conflict UI and recovery after storage failures.
+- Finish CSV/database import and full-table export, which still report temporary explicit errors. Verify SQL/result downloads through the browser end to end, saved-query conflict UI, and recovery after storage failures.
 - Verify timeout/cancellation during transactional writes, allocation-limit exhaustion, whole-tab memory, and worker crash recovery. Basic timeout/cancel/read recovery passed; shared cancellation requires cross-origin-isolated hosting and fallback deadline is two seconds.
 - Extend keyboard verification to additional browsers and grid navigation. Cell select-all and current/selected/all query execution passed in the in-app browser with browser-native key events.
 - Verify reset/reload isolation, download actions, same-origin embedding headers, responsive layout and additional browser engines. Keep website claims synchronized with tested capabilities.

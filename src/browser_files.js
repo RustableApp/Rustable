@@ -21,7 +21,10 @@ export function pick_sql() {
   });
 }
 export function download_sql(name, sql) {
-  const url = URL.createObjectURL(new Blob([sql], {type: 'application/sql;charset=utf-8'}));
+  download_bytes(name, new TextEncoder().encode(sql), 'application/sql;charset=utf-8');
+}
+export function download_bytes(name, bytes, mime) {
+  const url = URL.createObjectURL(new Blob([bytes], {type: mime}));
   const link = document.createElement('a');
   link.href = url;
   link.download = name.replace(/[\\/]/g, '_');

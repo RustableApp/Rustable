@@ -258,6 +258,8 @@ enum Pending {
 }
 enum FileAction {
     #[cfg(target_arch = "wasm32")]
+    BrowserExportDone(Result<String, String>),
+    #[cfg(target_arch = "wasm32")]
     BrowserScript(String, String),
     #[cfg(target_arch = "wasm32")]
     BrowserDownload(String),
@@ -428,6 +430,8 @@ pub struct Rustable {
     inspector: bool,
     history: bool,
     query_library: query_library::Library,
+    #[cfg(target_arch = "wasm32")]
+    browser_export: std::cell::RefCell<Option<crate::browser_jobs::Handle>>,
     navigator: navigator::Navigator,
     activity: std::collections::VecDeque<String>,
     last_operation_ms: Option<f64>,
@@ -865,6 +869,8 @@ impl Rustable {
             inspector: true,
             history: false,
             query_library: Default::default(),
+            #[cfg(target_arch = "wasm32")]
+            browser_export: Default::default(),
             navigator: navigator::Navigator::new(initial.as_ref()),
             activity: Default::default(),
             last_operation_ms: None,
@@ -928,6 +934,11 @@ impl Rustable {
 
     fn poll(&mut self) {
         self.poll_query_groups();
+        #[cfg(target_arch = "wasm32")]
+        if self.browser_export.borrow().as_ref().is_some_and(|worker| worker.expired()) {
+            self.browser_export.borrow_mut().take();
+            self.error = Some("Export timed out. No download was created.".into());
+        }
         while let Ok(result) = self.worker.rx.try_recv() {
             let elapsed = self.started.elapsed().as_secs_f64() * 1000.0;
             self.last_operation_ms = Some(elapsed);
@@ -1212,6 +1223,11 @@ impl Rustable {
             // a completed import merely because a query is still running.
             #[cfg(target_arch = "wasm32")]
             let action = match action {
+                FileAction::BrowserExportDone(result) => {
+                    self.browser_export.borrow_mut().take();
+                    match result { Ok(name) => self.status = format!("Download requested: {name}"), Err(error) => self.error = Some(error) }
+                    continue;
+                }
                 FileAction::BrowserScript(name, sql) => {
                     let activate = self.finish_cell_edit();
                     let mut tab = QueryTab::new(sql);
@@ -1236,7 +1252,7 @@ impl Rustable {
             }
             match action {
                 #[cfg(target_arch = "wasm32")]
-                FileAction::BrowserScript(..) | FileAction::BrowserDownload(..) => unreachable!(),
+                FileAction::BrowserScript(..) | FileAction::BrowserDownload(..) | FileAction::BrowserExportDone(..) => unreachable!(),
                 FileAction::QueryLibraryError(error) => self.error = Some(error),
                 FileAction::QueryDirectory(path) => { self.prefs.query_directory = Some(path); self.query_library.invalidate(); self.shared_preferences_dirty = true; }
                 FileAction::ProfilePath(generation, key, path) => {
