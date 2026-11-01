@@ -9,6 +9,7 @@ use std::{ops::Range, sync::mpsc};
 const INPUT_LIMIT: usize = 1024 * 1024;
 const OUTPUT_LIMIT: usize = 8 * INPUT_LIMIT;
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Formatted {
     pub original: String,
     pub text: String,
@@ -18,6 +19,8 @@ pub struct Formatted {
 pub struct Formatter {
     worker: Option<mpsc::Receiver<Result<Formatted, String>>>,
     pub status: Option<String>,
+    #[cfg(target_arch = "wasm32")]
+    browser_worker: Option<crate::browser_jobs::Handle>,
 }
 impl Formatter {
     pub fn busy(&self) -> bool {
@@ -42,14 +45,52 @@ impl Formatter {
         let ctx = ctx.clone();
         let (tx, rx) = mpsc::sync_channel(1);
         self.worker = Some(rx);
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(|| format_document(original, selection, dialect))
                 .unwrap_or_else(|_| Err("Formatter failed; SQL was left unchanged.".into()));
             let _ = tx.send(result);
             ctx.request_repaint();
         });
+        #[cfg(target_arch = "wasm32")]
+        {
+            use crate::browser_jobs::{self, Request, Response};
+            self.browser_worker = match browser_jobs::start(
+                Request::Format {
+                    sql: original,
+                    selection,
+                    dialect,
+                },
+                ctx.clone(),
+                move |reply| {
+                    let result = reply.and_then(|reply| match reply {
+                        Response::Formatted(formatted) => Ok(formatted),
+                        _ => Err("Unexpected formatting response".into()),
+                    });
+                    let _ = tx.try_send(result);
+                },
+            ) {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    self.worker = None;
+                    self.status = Some(error);
+                    None
+                }
+            };
+        }
     }
     pub fn poll(&mut self, current: &str) -> Option<Formatted> {
+        #[cfg(target_arch = "wasm32")]
+        if self
+            .browser_worker
+            .as_ref()
+            .is_some_and(|worker| worker.expired())
+        {
+            self.worker = None;
+            self.browser_worker = None;
+            self.status = Some("Formatting timed out; SQL was left unchanged.".into());
+            return None;
+        }
         let result = match self.worker.as_ref()?.try_recv() {
             Ok(result) => result,
             Err(mpsc::TryRecvError::Empty) => return None,
@@ -58,6 +99,10 @@ impl Formatter {
             }
         };
         self.worker = None;
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.browser_worker = None;
+        }
         match result {
             Ok(result) if result.original == current => Some(result),
             Ok(_) => {
@@ -247,13 +292,14 @@ fn protected_format(input: &str, dialect: Dialect) -> Result<String, String> {
         .into_owned();
     Ok(restored)
 }
-fn format_document(
+pub(crate) fn format_document(
     original: String,
     selection: Range<usize>,
     dialect: Dialect,
 ) -> Result<Formatted, String> {
     if let Dialect::Mysql(mode) = dialect
-        && (mode.no_backslash_escapes || mode.ansi_quotes) {
+        && (mode.no_backslash_escapes || mode.ansi_quotes)
+    {
         return Err("Beautify is not yet available for this MySQL SQL mode.".into());
     }
     if original.len() > INPUT_LIMIT {

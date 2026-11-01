@@ -17,10 +17,12 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 - Screenshot: `/Users/jatochnietdan/.codex/visualizations/2026/10/31/01a18f82-8ef6-7c12-b1e5-94903450cc37/full-workspace-wasm-local.png`.
 - Earlier native database regression run after the SQLite upgrade: 102 passed, 32 existing integration/performance tests ignored. These are not evidence of live PostgreSQL/MySQL/MariaDB verification.
 
+- Browser SQL Beautify now runs the shared formatter in a dedicated WASM worker. Verified multiline output and successful execution of both formatted statements. Result search runs the shared scanner in a worker; searching `800` in the grouped demo result found three cells and selected the first. Both workers have a ten-second UI timeout and terminate when their handles are dropped. Timeout/error paths still need browser fault-injection verification.
+- Search tests: 4 passed. Formatter tests: 5 passed, 1 existing ignored. Native strict all-target Clippy passed after adding the worker adapters.
+
 ## Required before replacement deployment
 
 - Implement browser file handling and saved-query storage; current explicit capability errors are temporary.
-- Replace remaining native search/format threads with browser-safe workers. Do not call a build production-ready merely because the default screen works.
 - Verify cancellation and timeout rollback/recovery, bounds on SQLite memory and SQL input, and worker error recovery. Shared cancellation requires cross-origin-isolated hosting; fallback deadline is two seconds.
 - Fix and verify browser keyboard behavior and shortcut labels, including cell selection, current/selected/all query execution.
 - Verify reset/reload isolation, download actions, same-origin embedding headers, responsive layout and additional browser engines. Keep website claims synchronized with tested capabilities.

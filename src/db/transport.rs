@@ -1,6 +1,6 @@
 //! Bounded binary messages preserve database values across browser workers.
 use bincode::Options;
-pub(super) fn codec() -> impl Options {
+pub(crate) fn codec() -> impl Options {
     bincode::DefaultOptions::new().with_fixint_encoding().with_limit(32 * 1024 * 1024)
 }
 #[cfg(test)]

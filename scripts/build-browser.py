@@ -23,7 +23,7 @@ subprocess.run(['mise','exec','--','cargo','build','--locked','--release','--tar
 out = args.output.resolve()
 out.mkdir(parents=True,exist_ok=True)
 subprocess.run(['mise','exec','--','wasm-bindgen','--target','web','--out-dir',str(out/'pkg'),str(package/'target/wasm32-unknown-unknown/release/rustable_browser.wasm')],check=True)
-for name in ['index.html','database-worker.js','boot.js','demo.css']:
+for name in ['index.html','database-worker.js','background-worker.js','boot.js','demo.css']:
     shutil.copy2(package/'web'/name,out/name)
 licenses = out/'Licenses'
 licenses.mkdir(exist_ok=True)

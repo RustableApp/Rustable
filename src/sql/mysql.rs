@@ -2,7 +2,7 @@
 //! never part of SQL sent to the server. The session must supply its SQL mode.
 use std::ops::Range;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Mode {
     pub no_backslash_escapes: bool,
     pub ansi_quotes: bool,

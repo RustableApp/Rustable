@@ -14,3 +14,8 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsValue> {
 pub fn database_command(bytes: &[u8]) -> Vec<u8> {
     rustable::browser_database_command(bytes)
 }
+
+#[wasm_bindgen]
+pub fn background_job(bytes: &[u8]) -> Vec<u8> {
+    rustable::browser_background_job(bytes)
+}

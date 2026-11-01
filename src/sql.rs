@@ -2,7 +2,7 @@
 use std::{ffi::CString, ops::Range};
 pub mod mysql;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Dialect {
     #[default]
     Sqlite,

@@ -5,7 +5,9 @@ use std::sync::{Arc, Weak, mpsc};
 
 const MATCH_LIMIT: usize = 100_000;
 type Cell = (usize, usize);
-struct Found {
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Found {
+    #[serde(skip)]
     source: Weak<Grid>,
     needle: String,
     case_sensitive: bool,
@@ -21,7 +23,10 @@ pub struct Search {
     needle: String,
     case_sensitive: bool,
     found: Option<Found>,
-    worker: Option<mpsc::Receiver<Found>>,
+    worker: Option<mpsc::Receiver<Result<Found, String>>>,
+    error: Option<String>,
+    #[cfg(target_arch = "wasm32")]
+    browser_worker: Option<crate::browser_jobs::Handle>,
     current: usize,
 }
 impl Found {
@@ -31,7 +36,7 @@ impl Found {
             && self.case_sensitive == case
     }
 }
-fn scan(grid: &Arc<Grid>, needle: String, case_sensitive: bool) -> Found {
+pub(crate) fn scan(grid: &Arc<Grid>, needle: String, case_sensitive: bool) -> Found {
     let mut result = Found {
         source: Arc::downgrade(grid),
         needle,
@@ -70,10 +75,18 @@ fn scan(grid: &Arc<Grid>, needle: String, case_sensitive: bool) -> Found {
 }
 impl Search {
     pub fn has_focus(&self, ctx: &egui::Context) -> bool {
-        self.open && self.field_id.is_some_and(|id| ctx.memory(|m| m.has_focus(id)))
+        self.open
+            && self
+                .field_id
+                .is_some_and(|id| ctx.memory(|m| m.has_focus(id)))
     }
     pub fn show(&mut self, ui: &mut egui::Ui, grid: &Arc<Grid>) -> Option<Cell> {
         if !self.open {
+            self.worker = None;
+            #[cfg(target_arch = "wasm32")]
+            {
+                self.browser_worker = None;
+            }
             return None;
         }
         let mut move_by = std::mem::take(&mut self.step);
@@ -86,6 +99,9 @@ impl Search {
                     .hint_text("Loaded cells only"),
             );
             self.field_id = Some(field.id);
+            if field.changed() {
+                self.error = None;
+            }
             if self.focus {
                 field.request_focus();
                 self.focus = false;
@@ -106,7 +122,12 @@ impl Search {
                     self.open = false;
                 }
             }
-            ui.checkbox(&mut self.case_sensitive, "Match case");
+            if ui
+                .checkbox(&mut self.case_sensitive, "Match case")
+                .changed()
+            {
+                self.error = None;
+            }
             let ready = self
                 .found
                 .as_ref()
@@ -139,6 +160,8 @@ impl Search {
                         if found.limited { "+" } else { "" }
                     )
                 }
+            } else if self.error.is_some() {
+                "Search unavailable".into()
             } else {
                 "Searching…".into()
             });
@@ -150,10 +173,29 @@ impl Search {
                 self.open = false;
             }
         });
+        if !self.open {
+            self.worker = None;
+            #[cfg(target_arch = "wasm32")]
+            { self.browser_worker = None; }
+            return None;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self
+            .browser_worker
+            .as_ref()
+            .is_some_and(|worker| worker.expired())
+        {
+            self.worker = None;
+            self.browser_worker = None;
+            self.error = Some("Search timed out. Change the search to try again.".into());
+        }
+        if let Some(error) = &self.error {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
         let mut target = None;
         if let Some(receiver) = &self.worker {
             match receiver.try_recv() {
-                Ok(found) => {
+                Ok(Ok(found)) => {
                     // The status label was painted before consuming this reply.
                     ui.ctx().request_repaint();
                     if found.matches(grid, &self.needle, self.case_sensitive) {
@@ -163,9 +205,21 @@ impl Search {
                     }
                     self.worker = None;
                 }
-                Err(mpsc::TryRecvError::Disconnected) => self.worker = None,
+                Ok(Err(error)) => {
+                    self.worker = None;
+                    self.error = Some(error);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.worker = None;
+                    self.error =
+                        Some("Search worker stopped. Change the search to try again.".into());
+                }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.worker.is_none() {
+            self.browser_worker = None;
         }
         if self
             .found
@@ -178,7 +232,7 @@ impl Search {
                     .rem_euclid(found.cells.len() as isize) as usize;
                 target = found.cells.get(self.current).copied();
             }
-        } else if self.worker.is_none() && self.open {
+        } else if self.worker.is_none() && self.open && self.error.is_none() {
             // One in-flight scan per tab; input changes coalesce while it runs.
             // Retain only the existing Arc, and cap matching coordinates.
             let (tx, rx) = mpsc::sync_channel(1);
@@ -186,11 +240,42 @@ impl Search {
             let needle = self.needle.clone();
             let case = self.case_sensitive;
             let ctx = ui.ctx().clone();
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::spawn(move || {
-                let _ = tx.send(scan(&source, needle, case));
+                let _ = tx.send(Ok(scan(&source, needle, case)));
                 ctx.request_repaint();
             });
             self.worker = Some(rx);
+            #[cfg(target_arch = "wasm32")]
+            {
+                use crate::browser_jobs::{self, Request, Response};
+                let identity = Arc::downgrade(&source);
+                self.browser_worker = match browser_jobs::start(
+                    Request::Search {
+                        grid: source,
+                        needle,
+                        case_sensitive: case,
+                    },
+                    ctx,
+                    move |reply| {
+                        let result = reply.and_then(|reply| match reply {
+                            Response::Found(mut found) => {
+                                found.source = identity.clone();
+                                Ok(found)
+                            }
+                            _ => Err("Unexpected search response".into()),
+                        });
+                        let _ = tx.try_send(result);
+                    },
+                ) {
+                    Ok(handle) => Some(handle),
+                    Err(error) => {
+                        self.worker = None;
+                        self.error = Some(error);
+                        None
+                    }
+                };
+            }
         }
         if target.is_some() {
             ui.ctx().request_repaint();
