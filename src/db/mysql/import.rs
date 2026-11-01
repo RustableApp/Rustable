@@ -82,7 +82,7 @@ pub(super) fn table(driver: &mut MysqlDriver, request: &csv_import::Request, can
             Ok(count)
         }
         Err(error) => {
-            if let Err(rollback) = driver.conn().and_then(|conn| conn.query_drop("ROLLBACK").map_err(|e| e.to_string())) {
+            if let Err(rollback) = driver.conn().and_then(|conn| conn.query_drop("ROLLBACK").map_err(|e| error_message(&e))) {
                 driver.connection = None;
                 return Err(format!("{error}\nImport rollback could not be confirmed: {rollback}. Reconnect and verify data."));
             }

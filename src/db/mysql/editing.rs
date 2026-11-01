@@ -302,7 +302,7 @@ pub(super) fn apply(driver: &mut MysqlDriver, plan: &ChangePlan) -> Result<(), S
     })();
     if let Err(error) = result {
         // Cancellation must not cancel cleanup. Never replay an uncertain write.
-        let rollback = driver.conn().and_then(|conn| conn.query_drop("ROLLBACK").map_err(|e| e.to_string()));
+        let rollback = driver.conn().and_then(|conn| conn.query_drop("ROLLBACK").map_err(|e| error_message(&e)));
         if let Err(rollback_error) = rollback {
             driver.connection = None;
             return Err(format!("{error}\nRollback could not be confirmed: {rollback_error}. Reconnect and verify data before retrying."));

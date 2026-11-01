@@ -31,7 +31,7 @@ pub(super) fn collect_budget_since<T: Protocol>(mut results: QueryResult<'_, '_,
         // have a bound. Do not misrepresent omitted results as a successful run.
         if report.grids.len() >= set_limit {
             report.error.get_or_insert_with(|| format!("Only the first {set_limit} result sets are retained for this statement."));
-            for row in set.by_ref() { if let Err(error) = row { disconnected |= error.is_connectivity_error(); report.error = Some(error.to_string()); } }
+            for row in set.by_ref() { if let Err(error) = row { disconnected |= error.is_connectivity_error(); report.error = Some(super::mysql::error_message(&error)); } }
             continue;
         }
         let columns = set.columns().as_ref().to_vec();
@@ -44,7 +44,7 @@ pub(super) fn collect_budget_since<T: Protocol>(mut results: QueryResult<'_, '_,
             sum.saturating_add(std::mem::size_of::<String>()).saturating_add(name.len()));
         if header_bytes > remaining {
             report.error.get_or_insert_with(|| "Result headers exceed the retained-result memory limit.".into());
-            for row in set.by_ref() { if let Err(error) = row { disconnected |= error.is_connectivity_error(); report.error = Some(error.to_string()); } }
+            for row in set.by_ref() { if let Err(error) = row { disconnected |= error.is_connectivity_error(); report.error = Some(super::mysql::error_message(&error)); } }
             continue;
         }
         remaining -= header_bytes;
@@ -52,7 +52,7 @@ pub(super) fn collect_budget_since<T: Protocol>(mut results: QueryResult<'_, '_,
         for row in set.by_ref() {
             let row = match row {
                 Ok(row) => row,
-                Err(error) => { disconnected |= error.is_connectivity_error(); report.error = Some(error.to_string()); break; }
+                Err(error) => { disconnected |= error.is_connectivity_error(); report.error = Some(super::mysql::error_message(&error)); break; }
             };
             if grid.truncated || decoding_failed { continue; }
             let row_bytes = (0..row.len()).fold(std::mem::size_of::<Vec<Value>>(), |sum, i| {

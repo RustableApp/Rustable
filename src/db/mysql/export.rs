@@ -14,7 +14,7 @@ pub(super) fn table(driver: &mut MysqlDriver, path: &Path, browse: &Browse, canc
         csv::publish(path, cancel, |output| {
             let mut results = conn.exec_iter(&sql, parameters).map_err(|error| {
                 disconnected |= error.is_connectivity_error();
-                io::Error::other(error)
+                io::Error::other(error_message(&error))
             })?;
             let columns = results.columns().as_ref().to_vec();
             let names = columns.iter().map(|column| column.name_str().into_owned()).collect::<Vec<_>>();
@@ -23,7 +23,7 @@ pub(super) fn table(driver: &mut MysqlDriver, path: &Path, browse: &Browse, canc
                 for row in results.by_ref() {
                     let row = row.map_err(|error| {
                         disconnected |= error.is_connectivity_error();
-                        io::Error::other(error)
+                        io::Error::other(error_message(&error))
                     })?;
                     // One decoded row at a time, independent of table size.
                     let values = columns.iter().zip(row.unwrap()).map(Value::try_from)

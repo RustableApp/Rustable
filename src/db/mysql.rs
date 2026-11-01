@@ -12,6 +12,14 @@ mod transport_tests;
 #[cfg(test)]
 mod cascade_tests;
 
+/// Keep server diagnostics readable without exposing the driver's enum wrapper.
+pub(super) fn error_message(error: &::mysql::Error) -> String {
+    match error {
+        ::mysql::Error::MySqlError(server) => server.to_string(),
+        _ => error.to_string(),
+    }
+}
+
 type CatalogRow = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
 
 struct MysqlDriver {
@@ -53,10 +61,10 @@ impl MysqlDriver {
             Some(crate::ssh_tunnel::Tunnel::start(&ssh, cancel)?)
         } else { None };
         let destination = tunnel.as_ref().map(|t| std::net::SocketAddr::from(([127,0,0,1],t.local_port())));
-        let mut connection = Conn::new(OptsBuilder::from(config).tcp_destination(destination)).map_err(|e| e.to_string())?;
-        connection.query_drop("SET SESSION session_track_system_variables = 'sql_mode'").map_err(|e| e.to_string())?;
+        let mut connection = Conn::new(OptsBuilder::from(config).tcp_destination(destination)).map_err(|e| error_message(&e))?;
+        connection.query_drop("SET SESSION session_track_system_variables = 'sql_mode'").map_err(|e| error_message(&e))?;
         let (version, database, sql_mode, account): (String, Option<String>, String, String) = connection.query_first(
-            "SELECT VERSION(), DATABASE(), @@SESSION.sql_mode, CURRENT_USER()").map_err(|e| e.to_string())?
+            "SELECT VERSION(), DATABASE(), @@SESSION.sql_mode, CURRENT_USER()").map_err(|e| error_message(&e))?
             .ok_or("Server did not return session metadata")?;
         // Static global privilege changes take effect only on a new session.
         // Remember the login-time grant so later grants cannot imply visibility
@@ -64,9 +72,9 @@ impl MysqlDriver {
         let global_trigger_at_connect = if let Some(grantee) = editing::grantee(&account) {
             connection.exec_first::<u8, _, _>(
                 "SELECT 1 FROM information_schema.USER_PRIVILEGES WHERE GRANTEE=? AND PRIVILEGE_TYPE='TRIGGER' LIMIT 1",
-                (grantee,)).map_err(|e| e.to_string())?.is_some()
+                (grantee,)).map_err(|e| error_message(&e))?.is_some()
         } else { false };
-        let names = connection.query("SHOW DATABASES").map_err(|e| e.to_string())?;
+        let names = connection.query("SHOW DATABASES").map_err(|e| error_message(&e))?;
         Ok(Self {
             connection: Some(connection),
             tunnel,
@@ -126,10 +134,10 @@ fn with_cancel<T>(config: &MysqlConfig, destination: Option<std::net::SocketAddr
                     options.read_timeout = Duration::from_secs(1);
                     control = Some(Conn::new(OptsBuilder::from(&options).tcp_destination(destination)
                         .write_timeout(Some(Duration::from_secs(1))))
-                        .map_err(|e| format!("Could not connect to cancel query: {e}"))?);
+                        .map_err(|e| format!("Could not connect to cancel query: {}", error_message(&e)))?);
                 }
                 control.as_mut().unwrap().query_drop(format!("KILL QUERY {id}"))
-                    .map_err(|e| format!("Could not cancel query: {e}"))?;
+                    .map_err(|e| format!("Could not cancel query: {}", error_message(&e)))?;
                 // Repeat until completion to cover cancellation racing query arrival.
             }
         });
@@ -187,7 +195,7 @@ impl MysqlDriver {
             Ok(None) => Err("Missing MySQL session state".into()),
             Err(error) => {
                 if error.is_connectivity_error() { self.connection = None; }
-                Err(error.to_string())
+                Err(error_message(&error))
             }
         }
     }
@@ -214,8 +222,8 @@ impl MysqlDriver {
             Err(error) => {
                 if error.is_connectivity_error() { self.connection = None; }
                 Err(match cancellation_error {
-                    Some(cancel_error) => format!("{error}\n{cancel_error}"),
-                    None => error.to_string(),
+                    Some(cancel_error) => format!("{}\n{cancel_error}", error_message(&error)),
+                    None => error_message(&error),
                 })
             }
         }
@@ -454,8 +462,8 @@ impl Driver for MysqlDriver {
                 Err(error) => {
                     let disconnected = error.is_connectivity_error();
                     report.error = Some(match report.error.take() {
-                        Some(cancel_error) => format!("{error}\n{cancel_error}"),
-                        None => error.to_string(),
+                        Some(cancel_error) => format!("{}\n{cancel_error}", error_message(&error)),
+                        None => error_message(&error),
                     });
                     if disconnected { self.connection = None; }
                     break;
@@ -1656,4 +1664,18 @@ mod tests {
         driver.conn().unwrap().query_drop("DROP TABLE edit_types_probe").unwrap();
     }
 
+}
+
+#[cfg(test)]
+mod error_message_tests {
+    use super::error_message;
+    #[test]
+    fn server_diagnostics_keep_code_state_and_message_without_enum_wrapper() {
+        let error = ::mysql::Error::MySqlError(::mysql::MySqlError {
+            code: 1062, state: "23000".into(), message: "Duplicate entry '日本' for key 'PRIMARY'".into(),
+        });
+        assert_eq!(error_message(&error), "ERROR 1062 (23000): Duplicate entry '日本' for key 'PRIMARY'");
+        let transport = ::mysql::Error::from(std::io::Error::new(std::io::ErrorKind::TimedOut, "fixture timeout"));
+        assert_eq!(error_message(&transport), transport.to_string());
+    }
 }

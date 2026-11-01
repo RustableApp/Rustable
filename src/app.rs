@@ -9762,7 +9762,9 @@ mod csv_review_keyboard_tests {
             app.csv_review = Some(review);
             app.commit_csv_import();
             wait_for_worker(&mut app);
-            assert!(app.error.is_some());
+            let error = app.error.as_deref().expect("duplicate import should fail");
+            assert!(error.contains("1062 (23000)"), "{error}");
+            assert!(!error.contains("MySqlError"), "{error}");
             assert!(app.csv_review.is_some());
             assert_eq!(observer.query_first::<u64,_>("SELECT COUNT(*) FROM ui_csv_probe").unwrap(),Some(id));
             app.csv_review = None;
