@@ -389,9 +389,10 @@ impl Driver for MysqlDriver {
             if cancel.load(Ordering::Relaxed) { report.error = Some("Cancelled before next statement".into()); break; }
             self.session_dirty = may_change_session(&sql[range.clone()]);
             let Some(conn) = self.connection.as_mut() else { report.error = Some("MySQL connection is disconnected".into()); break; };
+            let statement_started = std::time::Instant::now();
             let (outcome, cancellation_error) = with_cancel(&self.config, self.destination, conn.connection_id(), cancel, || {
                 conn.query_iter(&sql[range]).map(|results|
-                    super::mysql_results::collect_budget(results, &mut remaining, QUERY_LIMIT, 128 - report.grids.len()))
+                    super::mysql_results::collect_budget_since(results, &mut remaining, QUERY_LIMIT, 128 - report.grids.len(), statement_started))
             });
             if let Some(error) = cancellation_error { report.error = Some(error); }
             let (result, disconnected) = match outcome {
@@ -465,8 +466,9 @@ impl Driver for MysqlDriver {
         sql.push_str(&format!(" LIMIT {} OFFSET {}", PAGE_SIZE + 1, request.offset));
         let params = parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>, _>>()?;
         let mut remaining = BYTE_LIMIT;
+        let query_started = std::time::Instant::now();
         let ((report, disconnected), cancellation_error) = self.with_connection_status(|conn| conn.exec_iter(&sql, params).map(|results|
-            super::mysql_results::collect_budget(results, &mut remaining, PAGE_SIZE + 1, 1)))?;
+            super::mysql_results::collect_budget_since(results, &mut remaining, PAGE_SIZE + 1, 1, query_started)))?;
         if disconnected { self.connection = None; }
         if let Some(error) = report.error {
             return Err(match cancellation_error { Some(cancel_error) => format!("{error}\n{cancel_error}"), None => error });
@@ -520,6 +522,22 @@ mod tests {
         assert_eq!(error,"Connection cancelled");
         let error = MysqlDriver::connect(&config).err().unwrap();
         assert!(error.contains("host") || error.contains("Windows"), "must reject SSH configuration before any database connection: {error}");
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_result_timing_includes_server_execution() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let result = driver.execute("SELECT SLEEP(0.15); SELECT SLEEP(0.05);", false, &AtomicBool::new(false));
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.grids.len(), 2);
+        assert!(result.grids[0].elapsed >= Duration::from_millis(140));
+        assert!(result.grids[1].elapsed >= Duration::from_millis(40));
+        assert!(result.grids.iter().map(|grid| grid.elapsed).sum::<Duration>() <= result.elapsed);
     }
 
     #[test]

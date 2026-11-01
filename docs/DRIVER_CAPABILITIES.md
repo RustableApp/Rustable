@@ -487,3 +487,27 @@ All 40 driver tests passed on each engine, including SSH/TLS and unreadable trig
 metadata. New live coverage preserves indexes and trigger DDL for apostrophe,
 backtick and Unicode table/trigger names under default, NO_BACKSLASH_ESCAPES and
 ANSI_QUOTES+NO_BACKSLASH_ESCAPES modes. Strict all-target Clippy passed.
+
+### Native MySQL acceptance and result timing (2026-11-01)
+
+The debug native app at e0e8a2c connected to the disposable MySQL 8.4.11 TLS
+fixture through the connection form: custom CA, Verify full, successful
+“TLS verified” probe, then the workspace. Cmd+Enter with the caret in the second
+statement ran only `SELECT 42`; Cmd+Shift+Enter returned both result sets,
+including the server version and connection ID. Japanese text rendered correctly;
+the crab emoji rendered as a missing glyph in both editor and grid (font fallback
+still needs work). No production connection was used.
+
+This uncovered a misleading result footer: 0.0 ms because timing began only after
+query_iter had received the first server response. Editor and browse streams now
+start timing before dispatch; subsequent result sets include their response wait.
+The script total remains a separate end-to-end measurement. A live regression uses
+150 ms and 50 ms server sleeps and checks each statement's elapsed time and the
+sum against the script total. It passed on both MySQL 8.4.11 and MariaDB 11.4.13;
+strict all-target Clippy passed. The updated timing has not yet been visually
+rechecked in a rebuilt native bundle. Native MariaDB UI acceptance and emoji
+fallback remain pending.
+
+Local screenshot evidence: `native-mysql-tls-probe.png` and
+`native-mysql-query-timing-before.png` in the session visualization directory
+`~/.codex/visualizations/2026/10/31/01a18f82-8ef6-7c12-b1e5-94903450cc37/`.

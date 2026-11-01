@@ -15,8 +15,14 @@ fn collect<T: Protocol>(results: QueryResult<'_, '_, '_, T>, budget: usize, row_
     collect_budget(results, &mut { budget }, row_limit, 128).0
 }
 
-pub(super) fn collect_budget<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, set_limit: usize) -> (ScriptResult, bool) {
-    let started = Instant::now();
+pub(super) fn collect_budget<T: Protocol>(results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, set_limit: usize) -> (ScriptResult, bool) {
+    collect_budget_since(results, budget, row_limit, set_limit, Instant::now())
+}
+
+// Start before query_iter/exec_iter: those calls already wait for the server's
+// first response. Later result sets include the wait in results.iter().
+pub(super) fn collect_budget_since<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, set_limit: usize, started: Instant) -> (ScriptResult, bool) {
+    let mut set_started = started;
     let mut report = ScriptResult::default();
     let mut remaining = *budget;
     let mut disconnected = false;
@@ -42,7 +48,6 @@ pub(super) fn collect_budget<T: Protocol>(mut results: QueryResult<'_, '_, '_, T
             continue;
         }
         remaining -= header_bytes;
-        let set_started = Instant::now();
         let mut decoding_failed = false;
         for row in set.by_ref() {
             let row = match row {
@@ -70,6 +75,7 @@ pub(super) fn collect_budget<T: Protocol>(mut results: QueryResult<'_, '_, '_, T
         }
         grid.elapsed = set_started.elapsed();
         report.grids.push(Arc::new(grid));
+        set_started = Instant::now();
     }
     report.elapsed = started.elapsed();
     *budget = remaining;
