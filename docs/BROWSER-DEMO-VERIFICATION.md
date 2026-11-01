@@ -137,3 +137,22 @@ This proves disposal and recovery of the in-memory worker session, not rollback
 or recovery of its lost contents. Screenshot evidence:
 `wasm-transaction-worker-failure.png` and `wasm-transaction-worker-recovery.png`
 in the session visualization directory. The public replacement is still pending.
+
+### Incremental library writes and aborted-save preservation (2026-11-01)
+
+Browser query saves no longer clear and rewrite every library entry. The existing
+readwrite transaction still performs conflict and total-size checks, but applies
+only changed paths. Renaming a group moves its descendants atomically and leaves
+unrelated entries untouched. Unchanged saves issue no writes. Snapshot reads and
+size validation still scale with total library size; this is not a constant-time
+save claim. Five Node tests pass, including delta application and sibling-prefix
+isolation. The release WASM build passes.
+
+In the actual iframe, a preview-only fault aborted the IndexedDB transaction
+after scheduling its writes when SQL contained STORAGE_ABORT_20261101. Saving an
+edited existing query showed the injected error, retained the SQL in the editor,
+and kept the dirty-tab marker. Reloading and reopening the stored query returned
+its original SQL, proving the aborted transaction did not replace it. Evidence:
+`wasm-storage-abort.png` in the session visualization directory. This simulates
+transaction abort, not actual browser quota exhaustion. The clean release build
+replaced the injected preview assets afterward. No fault hooks ship in source.

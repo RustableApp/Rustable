@@ -25,3 +25,24 @@ test('paths, collisions, names and limits are checked before mutation', () => {
   assert.throws(() => prepareChange([], {op:'save', path:'/Queries/missing/q.sql',sql:'SELECT 1'}));
   assert.equal(prepareChange([{path:'/Queries/New group',kind:'group'}],{op:'group'}).path,'/Queries/New group 2');
 });
+
+test('saving one document writes only that document and preserves unrelated entries', () => {
+  const rows = [{path:'/Queries/a.sql',kind:'sql',sql:'SELECT 1;'},
+    {path:'/Queries/b.sql',kind:'sql',sql:'SELECT 2;'}, {path:'/Queries/Empty',kind:'group'}];
+  const changed = prepareChange(rows, {op:'save',path:'/Queries/a.sql',sql:'SELECT 3;',expected:'SELECT 1;'});
+  assert.deepEqual(changed.deletes, []);
+  assert.deepEqual(changed.puts, [{path:'/Queries/a.sql',kind:'sql',sql:'SELECT 3;'}]);
+  const unchanged = prepareChange(rows, {op:'save',path:'/Queries/a.sql',sql:'SELECT 1;',expected:'SELECT 1;'});
+  assert.deepEqual(unchanged.puts, []);
+});
+test('group rename deletes only old paths and writes only moved entries', () => {
+  const rows = [{path:'/Queries/A',kind:'group'}, {path:'/Queries/A/q.sql',kind:'sql',sql:'SELECT 1;'},
+    {path:'/Queries/AB/q.sql',kind:'sql',sql:'SELECT 2;'}];
+  const changed = prepareChange(rows, {op:'rename',path:'/Queries/A',name:'C'});
+  assert.deepEqual(changed.deletes, ['/Queries/A','/Queries/A/q.sql']);
+  assert.deepEqual(changed.puts, [{path:'/Queries/C',kind:'group'}, {path:'/Queries/C/q.sql',kind:'sql',sql:'SELECT 1;'}]);
+  const applied = new Map(rows.map(row => [row.path,row]));
+  changed.deletes.forEach(path => applied.delete(path));
+  changed.puts.forEach(row => applied.set(row.path,row));
+  assert.deepEqual([...applied.values()].sort((a,b)=>a.path.localeCompare(b.path)), changed.rows.sort((a,b)=>a.path.localeCompare(b.path)));
+});

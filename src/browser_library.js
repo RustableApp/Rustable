@@ -43,7 +43,14 @@ export function prepareChange(snapshot, request) {
     if (index < 0) rows.push(row); else rows[index] = row;
   } else { throw new Error('Unknown library operation.'); }
   if (rows.length > 5000 || new TextEncoder().encode(JSON.stringify(rows)).length > LIMIT) throw new Error('Browser query library exceeds its 5,000-item or 32 MiB limit.');
-  return {rows, path};
+  const before = new Map(snapshot.map(row => [row.path, row]));
+  const after = new Set(rows.map(row => row.path));
+  const deletes = snapshot.filter(row => !after.has(row.path)).map(row => row.path);
+  const puts = rows.filter(row => {
+    const previous = before.get(row.path);
+    return !previous || previous.kind !== row.kind || previous.sql !== row.sql;
+  });
+  return {rows, path, deletes, puts};
 }
 function openLibrary() {
   return new Promise((resolve, reject) => {
@@ -91,8 +98,8 @@ export async function library_request(json) {
             result = read.result.map(({path, kind}) => ({path, kind}));
           } else {
             const changed = prepareChange(read.result, request);
-            store.clear();
-            for (const row of changed.rows) store.put(row);
+            for (const path of changed.deletes) store.delete(path);
+            for (const row of changed.puts) store.put(row);
             result = {path: changed.path};
           }
         } catch (error) { failure = error; tx.abort(); }
