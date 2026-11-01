@@ -4,7 +4,7 @@ use super::*;
 #[path = "browser_query_library.rs"]
 mod browser;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct QueryFile { pub path: PathBuf, pub name: String, pub group: String }
 #[derive(PartialEq)]
 enum Selection { File(PathBuf), Recovered(usize) }
@@ -110,20 +110,29 @@ impl Library {
     }
 }
 fn scan(root: &std::path::Path) -> Result<(Vec<QueryFile>, Vec<String>), String> {
+    scan_with_limits(root, 5000, 1000, 20_000)
+}
+fn scan_with_limits(root: &std::path::Path, max_files: usize, max_groups: usize, max_entries: usize) -> Result<(Vec<QueryFile>, Vec<String>), String> {
     if !root.exists() { return Ok((Vec::new(), Vec::new())); }
     let mut groups = Vec::new();
     let mut files = Vec::new(); let mut todo = vec![(root.to_owned(), 0)];
+    let mut entries = 0;
     while let Some((directory, depth)) = todo.pop() {
         for item in std::fs::read_dir(&directory).map_err(|e| e.to_string())? {
+            entries += 1;
+            if entries > max_entries { return Err(format!("Query folder exceeds {max_entries} directory entries. Choose a smaller folder.")); }
             let item = item.map_err(|e| e.to_string())?; let kind = item.file_type().map_err(|e| e.to_string())?;
             if kind.is_symlink() { continue; }
             let path = item.path();
-            if kind.is_dir() && depth < 8 { groups.push(path.strip_prefix(root).unwrap().to_string_lossy().into_owned()); todo.push((path, depth + 1)); }
+            if kind.is_dir() && depth < 8 {
+                if groups.len() == max_groups { return Err(format!("Query folder exceeds {max_groups} groups. Choose a smaller folder.")); }
+                groups.push(path.strip_prefix(root).unwrap().to_string_lossy().into_owned()); todo.push((path, depth + 1));
+            }
             else if kind.is_file() && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("sql")) {
                 let group = path.parent().unwrap().strip_prefix(root).unwrap().to_string_lossy().into_owned();
                 let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                if files.len() == max_files { return Err(format!("Query folder exceeds {max_files} SQL files. Choose a smaller folder.")); }
                 files.push(QueryFile { path, name, group });
-                if files.len() >= 5000 { return Err("Query folder exceeds 5,000 files. Choose a smaller folder.".into()); }
             }
         }
     }
@@ -554,6 +563,22 @@ mod tests {
             assert!(app.pending.is_none(), "Opening an already loaded query must not execute SQL");
         }
     }
+    #[test]
+    fn scan_limits_cover_groups_and_ignored_files_and_accept_exact_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Reports")).unwrap();
+        std::fs::write(root.path().join("Reports/A.sql"), "SELECT 1").unwrap();
+        std::fs::write(root.path().join("B.SQL"), "SELECT 2").unwrap();
+        let (files, groups) = scan_with_limits(root.path(), 2, 1, 3).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(groups, vec!["Reports"]);
+        assert!(scan_with_limits(root.path(), 1, 1, 3).unwrap_err().contains("SQL files"));
+        assert!(scan_with_limits(root.path(), 2, 0, 3).unwrap_err().contains("groups"));
+        std::fs::write(root.path().join("ignored.txt"), "not SQL").unwrap();
+        assert!(scan_with_limits(root.path(), 2, 1, 3).unwrap_err().contains("directory entries"));
+        assert_eq!(scan_with_limits(root.path(), 2, 1, 4).unwrap().0.len(), 2);
+    }
+
     #[test]
     fn files_are_named_and_grouped_without_reading_sql_contents() {
         let temp = tempfile::tempdir().unwrap();
