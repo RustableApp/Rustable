@@ -6,7 +6,7 @@ GitHub Actions has three separate workflows:
 - Package candidates: manually requested complete app/LSP/license bundles, retained as CI artifacts. macOS candidates are explicitly unsigned.
 - Signed release: an existing vX.Y.Z tag matching Cargo.toml. Builds every platform, signs and notarizes macOS, generates its signed Sparkle feed, and creates a GitHub draft only after all platform jobs succeed.
 
-The first release is not yet verified or published. Windows SSH transport uses Unix control sockets and needs a Windows implementation before parity can be claimed. Intel macOS, native Windows/Linux acceptance, and end-to-end Sparkle old-to-new installation remain gates. Windows ZIP and Linux tar.gz are portable packages, not OS installers or automatic-update implementations.
+The first release, v0.1.0, is published. See [its verification record](RELEASE-0.1.0-VERIFICATION.md) for build provenance and validation limits. Windows SSH transport uses Unix control sockets and needs a Windows implementation before parity can be claimed. Intel macOS, native Windows/Linux acceptance, and end-to-end Sparkle old-to-new installation remain followup verification gates for full platform parity. Windows ZIP and Linux tar.gz are portable packages, not OS installers or automatic-update implementations.
 
 ## Signing
 

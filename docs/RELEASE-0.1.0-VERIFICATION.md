@@ -18,11 +18,20 @@ This records evidence for the first release, not completion of TablePlus parity.
 - macOS DMG, macOS ZIP, appcast, and Linux archive downloaded back from the draft release match local SHA-256 hashes.
 - Updated website screenshots captured from the native QA app using sample SQLite data, not production data or a mockup.
 
-## Outstanding before publication
+## Publication — November 1, 2026
 
-- Windows repaired package job completion and archive inspection.
-- Complete checksum manifest, upload, and download verification including Windows.
-- Publish release and verify public direct download links before deploying website buttons.
+- Windows recovery run `41274333076` completed successfully. ZIP CRC/integrity checks pass across 2,025 entries; app and both language servers have PE headers, and bundled licenses are present. This is archive inspection, not a native Windows launch test.
+- `SHA256SUMS` covers all five assets. All downloaded release files pass `shasum -a 256 -c SHA256SUMS`.
+- Published [v0.1.0](https://github.com/RustableApp/Rustable/releases/tag/v0.1.0) without moving the tag or replacing a published asset.
+- Public latest-release links return HTTP 200 for all three OS downloads, the macOS update feed, and checksum manifest.
+- Website deployed to `rustable.app` through Cloudflare Workers, version `5d179275-afee-492d-9c22-856505e0c18a`. Live HTML and browser accessibility state confirm the macOS DMG, Windows ZIP, Linux tar.gz buttons and first-release limitations.
+
+## Post-tag development verification
+
+- Isolated macOS QA build: saved query single-click paints the blue selection without opening; double-click opens the selected SQL file.
+- Right-click query rename changes the file and visible name. Regression coverage verifies open-tab retargeting, preservation of unsaved SQL and rejection of existing destinations.
+- New connection and saved-query groups enter inline naming immediately. Native QA verified creation and right-click inline rename in both lists.
+- These changes remain on the development branch and are not in v0.1.0.
 
 ## Limits and followups
 
