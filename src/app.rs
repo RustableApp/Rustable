@@ -3883,8 +3883,12 @@ impl Rustable {
                         caret.rect.left_top() + egui::vec2(0.0, 4.0),
                         caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
                     ], Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
-                    egui::Popup::menu(&caret).show(|ui| {
-                        ui.set_width(170.0);
+                    egui::Popup::menu(&caret)
+                        .frame(egui::Frame::popup(ui.style()).inner_margin(4.0))
+                        .show(|ui| {
+                        ui.set_width(140.0);
+                        ui.spacing_mut().interact_size.y = 20.0;
+                        ui.spacing_mut().item_spacing.y = 1.0;
                         if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_menu_item("Run current", false, "Enter")).clicked() {
                             self.run_query(false);
                             ui.close();
