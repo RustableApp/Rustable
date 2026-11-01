@@ -344,3 +344,12 @@ bundle rebuilt successfully. In the local in-app browser, verified the visible
 three-dot icon, opened its popup, chose New group, observed the focused inline
 editor, and saved the group as Reports. Evidence: `wasm-library-menu-fixed.png`
 in the thread visualization directory. Production deployment remains pending.
+
+### Vector library icons (2026-11-01)
+
+Replaced font-dependent document and folder symbols with painted egui shapes.
+Verified outlined documents, purple folders, the selected saved query and its
+2400-row count result in the rebuilt browser workspace. Group context-menu
+rename remains available. Evidence: `wasm-library-vector-icons.png` in the
+thread visualization directory. Query-library tests: 11 passed; strict
+all-target Clippy passed; optimized WASM build passed.
