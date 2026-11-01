@@ -225,6 +225,7 @@ impl MysqlDriver {
         let row: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(
             format!("SHOW CREATE TABLE {}.{}", quote(schema), quote(table))))?;
         let definition: String = row.and_then(|row| row.get(1)).ok_or("Missing table definition")?;
+        let definition = editing::schema_signature(&definition, self.mode)?;
         // Trigger execution depends on its creation context, not just its body.
         // Capture order, definer, SQL mode and character settings as well.
         type Trigger = (String, String, String, String, u64, String, String, String, String, String);
@@ -774,6 +775,31 @@ mod tests {
         let inserted = driver.plan(&[Change::InsertRow { id:1, table:"plan_data_probe".into(), fields:vec![("id".into(),Value::Integer(2))] }]).unwrap();
         assert!(!inserted.statements[0].sql.contains("generated_value"));
         driver.conn().unwrap().query_drop("DROP TABLE plan_data_probe").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_snapshot_ignores_auto_increment_progress() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut other = Conn::new(OptsBuilder::from(&config)).unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS review_counter_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE review_counter_probe(id BIGINT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(60) DEFAULT 'AUTO_INCREMENT=22') ENGINE=InnoDB").unwrap();
+        let empty = driver.edit_schema_snapshot("rustable_test", "review_counter_probe").unwrap();
+        other.query_drop("INSERT INTO review_counter_probe(label) VALUES ('first')").unwrap();
+        assert_eq!(empty, driver.edit_schema_snapshot("rustable_test", "review_counter_probe").unwrap());
+        let original = driver.browse(&Browse { table:"review_counter_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
+        let changes = [Change::Cell { table:"review_counter_probe".into(), column:"label".into(), original, value:Value::Text("edited".into()) }];
+        let plan = driver.plan(&changes).unwrap();
+        other.query_drop("INSERT INTO review_counter_probe(label) VALUES ('unrelated')").unwrap();
+        assert_eq!(plan.schemas, driver.plan(&changes).unwrap().schemas, "unrelated inserts must not invalidate the reviewed schema");
+        other.query_drop("ALTER TABLE review_counter_probe AUTO_INCREMENT=9000").unwrap();
+        assert_eq!(plan.schemas, driver.plan(&changes).unwrap().schemas);
+        other.query_drop("ALTER TABLE review_counter_probe ALTER COLUMN label SET DEFAULT 'AUTO_INCREMENT=23'").unwrap();
+        assert_ne!(plan.schemas, driver.plan(&changes).unwrap().schemas, "literal defaults remain part of the fingerprint");
+        other.query_drop("DROP TABLE review_counter_probe").unwrap();
     }
 
     #[test]

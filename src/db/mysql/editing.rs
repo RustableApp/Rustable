@@ -105,3 +105,56 @@ pub(super) fn plan(changes: &[Change], objects: &[Object]) -> Result<ChangePlan,
     }
     Ok(plan)
 }
+
+
+/// SHOW CREATE includes the next AUTO_INCREMENT value, which is data state,
+/// not a change to the reviewed table layout. Ignore only that table option;
+/// retain column attributes, quoted text, comments and all other options.
+pub(super) fn schema_signature(ddl: &str, mode: Mode) -> Result<Vec<String>, String> {
+    use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
+    let lexer = crate::sql::mysql::Lexer(mode);
+    let tokens = Tokenizer::new(&lexer, ddl).with_unescape(false).tokenize()
+        .map_err(|error| format!("Cannot fingerprint MySQL table definition: {error}"))?
+        .into_iter().filter(|token| !matches!(token, Token::Whitespace(
+            Whitespace::Space | Whitespace::Newline | Whitespace::Tab))).collect::<Vec<_>>();
+    let (mut depth, mut body_seen, mut i) = (0usize, false, 0usize);
+    let mut signature = Vec::new();
+    while i < tokens.len() {
+        if body_seen && depth == 0
+            && matches!(&tokens[i], Token::Word(word) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("AUTO_INCREMENT"))
+            && matches!(tokens.get(i+1), Some(Token::Eq))
+            && matches!(tokens.get(i+2), Some(Token::Number(value, false)) if !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit())) {
+            i += 3;
+            continue;
+        }
+        match tokens[i] {
+            Token::LParen => { depth += 1; body_seen = true; }
+            Token::RParen => { depth = depth.checked_sub(1).ok_or("Unbalanced table definition")?; }
+            _ => {}
+        }
+        // Debug encoding preserves token kinds, quote styles and exact literal
+        // contents; serializing the vector keeps token boundaries unambiguous.
+        signature.push(format!("{:?}", tokens[i]));
+        i += 1;
+    }
+    if depth != 0 || !body_seen { return Err("Incomplete table definition".into()); }
+    Ok(signature)
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+    #[test]
+    fn auto_increment_counter_is_not_schema_but_attributes_and_literals_are() {
+        let base = "CREATE TABLE `counter` (`id` bigint AUTO_INCREMENT, `label` varchar(80) DEFAULT 'AUTO_INCREMENT=22', PRIMARY KEY (`id`)) ENGINE=InnoDB";
+        let signature = |ddl: &str| schema_signature(ddl, Mode::default()).unwrap();
+        assert_eq!(signature(base), signature(&format!("{base} AUTO_INCREMENT=27")));
+        assert_eq!(signature(&format!("{base} AUTO_INCREMENT=27")), signature(&format!("{base} AUTO_INCREMENT=999")));
+        assert_ne!(signature(base), signature(&base.replace("bigint AUTO_INCREMENT", "bigint")));
+        assert_ne!(signature(base), signature(&base.replace("'AUTO_INCREMENT=22'", "'AUTO_INCREMENT=23'")));
+        assert_ne!(signature(base), signature(&format!("{base} COMMENT='AUTO_INCREMENT=27'")));
+        assert_ne!(signature(base), signature(&format!("{base} /* AUTO_INCREMENT=27 */")));
+        assert_ne!(signature(base), signature(&base.replace("InnoDB", "MyISAM")));
+        assert!(schema_signature("CREATE TABLE broken (", Mode::default()).is_err());
+    }
+}

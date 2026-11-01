@@ -115,3 +115,18 @@ COMMIT recovery. Those are remaining implementation/acceptance gates.
 Reference semantics:
 [MySQL metadata locking](https://dev.mysql.com/doc/refman/8.0/en/metadata-locking.html)
 and [MariaDB transactions](https://mariadb.com/docs/server/reference/sql-statements/transactions/start-transaction).
+
+### Stable MySQL/MariaDB review fingerprints (2026-11-01)
+
+Review snapshots now tokenize the SHOW CREATE definition and exclude only the
+unquoted, top-level `AUTO_INCREMENT=<integer>` table option. This counter changes
+with ordinary inserts and is not a schema conflict. Column AUTO_INCREMENT
+attributes, quoted identifiers/literals, comments, engine options and trigger
+creation context remain fingerprinted. Malformed definitions fail closed.
+
+New live coverage on both engines verifies the empty-to-first-insert transition,
+an unrelated insert after review, an explicit counter advance, and detection of a
+changed default containing the literal text `AUTO_INCREMENT=23`. Lexical tests
+also retain the column attribute, comments and engine changes. All 22 MySQL driver
+tests passed independently on MySQL and MariaDB; strict all-target Clippy passed.
+This change does not enable the still-incomplete GUI apply path.
