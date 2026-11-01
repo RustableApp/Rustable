@@ -291,6 +291,12 @@ impl MysqlDriver {
         let row: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(
             format!("SHOW CREATE TABLE {}.{}", quote(schema), quote(table))))?;
         let definition: String = row.and_then(|row| row.get(1)).ok_or("Missing table definition")?;
+        // information_schema describes the persistent table even when a
+        // session-local temporary table hides it. Its engine and row metadata
+        // cannot authorize writes to that replacement (which may be MyISAM).
+        if definition.starts_with("CREATE TEMPORARY TABLE") {
+            return Err("Reviewed saves to temporary tables are not supported. Close the temporary table and review the persistent table again.".into());
+        }
         let definition = editing::schema_signature(&definition, self.mode)?;
         // Trigger execution depends on its creation context, not just its body.
         // Capture order, definer, SQL mode and character settings as well.
@@ -565,6 +571,38 @@ mod tests {
         assert!(error.contains("host") || error.contains("Windows"), "must reject SSH configuration before any database connection: {error}");
     }
 
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_rejects_temporary_table_shadowing() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut observer = Conn::new(OptsBuilder::from(&config)).unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS review_shadow_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE review_shadow_probe (id INT PRIMARY KEY, n INT) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO review_shadow_probe VALUES (1,7)").unwrap();
+        let change = Change::Cell { table:"review_shadow_probe".into(), column:"n".into(),
+            original:vec![Value::Integer(1),Value::Integer(7)], value:Value::Integer(9) };
+        let plan = driver.plan(std::slice::from_ref(&change)).unwrap();
+        for engine in ["MyISAM", "InnoDB"] {
+            // Identical names and values can hide a nontransactional replacement.
+            // A rollback after writing MyISAM would not undo the update.
+            driver.conn().unwrap().query_drop(format!("CREATE TEMPORARY TABLE review_shadow_probe (id INT PRIMARY KEY, n INT) ENGINE={engine}")).unwrap();
+            driver.conn().unwrap().query_drop("INSERT INTO review_shadow_probe VALUES (1,7)").unwrap();
+            let error = driver.plan(std::slice::from_ref(&change)).unwrap_err();
+            assert!(error.contains("temporary") || (engine == "MyISAM" && error.contains("InnoDB")), "{error}");
+            let error = driver.apply(&plan).unwrap_err();
+            assert!(error.contains("temporary") || (engine == "MyISAM" && error.contains("InnoDB")), "{error}");
+            assert_eq!(driver.transaction_state(), TransactionState::Idle);
+            assert_eq!(driver.conn().unwrap().query_first::<i32,_>("SELECT n FROM review_shadow_probe").unwrap(), Some(7));
+            assert_eq!(observer.query_first::<i32,_>("SELECT n FROM review_shadow_probe").unwrap(), Some(7));
+            driver.conn().unwrap().query_drop("DROP TEMPORARY TABLE review_shadow_probe").unwrap();
+        }
+        driver.apply(&plan).unwrap();
+        assert_eq!(observer.query_first::<i32,_>("SELECT n FROM review_shadow_probe").unwrap(), Some(9));
+        driver.conn().unwrap().query_drop("DROP TABLE review_shadow_probe").unwrap();
+    }
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_browse_view_without_definition_privilege() {

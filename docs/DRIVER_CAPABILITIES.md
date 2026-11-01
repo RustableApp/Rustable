@@ -564,3 +564,21 @@ a different primary-key name and a trigger on the persistent table, SELECT-only
 view access, locked-table cancellation, ordinary catalog/query/browse workflows,
 and invisible-column browse/export alignment. GUI editing remains gated; this
 change does not establish safe planning against shadowed persistent tables.
+
+### Reviewed-save temporary-table exclusion (2026-11-01)
+
+Reviewed schema snapshots now reject SHOW CREATE definitions for temporary tables.
+This applies both while planning and while revalidating under the apply transaction,
+so information_schema metadata for a hidden persistent table cannot authorize a
+write to its temporary replacement. GUI editing remains gated; temporary tables
+are browse/query/export targets, not reviewed-save targets yet.
+
+`live_review_rejects_temporary_table_shadowing` passed on both disposable engines.
+It creates a persistent InnoDB table and reviews an update, then shadows it with
+identically shaped MyISAM and InnoDB temporary tables. Planning and applying are
+rejected before any write; both the temporary and persistent values remain 7,
+transaction state is idle, and the original reviewed update changes the persistent
+value to 9 after the temporary replacement is removed. MariaDB independently rejects
+the MyISAM case at its engine check; MySQL's persistent catalog engine requires the
+new session-resolved definition check. The InnoDB temporary case exercises the new
+exclusion on both engines.
