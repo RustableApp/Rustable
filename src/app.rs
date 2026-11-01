@@ -726,7 +726,9 @@ impl Rustable {
 
     /// Row planners are distinct from schema rebuild/import capabilities.
     fn supports_data_changes(&self) -> bool {
-        self.engine == "SQLite" || (self.engine == "PostgreSQL" && !self.columns.is_empty())
+        self.engine == "SQLite"
+            || (matches!(self.engine.as_str(), "PostgreSQL" | "MySQL" | "MariaDB")
+                && !self.columns.is_empty())
     }
 
     fn supports_table_export(&self) -> bool {
@@ -11091,6 +11093,75 @@ mod transaction_window_tests {
 #[cfg(test)]
 mod mysql_editor_mode_tests {
     use super::*;
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_mysql_grid_edit_review_save_and_conflict() {
+        use ::mysql::prelude::Queryable;
+        fn settle(app: &mut Rustable) {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while app.pending.is_some() {
+                assert!(Instant::now() < deadline, "worker timeout");
+                app.poll();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        fn edit_label(app: &mut Rustable, text: &str) {
+            let row = app.table.rows[0].clone();
+            app.edit = Some(CellEdit {
+                bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+                table: app.browse.table.clone(), original_value: row[1].clone(), row,
+                column: "label".into(), text: text.into(), kind: 3, focus: false, inspector: false,
+            });
+            assert!(app.finish_cell_edit());
+        }
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = crate::connection::MysqlConfig {
+            host: "127.0.0.1".into(), port, user: "rustable".into(),
+            password: "rustable-test-only".into(), database: "rustable_test".into(),
+            tls: false, ..Default::default()
+        };
+        let mut observer = ::mysql::Conn::new(::mysql::OptsBuilder::default()
+            .ip_or_hostname(Some("127.0.0.1")).tcp_port(port).user(Some("rustable"))
+            .pass(Some("rustable-test-only")).db_name(Some("rustable_test"))).unwrap();
+        observer.query_drop("DROP TABLE IF EXISTS ui_edit_probe").unwrap();
+        observer.query_drop("CREATE TABLE ui_edit_probe(id INT PRIMARY KEY, label VARCHAR(40)) ENGINE=InnoDB").unwrap();
+        observer.query_drop("INSERT INTO ui_edit_probe VALUES(1,'before')").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(), Command::OpenMysql(config), None);
+        settle(&mut app);
+        app.safe = false;
+        app.open_table("ui_edit_probe".into());
+        settle(&mut app);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(app.supports_data_changes());
+        edit_label(&mut app, "日本 🦀");
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.review.is_some(), "{:?}", app.error);
+        assert!(app.review_sql.join("\n").contains("日本 🦀"));
+        assert_eq!(observer.query_first::<String,_>("SELECT label FROM ui_edit_probe").unwrap().as_deref(), Some("before"));
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(app.review.is_none());
+        assert!(app.changes.is_empty());
+        assert_eq!(app.table.rows[0][1], Value::Text("日本 🦀".into()));
+        edit_label(&mut app, "local edit");
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.review.is_some());
+        observer.query_drop("UPDATE ui_edit_probe SET label='external edit'").unwrap();
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.error.is_some());
+        assert!(app.review.is_some());
+        assert_eq!(app.changes.len(), 1);
+        assert_eq!(observer.query_first::<String,_>("SELECT label FROM ui_edit_probe").unwrap().as_deref(), Some("external edit"));
+        assert_eq!(app.worker.transaction_state(), db::TransactionState::Idle);
+        observer.query_drop("DROP TABLE ui_edit_probe").unwrap();
+    }
+
     #[test]
     fn query_reply_updates_mode_used_by_run_current() {
         let ctx = egui::Context::default();

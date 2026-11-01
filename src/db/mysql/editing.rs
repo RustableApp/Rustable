@@ -202,12 +202,44 @@ pub(super) fn require_trigger_visibility(driver: &mut MysqlDriver, schema: &str,
     Ok(())
 }
 
+// SQL-layer foreign keys in newer MySQL versions can execute child triggers.
+// Until indirect trigger effects are reviewed, require the established behavior;
+// never change the user's foreign-key or trigger settings to make a save work.
+fn require_supported_cascades(driver: &mut MysqlDriver, plan: &ChangePlan) -> Result<(), String> {
+    if driver.engine != "MySQL" || !plan.statements.iter().any(|statement|
+        statement.sql.starts_with("UPDATE ") || statement.sql.starts_with("DELETE FROM ")) {
+        return Ok(());
+    }
+    let variables: Vec<(String,String)> = driver.with_connection(|conn| conn.query(
+        "SHOW SESSION VARIABLES WHERE Variable_name IN ('innodb_native_foreign_keys','enable_cascade_triggers')"))?;
+    supported_cascade_settings(&variables)
+}
+
+fn supported_cascade_settings(variables: &[(String,String)]) -> Result<(), String> {
+    let value = |name: &str| -> Result<Option<bool>,String> {
+        variables.iter().find(|(key,_)| key.eq_ignore_ascii_case(name)).map(|(_,value)| {
+            match value.to_ascii_uppercase().as_str() {
+                "ON" | "1" => Ok(true),
+                "OFF" | "0" => Ok(false),
+                _ => Err(format!("Cannot verify MySQL cascade setting {name}.")),
+            }
+        }).transpose()
+    };
+    let native = value("innodb_native_foreign_keys")?;
+    let triggers = value("enable_cascade_triggers")?;
+    if (native.is_none() && triggers.is_none()) || native == Some(true) || triggers == Some(false) {
+        return Ok(());
+    }
+    Err("Reviewed updates and deletes do not yet support this server's cascade-trigger mode. No changes were saved; server settings were left unchanged.".into())
+}
+
 pub(super) fn apply(driver: &mut MysqlDriver, plan: &ChangePlan) -> Result<(), String> {
     driver.require_idle()?;
     if plan.statements.is_empty() { return Ok(()); }
     if plan.rebuild || plan.schemas.is_empty() || plan.preconditions.iter().any(|c| c.before_statement >= plan.statements.len()) {
         return Err("Invalid data review. Review the changes again.".into());
     }
+    require_supported_cascades(driver, plan)?;
     let checks_sql = if driver.engine == "MariaDB" {
         "SELECT @@SESSION.foreign_key_checks, @@SESSION.unique_checks, @@SESSION.check_constraint_checks"
     } else {
@@ -289,6 +321,23 @@ pub(super) fn apply(driver: &mut MysqlDriver, plan: &ChangePlan) -> Result<(), S
 #[cfg(test)]
 mod signature_tests {
     use super::*;
+    #[test]
+    fn cascade_settings_preserve_legacy_and_explicitly_disabled_trigger_behavior() {
+        let settings = |pairs: &[(&str,&str)]| pairs.iter().map(|(k,v)| (k.to_string(),v.to_string())).collect::<Vec<_>>();
+        for pairs in [
+            vec![],
+            vec![("innodb_native_foreign_keys","ON"),("enable_cascade_triggers","ON")],
+            vec![("innodb_native_foreign_keys","OFF"),("enable_cascade_triggers","OFF")],
+            vec![("enable_cascade_triggers","0")],
+        ] { assert!(supported_cascade_settings(&settings(&pairs)).is_ok(),"{pairs:?}"); }
+        for pairs in [
+            vec![("innodb_native_foreign_keys","OFF"),("enable_cascade_triggers","ON")],
+            vec![("innodb_native_foreign_keys","OFF")],
+            vec![("enable_cascade_triggers","1")],
+            vec![("enable_cascade_triggers","unknown")],
+        ] { assert!(supported_cascade_settings(&settings(&pairs)).is_err(),"{pairs:?}"); }
+    }
+
     #[test]
     fn auto_increment_counter_is_not_schema_but_attributes_and_literals_are() {
         let base = "CREATE TABLE `counter` (`id` bigint AUTO_INCREMENT, `label` varchar(80) DEFAULT 'AUTO_INCREMENT=22', PRIMARY KEY (`id`)) ENGINE=InnoDB";

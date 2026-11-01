@@ -11,7 +11,7 @@ inspection. Shared UI acceptance remains in [the parity requirements](TABLEPLUS_
 
 | Operation | SQLite | PostgreSQL | Source / limits |
 | --- | --- | --- | --- |
-| Saved connection | Existing local file; in-memory demo | Server, database, user, password, TLS and optional SSH | `src/connection_profiles.rs::ConnectionKind`; SQLite and PostgreSQL are the established adapters. Experimental MySQL/MariaDB adapters now implement connections, SQL, browsing, export and CSV import; GUI editing/administration remain gated. CSV import is locally enabled with backend and app-level verification; native visual acceptance remains pending. Redis is not implemented. |
+| Saved connection | Existing local file; in-memory demo | Server, database, user, password, TLS and optional SSH | `src/connection_profiles.rs::ConnectionKind`; SQLite and PostgreSQL are the established adapters. Experimental MySQL/MariaDB adapters now implement connections, SQL, browsing, export and CSV import; Reviewed GUI row editing and CSV import are locally enabled with backend and app-level verification; visual schema administration remains gated. Native MariaDB CSV success has been verified; native row editing acceptance remains pending. Redis is not implemented. |
 | Session reuse | One owned connection per worker | One owned client per worker | `src/db.rs::Driver`, adapter structs. Independent windows own independent sessions. |
 | SQL editor execution | Engine-prepared statements; multiple results | Split statements executed sequentially; multiple results | `sqlite.rs::script`, `postgres.rs::execute`; at most 128 statements per run. Earlier autocommitted statements survive a later error. |
 | Explicit transactions across editor runs | Implemented: BEGIN/savepoint state persists until explicit finish or an engine-driven rollback | Implemented: BEGIN persists until COMMIT/ROLLBACK or connection teardown | Native acceptance remains open; see transaction table below. |
@@ -835,3 +835,30 @@ not arbitrary child UDF effects or newer MySQL cascade-trigger modes. The direct
 edited-table expression gate remains unchanged. Next editing work should address
 server-mode compatibility and the app/native edit-review-confirm path rather than
 repeating these successful cascade tests without a relevant change.
+
+### Experimental grid editing enabled locally (2026-11-01)
+
+MySQL/MariaDB now use the shared table-cell editing and reviewed-save UI when
+column metadata is available. Existing primary-key, base-table, busy and read-only
+gates remain in effect. Backend restrictions still reject unsupported storage,
+triggers, visibility and expressions rather than silently bypassing checks.
+
+The new live application test opens a real table through the worker, stages a
+Unicode cell edit, checks that preview has not written anything, confirms the
+review and verifies refreshed grid values. It then modifies the same row from an
+independent connection and confirms that save fails, the external value survives,
+and pending local changes and review remain available. It passes on both local
+MySQL 8.4 and MariaDB 11.4 fixtures.
+
+Reviewed MySQL updates/deletes now inspect the cascade implementation settings.
+Legacy servers without these settings retain their existing behavior. Native
+InnoDB cascades or explicitly disabled cascade triggers are accepted; unknown or
+active SQL-layer cascade-trigger configurations are rejected before the write
+transaction. The application does not change either server setting. Unit coverage
+checks setting combinations; a real MySQL 9.7 configuration remains unverified.
+
+Validation: all 12 live reviewed-write regressions pass on each fixture; the new
+application test passes on each; the library suite reports 437 passed, 99 ignored;
+Clippy all-targets with warnings denied passes. Native grid editing interaction,
+newer server versions and wider effective-privilege coverage remain release gates.
+No push, deployment or release accompanies this local change.
