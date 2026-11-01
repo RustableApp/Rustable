@@ -11,7 +11,7 @@ inspection. Shared UI acceptance remains in [the parity requirements](TABLEPLUS_
 
 | Operation | SQLite | PostgreSQL | Source / limits |
 | --- | --- | --- | --- |
-| Saved connection | Existing local file; in-memory demo | Server, database, user, password, TLS and optional SSH | `src/connection_profiles.rs::ConnectionKind`; SQLite and PostgreSQL are the established adapters. Experimental MySQL/MariaDB adapters now implement connections, SQL, browsing, export and CSV import; Reviewed GUI row editing and CSV import are locally enabled with backend and app-level verification; visual schema administration remains gated. Native MariaDB CSV success has been verified; native row editing acceptance remains pending. Redis is not implemented. |
+| Saved connection | Existing local file; in-memory demo | Server, database, user, password, TLS and optional SSH | `src/connection_profiles.rs::ConnectionKind`; SQLite and PostgreSQL are the established adapters. Experimental MySQL/MariaDB adapters now implement connections, SQL, browsing, export and CSV import; Reviewed GUI row editing and CSV import are locally enabled with backend and app-level verification; visual schema administration remains gated. Native MariaDB CSV import and row insert/update/delete/error-recovery have been verified; native MySQL acceptance remains pending. Redis is not implemented. |
 | Session reuse | One owned connection per worker | One owned client per worker | `src/db.rs::Driver`, adapter structs. Independent windows own independent sessions. |
 | SQL editor execution | Engine-prepared statements; multiple results | Split statements executed sequentially; multiple results | `sqlite.rs::script`, `postgres.rs::execute`; at most 128 statements per run. Earlier autocommitted statements survive a later error. |
 | Explicit transactions across editor runs | Implemented: BEGIN/savepoint state persists until explicit finish or an engine-driven rollback | Implemented: BEGIN persists until COMMIT/ROLLBACK or connection teardown | Native acceptance remains open; see transaction table below. |
@@ -87,11 +87,11 @@ newly natively accepted as part of this audit**. Detailed prior evidence is in
 [PostgreSQL editing](POSTGRES_EDITING.md), [performance measurements](PERFORMANCE.md)
 and `PROGRESS.md`.
 
-Release remains blocked on requirements work, not on this document: additional
-engine coverage, native transaction acceptance, richer visual administration,
-multi-column sorting/filtering, native failure/close/reconnect matrices, and
-platform/version/performance acceptance are unfinished. This matrix closes the
-inventory task only; it does not close any of those implementation requirements.
+Full TablePlus parity remains incomplete: additional engine coverage, richer
+visual administration, multi-column sorting/filtering, native failure/close/reconnect
+matrices and platform/version/performance acceptance remain. These broader goals
+are not all prerequisites for an incremental driver release. The next MySQL/MariaDB
+release uses the focused gates in [release acceptance](MYSQL-MARIADB-RELEASE.md).
 
 ### MySQL/MariaDB review transaction evidence (2026-11-01)
 
