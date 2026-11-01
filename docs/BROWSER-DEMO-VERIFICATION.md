@@ -282,3 +282,24 @@ appeared. Restored boot.js and the production 60-second controller; reloading
 rendered the live workspace normally. Evidence: wasm-missing-boot-fallback.png
 in the session visualization directory. No fault code remains in preview.
 This does not close cross-browser, mobile-device or whole-tab-memory checks.
+
+## Production deployment — 2026-11-01
+
+Built app source `8a0babd` into the website bundle using the staged browser builder.
+The WASM binary is 11,173,773 bytes uncompressed. Website fallback tests: 3 passed;
+Wrangler dry run passed. Deployed Cloudflare version
+`e95b9254-52a4-4cfe-93f6-dd41cbb5a7f6`; website local commit `93f2e27`.
+No app main push or desktop release was triggered.
+
+Verified public `/demo/` and WASM responses are HTTP 200 with application/wasm,
+COOP same-origin, COEP require-corp and the expected WASM CSP. In the production
+landing-page iframe, opened SQL Query 1 and ran
+`SELECT count(*) AS customers FROM customers;` using Cmd+Enter: result 2400.
+Evidence: `wasm-production-query.png` in the existing visualization evidence directory.
+
+Also verified the latest local full workspace renders in installed Firefox,
+including the 500-row customers grid and inspector. This is startup/rendering
+coverage only, not a claim of complete Firefox workflow verification. Firefox
+required raising its test window before the native screenshot refreshed.
+Actual mobile hardware, sustained whole-tab memory measurements and deeper
+cross-engine file/cancellation workflows remain follow-up work.
