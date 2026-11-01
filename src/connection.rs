@@ -45,3 +45,107 @@ mod tests {
         assert!(!config.label().contains(&config.password));
     }
 }
+
+/// MySQL/MariaDB credentials exist only for the live session, never persisted
+/// or included in Debug output. Both engines use this wire configuration.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct MysqlConfig {
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub user: String,
+    pub password: String,
+    pub tls: bool,
+    pub root_certificate: Option<std::path::PathBuf>,
+    pub connect_timeout: std::time::Duration,
+    pub read_timeout: std::time::Duration,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for MysqlConfig {
+    fn default() -> Self {
+        Self {
+            host: "localhost".into(),
+            port: 3306,
+            database: String::new(),
+            user: "root".into(),
+            password: String::new(),
+            tls: true,
+            root_certificate: None,
+            connect_timeout: std::time::Duration::from_secs(5),
+            read_timeout: std::time::Duration::from_secs(120),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for MysqlConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}:{}/{}", self.user, self.host, self.port, self.database)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<&MysqlConfig> for mysql::OptsBuilder {
+    fn from(config: &MysqlConfig) -> Self {
+        let tls = config.tls.then(|| mysql::SslOpts::default()
+            .with_root_cert_path(config.root_certificate.clone()));
+        Self::default()
+            .ip_or_hostname(Some(config.host.clone()))
+            .tcp_port(config.port)
+            .user(Some(config.user.clone()))
+            .pass(Some(config.password.clone()))
+            .db_name((!config.database.is_empty()).then(|| config.database.clone()))
+            // Don't silently switch transports and bypass the requested TLS policy.
+            .prefer_socket(false)
+            .ssl_opts(tls)
+            .tcp_connect_timeout(Some(config.connect_timeout))
+            .read_timeout(Some(config.read_timeout))
+            .write_timeout(Some(std::time::Duration::from_secs(10)))
+            .max_allowed_packet(Some(32 * 1024 * 1024))
+            .stmt_cache_size(32)
+            .init(vec!["SET NAMES utf8mb4"])
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod mysql_tests {
+    use super::*;
+    #[test]
+    fn configuration_preserves_tls_identity_and_bounds_transport() {
+        let config = MysqlConfig { password: "secret-sentinel".into(), ..Default::default() };
+        let opts = mysql::Opts::from(mysql::OptsBuilder::from(&config));
+        assert!(opts.get_ssl_opts().is_some());
+        assert!(!opts.get_ssl_opts().unwrap().skip_domain_validation());
+        assert!(!opts.get_ssl_opts().unwrap().accept_invalid_certs());
+        assert!(!opts.get_prefer_socket());
+        assert_eq!(opts.get_db_name(), None);
+        assert_eq!(opts.get_tcp_port(), 3306);
+        assert_eq!(opts.get_max_allowed_packet(), Some(32 * 1024 * 1024));
+        assert!(!config.to_string().contains("secret-sentinel"));
+        assert_eq!(config.to_string(), "root@localhost:3306/");
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_config_connects_with_utf8_and_rejects_untrusted_tls() {
+        use mysql::prelude::Queryable;
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let mut config = MysqlConfig {
+            host: "127.0.0.1".into(), port, user: "rustable".into(),
+            password: "rustable-test-only".into(), database: "rustable_test".into(),
+            ..Default::default()
+        };
+        // Test servers have no publicly trusted certificate. Never fall back to plaintext.
+        assert!(mysql::Conn::new(mysql::OptsBuilder::from(&config)).is_err());
+        config.tls = false; // Explicit plaintext only for these loopback fixtures.
+        let mut conn = mysql::Conn::new(mysql::OptsBuilder::from(&config)).unwrap();
+        let charset: String = conn.query_first("SELECT @@character_set_results").unwrap().unwrap();
+        assert_eq!(charset, "utf8mb4");
+        let value: String = conn.query_first("SELECT '日本 🦀'").unwrap().unwrap();
+        assert_eq!(value, "日本 🦀");
+        assert_eq!(conn.transaction_status(), Some(false));
+    }
+}

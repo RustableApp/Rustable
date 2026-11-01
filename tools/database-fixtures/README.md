@@ -68,3 +68,20 @@ write rollback behavior and must not be hidden by a generic cancellation path.
 A 100ms read-timeout test verifies unknown status and discards the connection;
 never retry an uncertain write automatically or reuse an unsynchronized stream.
 These checks passed independently on both fixture engines on 2026-11-01.
+
+Connection configuration checks:
+
+```sh
+RUSTABLE_MYSQL_TEST_PORT=43316 mise exec -- cargo test --lib connection::mysql_tests -- --include-ignored
+RUSTABLE_MYSQL_TEST_PORT=43317 mise exec -- cargo test --lib connection::mysql_tests -- --include-ignored
+```
+
+`MysqlConfig` is ephemeral (no serialization or Debug implementation), with a
+password-free Display label. TLS verifies certificates and hostnames by default;
+TCP is explicit so local socket discovery cannot bypass that policy. An optional
+root-certificate path is supported. Defaults are 5s connect, 120s read and 10s
+write deadlines, 32 MiB packets and 32 cached statements. Connection setup requests
+utf8mb4, without starting a transaction. Both servers reject the default verified
+TLS attempt against these untrusted/non-TLS fixtures and pass explicitly selected
+loopback plaintext plus Unicode/emoji and idle-state checks. Positive verified-TLS
+and custom-root/hostname-mismatch coverage remain outstanding.
