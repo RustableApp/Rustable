@@ -63,3 +63,5 @@ tokio-postgres = { path = "vendor/tokio-postgres" }
 eframe = { path = "vendor/eframe" }
 
 egui_extras = { path = "vendor/egui_extras" }
+
+mysql = { path = "vendor/mysql" }

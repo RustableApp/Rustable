@@ -66,3 +66,10 @@ accessor reads a protocol flag. SQL-prefix guesses cannot accurately track
 implicit commits or errors. Investigate a minimal accessor patch/upstream API
 before wiring connection replacement; cancellation and connection-loss semantics
 also need live tests. Do not label these engines officially supported yet.
+
+The transaction-status API gap is now addressed by a minimal vendored mysql
+patch (documented in vendor/README.md). The first live attempt revealed that
+upstream ping discards its OK packet; it now parses the status. A validity flag
+avoids stale status after sending a command or receiving a server error. Live
+checks cover ordinary errors inside transactions, implicit DDL commits and a
+killed connection; integration into the Rustable driver remains outstanding.

@@ -108,3 +108,26 @@ continues to paint through the body, but its resize interaction rectangle covers
 only the header, with horizontal grab padding. Existing header drags can continue
 outside the header. Rustable's grid interaction regression checks both body
 non-resizing and persisted header resizing.
+
+## MySQL protocol transaction status
+
+`mysql 28.0.4` is copied from crates.io, retaining its upstream MIT/Apache-2.0
+licenses and source from https://github.com/blackbeam/rust-mysql-simple.
+The additive `Conn::transaction_status() -> Option<bool>` reports the protocol's
+`SERVER_STATUS_IN_TRANS` bit after a consumed OK/EOF packet. A separate validity
+flag is cleared when sending a command and on server ERR packets, so errors
+cannot masquerade as idle or retain an earlier successful state. Read it only
+after draining all result sets. Transport errors must still mark the app's
+connection disconnected; an unknown status is not permission to replace it.
+
+Upstream `ping()` discards its response. Our patch parses that OK packet so a
+caller can refresh unknown transaction status without starting, committing or
+rolling back a transaction. This extra exchange is needed after an error, not
+on every successful read. A failed refresh must leave connection state unknown
+or disconnected. The existing status flags and result-set parsing are unchanged.
+
+The opted-in `sql::mysql::server_tests` test verifies both MySQL and MariaDB:
+idle/read, explicit transaction, failed statement -> unknown -> ping -> active,
+rollback, implicit DDL commit, and server-killed connection -> unknown. Run via
+tools/database-fixtures/README.md. Preserve these semantics when updating the
+vendored crate, or remove the patch when upstream exposes an equivalent API.

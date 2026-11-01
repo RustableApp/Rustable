@@ -187,11 +187,12 @@ mod server_tests {
             .pass(Some("rustable-test-only"))
             .db_name(Some("rustable_test"))
             .prefer_socket(false);
-        let mut conn = Conn::new(options).unwrap();
+        let mut conn = Conn::new(options.clone()).unwrap();
         let version: String = conn.query_first("SELECT VERSION()").unwrap().unwrap();
         eprintln!("server: {version}");
         // The protocol connection is reused; no implicit BEGIN is needed for reads.
         let id: u64 = conn.query_first("SELECT CONNECTION_ID()").unwrap().unwrap();
+        assert_eq!(conn.transaction_status(), Some(false));
         conn.query_drop("DROP PROCEDURE IF EXISTS rustable_delimiter_probe").unwrap();
         let script = "DELIMITER $$\nCREATE PROCEDURE rustable_delimiter_probe() BEGIN SELECT '日本' AS label; SELECT 9007199254740993 AS exact_integer; END$$\nDELIMITER ;\nSELECT 3;";
         let routine = editor_ranges(script, Mode::default()).remove(0);
@@ -215,9 +216,26 @@ mod server_tests {
         conn.query_drop("CREATE TEMPORARY TABLE rustable_tx_probe (value INT) ENGINE=InnoDB").unwrap();
         conn.query_drop("INSERT INTO rustable_tx_probe VALUES (7)").unwrap();
         conn.query_drop("START TRANSACTION").unwrap();
+        assert_eq!(conn.transaction_status(), Some(true));
         conn.query_drop("UPDATE rustable_tx_probe SET value=8").unwrap();
+        // ERR packets have no transaction flags. Do not mistake unknown for idle.
+        assert!(conn.query_drop("SELECT * FROM rustable_missing_table_93847").is_err());
+        assert_eq!(conn.transaction_status(), None);
+        conn.ping().unwrap();
+        assert_eq!(conn.transaction_status(), Some(true));
         conn.query_drop("ROLLBACK").unwrap();
+        assert_eq!(conn.transaction_status(), Some(false));
         assert_eq!(conn.query_first::<i64, _>("SELECT value FROM rustable_tx_probe").unwrap(), Some(7));
+        conn.query_drop("START TRANSACTION").unwrap();
+        conn.query_drop("UPDATE rustable_tx_probe SET value=9").unwrap();
+        // Regular DDL implicitly commits, unlike CREATE TEMPORARY TABLE.
         conn.query_drop("DROP PROCEDURE rustable_delimiter_probe").unwrap();
+        assert_eq!(conn.transaction_status(), Some(false));
+        conn.query_drop("ROLLBACK").unwrap();
+        assert_eq!(conn.query_first::<i64, _>("SELECT value FROM rustable_tx_probe").unwrap(), Some(9));
+        let mut killer = Conn::new(options).unwrap();
+        killer.query_drop(format!("KILL CONNECTION {id}")).unwrap();
+        assert!(conn.query_drop("SELECT 1").is_err());
+        assert_eq!(conn.transaction_status(), None);
     }
 }
