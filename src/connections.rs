@@ -46,6 +46,23 @@ enum FieldStatus {
     Failed(String),
 }
 impl Manager {
+    pub(super) fn reveal_profile(&mut self, id: ProfileId, profiles: &crate::connection_profiles::ConnectionProfiles) {
+        let Some(profile) = profiles.profile(id) else {
+            self.error = Some("This connection's saved profile was removed. The live session is still connected.".into());
+            return;
+        };
+        let already_selected = self.draft.as_ref().is_some_and(|draft| draft.id == id);
+        if !already_selected && (self.dirty(profiles) || !self.password.is_empty()) {
+            self.error = Some("Save or discard the current connection form before selecting the active connection.".into());
+            return;
+        }
+        if !already_selected {
+            self.select(profile.clone());
+        }
+        self.search.clear();
+        self.collapsed_groups.remove(&profile.group);
+        self.scroll_to_profile = Some(id);
+    }
     fn queue_credential(&mut self, id: ProfileId, operation: CredentialOperation) {
         let kind = match &operation {
             CredentialOperation::Read => CredentialKind::Read(self.password_revision),
@@ -2422,6 +2439,44 @@ mod tests {
                 .is_empty()
         );
     }
+    #[test]
+    fn active_profile_reveal_uses_identity_and_preserves_unfinished_forms() {
+        let mut app = app();
+        let connection = ConnectionKind::SQLite { path: PathBuf::from("same.sqlite") };
+        let first = app.prefs.saved_connections.add_profile(Profile::draft("First".into(), connection.clone())).unwrap();
+        let mut second = Profile::draft("Second".into(), connection);
+        let group = app.prefs.saved_connections.add_group("Servers".into()).unwrap();
+        second.group = Some(group);
+        let second = app.prefs.saved_connections.add_profile(second).unwrap();
+        app.connection_manager.select(app.prefs.saved_connections.profile(first).unwrap().clone());
+        app.connection_manager.search = "hidden".into();
+        app.connection_manager.collapsed_groups.insert(Some(group));
+        app.select_manager_profile(Some(second));
+        assert_eq!(app.connection_manager.draft.as_ref().unwrap().id, second);
+        assert!(app.connection_manager.search.is_empty());
+        assert!(!app.connection_manager.collapsed_groups.contains(&Some(group)));
+        assert_eq!(app.connection_manager.scroll_to_profile, Some(second));
+        assert!(app.window_requests.is_empty());
+
+        app.connection_manager.draft.as_mut().unwrap().name = "Unfinished".into();
+        app.select_manager_profile(Some(first));
+        assert_eq!(app.connection_manager.draft.as_ref().unwrap().name, "Unfinished");
+        assert!(app.connection_manager.error.as_ref().unwrap().contains("Save or discard"));
+        app.select_manager_profile(Some(second));
+        assert_eq!(app.connection_manager.draft.as_ref().unwrap().name, "Unfinished");
+        app.connection_manager.select(app.prefs.saved_connections.profile(second).unwrap().clone());
+        app.connection_manager.password = "session-only".into();
+        app.select_manager_profile(Some(first));
+        assert_eq!(app.connection_manager.password, "session-only");
+        assert_eq!(app.connection_manager.draft.as_ref().unwrap().id, second);
+        app.select_manager_profile(None);
+        assert_eq!(app.connection_manager.draft.as_ref().unwrap().id, second);
+        app.select_manager_profile(Some(ProfileId(u64::MAX)));
+        assert!(app.connection_manager.error.as_ref().unwrap().contains("removed"));
+        assert_eq!(app.connection_manager.draft.as_ref().unwrap().id, second);
+        assert!(app.pending.is_none());
+    }
+
     #[test]
     fn same_endpoint_profiles_keep_identity_styles_and_failed_connect_preserves_active_session() {
         fn settle(app: &mut Rustable) {

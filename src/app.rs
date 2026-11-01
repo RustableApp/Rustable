@@ -554,6 +554,15 @@ impl Rustable {
     pub(crate) fn open_connection_manager(&mut self) {
         self.connections = true;
     }
+    pub(crate) fn active_profile_id(&self) -> Option<crate::connection_profiles::ProfileId> {
+        self.active_profile.as_ref().map(|profile| profile.id)
+    }
+    pub(crate) fn select_manager_profile(&mut self, id: Option<crate::connection_profiles::ProfileId>) {
+        if let Some(id) = id {
+            self.connection_manager.reveal_profile(id, &self.prefs.saved_connections);
+        }
+    }
+
     pub(crate) fn window_error(&mut self, message: &str) {
         self.error = Some(message.into());
     }
@@ -2293,6 +2302,9 @@ impl Rustable {
             ))
             .clicked()
         {
+            if !self.child_window {
+                self.select_manager_profile(self.active_profile_id());
+            }
             self.connections = true;
         }
         if self.pending.is_some()

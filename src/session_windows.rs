@@ -138,7 +138,10 @@ impl eframe::App for SessionWindows {
                     child_ctx.request_repaint();
                 }
                 shared_changed |= self.root.merge_window_preferences(app);
-                if app.take_manager_request() { manager_requested = true; }
+                if app.take_manager_request() {
+                    self.root.select_manager_profile(app.active_profile_id());
+                    manager_requested = true;
+                }
                 if child_ctx.input(|input| input.viewport().close_requested()) {
                     if app.close_blocked() {
                         child_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
