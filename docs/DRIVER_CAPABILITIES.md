@@ -762,3 +762,30 @@ strict all-target Clippy passes.
 Native preview/mapping/review screenshots, cancellation interaction, and version
 compatibility remain release acceptance work. This is experimental functionality,
 not a declaration of official MySQL/MariaDB parity.
+
+### Native MariaDB CSV import acceptance (2026-11-01)
+
+Built source 95cce29 with mise/Cargo and replaced only the disposable
+/tmp/Rustable Acceptance.app binary. Connected to localhost:43319, rustable_test,
+using Verify Full TLS and the fixture CA; password remembering remained off.
+The production connection was not opened.
+
+Created native_csv_acceptance with id/label and a stored doubled=id*2 column.
+Opened /tmp/rustable-native-import.csv through the native file picker. The CSV
+headers were label,id (opposite table order), with Rusty crab plus a crab emoji
+and Japanese text. Selecting the destination automatically mapped both headers;
+the generated column was omitted. The review displayed syntax-highlighted,
+database-qualified INSERTs with the actual values. Cmd+Enter confirmed, dismissed
+both dialogs and refreshed the grid to two rows with doubled values 2 and 4.
+
+Evidence under the session visualization directory:
+- native-mariadb-csv-mapping.png
+- native-mariadb-csv-review.png
+- native-mariadb-csv-imported.png
+
+The acceptance app remains connected to the disposable fixture with these two
+rows available for follow-up. Native cancellation/error interaction and MySQL
+visual acceptance remain outstanding (both engines already have app integration
+and driver failure/cancellation coverage). Discoverability issue observed: the
+CSV entry point is currently named Preview CSV file under Export; improve the
+import/export entry point before declaring the workflow polished.
