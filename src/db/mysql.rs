@@ -11,6 +11,8 @@ struct MysqlDriver {
     engine: &'static str,
     schemas: SchemaCatalog,
     mode: Mode,
+    mode_tracking: bool,
+    session_dirty: bool,
 }
 
 impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
@@ -28,6 +30,8 @@ impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
             engine: if version.contains("MariaDB") { "MariaDB" } else { "MySQL" },
             schemas: SchemaCatalog { names, selected: database },
             mode: parse_mode(&sql_mode),
+            mode_tracking: true,
+            session_dirty: false,
         }))
     }
 }
@@ -39,6 +43,21 @@ fn parse_mode(value: &str) -> Mode {
         no_backslash_escapes: modes.iter().any(|s| s.eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES")),
     }
 }
+// Session-mutating statements need authoritative refresh even if the user has
+// disabled protocol tracking. Ordinary SELECT/DML keeps the single-query path.
+fn may_change_session(mut sql: &str) -> bool {
+    loop {
+        sql = sql.trim_start();
+        if sql.starts_with("/*!") || sql.starts_with("/*M!") { return true; }
+        if sql.starts_with("/*") && let Some(end) = sql.find("*/") { sql = &sql[end + 2..]; continue; }
+        if (sql.starts_with('#') || (sql.starts_with("--") && sql.as_bytes().get(2).is_some_and(u8::is_ascii_whitespace)))
+            && let Some(end) = sql.find('\n') { sql = &sql[end + 1..]; continue; }
+        break;
+    }
+    matches!(sql.split(|c: char| !c.is_ascii_alphabetic()).next().unwrap_or("").to_ascii_uppercase().as_str(),
+        "SET" | "CALL" | "EXECUTE" | "USE")
+}
+
 fn quote(name: &str) -> String { format!("`{}`", name.replace('`', "``")) }
 
 /// The scoped watcher cannot outlive a query and cancel the next operation.
@@ -78,6 +97,24 @@ fn with_cancel<T>(config: &MysqlConfig, id: u32, cancel: &AtomicBool, run: impl 
 }
 
 impl MysqlDriver {
+    fn refresh_session(&mut self) -> Result<(), String> {
+        let result = self.conn()?.query_first::<(String, String, Option<String>), _>(
+            "SELECT @@SESSION.sql_mode, @@SESSION.session_track_system_variables, DATABASE()");
+        match result {
+            Ok(Some((mode, tracking, schema))) => {
+                self.mode = parse_mode(&mode);
+                self.mode_tracking = tracking.split(',').any(|name| name.trim() == "*" || name.trim().eq_ignore_ascii_case("sql_mode"));
+                self.schemas.selected = schema;
+                self.session_dirty = false;
+                Ok(())
+            }
+            Ok(None) => Err("Missing MySQL session state".into()),
+            Err(error) => {
+                if error.is_connectivity_error() { self.connection = None; }
+                Err(error.to_string())
+            }
+        }
+    }
     fn conn(&mut self) -> Result<&mut Conn, String> {
         self.connection.as_mut().ok_or_else(|| "MySQL connection is disconnected".into())
     }
@@ -188,6 +225,10 @@ impl Driver for MysqlDriver {
         let mut offset = 0;
         let mut delimiter = ";".to_owned();
         while offset < sql.len() {
+            if cancel.load(Ordering::Relaxed) { report.error = Some("Cancelled before next statement".into()); break; }
+            if (self.session_dirty || !self.mode_tracking) && let Err(error) = self.refresh_session() {
+                report.error = Some(error); break;
+            }
             let (range, consumed, next_delimiter) = match crate::sql::mysql::next_statement(&sql[offset..], self.mode, &delimiter) {
                 Ok(next) => next,
                 Err(error) => { report.error = Some(error); break; }
@@ -201,6 +242,7 @@ impl Driver for MysqlDriver {
                 break;
             }
             if cancel.load(Ordering::Relaxed) { report.error = Some("Cancelled before next statement".into()); break; }
+            self.session_dirty = may_change_session(&sql[range.clone()]);
             let Some(conn) = self.connection.as_mut() else { report.error = Some("MySQL connection is disconnected".into()); break; };
             let (outcome, cancellation_error) = with_cancel(&self.config, conn.connection_id(), cancel, || {
                 conn.query_iter(&sql[range]).map(|results|
@@ -229,6 +271,9 @@ impl Driver for MysqlDriver {
                                         if variable.name_str().eq_ignore_ascii_case("sql_mode") { self.mode = parse_mode(&variable.value_str()); }
                                     }
                                 }
+                                Ok(::mysql::session_state_change::SessionStateChange::Schema(schema)) => {
+                                    self.schemas.selected = Some(schema.as_str().into_owned());
+                                }
                                 Ok(_) => {}
                                 Err(error) => { report.error = Some(format!("Invalid MySQL session-state update: {error}")); }
                             }
@@ -242,6 +287,9 @@ impl Driver for MysqlDriver {
                 if result.error.is_some() { report.error = result.error; }
                 if disconnected { self.connection = None; }
                 break;
+            }
+            if self.session_dirty && let Err(error) = self.refresh_session() {
+                report.error = Some(error); break;
             }
         }
         report.elapsed = started.elapsed();
@@ -417,6 +465,16 @@ mod tests {
         let result = driver.execute(r#"SELECT 2 AS "b\";"#, false, &cancel);
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.grids[0].columns, ["b\\"]);
+        let result = driver.execute(r#"SET session_track_system_variables=''; SET sql_mode='NO_BACKSLASH_ESCAPES'; SELECT 'c\'; SET sql_mode=''; SELECT 'c\'d';"#, false, &cancel);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.grids[2].rows, [vec![Value::Text("c\\".into())]]);
+        assert_eq!(result.grids[4].rows, [vec![Value::Text("c'd".into())]]);
+        let result = driver.execute("SET session_track_system_variables='sql_mode'; SET session_track_schema=OFF; USE information_schema;", false, &cancel);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(driver.schema_catalog().selected.as_deref(), Some("information_schema"));
+        let result = driver.execute("-- leading comment\nUSE rustable_test;", false, &cancel);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(driver.schema_catalog().selected.as_deref(), Some("rustable_test"));
     }
 
 }

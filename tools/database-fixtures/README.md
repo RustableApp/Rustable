@@ -102,7 +102,7 @@ to switch databases during a transaction. SQL result byte budgets span statement
 
 Before exposing this driver in the connection picker: extend cancellation to
 metadata/table browsing,
-finish session tracking/editor-mode integration and tracking-disable recovery,
+finish editor-mode integration and fault coverage for session refresh,
 implement table-edit concurrency checks and commits, optimize metadata round trips,
 add SSH/TLS fixtures, and connect profile storage/editor dialect state. Safe-mode
 requests currently return an explicit unsupported error. Stream collection preserves typed connectivity classification: ordinary SQL
@@ -158,6 +158,19 @@ regression combines custom delimiters with a mode change and delimiter reset.
 A malformed later statement stops at that point; earlier autocommitted statements
 remain executed, matching the sequential execution model.
 
-Still required: propagation of active mode into editor selection/completion,
-handling deliberate changes to session_track_system_variables, and SQL USE/schema
-tracking. These are prerequisites for exposing the driver as supported.
+Still required: propagation of active mode into editor selection/completion.
+This is a prerequisite for exposing the driver as supported.
+
+
+Session-changing SET/CALL/EXECUTE/USE statements now refresh authoritative mode,
+tracking policy and current database. Leading ordinary comments are skipped;
+executable comments conservatively refresh. When sql_mode tracking is disabled,
+the driver refreshes before scanning each following statement rather than parsing
+with stale modes. Re-enabling tracking restores the ordinary-query fast path.
+Schema notifications also update the selected database. Live tests on both
+engines disable tracking, toggle quoting modes, re-enable tracking, disable schema
+tracking, and issue USE with and without a leading comment. Selected-database
+state and query values match the server. Normal SELECT/DML with tracking enabled
+adds no session-refresh exchange. A failed session-changing command leaves the
+state dirty for refresh before the next run; immediate UI mode propagation and
+session-refresh failure coverage still need integration.
