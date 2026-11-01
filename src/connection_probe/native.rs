@@ -19,7 +19,8 @@ pub(super) fn run(connection: ConnectionKind, password: String, cancel: &AtomicB
             }
         }
         ConnectionKind::Mysql(profile) | ConnectionKind::MariaDb(profile) => {
-            let fields = vec![Host, Port, Database, User, Password, Tls];
+            let mut fields = vec![Host, Port, Database, User, Password];
+            if profile.tls { fields.push(Tls); }
             emit(Event::Running(fields.clone()));
             let mut config = profile.with_password(password);
             config.connect_timeout = std::time::Duration::from_secs(5);
@@ -248,6 +249,23 @@ fn describe_error(error: &postgres::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB plaintext fixture"]
+    fn live_mysql_plaintext_probe_does_not_mark_tls_successful() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let profile = crate::connection_profiles::MysqlProfile {
+            host: "127.0.0.1".into(), port, user: "rustable".into(), database: "rustable_test".into(), tls: false,
+            ..Default::default()
+        };
+        let events = std::cell::RefCell::new(Vec::new());
+        let connection = if port == 43317 { ConnectionKind::MariaDb(profile) } else { ConnectionKind::Mysql(profile) };
+        run(connection, "rustable-test-only".into(), &AtomicBool::new(false), &|event| events.borrow_mut().push(event));
+        let events = events.into_inner();
+        assert!(events.iter().any(|event| matches!(event, Event::Success(fields) if fields.contains(&ProbeField::Database))));
+        assert!(!events.iter().any(|event| matches!(event, Event::Failed(_, _))));
+        assert!(!events.iter().any(|event| matches!(event, Event::Success(fields) | Event::Running(fields) if fields.contains(&ProbeField::Tls))));
+    }
     use super::*;
     #[test]
     #[ignore = "requires opt-in disposable local PostgreSQL QA fixture"]

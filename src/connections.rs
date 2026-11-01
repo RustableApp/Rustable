@@ -102,7 +102,16 @@ impl Manager {
                 self.probe_status
                     .retain(|(_, status)| !matches!(status, FieldStatus::Running));
                 if self.probe_message.is_none() {
-                    self.probe_message = Some("Connection test succeeded".into());
+                    let transport = self.draft.as_ref().and_then(|draft| match &draft.connection {
+                        ConnectionKind::Mysql(profile) | ConnectionKind::MariaDb(profile) => Some(profile.tls),
+                        ConnectionKind::Postgres(profile) => Some(profile.tls),
+                        ConnectionKind::SQLite { .. } => None,
+                    });
+                    self.probe_message = Some(match transport {
+                        Some(true) => "Connection test succeeded · TLS verified",
+                        Some(false) => "Connection test succeeded · Database TLS disabled",
+                        None => "Connection test succeeded",
+                    }.into());
                 }
                 return;
             }
@@ -1314,6 +1323,26 @@ mod tests {
         }
         fn flush(&mut self) {}
     }
+    #[test]
+    fn connection_test_summary_distinguishes_tls_and_preserves_failures() {
+        for tls in [false, true] {
+            for kind in [
+                ConnectionKind::Mysql(crate::connection_profiles::MysqlProfile { tls, ..Default::default() }),
+                ConnectionKind::MariaDb(crate::connection_profiles::MysqlProfile { tls, ..Default::default() }),
+                ConnectionKind::Postgres(PostgresProfile { tls, ..Default::default() }),
+            ] {
+                let mut manager = Manager { draft: Some(Profile::draft("Test".into(), kind)), ..Default::default() };
+                manager.apply_probe_event(ProbeEvent::Success(vec![ProbeField::Host]));
+                manager.apply_probe_event(ProbeEvent::Finished);
+                assert_eq!(manager.probe_message.as_deref(), Some(if tls { "Connection test succeeded · TLS verified" } else { "Connection test succeeded · Database TLS disabled" }));
+                manager.probe_message = None;
+                manager.apply_probe_event(ProbeEvent::Failed(vec![ProbeField::Tls], "Certificate rejected".into()));
+                manager.apply_probe_event(ProbeEvent::Finished);
+                assert_eq!(manager.probe_message.as_deref(), Some("Certificate rejected"));
+            }
+        }
+    }
+
     #[test]
     fn mysql_and_mariadb_profiles_open_windows_without_persisting_passwords() {
         for maria in [false, true] {
