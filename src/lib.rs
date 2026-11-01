@@ -65,3 +65,12 @@ pub fn browser_database_command(bytes: &[u8]) -> Vec<u8> {
 pub fn browser_background_job(bytes: &[u8]) -> Vec<u8> {
     browser_jobs::execute(bytes)
 }
+
+/// Present browser errors without leaking implementation stack traces into UI.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn browser_error(error: wasm_bindgen::JsValue) -> String {
+    let message = error.as_string().or_else(|| {
+        js_sys::Reflect::get(&error, &"message".into()).ok().and_then(|value| value.as_string())
+    }).filter(|message| !message.trim().is_empty()).unwrap_or_else(|| "Browser operation failed".into());
+    message.chars().take(500).collect()
+}

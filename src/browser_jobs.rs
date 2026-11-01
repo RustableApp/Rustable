@@ -85,7 +85,7 @@ pub(crate) fn start(
     let options = web_sys::WorkerOptions::new();
     options.set_type(web_sys::WorkerType::Module);
     let worker = web_sys::Worker::new_with_options("./background-worker.js", &options)
-        .map_err(|e| format!("Could not start browser worker: {e:?}"))?;
+        .map_err(|e| format!("Could not start browser worker: {}", crate::browser_error(e)))?;
     ctx.request_repaint_after(std::time::Duration::from_secs(10));
     let callback = Rc::new(RefCell::new(reply));
     let completed = callback.clone();
@@ -114,6 +114,6 @@ pub(crate) fn start(
     handle
         .worker
         .post_message(&js_sys::Uint8Array::from(bytes.as_slice()))
-        .map_err(|e| format!("Could not send job: {e:?}"))?;
+        .map_err(|e| format!("Could not send job: {}", crate::browser_error(e)))?;
     Ok(handle)
 }

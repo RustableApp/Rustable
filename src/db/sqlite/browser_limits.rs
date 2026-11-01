@@ -40,4 +40,21 @@ mod tests {
         connection.execute_batch("ROLLBACK").unwrap();
         assert_eq!(connection.query_row("SELECT count(*) FROM t", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
+    #[test]
+    fn interrupted_write_rolls_back_transaction_and_connection_recovers() {
+        let connection = Connection::open_in_memory().unwrap();
+        configure(&connection).unwrap();
+        connection.execute_batch("CREATE TABLE t(value); INSERT INTO t VALUES (7); BEGIN; UPDATE t SET value=99;").unwrap();
+        connection.progress_handler(1_000, Some(|| true)).unwrap();
+        let error = connection.execute_batch(
+            "UPDATE t SET value=(WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n)"
+        ).unwrap_err();
+        assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::OperationInterrupted));
+        connection.progress_handler(0, None::<fn() -> bool>).unwrap();
+        assert!(connection.is_autocommit());
+        assert_eq!(connection.query_row("SELECT value FROM t", [], |row| row.get::<_, i64>(0)).unwrap(), 7);
+        connection.execute_batch("BEGIN; UPDATE t SET value=8; COMMIT;").unwrap();
+        assert_eq!(connection.query_row("SELECT value FROM t", [], |row| row.get::<_, i64>(0)).unwrap(), 8);
+    }
+
 }

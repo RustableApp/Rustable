@@ -104,7 +104,7 @@ impl Worker {
         }) as Box<dyn FnMut(_)>);
         let options = web_sys::WorkerOptions::new();
         options.set_type(web_sys::WorkerType::Module);
-        let worker = web_sys::Worker::new_with_options("./database-worker.js", &options).map_err(|e| format!("Could not start database worker: {e:?}"));
+        let worker = web_sys::Worker::new_with_options("./database-worker.js", &options).map_err(|e| format!("Could not start database worker: {}", crate::browser_error(e)));
         let mut cancellation = None;
         if let Ok(worker) = &worker {
             worker.set_onmessage(Some(message.as_ref().unchecked_ref()));
@@ -128,7 +128,7 @@ impl Worker {
         validate_command(&command)?;
         if let Some(flag) = &self.cancellation { let _ = js_sys::Atomics::store(flag, 0, 0); }
         let bytes = codec().serialize(&command).map_err(|e| format!("Operation is not available in this browser session: {e}"))?;
-        self.worker.as_ref().map_err(Clone::clone)?.post_message(&js_sys::Uint8Array::from(bytes.as_slice())).map_err(|e| format!("Could not send database command: {e:?}"))?;
+        self.worker.as_ref().map_err(Clone::clone)?.post_message(&js_sys::Uint8Array::from(bytes.as_slice())).map_err(|e| format!("Could not send database command: {}", crate::browser_error(e)))?;
         self.started.set(Some(web_time::Instant::now()));
         self.ctx.request_repaint_after(Duration::from_secs(10));
         Ok(())

@@ -27,14 +27,14 @@ impl Rustable {
             let name = tab.source_name.clone().unwrap_or_else(|| "query.sql".into());
             let result = if tab.sql.len() as u64 > crate::script_file::MAX_BYTES {
                 Err("SQL editor files are limited to 8 MiB".into())
-            } else { download_sql(&name, &tab.sql).map_err(|e| format!("SQL download failed: {e:?}")) };
+            } else { download_sql(&name, &tab.sql).map_err(|e| format!("SQL download failed: {}", crate::browser_error(e))) };
             let _ = tx.send(match result { Ok(()) => FileAction::BrowserDownload(name), Err(error) => FileAction::QueryLibraryError(error) });
             ctx.request_repaint();
             return;
         }
         wasm_bindgen_futures::spawn_local(async move {
             let result = async {
-                let value = pick_sql().await.map_err(|e| format!("SQL import failed: {e:?}"))?;
+                let value = pick_sql().await.map_err(|e| format!("SQL import failed: {}", crate::browser_error(e)))?;
                 if value.is_null() { return Ok(None); }
                 let name = js_sys::Reflect::get(&value, &"name".into()).ok().and_then(|v| v.as_string()).ok_or("Missing SQL filename")?;
                 let bytes = js_sys::Reflect::get(&value, &"bytes".into()).map_err(|_| "Missing SQL content")?;
@@ -56,7 +56,7 @@ impl Rustable {
         let (name, mime) = match format { db::ExportFormat::Csv => ("results.csv", "text/csv;charset=utf-8"), db::ExportFormat::Json => ("results.json", "application/json") };
         match browser_jobs::start(Request::Export { grid: self.grid(), format }, ctx.clone(), move |reply| {
             let result = reply.and_then(|reply| match reply {
-                Response::Exported(bytes) => download_bytes(name, &bytes, mime).map(|()| name.to_owned()).map_err(|e| format!("Download failed: {e:?}")),
+                Response::Exported(bytes) => download_bytes(name, &bytes, mime).map(|()| name.to_owned()).map_err(|e| format!("Download failed: {}", crate::browser_error(e))),
                 _ => Err("Unexpected export response".into()),
             });
             let _ = tx.send(FileAction::BrowserExportDone(result));
