@@ -206,8 +206,13 @@ impl Driver for SqliteDriver {
             }
             Err(error) => {
                 cancel.store(false, Ordering::Relaxed);
-                tx.rollback()
-                    .map_err(|rollback| format!("{error}; rollback failed: {rollback}"))?;
+                // An interrupted write (including a trigger) can make SQLite
+                // roll back automatically. Preserve the original error instead
+                // of issuing ROLLBACK against an already-idle connection.
+                if !tx.is_autocommit() {
+                    tx.rollback()
+                        .map_err(|rollback| format!("{error}; rollback failed: {rollback}"))?;
+                }
                 Err(error)
             }
         }
@@ -3470,6 +3475,7 @@ mod csv_import_tests {
         use std::sync::atomic::AtomicUsize;
         for explicit_cancel in [false, true] {
             let (mut driver, cancel) = setup();
+            driver.connection.execute_batch("CREATE TRIGGER slow_import AFTER INSERT ON import_target BEGIN SELECT (WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000) SELECT sum(x) FROM n); END;").unwrap();
             let text = format!("id,value\n{}", (1..=1000).map(|id| format!("{id},good\n")).collect::<String>());
             let request = request(&driver, &text, &cancel);
             let inserted = Arc::new(AtomicUsize::new(0));

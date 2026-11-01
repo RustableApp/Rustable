@@ -239,3 +239,29 @@ and allow the same 1,000-row request to succeed on retry. All three SQLite CSV
 import tests and strict all-target Clippy pass. This strengthens transaction
 coverage but does not substitute for exercising the browser Cancel import
 button and its shared-memory signal; that UI check remains outstanding.
+
+### Browser import cancellation and automatic rollback fix (2026-11-01)
+
+A real browser import into a disposable table with an expensive AFTER INSERT
+trigger exposed a gap in the earlier native test: interruption inside a write
+can make SQLite roll back automatically. Rustable then attempted another ROLLBACK
+and incorrectly appended `rollback failed: cannot rollback - no transaction is
+active`. The initial browser attempt reached its 2003.7 ms deadline and was not
+counted as manual cancellation. Adding a trigger to the native regression
+reproduced the same failure at row 100.
+
+The importer now checks autocommit before explicitly rolling back, preserving
+the original interruption error when SQLite has already done the cleanup.
+All three SQLite import tests, strict all-target Clippy, and the release WASM
+build passed. In the rebuilt full-size browser workspace, clicking Cancel import
+stopped the 100-row fixture at row 3 after 388.5 ms, well before the deadline.
+The review showed only `CSV data row 3: interrupted` and retained its source and
+mapping. Closing the review and running SELECT count(*) on the same connection
+returned zero rows. This verifies the actual browser cancellation signal and
+rollback path in the in-app browser, not additional browser engines.
+
+Reproduction uses a table with id INTEGER PRIMARY KEY and an AFTER INSERT
+trigger executing a recursive sum from 1 through 1,000,000; CSV contains header
+id and values 1 through 100. Evidence in the session visualization directory:
+`wasm-import-trigger-before.png`, `wasm-import-cancel-fixed.png`, and
+`wasm-import-cancel-recovery.png`. The public demo remains unchanged.
