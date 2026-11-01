@@ -3,6 +3,8 @@ use super::*;
 use ::mysql::{Conn, OptsBuilder, prelude::Queryable};
 use crate::{connection::MysqlConfig, sql::mysql::Mode};
 
+mod editing;
+
 type CatalogRow = (String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
 
 struct MysqlDriver {
@@ -388,8 +390,21 @@ impl Driver for MysqlDriver {
             else { self.table_metadata(&schema, &object.name)? };
         Ok(TableData { sql, parameters, grid, columns: object.columns, indexes, triggers })
     }
-    fn plan(&mut self, _changes: &[Change]) -> Result<ChangePlan, String> {
-        Err("MySQL table editing is still being implemented.".into())
+    fn plan(&mut self, changes: &[Change]) -> Result<ChangePlan, String> {
+        self.require_idle()?;
+        let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
+        let mut objects = Vec::new();
+        for change in changes {
+            if objects.iter().any(|object: &Object| object.name == change.table()) { continue; }
+            let mut object = self.catalog_objects(Some(change.table()))?.into_iter().next().ok_or("Table no longer exists")?;
+            let engine: Option<String> = self.with_connection(|conn| conn.exec_first(
+                "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", (&schema, change.table())))?;
+            if engine.as_deref() != Some("InnoDB") { return Err("Reviewed data changes currently require an InnoDB base table.".into()); }
+            let row: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(format!("SHOW CREATE TABLE {}.{}", quote(&schema), quote(change.table()))))?;
+            object.ddl = row.and_then(|row| row.get(1)).ok_or("Missing table definition")?;
+            objects.push(object);
+        }
+        editing::plan(changes, &objects)
     }
     fn apply(&mut self, _plan: &ChangePlan) -> Result<(), String> {
         Err("MySQL table editing is still being implemented.".into())
@@ -681,6 +696,43 @@ mod tests {
         let Payload::Query { report, .. } = reply else { panic!("query payload expected"); };
         assert_eq!(report.grids[0].rows, [vec![Value::Integer(42)]]);
         assert!(super::super::transport::codec().serialize(&Command::OpenMysql(config)).is_err(), "credentials must never cross browser transport");
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_data_plan_groups_updates_and_detects_case_only_conflicts() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let cancel = AtomicBool::new(false);
+        let setup = driver.execute("DROP TABLE IF EXISTS plan_data_probe; CREATE TABLE plan_data_probe (id INT PRIMARY KEY, name VARCHAR(80) COLLATE utf8mb4_general_ci, n INT, generated_value INT GENERATED ALWAYS AS (n*2) STORED) ENGINE=InnoDB; INSERT INTO plan_data_probe(id,name,n) VALUES (1,'Before',2);", false, &cancel);
+        assert!(setup.error.is_none(), "{:?}", setup.error);
+        let original = driver.browse(&Browse { table:"plan_data_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
+        let edits = vec![Change::Cell { table:"plan_data_probe".into(), column:"name".into(), original:original.clone(), value:Value::Text("after'; DROP TABLE plan_data_probe; --".into()) },
+            Change::Cell { table:"plan_data_probe".into(), column:"n".into(), original:original.clone(), value:Value::Integer(3) }];
+        let plan = driver.plan(&edits).unwrap();
+        assert_eq!(plan.statements.len(),1);
+        assert_eq!(plan.preconditions.len(),1);
+        assert_eq!(plan.statements[0].parameters.len(),3);
+        assert!(!plan.statements[0].sql.contains("DROP TABLE"));
+        assert_eq!(plan.schemas.len(),1);
+        let check = &plan.preconditions[0];
+        let params = check.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>,_>>().unwrap();
+        let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, params.clone()).unwrap();
+        assert_eq!(matches,[1]);
+        driver.conn().unwrap().query_drop("UPDATE plan_data_probe SET name='before' WHERE id=1").unwrap();
+        let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, params).unwrap();
+        assert!(matches.is_empty(), "case-insensitive collation must not conceal a conflict");
+        assert!(driver.plan(&[Change::Cell { table:"plan_data_probe".into(), column:"generated_value".into(), original:original.clone(), value:Value::Integer(4) }]).is_err());
+        let mut deleted = edits;
+        deleted.push(Change::DeleteRow { table:"plan_data_probe".into(), original });
+        let plan = driver.plan(&deleted).unwrap();
+        assert_eq!(plan.statements.len(),1);
+        assert!(plan.statements[0].sql.starts_with("DELETE"));
+        let inserted = driver.plan(&[Change::InsertRow { id:1, table:"plan_data_probe".into(), fields:vec![("id".into(),Value::Integer(2))] }]).unwrap();
+        assert!(!inserted.statements[0].sql.contains("generated_value"));
+        driver.conn().unwrap().query_drop("DROP TABLE plan_data_probe").unwrap();
     }
 
 }

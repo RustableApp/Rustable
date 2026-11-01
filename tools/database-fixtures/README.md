@@ -317,3 +317,21 @@ finite real, binary bytes and Unicode/NUL/quote/backslash/SQL-looking text under
 both default and ANSI_QUOTES + NO_BACKSLASH_ESCAPES modes. All 15 driver tests
 pass separately on MySQL/MariaDB; strict Clippy passes. This establishes value
 binding for the upcoming change planner; table plan/apply remain unimplemented.
+
+MySQL/MariaDB data change planning now generates parameterized grouped cell
+updates, inserts (omitted columns retain defaults), and deduplicated deletes.
+Delete supersedes staged edits to that row. Updates/deletes require a complete
+row snapshot and non-NULL primary key; generated/unknown columns and nonfinite
+parameters are rejected. Plans retain qualified names and reviewed table DDL.
+Only InnoDB base tables are accepted; DDL changes are rejected for separate review
+because their implicit commits cannot be mixed into the data transaction.
+
+Row preconditions use a primary-key predicate plus NULL-safe binary comparisons
+of the loaded row, followed by FOR UPDATE. The indexed key narrows the check;
+binary comparisons catch case-only changes under case-insensitive collations.
+Live tests cover grouped updates, SQL-looking bound data, generated-column
+rejection, delete precedence, insert omission and case-only conflicts. All 16
+driver tests pass on each engine; strict Clippy passes. Execution is intentionally
+still rejected by apply(): schema/trigger revalidation under metadata locks,
+transaction ownership, affected-row semantics, rollback and ambiguous commit
+handling must be implemented before this can save data.
