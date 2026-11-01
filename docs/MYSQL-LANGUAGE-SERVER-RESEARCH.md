@@ -344,3 +344,9 @@ saved TLS configuration. No new connection was opened by these status clicks.
 Evidence: native-active-profile-reveal.png. Same-endpoint identity isolation and
 dirty-form blocking remain covered by the automated manager suite rather than
 this native click-through.
+
+Follow-up: the unaliased emoji result header reported above is now traced to the
+server's raw metadata (byte 63) on both MySQL and MariaDB, in text and prepared
+protocols. Values and explicit Japanese/ASCII aliases survive unchanged. See the
+supplementary-character investigation in DRIVER_CAPABILITIES.md; no UI label
+rewriting is appropriate.

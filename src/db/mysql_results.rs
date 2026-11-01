@@ -89,6 +89,31 @@ mod tests {
 
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_unicode_headers_match_server_metadata() {
+        let port: u16 = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let mut conn = Conn::new(OptsBuilder::default().ip_or_hostname(Some("127.0.0.1"))
+            .tcp_port(port).user(Some("rustable")).pass(Some("rustable-test-only"))
+            .db_name(Some("rustable_test")).prefer_socket(false)).unwrap();
+        conn.query_drop("SET NAMES utf8mb4").unwrap();
+        let sql = "SELECT '🦀', '🦀' AS crab, '日本' AS `日本語`";
+        for prepared in [false, true] {
+            let raw: ::mysql::Row = if prepared { conn.exec_first(sql, ()).unwrap().unwrap() }
+                else { conn.query_first(sql).unwrap().unwrap() };
+            let headers = raw.columns_ref().iter().map(|column| column.name_ref().to_vec()).collect::<Vec<_>>();
+            eprintln!("port={port} prepared={prepared} raw headers={headers:?}");
+            let names = headers.iter().map(|bytes| std::str::from_utf8(bytes).unwrap().to_owned()).collect::<Vec<_>>();
+            assert_eq!(&names[1..], ["crab", "日本語"]);
+            let report = if prepared { ScriptResult::from(conn.exec_iter(sql, ()).unwrap()) }
+                else { ScriptResult::from(conn.query_iter(sql).unwrap()) };
+            assert!(report.error.is_none(), "{:?}", report.error);
+            assert_eq!(report.grids[0].columns, names);
+            assert_eq!(report.grids[0].rows, [vec![Value::Text("🦀".into()), Value::Text("🦀".into()), Value::Text("日本".into())]]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_bounded_results_and_connection_reuse() {
         let port: u16 = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
         assert!([43316, 43317].contains(&port));

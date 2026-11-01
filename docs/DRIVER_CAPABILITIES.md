@@ -905,3 +905,27 @@ conversion for NUL/backslash text is independent of these session modes. This
 establishes value fidelity for these tested literal types; it is not a claim that
 arbitrary handwritten SQL can be expanded or that every numeric/server type has
 been covered. Execution continues to bind parameters rather than run preview SQL.
+
+### Supplementary-character result header investigation (2026-11-01)
+
+The native `SELECT '🦀'` header rendered as `?`. Live protocol checks on MySQL 8.4
+(port 43316) and MariaDB 11.4 (43317), with SET NAMES utf8mb4, establish that both
+servers send the single raw metadata byte 63 (`?`) for this unaliased expression.
+The value remains the exact crab emoji. Text and prepared protocols agree.
+`SELECT '🦀', '🦀' AS crab, '日本' AS 日本語` also proves explicit ASCII and Japanese
+headers survive, and Rustable's resulting headers match the raw server metadata.
+
+Regression: `db::mysql_results::tests::live_unicode_headers_match_server_metadata`
+passed on each disposable fixture. No query execution beyond literal SELECTs and
+connection-local SET NAMES; no table data changes. Do not synthesize replacement
+column names from source SQL: preserve server identity and use an explicit alias
+when a readable name is needed. This closes the observed header discrepancy as
+server behavior, not a Rustable decoding defect.
+
+Related documented identifier restrictions (BMP only, supplementary characters
+excluded):
+- https://mariadb.com/docs/server/reference/sql-structure/sql-language-structure/identifier-names
+- https://dev.mysql.com/doc/refman/8.0/en/identifiers.html
+
+The raw protocol comparison, rather than these general naming restrictions, is
+the evidence for this particular expression label.
