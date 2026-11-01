@@ -2,6 +2,7 @@ use super::{Column, Value, csv_preview};
 use std::sync::Arc;
 
 #[derive(Clone)]
+#[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize))]
 pub struct Request {
     pub source: Arc<csv_preview::Source>,
     pub options: csv_preview::Options,

@@ -1,8 +1,7 @@
 //! Bounded, cancellable UTF-8 CSV preview. Parsing runs only on the worker.
 use std::{
     cell::Cell,
-    fs::File,
-    io::{self, Read, Write},
+    io::{self, Read},
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
@@ -10,6 +9,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::{fs::File, io::Write};
 const RECORD_BYTES: usize = 2 * 1024 * 1024;
 const PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
@@ -28,14 +29,33 @@ impl Default for Options {
         }
     }
 }
-/// Private temporary copy retained across parser changes and eventual import.
+/// Immutable source snapshot retained across parser changes and eventual import.
 #[derive(Debug)]
+#[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize))]
 pub struct Source {
-    file: tempfile::NamedTempFile,
+    storage: Storage,
     path: PathBuf,
     pub bytes: u64,
 }
+#[derive(Debug)]
+#[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize))]
+enum Storage {
+    #[cfg(not(target_arch = "wasm32"))]
+    File(tempfile::NamedTempFile),
+    #[cfg(any(test, target_arch = "wasm32"))]
+    Memory(Vec<u8>),
+}
 impl Source {
+    #[cfg(any(test, target_arch = "wasm32"))]
+    pub fn from_bytes(path: PathBuf, bytes: Vec<u8>) -> Result<Self, String> {
+        if bytes.len() > 8 * 1024 * 1024 { return Err("Browser CSV files are limited to 8 MiB".into()); }
+        Ok(Self { path, bytes: bytes.len() as u64, storage: Storage::Memory(bytes) })
+    }
+    #[cfg(target_arch = "wasm32")]
+    fn capture(_path: &Path, _cancel: &AtomicBool) -> Result<Self, String> {
+        Err("Choose a CSV file using the browser file picker".into())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     fn capture(path: &Path, cancel: &AtomicBool) -> Result<Self, String> {
         let mut input = File::open(path).map_err(|e| e.to_string())?;
         let before = input.metadata().map_err(|e| e.to_string())?;
@@ -49,15 +69,26 @@ impl Source {
             return Err("CSV file changed while reading; choose it again".into());
         }
         Ok(Self {
-            file,
+            storage: Storage::File(file),
             path: path.to_owned(),
             bytes,
         })
     }
-    fn open(&self) -> Result<File, String> {
-        self.file.reopen().map_err(|e| e.to_string())
+    fn open(&self) -> Result<Box<dyn Read + '_>, String> {
+        match &self.storage {
+            #[cfg(not(target_arch = "wasm32"))]
+            Storage::File(file) => file.reopen().map(|file| Box::new(file) as Box<dyn Read>).map_err(|e| e.to_string()),
+            #[cfg(any(test, target_arch = "wasm32"))]
+            Storage::Memory(bytes) => {
+                if bytes.len() > 8 * 1024 * 1024 || bytes.len() as u64 != self.bytes {
+                    return Err("Invalid browser CSV snapshot".into());
+                }
+                Ok(Box::new(io::Cursor::new(bytes)))
+            }
+        }
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 fn copy_snapshot(
     reader: &mut impl Read,
     writer: &mut impl Write,
@@ -89,6 +120,7 @@ fn copy_snapshot(
 }
 
 #[derive(Debug)]
+#[cfg_attr(target_arch = "wasm32", derive(serde::Serialize, serde::Deserialize))]
 pub struct Preview {
     pub source: Option<Arc<Source>>,
     pub options: Options,
@@ -265,6 +297,23 @@ mod tests {
         )
     }
     #[test]
+    fn memory_snapshot_reparses_and_visits_all_rows_without_filesystem_access() {
+        let path = PathBuf::from("browser.csv");
+        let text = format!("id;name\n{}", (1..=150).map(|n| format!("{n};日本\n")).collect::<String>());
+        let source = Arc::new(Source::from_bytes(path.clone(), text.into_bytes()).unwrap());
+        let cancel = AtomicBool::new(false);
+        let options = Options { delimiter: b';', ..Default::default() };
+        let preview = load(&path, options, Some(source.clone()), &cancel).unwrap();
+        assert_eq!(preview.rows.len(), 100);
+        assert!(preview.more);
+        assert_eq!(preview.rows[0], ["1", "日本"]);
+        let mut visited = 0;
+        assert_eq!(visit(&source, options, 2, &cancel, |row| { visited += 1; assert_eq!(row.get(1), Some("日本")); Ok(()) }).unwrap(), 150);
+        assert_eq!(visited, 150);
+        assert!(load(Path::new("different.csv"), options, Some(source), &cancel).is_err());
+        assert!(Source::from_bytes(path, vec![0; 8 * 1024 * 1024 + 1]).is_err());
+    }
+    #[test]
     fn snapshot_survives_source_replacement_and_is_removed_when_released() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("source.csv");
@@ -272,7 +321,8 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let preview = load(&path, Options::default(), None, &cancel).unwrap();
         let source = preview.source.clone().unwrap();
-        let snapshot_path = source.file.path().to_owned();
+        let Storage::File(file) = &source.storage else { panic!("expected file snapshot") };
+        let snapshot_path = file.path().to_owned();
         std::fs::write(&path, "id,name\n2,replaced\n").unwrap();
         let reloaded = load(
             &path,

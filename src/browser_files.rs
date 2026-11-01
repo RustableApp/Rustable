@@ -5,6 +5,8 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(module = "/src/browser_files.js")]
 extern "C" {
     #[wasm_bindgen(catch)]
+    async fn pick_csv() -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(catch)]
     async fn pick_sql() -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
     fn download_sql(name: &str, sql: &str) -> Result<(), JsValue>;
@@ -17,7 +19,22 @@ impl Rustable {
         let _ = self.files_tx.send(FileAction::QueryLibraryError("Browser file access is not implemented yet. Use the desktop app for file import/export.".into()));
         ctx.request_repaint();
     }
-    pub(super) fn preview_csv_dialog(&self, ctx: &egui::Context) { self.browser_file_unavailable(ctx); }
+    pub(super) fn preview_csv_dialog(&self, ctx: &egui::Context) {
+        let tx = self.files_tx.clone(); let ctx = ctx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = async {
+                let value = pick_csv().await.map_err(crate::browser_error)?;
+                if value.is_null() { return Ok(None); }
+                let name = js_sys::Reflect::get(&value, &"name".into()).ok().and_then(|v| v.as_string()).ok_or("Missing CSV filename")?;
+                let bytes = js_sys::Reflect::get(&value, &"bytes".into()).map_err(|_| "Missing CSV content")?;
+                let path = PathBuf::from(name);
+                let source = db::csv_preview::Source::from_bytes(path.clone(), js_sys::Uint8Array::new(&bytes).to_vec())?;
+                Ok::<_, String>(Some(FileAction::BrowserCsv(path, Arc::new(source))))
+            }.await;
+            match result { Ok(Some(action)) => { let _ = tx.send(action); }, Ok(None) => {}, Err(error) => { let _ = tx.send(FileAction::QueryLibraryError(error)); } }
+            ctx.request_repaint();
+        });
+    }
     pub(super) fn export_table_dialog(&self, ctx: &egui::Context, format: db::ExportFormat) {
         if !self.supports_table_export() { return; }
         let _ = self.files_tx.send(FileAction::ExportTable(PathBuf::new(), self.browse.clone(), self.label.clone(), format));

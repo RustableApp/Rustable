@@ -1,9 +1,11 @@
 // Only a user-selected file is read. The picker never grants directory access.
-export function pick_sql() {
+export function pick_sql() { return pick_file('.sql,text/plain,application/sql', 'SQL editor'); }
+export function pick_csv() { return pick_file('.csv,text/csv', 'CSV'); }
+function pick_file(accept, label) {
   return new Promise((resolve, reject) => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.sql,text/plain,application/sql';
+    input.accept = accept;
     input.hidden = true;
     const clean = () => input.remove();
     input.addEventListener('cancel', () => { clean(); resolve(null); }, {once: true});
@@ -11,7 +13,7 @@ export function pick_sql() {
       try {
         const file = input.files[0];
         if (!file) { resolve(null); return; }
-        if (file.size > 8 * 1024 * 1024) throw new Error('SQL editor files are limited to 8 MiB');
+        if (file.size > 8 * 1024 * 1024) throw new Error(`${label} files are limited to 8 MiB`);
         resolve({name: file.name, bytes: new Uint8Array(await file.arrayBuffer())});
       } catch (error) { reject(error); }
       finally { clean(); }

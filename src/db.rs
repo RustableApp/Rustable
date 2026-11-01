@@ -255,7 +255,7 @@ pub enum Command {
         expected: Option<crate::script_file::SaveSource>,
     },
     ImportCsv {
-        #[serde(with = "unavailable_transport")]
+        #[cfg_attr(not(target_arch = "wasm32"), serde(with = "unavailable_transport"))]
         request: csv_import::Request,
         safe: bool,
     },
@@ -263,7 +263,7 @@ pub enum Command {
     PreviewCsv {
         path: PathBuf,
         options: csv_preview::Options,
-        #[serde(with = "unavailable_transport")]
+        #[cfg_attr(not(target_arch = "wasm32"), serde(with = "unavailable_transport"))]
         source: Option<Arc<csv_preview::Source>>,
     },
     Open(Option<PathBuf>),
@@ -307,7 +307,7 @@ pub enum Payload {
     },
     Imported(u64),
     ImportTarget(Object),
-    CsvPreview(#[serde(with = "unavailable_transport")] csv_preview::Preview),
+    CsvPreview(#[cfg_attr(not(target_arch = "wasm32"), serde(with = "unavailable_transport"))] csv_preview::Preview),
     Planned(ChangePlan),
     Applied {
         objects: Result<Vec<Object>, String>,

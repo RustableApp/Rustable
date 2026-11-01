@@ -23,6 +23,6 @@ SQL import/download, loaded-result CSV/JSON downloads, and full-table CSV/JSON d
 
 ## Remaining acceptance
 
-CSV preview/import and database-file import still need browser adapters. Server connections and OS keychains remain desktop integrations. Browser language-server processes are not started; shared catalog completion remains available.
+CSV preview, mapping, review and transactional import accept browser-selected files up to 8 MiB using immutable in-memory snapshots. Database-file import still needs a browser adapter. Server connections and OS keychains remain desktop integrations. Browser language-server processes are not started; shared catalog completion remains available.
 
 Verify cancellation, error recovery, keyboard shortcuts, browser memory bounds and more browsers before publishing. The full workspace is not a claim that every native OS integration exists in a browser.

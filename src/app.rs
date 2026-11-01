@@ -258,6 +258,8 @@ enum Pending {
 }
 enum FileAction {
     #[cfg(target_arch = "wasm32")]
+    BrowserCsv(PathBuf, Arc<db::csv_preview::Source>),
+    #[cfg(target_arch = "wasm32")]
     BrowserExportDone(Result<String, String>),
     #[cfg(target_arch = "wasm32")]
     BrowserScript(String, String),
@@ -1276,6 +1278,8 @@ impl Rustable {
                     },
                     Pending::Export,
                 ),
+                #[cfg(target_arch = "wasm32")]
+                FileAction::BrowserCsv(path, source) => self.dispatch(Command::PreviewCsv { path, options: Default::default(), source: Some(source) }, Pending::Export),
                 FileAction::PreviewCsv(path) => self.dispatch(
                     Command::PreviewCsv {
                         path,

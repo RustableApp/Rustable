@@ -31,7 +31,7 @@ pub(crate) fn execute(bytes: &[u8]) -> Vec<u8> {
                 Command::Open(None) | Command::Query { .. } | Command::Browse(_)
                 | Command::RefreshSchema | Command::SelectSchema(_) | Command::ListDatabases
                 | Command::Plan(_) | Command::Apply(_) | Command::ImportTarget(_)
-                | Command::DownloadTable { .. } => {}
+                | Command::DownloadTable { .. } | Command::PreviewCsv { .. } | Command::ImportCsv { .. } => {}
                 _ => return Err("This operation needs a browser file adapter or the desktop app.".into()),
             }
             handle(&mut connection, command, &Arc::new(AtomicBool::new(false)))
