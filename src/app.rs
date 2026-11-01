@@ -21,6 +21,9 @@ mod pane_toggles;
 mod row_copy;
 #[path = "row_selection.rs"]
 mod row_selection;
+#[cfg(target_arch = "wasm32")]
+#[path = "browser_files.rs"]
+mod browser_files;
 use crate::db::{self, Browse, Column, Command, Grid, Object, Payload, Worker};
 use crate::db::{Change, ChangePlan, Value};
 use eframe::egui::{self, Color32, RichText, Stroke, TextEdit};
@@ -1364,6 +1367,7 @@ impl Rustable {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn preview_csv_dialog(&self, ctx: &egui::Context) {
         let tx = self.files_tx.clone();
         let viewport = ctx.viewport_id();
@@ -1906,6 +1910,7 @@ impl Rustable {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn export_table_dialog(&self, ctx: &egui::Context, format: db::ExportFormat) {
         if !self.supports_table_export() {
             return;
@@ -1928,6 +1933,7 @@ impl Rustable {
         });
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn script_dialog(&self, ctx: &egui::Context, save: bool) {
         let tab_id = self.tabs[self.tab].id;
         let source_path = self.tabs[self.tab].source_path.clone();
@@ -1969,6 +1975,7 @@ impl Rustable {
         });
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn json_export_dialog(&self, ctx: &egui::Context) {
         let tx = self.files_tx.clone();
         let viewport = ctx.viewport_id();
@@ -1983,6 +1990,7 @@ impl Rustable {
         });
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn file_dialog(&self, ctx: &egui::Context, export: bool) {
         let tx = self.files_tx.clone();
         let viewport = ctx.viewport_id();
@@ -2010,8 +2018,8 @@ impl Rustable {
     }
 
     fn log_activity(&mut self, message: String) {
-        let seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let seconds = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
             % 86400;

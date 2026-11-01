@@ -51,3 +51,8 @@ pub fn run_native() -> eframe::Result {
         Box::new(|cc| Ok(Box::new(session_windows::SessionWindows::new(cc)))),
     )
 }
+
+#[cfg(target_arch = "wasm32")]
+pub fn browser_database_command(bytes: &[u8]) -> Vec<u8> {
+    db::browser::execute(bytes)
+}

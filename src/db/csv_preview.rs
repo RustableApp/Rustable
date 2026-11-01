@@ -13,7 +13,7 @@ use std::{
 const RECORD_BYTES: usize = 2 * 1024 * 1024;
 const PREVIEW_BYTES: usize = 2 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Options {
     pub delimiter: u8,
     pub quote: u8,

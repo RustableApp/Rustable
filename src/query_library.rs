@@ -24,6 +24,11 @@ pub(super) struct Library {
 }
 impl Library {
     pub fn invalidate(&mut self) { self.refreshed = None; self.receiver = None; }
+    #[cfg(target_arch = "wasm32")]
+    pub fn poll(&mut self, _ctx: &egui::Context, _root: PathBuf) {
+        self.error = Some("Saved query storage is not available in this browser build yet.".into());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn poll(&mut self, ctx: &egui::Context, root: PathBuf) {
         if self.root.as_ref() != Some(&root) { self.root = Some(root.clone()); self.files.clear(); self.groups.clear(); self.selected = None; self.receiver = None; self.refreshed = None; }
         if let Some(rx) = &self.receiver && let Ok((scanned, result)) = rx.try_recv() {
@@ -106,6 +111,11 @@ fn change_group(root: &std::path::Path, rename: Option<(PathBuf, String)>) -> Re
     }
 }
 impl Rustable {
+    #[cfg(target_arch = "wasm32")]
+    fn start_query_group_operation(&mut self, _ctx: &egui::Context, _rename: Option<(PathBuf, String)>) {
+        self.query_library.error = Some("Saved query storage is not available in this browser build yet.".into());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     fn start_query_group_operation(&mut self, ctx: &egui::Context, rename: Option<(PathBuf, String)>) {
         if self.query_library.group_operation.is_some() { return; }
         if self.pending.is_some() { self.query_library.error = Some("Wait for the current operation before changing query folders.".into()); return; }
@@ -147,6 +157,9 @@ impl Rustable {
         }
     }
     pub(super) fn query_directory(&self) -> PathBuf {
+        #[cfg(target_arch = "wasm32")]
+        return PathBuf::from("/Queries");
+        #[cfg(not(target_arch = "wasm32"))]
         self.prefs.query_directory.clone().unwrap_or_else(|| eframe::storage_dir(if cfg!(feature="qa") { "Rustable QA" } else { "Rustable" }).unwrap_or_else(std::env::temp_dir).join("Queries"))
     }
     pub(super) fn save_query_file(&mut self, ctx: &egui::Context, save_as: bool) {
@@ -156,6 +169,7 @@ impl Rustable {
             self.dispatch(Command::SaveScript { path: path.clone(), sql: tab.sql.clone(), tab_id: tab.id, expected: tab.saved_sql.clone().map(|sql| crate::script_file::SaveSource { path, sql }) }, Pending::Export);
         } else { self.script_dialog(ctx, true); }
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn choose_query_directory(&self, ctx: &egui::Context) {
         let directory = self.query_directory(); let tx = self.files_tx.clone(); let ctx = ctx.clone(); let viewport = ctx.viewport_id();
         std::thread::spawn(move || { if let Some(path) = rfd::FileDialog::new().set_directory(directory).set_title("Saved queries folder").pick_folder() { let _ = tx.send(FileAction::QueryDirectory(path)); ctx.request_repaint_of(viewport); } });

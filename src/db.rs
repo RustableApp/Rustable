@@ -4,6 +4,7 @@ mod json;
 mod row_export;
 
 #[derive(Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ExportFormat { Csv, Json }
 pub mod csv_import;
 pub mod csv_preview;
@@ -13,6 +14,12 @@ pub mod progress;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use postgres::async_client_config as probe_client_config;
 mod sqlite;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod transport;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod browser;
+#[cfg(target_arch = "wasm32")]
+pub use browser::Worker;
 
 use std::{
     path::PathBuf,
@@ -26,6 +33,7 @@ use std::{
 
 /// Driver-independent cell values. Adapters own conversion and parameter binding.
 #[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Null,
     Integer(i64),
@@ -37,6 +45,7 @@ pub enum Value {
 /// Transaction/session status published by the database owner thread.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum TransactionState {
     #[default]
     Idle,
@@ -100,6 +109,7 @@ pub const QUERY_LIMIT: usize = 5_000;
 const BYTE_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Object {
     pub schema: Option<String>,
     pub display_name: Option<String>,
@@ -115,12 +125,14 @@ impl Object {
     }
 }
 #[derive(Clone, Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SchemaCatalog {
     pub names: Vec<String>,
     pub selected: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Column {
     pub name: String,
     pub data_type: String,
@@ -131,6 +143,7 @@ pub struct Column {
 }
 
 #[derive(Clone, Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Grid {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
@@ -141,6 +154,7 @@ pub struct Grid {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RowTotal {
     pub rows: u64,
     pub estimated: bool,
@@ -193,6 +207,7 @@ impl From<TableData> for Payload {
 }
 
 #[derive(Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScriptResult {
     pub grids: Vec<Arc<Grid>>,
     pub error: Option<String>,
@@ -200,6 +215,7 @@ pub struct ScriptResult {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Browse {
     pub table: String,
     pub offset: usize,
@@ -220,6 +236,7 @@ impl Browse {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Command {
     ListDatabases,
     RefreshSchema,
@@ -232,6 +249,7 @@ pub enum Command {
         expected: Option<crate::script_file::SaveSource>,
     },
     ImportCsv {
+        #[serde(with = "unavailable_transport")]
         request: csv_import::Request,
         safe: bool,
     },
@@ -239,10 +257,11 @@ pub enum Command {
     PreviewCsv {
         path: PathBuf,
         options: csv_preview::Options,
+        #[serde(with = "unavailable_transport")]
         source: Option<Arc<csv_preview::Source>>,
     },
     Open(Option<PathBuf>),
-    OpenPostgres(crate::connection::PostgresConfig),
+    OpenPostgres(#[serde(with = "unavailable_transport")] crate::connection::PostgresConfig),
     Query {
         sql: String,
         safe: bool,
@@ -262,6 +281,7 @@ pub enum Command {
     },
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Payload {
     Databases(Vec<String>),
     Schema {
@@ -279,7 +299,7 @@ pub enum Payload {
     },
     Imported(u64),
     ImportTarget(Object),
-    CsvPreview(csv_preview::Preview),
+    CsvPreview(#[serde(with = "unavailable_transport")] csv_preview::Preview),
     Planned(ChangePlan),
     Applied {
         objects: Result<Vec<Object>, String>,
@@ -307,6 +327,7 @@ pub enum Payload {
     Exported(PathBuf),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Worker {
     tx: SyncSender<Command>,
     pub rx: Receiver<Result<Payload, String>>,
@@ -315,6 +336,7 @@ pub struct Worker {
     transaction: Arc<AtomicU8>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Worker {
     pub fn new(ctx: eframe::egui::Context) -> Self {
         let viewport_id = ctx.viewport_id();
@@ -1190,8 +1212,8 @@ mod worker_tests {
         let absent = std::env::temp_dir().join(format!(
             "rustable-missing-{}-{}.db",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -1238,6 +1260,7 @@ mod worker_tests {
 
 /// Immutable review data: execution uses these exact statements and parameters.
 #[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum Change {
     /// Omitted fields use database defaults; explicit Value::Null remains NULL.
     /// Each entry represents a distinct row, including identical entries.
@@ -1299,6 +1322,7 @@ impl Change {
 }
 
 #[derive(Clone, Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ChangePlan {
     pub rebuild: bool,
     pub schema_version: Option<i64>,
@@ -1310,12 +1334,14 @@ pub struct ChangePlan {
     pub schemas: Vec<(String, String)>,
 }
 #[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PlannedPrecondition {
     pub before_statement: usize,
     pub sql: String,
     pub parameters: Vec<Value>,
 }
 #[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PlannedStatement {
     pub sql: String,
     pub parameters: Vec<Value>,
@@ -1323,6 +1349,7 @@ pub struct PlannedStatement {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ColumnDefinition {
     pub name: String,
     pub data_type: String,
@@ -1332,6 +1359,7 @@ pub struct ColumnDefinition {
 }
 
 #[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Index {
     pub name: String,
     pub unique: bool,
@@ -1392,5 +1420,15 @@ mod row_total_tests {
                 estimated: false
             })
         );
+    }
+}
+
+// Keep every enum discriminant stable, including native-only operations.
+mod unavailable_transport {
+    pub fn serialize<T, S: serde::Serializer>(_: &T, _: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("This operation requires the desktop app"))
+    }
+    pub fn deserialize<'de, T, D: serde::Deserializer<'de>>(_: D) -> Result<T, D::Error> {
+        Err(serde::de::Error::custom("This operation requires the desktop app"))
     }
 }

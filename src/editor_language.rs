@@ -37,7 +37,7 @@ impl LanguageSession {
         sql: &str,
         cursor: usize,
     ) -> Option<Vec<Value>> {
-        if !self.started && matches!(engine, "SQLite" | "PostgreSQL") {
+        if !cfg!(target_arch = "wasm32") && !self.started && matches!(engine, "SQLite" | "PostgreSQL") {
             self.started = true;
             self.status = "Starting SQL language service…".into();
             let sqlite = engine == "SQLite";

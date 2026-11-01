@@ -803,6 +803,9 @@ impl Rustable {
         if test {
             self.connection_manager.start_probe(ctx);
         }
+        #[cfg(target_arch = "wasm32")]
+        if pick.is_some() { self.error = Some("Connection file selection requires the desktop app.".into()); }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(key) = pick {
             let generation = self.connection_manager.generation;
             let tx = self.files_tx.clone();

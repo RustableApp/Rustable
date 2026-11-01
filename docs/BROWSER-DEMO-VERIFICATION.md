@@ -1,28 +1,31 @@
-# Browser demo verification — November 1, 2026
+# Full workspace WASM verification — November 1, 2026
 
-This is a working browser edition, not full desktop parity. The Rust/egui UI compiles to WASM and shares `src/sql_highlight.rs` with the desktop editor. SQLite 3.54.1 runs as WASM in a dedicated worker; JavaScript implements browser messaging and SQLite API bindings. No query is sent to a database server.
+## Current source versus deployment
 
-## Observed and tested
+The local browser host now creates `rustable::Rustable::new_demo`, using the actual main window in `src/app.rs`. Native and browser builds share the SQLite adapter and command handler. The earlier separate BrowserApp UI has been removed from source. The public website still serves that earlier reduced demo; the replacement has not been deployed.
 
-- `cargo check` and strict Clippy pass for the wasm32-unknown-unknown package.
-- Six native editor/highlighter tests pass after extracting shared highlighting; native strict all-target Clippy passes.
-- Browser UI verified against localhost and the deployed HTTPS website: initial sample tables/results, editable SQL, Cmd+Shift+Enter script execution, separate result tabs and reset.
-- Real UPDATE changes the sample customer name to `WASM visitor`; a subsequent SELECT returns it. Reset restores `Avery Chen` without rerunning the edited script.
-- `test-worker.mjs` executes the same worker source using SQLite's Node WASM distribution. It verifies writes, NULL, exact 9007199254740993 integer rendering, zero-row column metadata, 500-row cap, current/selected statement behavior, SQL error recovery and a recursive query interrupted by the progress deadline.
-- Landing page replaces the primary screenshot with a lazy iframe, full-size link, explicit WASM wording and a screenshot fallback. Desktop screenshots remain available in a collapsed section.
-- Browser UI WASM is approximately 3.5 MB (1.36 MB gzip); SQLite WASM approximately 0.88 MB (0.41 MB gzip). Build and deployment ran locally; no desktop release or GitHub build was triggered.
+## Verified locally
 
-## Limits
+- Native all-target strict Clippy passes with the shared application library and target-specific adapters.
+- The SQLite dependency is now rusqlite 0.40.2, locked. Its WASM backend links successfully with rustup's LLVM archiver. Apple ar produced an empty WASM archive, which cargo check alone did not expose.
+- The full browser host checks, links in release mode, and generates wasm-bindgen assets.
+- Two transport tests pass: typed values (i64::MAX, blobs, NULL, Unicode with embedded NUL, infinity) and transaction state survive the binary worker boundary; truncated packets and oversized declared buffers are rejected. They caught and drove a fix for enum discriminant mismatches caused by skipping native-only variants.
+- Browser startup exposed native font-loading threads and unsupported SystemTime calls. The browser now uses bundled egui faces, web-time and Chrono's wasmbind clock support.
+- In-app browser at http://localhost:8767/demo/: actual native-style toolbar, sidebar, tabs, inspector and 500-row sample table rendered.
+- Ran a two-statement script returning exact integer 9007199254740993 and NULL, plus the selected sample row. Both result tabs appeared.
+- Staged a customer-name edit, generated the syntax-highlighted SQL review, saved it through the existing transaction path, and observed the changed row with no pending edits. The test value was `Avery ChenWASM visitor`; Cmd+A during cell editing appended instead of replacing, so keyboard selection needs follow-up.
+- Screenshot: `/Users/jatochnietdan/.codex/visualizations/2026/10/31/01a18f82-8ef6-7c12-b1e5-94903450cc37/full-workspace-wasm-local.png`.
+- Earlier native database regression run after the SQLite upgrade: 102 passed, 32 existing integration/performance tests ignored. These are not evidence of live PostgreSQL/MySQL/MariaDB verification.
 
-- Desktop connection manager, saved files, PostgreSQL/network drivers, full editing workflows, LSP completion and native menus are intentionally absent from this sample-data browser edition and remain desktop functionality.
-- Current browser acceptance is the available in-app browser, not a complete Chrome/Firefox/Safari/mobile matrix. Canvas accessibility and touch workflow coverage remain open.
-- Displayed results and cell previews are capped; SQL has a progress deadline and worker watchdog. Cancellation resets this disposable database rather than preserving a transaction.
-- Browser theme is explicitly dark to match the landing page; this does not change the desktop system-following theme behavior.
-# Full workspace replacement in progress
+## Required before replacement deployment
 
-The reduced browser UI documented below does **not** satisfy the user's request to run the actual Rustable main window. It must be replaced, not expanded into another UI implementation.
+- Implement browser file handling and saved-query storage; current explicit capability errors are temporary.
+- Replace remaining native search/format threads with browser-safe workers. Do not call a build production-ready merely because the default screen works.
+- Verify cancellation and timeout rollback/recovery, bounds on SQLite memory and SQL input, and worker error recovery. Shared cancellation requires cross-origin-isolated hosting; fallback deadline is two seconds.
+- Fix and verify browser keyboard behavior and shortcut labels, including cell selection, current/selected/all query execution.
+- Verify reset/reload isolation, download actions, same-origin embedding headers, responsive layout and additional browser engines. Keep website claims synchronized with tested capabilities.
+- Remove stale miniature-demo build assets from the deployment staging directory when publishing the replacement. No desktop release or main push is needed for each iteration.
 
-The application modules now live in `src/lib.rs`; the native binary calls that library. `Rustable::new_demo` opens the existing workspace directly on `Command::Open(None)` with fresh preferences, avoiding saved credentials and recovered user drafts. Native all-target checking, strict Clippy and 17 SQL boundary tests pass after extraction. This is groundwork, not a verified browser build.
+## Deployment history
 
-Next: adapt target dependencies and platform services, reuse the SQLite driver through rusqlite's WASM backend, and move database command handling into a browser worker without blocking frames. Native dialogs, threads, filesystem persistence, language-server subprocesses and update integrations require explicit browser adapters. The app now uses rusqlite 0.40.2 (locked), including its `ffi-sqlite-wasm-rs` backend. All 59 enabled SQLite driver tests pass; the broader database suite passes 102 tests with 32 existing integration/performance tests ignored. Native networking/keychain dependencies are target-gated, browser credentials remain ephemeral, and shared UI/database timing uses web-time. A real WASM check now reaches the application source and reports nine remaining compile errors: native file dialogs and the saved-query storage directory. Native-thread runtime adapters are still required after compilation succeeds. The existing reduced demo remains live until the real workspace passes browser acceptance.
-
+The earlier reduced demo was tested and deployed at rustable.app with lazy iframe embedding and screenshot fallback. Its separate JS SQLite worker tests and old size/limit measurements do not validate this replacement. They have been removed from the current source to avoid confusing those results with full-workspace acceptance.

@@ -44,6 +44,7 @@ fn definitions(font: Arc<FontData>) -> FontDefinitions {
     definitions
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn install(ctx: &egui::Context) {
     let ctx = ctx.clone();
     // Font file I/O happens once off the render thread. Glyphs are rasterized on demand.
@@ -82,3 +83,7 @@ mod tests {
         });
     }
 }
+
+/// Browser builds use the same bundled egui faces; OS font files are unavailable.
+#[cfg(target_arch = "wasm32")]
+pub fn install(_ctx: &egui::Context) {}

@@ -1,0 +1,109 @@
+//! Browser transport for the same database commands and SQLite driver as desktop.
+use super::*;
+use bincode::Options;
+use std::cell::{Cell, RefCell};
+use wasm_bindgen::{JsCast, prelude::*};
+
+use super::transport::codec;
+
+#[wasm_bindgen(module = "/src/db/browser_cancel.js")]
+extern "C" {
+    fn database_cancelled() -> bool;
+}
+thread_local! {
+    static CONNECTION: RefCell<Option<Box<dyn Driver>>> = RefCell::new(None);
+    static DEADLINE: Cell<Option<web_time::Instant>> = const { Cell::new(None) };
+}
+
+pub(super) fn should_interrupt() -> bool {
+    database_cancelled() || DEADLINE.with(|deadline| deadline.get().is_some_and(|t| web_time::Instant::now() >= t))
+}
+
+/// Called only inside the browser database worker, never from a rendering frame.
+pub(crate) fn execute(bytes: &[u8]) -> Vec<u8> {
+    let command = codec().deserialize::<Command>(bytes).map_err(|e| e.to_string());
+    let (result, state) = CONNECTION.with(|slot| {
+        let mut connection = slot.borrow_mut();
+        DEADLINE.set(Some(web_time::Instant::now() + Duration::from_secs(2)));
+        let result = command.and_then(|command| {
+            match &command {
+                Command::Open(None) | Command::Query { .. } | Command::Browse(_)
+                | Command::RefreshSchema | Command::SelectSchema(_) | Command::ListDatabases
+                | Command::Plan(_) | Command::Apply(_) | Command::ImportTarget(_) => {}
+                _ => return Err("This operation needs a browser file adapter or the desktop app.".into()),
+            }
+            handle(&mut connection, command, &Arc::new(AtomicBool::new(false)))
+        });
+        DEADLINE.set(None);
+        let state = connection.as_mut().map_or(TransactionState::Idle, |driver| driver.transaction_state());
+        (result, state)
+    });
+    codec().serialize(&(result, state)).unwrap_or_else(|error| {
+        codec().serialize(&(Err::<Payload, _>(format!("Browser result exceeds its transport limit: {error}")), state)).expect("bounded error message")
+    })
+}
+
+pub struct Worker {
+    worker: Result<web_sys::Worker, String>,
+    pub rx: Receiver<Result<Payload, String>>,
+    transaction: Arc<AtomicU8>,
+    cancellation: Option<js_sys::Int32Array>,
+    _message: Closure<dyn FnMut(web_sys::MessageEvent)>,
+    _error: Closure<dyn FnMut(web_sys::ErrorEvent)>,
+}
+impl Worker {
+    pub fn new(ctx: eframe::egui::Context) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let transaction = Arc::new(AtomicU8::new(0));
+        let status = transaction.clone();
+        let repaint = ctx.clone();
+        let errors = tx.clone();
+        let message = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+            let bytes = js_sys::Uint8Array::new(&event.data()).to_vec();
+            let result = codec().deserialize::<(Result<Payload, String>, TransactionState)>(&bytes);
+            let reply = match result {
+                Ok((reply, state)) => { status.store(state as u8, Ordering::Release); reply }
+                Err(error) => Err(format!("Invalid database worker response: {error}")),
+            };
+            let _ = tx.send(reply);
+            repaint.request_repaint();
+        }) as Box<dyn FnMut(_)>);
+        let error = Closure::wrap(Box::new(move |event: web_sys::ErrorEvent| {
+            let _ = errors.send(Err(format!("Browser database worker failed: {}", event.message())));
+            ctx.request_repaint();
+        }) as Box<dyn FnMut(_)>);
+        let options = web_sys::WorkerOptions::new();
+        options.set_type(web_sys::WorkerType::Module);
+        let worker = web_sys::Worker::new_with_options("./database-worker.js", &options).map_err(|e| format!("Could not start database worker: {e:?}"));
+        let mut cancellation = None;
+        if let Ok(worker) = &worker {
+            worker.set_onmessage(Some(message.as_ref().unchecked_ref()));
+            worker.set_onerror(Some(error.as_ref().unchecked_ref()));
+            // Shared cancellation does not wait for the busy worker's event loop.
+            if js_sys::Reflect::get(&js_sys::global(), &"crossOriginIsolated".into()).ok().and_then(|v| v.as_bool()) == Some(true) {
+                let buffer = js_sys::SharedArrayBuffer::new(4);
+                let array = js_sys::Int32Array::new(&buffer);
+                let message = js_sys::Object::new();
+                if js_sys::Reflect::set(&message, &"cancel".into(), &buffer).is_ok() && worker.post_message(&message).is_ok() {
+                    cancellation = Some(array);
+                }
+            }
+        }
+        Self { worker, rx, transaction, cancellation, _message: message, _error: error }
+    }
+    pub fn send(&self, command: Command) -> Result<(), String> {
+        if let Some(flag) = &self.cancellation { let _ = js_sys::Atomics::store(flag, 0, 0); }
+        let bytes = codec().serialize(&command).map_err(|e| format!("Operation is not available in this browser session: {e}"))?;
+        self.worker.as_ref().map_err(Clone::clone)?.post_message(&js_sys::Uint8Array::from(bytes.as_slice())).map_err(|e| format!("Could not send database command: {e:?}"))
+    }
+    pub fn transaction_state(&self) -> TransactionState {
+        match self.transaction.load(Ordering::Acquire) { 1 => TransactionState::Active, 2 => TransactionState::Failed, 3 => TransactionState::Disconnected, _ => TransactionState::Idle }
+    }
+    pub fn progress(&self) -> progress::Snapshot { progress::Snapshot::default() }
+    pub fn cancel(&self) {
+        if let Some(flag) = &self.cancellation { let _ = js_sys::Atomics::store(flag, 0, 1); }
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) { if let Ok(worker) = &self.worker { worker.terminate(); } }
+}

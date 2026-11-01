@@ -27,7 +27,11 @@ impl SqliteDriver {
         connection
             .pragma_update(None, "foreign_keys", true)
             .map_err(|e| e.to_string())?;
-        connection.progress_handler(1_000, Some(move || cancel.load(Ordering::Relaxed)))
+        connection.progress_handler(1_000, Some(move || {
+            #[cfg(target_arch = "wasm32")]
+            if super::browser::should_interrupt() { return true; }
+            cancel.load(Ordering::Relaxed)
+        }))
             .map_err(|e| e.to_string())?;
         Ok(Self {
             connection,

@@ -339,6 +339,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -571,7 +580,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -3027,11 +3038,13 @@ dependencies = [
 name = "rustable"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "chrono",
  "csv",
  "eframe",
  "egui_extras",
  "getrandom 0.4.3",
+ "js-sys",
  "keyring",
  "native-tls",
  "objc2 0.6.5",
@@ -3051,6 +3064,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-postgres",
+ "wasm-bindgen",
+ "web-sys",
  "web-time",
 ]
 

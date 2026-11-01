@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 /// Captured document identity and saved baseline; resolved on the worker.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SaveSource {
     pub path: PathBuf,
     pub sql: Arc<String>,
