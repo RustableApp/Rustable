@@ -20,12 +20,20 @@ It’s written in Rust. Of course it is. We also use mise, and mise is written i
 
 macOS is signed and notarized, with Sparkle updates. Windows and Linux are portable packages; updates are manual for now. Built-in SSH tunnels currently work on macOS and Linux; on Windows use a direct connection or an external tunnel. Linux packages target Ubuntu 24.04 or compatible newer systems.
 
+## This isn’t a screenshot
+
+[Try the live WASM demo →](https://rustable.app/#demo-title)
+
+Rust, compiled to **WebAssembly**, running in your browser. Not a JavaScript rewrite. Why would you do that? Because you can. It’s written in Rust, dude. Imagine that.
+
+The browser edition runs real SQLite against disposable sample data. Query it, change it, reset it. The UI is Rust/egui compiled to WASM; a small JavaScript bridge handles browser integration and SQLite’s WASM API. Real server connections and the full editing workflows live in the desktop app.
+
 ## What’s in it
 
 - Saved connections and separate database windows.
 - SSH tunnels, schema browsing, and credentials stored through the system credential store when enabled.
 - Resizable data grids, sorting, filtering, pagination, and a row inspector.
-- SQL tabs, syntax highlighting, completion tooling, query history, and favorites.
+- SQL tabs, syntax highlighting, completion tooling, query history, and named saved queries grouped in folders.
 - Staged table edits, undo, and a SQL review before saving.
 - Result exports, light and dark themes, and keyboard shortcuts for the things you do repeatedly.
 
