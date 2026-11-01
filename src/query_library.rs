@@ -134,6 +134,47 @@ impl Rustable {
 mod tests {
     use super::*;
     #[test]
+    fn single_click_selects_and_double_click_opens_saved_query() {
+        let ctx = egui::Context::default();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("Customer report.sql");
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.prefs.query_directory = Some(temp.path().to_owned());
+        app.query_library.root = Some(temp.path().to_owned());
+        app.query_library.refreshed = Some(Instant::now());
+        app.query_library.files.push(QueryFile { path: path.clone(), name: "Customer report".into(), group: String::new() });
+        let original_tab = app.tab;
+        let mut saved = QueryTab::new("SELECT 42;".into());
+        saved.source_path = Some(path.clone());
+        app.tabs.push(saved);
+        let saved_tab = app.tabs.len() - 1;
+        let mut time = 0.0;
+        let mut frame = |app: &mut Rustable, events| {
+            time += 0.04;
+            ctx.run(egui::RawInput { time: Some(time), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0, 700.0))), events, ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.query_library_sidebar(ui));
+            })
+        };
+        frame(&mut app, vec![]);
+        let output = frame(&mut app, vec![]);
+        fn label(shape: &egui::Shape) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == "▤ Customer report" => Some(text.pos + text.galley.size() * 0.5),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(label),
+                _ => None,
+            }
+        }
+        let pos = output.shapes.iter().find_map(|shape| label(&shape.shape)).expect("saved query is visible");
+        for click in 0..2 {
+            for pressed in [true, false] {
+                frame(&mut app, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }]);
+            }
+            assert!(app.query_library.selected == Some(Selection::File(path.clone())));
+            assert_eq!(app.tab, if click == 0 { original_tab } else { saved_tab });
+            assert!(app.pending.is_none(), "Opening an already loaded query must not execute SQL");
+        }
+    }
+    #[test]
     fn files_are_named_and_grouped_without_reading_sql_contents() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir(temp.path().join("Reports")).unwrap();
