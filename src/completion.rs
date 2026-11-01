@@ -527,6 +527,7 @@ fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]
             }
         }
         let mut lexemes = Vec::new();
+        let mut derived = std::collections::HashMap::new();
         for (i, token) in tokens.iter().enumerate().take(arm_end).skip(arm_start) {
             if blocks.iter().any(|&(child_start, child_end)| child_start > start && child_end <= end && child_start <= i && i < child_end) { continue; }
             if let Some(&(child_start, child_end)) = blocks.iter().find(|&&(cs, ce)| cs > start && ce < end && cs == i + 1) {
@@ -534,18 +535,7 @@ fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]
                 // The normal relation scanner still decides whether it follows
                 // FROM/JOIN (scalar subqueries never become table sources).
                 let name = format!("__rustable_derived_{child_start}");
-                let query = tokens[child_start..child_end].iter().map(|t| t.token.to_string()).collect::<Vec<_>>().join(" ");
-                let mut columns = projection::columns(&query, dialect, objects, bindings);
-                let mut alias = child_end + 1;
-                if tokens.get(alias).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("AS"))) { alias += 1; }
-                if matches!(tokens.get(alias).map(|t| &t.token), Some(Token::Word(_)))
-                    && matches!(tokens.get(alias + 1).map(|t| &t.token), Some(Token::LParen)) {
-                    let renamed: Vec<_> = tokens.iter().skip(alias + 2).take_while(|t| t.token != Token::RParen)
-                        .filter_map(|t| if let Token::Word(w) = &t.token { Some(w.value.clone()) } else { None }).collect();
-                    columns = renamed.into_iter().take(1024).collect();
-                }
-                if child_start <= caret && caret <= child_end { columns.clear(); }
-                projected.insert(name.clone(), columns);
+                derived.insert(name.clone(), (child_start, child_end));
                 lexemes.push((name, true));
                 continue;
             }
@@ -553,12 +543,29 @@ fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]
             if let Some(lexeme) = relation_token(token.token.clone()) { lexemes.push(lexeme); }
         }
         for mut relation in relations_from_tokens(lexemes) {
+            if result.iter().any(|(_, alias)| alias.eq_ignore_ascii_case(&relation.1)) { continue; }
+            // Infer only actual FROM/JOIN sources, not scalar subqueries or
+            // CTE declarations (whose outputs were already resolved above).
+            if let Some(&(child_start, child_end)) = derived.get(&relation.0) {
+                let query = tokens[child_start..child_end].iter().map(|t| t.token.to_string()).collect::<Vec<_>>().join(" ");
+                let mut columns = projection::columns(&query, dialect, objects, bindings);
+                let mut alias = child_end + 1;
+                if tokens.get(alias).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("AS"))) { alias += 1; }
+                if matches!(tokens.get(alias).map(|t| &t.token), Some(Token::Word(_)))
+                    && matches!(tokens.get(alias + 1).map(|t| &t.token), Some(Token::LParen)) {
+                    let renamed: Vec<_> = tokens.iter().skip(alias + 2).take_while(|t| t.token != Token::RParen)
+                        .filter_map(|t| if let Token::Word(w) = &t.token { Some(w.value.clone()) } else { None }).take(1024).collect();
+                    columns = renamed.into_iter().take(1024).collect();
+                }
+                if child_start <= caret && caret <= child_end { columns.clear(); }
+                projected.insert(relation.0.clone(), columns);
+            }
             if let Some(columns) = bindings.get(&relation.0.to_lowercase()) {
                 let key = format!("__rustable_cte_{start}_{}", relation.0);
                 projected.insert(key.clone(), columns.clone());
                 relation.0 = key;
             }
-            if !result.iter().any(|(_, alias)| alias.eq_ignore_ascii_case(&relation.1)) { result.push(relation); }
+            result.push(relation);
         }
     }
     (result, projected)
@@ -1027,17 +1034,28 @@ mod tests {
         }).collect();
         objects.push(object("customers", &["customer_name"]));
         let mut completion = Completion::default();
-        for sql in ["SELECT * FROM ta", "SELECT c.cu FROM customers c", "SELECT nonexistent"] {
-            let cursor = sql.find(" FROM customers").unwrap_or(sql.len());
+        let ctes = (0..64).map(|i| if i == 0 { "cte0 AS (SELECT customer_name FROM customers)".to_owned() }
+            else { format!("cte{i} AS (SELECT * FROM cte{})", i - 1) }).collect::<Vec<_>>().join(", ");
+        let chained = format!("WITH {ctes} SELECT c.cu| FROM cte63 c");
+        for marked in [
+            chained.as_str(),
+            "SELECT * FROM ta|",
+            "SELECT c.cu| FROM customers c",
+            "SELECT nonexistent|",
+            "WITH cte AS (SELECT customer_name FROM customers) SELECT c.cu| FROM cte c",
+            "SELECT c.cu| FROM (SELECT * FROM customers) c",
+        ] {
+            let cursor = marked.find('|').unwrap();
+            let sql = marked.replace('|', "");
             let mut samples = Vec::new();
             for _ in 0..50 {
                 let start = std::time::Instant::now();
-                completion.refresh(sql, cursor, &objects, &[], true, Dialect::Mysql(crate::sql::mysql::Mode::default()));
+                completion.refresh(&sql, cursor, &objects, &[], true, Dialect::Mysql(crate::sql::mysql::Mode::default()));
                 samples.push(start.elapsed());
                 assert!(completion.items.len() <= 12);
             }
             samples.sort();
-            eprintln!("{sql}: median={:?}, p95={:?}", samples[25], samples[47]);
+            eprintln!("{}: median={:?}, p95={:?}", if sql.len() > 200 { "64 chained CTEs" } else { &sql }, samples[25], samples[47]);
             if sql.ends_with(" ta") { assert_eq!(completion.items.len(), 12); }
             if sql.contains("c.cu") { assert_eq!(completion.items, vec!["customer_name"]); }
         }

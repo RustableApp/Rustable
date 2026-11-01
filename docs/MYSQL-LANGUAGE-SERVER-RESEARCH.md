@@ -199,3 +199,28 @@ Validation: nine CTE visibility/output scenarios across PostgreSQL, SQLite and
 MySQL dialects; all 25 completion tests pass (one manual benchmark ignored).
 Strict all-target Clippy passes. Native UI acceptance of these new suggestions
 and browser rebuild/deployment remain pending; no release was triggered.
+
+### Completion regression and latency check (2026-11-01)
+
+The full library suite after CTE inference passed: 432 tests, 87 skipped live or
+manual tests. Local completion now delays derived-output parsing until the
+relation scanner actually identifies a FROM/JOIN source. Scalar subqueries and
+WITH declarations no longer undergo redundant derived-table inference; CTE
+bindings are still resolved normally. Shadowed outer aliases also skip inference.
+
+Expanded the manual 20,000-table benchmark to include CTEs, derived wildcards and
+64 chained CTEs. Debug-build measurements (50 samples per case) after the change:
+
+| Case | Median | p95 |
+| --- | ---: | ---: |
+| Table prefix | 1.888 ms | 1.943 ms |
+| Qualified catalog column | 2.084 ms | 2.169 ms |
+| No matching prefix | 2.384 ms | 2.480 ms |
+| CTE column | 2.240 ms | 2.280 ms |
+| Derived wildcard column | 2.289 ms | 2.399 ms |
+| 64 chained CTEs | 5.135 ms | 6.273 ms |
+
+These are local completion timings, not total frame or server latency, and are
+not a controlled before/after benchmark. The completion regression suite still
+passes all 25 tests; the manual benchmark asserts expected suggestions as well
+as recording timings. Strict all-target Clippy passes.
