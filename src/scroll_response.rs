@@ -1,30 +1,14 @@
-//! Small, immediate wheel steps; precise native trackpad movement stays unchanged.
-//!
-//! Egui 0.33 smooths point events >= 8 points as well as line/page events.
-//! Fast macOS trackpad movement already includes OS momentum: smoothing it a
-//! second time adds latency. Keep native deltas (including momentum) unchanged.
-//! Clear egui's interpolation accumulator as well as replacing the delta so
-//! there is neither residual movement nor invisible smoothing repaint work.
-use eframe::egui::{self, Event, MouseWheelUnit, Vec2};
+//! Use egui's same scroll interpolation on desktop and in the WASM workspace.
+//! Keep diagnostics separate from input so tracing never changes scroll behavior.
+use eframe::egui;
+#[cfg(any(test, not(target_arch = "wasm32")))]
+use eframe::egui::Event;
+#[cfg(test)]
+use eframe::egui::{MouseWheelUnit, Vec2};
 
-// Logical points per reported wheel line, not physical Retina pixels. Egui's
-// default is 40; half that keeps a tick small without adding an animated tail.
-const WHEEL_LINE_POINTS: f32 = 20.0;
-
-pub fn install(ctx: &egui::Context) {
-    ctx.options_mut(|options| options.input_options.line_scroll_speed = WHEEL_LINE_POINTS);
-    ctx.on_begin_pass(
-        "direct native scrolling",
-        std::sync::Arc::new(|ctx| {
-            let options = ctx.options(|options| options.input_options);
-            ctx.input_mut(|input| {
-                let delta = direct_delta(&input.events, options, input.viewport_rect().height());
-                input.set_scroll_delta_without_smoothing(delta);
-            });
-        }),
-    );
+pub fn install(_ctx: &egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
-    install_trace(ctx);
+    install_trace(_ctx);
 }
 
 /// Optional hardware-input evidence. No SQL, cell contents or connection details.
@@ -115,86 +99,41 @@ fn install_trace(ctx: &egui::Context) {
     );
 }
 
-fn direct_delta(events: &[Event], options: egui::InputOptions, viewport_height: f32) -> Vec2 {
-    events.iter().fold(Vec2::ZERO, |total, event| {
-        let Event::MouseWheel {
-            unit,
-            delta,
-            modifiers,
-        } = event
-        else {
-            return total;
-        };
-        // Preserve egui's zoom path; raw_scroll_delta itself also includes zoom,
-        // so copying it directly would incorrectly pan while zooming.
-        if modifiers.matches_any(options.zoom_modifier) {
-            return total;
-        }
-        let mut delta = match unit {
-            MouseWheelUnit::Point => *delta,
-            MouseWheelUnit::Line => *delta * options.line_scroll_speed,
-            MouseWheelUnit::Page => *delta * viewport_height,
-        };
-        let horizontal = modifiers.matches_any(options.horizontal_scroll_modifier);
-        let vertical = modifiers.matches_any(options.vertical_scroll_modifier);
-        if horizontal && !vertical {
-            delta = egui::vec2(delta.x + delta.y, 0.0);
-        }
-        if vertical && !horizontal {
-            delta = egui::vec2(0.0, delta.x + delta.y);
-        }
-        total + delta
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn wheel(unit: MouseWheelUnit, delta: Vec2, modifiers: egui::Modifiers) -> Event {
-        Event::MouseWheel {
-            unit,
-            delta,
-            modifiers,
-        }
-    }
-    fn frame(ctx: &egui::Context, events: Vec<Event>, time: f64) -> Vec2 {
-        let mut observed = Vec2::ZERO;
-        let _ = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(800.0, 600.0),
-                )),
-                events,
-                time: Some(time),
-                ..Default::default()
-            },
-            |ctx| {
-                observed = ctx.input(|i| i.smooth_scroll_delta);
-            },
-        );
-        observed
-    }
-
     #[test]
-    fn wheel_movement_is_complete_in_first_frame_with_no_tail() {
-        let ctx = egui::Context::default();
-        install(&ctx);
-        assert_eq!(
-            frame(
-                &ctx,
-                vec![wheel(
-                    MouseWheelUnit::Line,
-                    egui::vec2(0.0, -3.0),
-                    egui::Modifiers::NONE
-                )],
-                0.0
-            ),
-            egui::vec2(0.0, -60.0)
-        );
-        for index in 1..30 {
-            assert_eq!(frame(&ctx, vec![], index as f64 / 144.0), Vec2::ZERO);
+    fn desktop_matches_browser_smoothing_at_each_refresh_rate() {
+        for hz in [60.0, 120.0, 144.0] {
+            for unit in [MouseWheelUnit::Point, MouseWheelUnit::Line, MouseWheelUnit::Page] {
+                for modifiers in [egui::Modifiers::NONE, egui::Modifiers::SHIFT, egui::Modifiers::COMMAND] {
+                    let desktop = egui::Context::default();
+                    install(&desktop);
+                    let browser = egui::Context::default();
+                    let mut total = Vec2::ZERO;
+                    let mut moving_frames = 0;
+                    for frame in 0..180 {
+                        let input = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                            time: Some(frame as f64 / hz),
+                            events: if frame == 3 { vec![Event::MouseWheel { unit, delta: egui::vec2(0.0, -1.0), modifiers }] } else { vec![] },
+                            ..Default::default()
+                        };
+                        let mut actual = Vec2::ZERO;
+                        let mut expected = Vec2::ZERO;
+                        let _ = desktop.run(input.clone(), |ctx| actual = ctx.input(|i| i.smooth_scroll_delta));
+                        let _ = browser.run(input, |ctx| expected = ctx.input(|i| i.smooth_scroll_delta));
+                        assert_eq!(actual, expected);
+                        total += actual;
+                        moving_frames += usize::from(actual != Vec2::ZERO);
+                        if frame == 179 { assert_eq!(actual, Vec2::ZERO, "must settle at idle"); }
+                    }
+                    if unit == MouseWheelUnit::Line && modifiers == egui::Modifiers::NONE {
+                        assert!((total.y + 40.0).abs() < 0.01);
+                        assert!(moving_frames > 1, "wheel ticks should be interpolated");
+                    }
+                }
+            }
         }
     }
 
@@ -220,108 +159,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn wheel_does_not_schedule_invisible_smoothing_frames() {
-        let ctx = egui::Context::default();
-        install(&ctx);
-        for i in 0..3 { frame(&ctx, vec![], i as f64 / 120.0); }
-        frame(&ctx, vec![wheel(MouseWheelUnit::Line, egui::vec2(0.0,-3.0), egui::Modifiers::NONE)], 0.1);
-        // egui may schedule the usual follow-up frame after input, but there
-        // must not be an animation's worth of invisible repaint requests.
-        for index in 0..30 {
-            let output = ctx.run(egui::RawInput {
-                time:Some(0.1 + (index+1) as f64/120.0), ..Default::default()
-            }, |_| {});
-            if index >= 2 {
-                assert_ne!(output.viewport_output[&egui::ViewportId::ROOT].repaint_delay,
-                    std::time::Duration::ZERO, "invisible wheel smoothing still requests repaint at idle frame {index}");
-            }
-        }
-    }
-
-    #[test]
-    fn horizontal_wheel_steps_are_small_and_reverse_without_momentum() {
-        let ctx = egui::Context::default();
-        install(&ctx);
-        for (index, lines) in [-1.0, 1.0, -3.0].into_iter().enumerate() {
-            assert_eq!(
-                frame(
-                    &ctx,
-                    vec![wheel(
-                        MouseWheelUnit::Line,
-                        egui::vec2(0.0, lines),
-                        egui::Modifiers::SHIFT
-                    )],
-                    index as f64 / 120.0
-                ),
-                egui::vec2(lines * WHEEL_LINE_POINTS, 0.0)
-            );
-        }
-        assert_eq!(frame(&ctx, vec![], 0.1), Vec2::ZERO);
-    }
-
-    #[test]
-    fn native_trackpad_momentum_is_not_delayed_or_multiplied() {
-        let ctx = egui::Context::default();
-        install(&ctx);
-        // Includes large finger movement and diminishing native momentum.
-        for (index, movement) in [36.0, 24.0, 12.0, 7.0, 2.0, 0.25, 0.0]
-            .into_iter()
-            .enumerate()
-        {
-            let delta = egui::vec2(movement * 0.5, -movement);
-            assert_eq!(
-                frame(
-                    &ctx,
-                    vec![wheel(MouseWheelUnit::Point, delta, egui::Modifiers::NONE)],
-                    index as f64 / 144.0
-                ),
-                delta
-            );
-        }
-        assert_eq!(frame(&ctx, vec![], 0.1), Vec2::ZERO);
-    }
-
-    #[test]
-    fn modifiers_page_units_and_zoom_keep_their_meaning() {
-        let ctx = egui::Context::default();
-        install(&ctx);
-        assert_eq!(
-            frame(
-                &ctx,
-                vec![wheel(
-                    MouseWheelUnit::Page,
-                    egui::vec2(0.0, -1.0),
-                    egui::Modifiers::SHIFT
-                )],
-                0.0
-            ),
-            egui::vec2(-600.0, 0.0)
-        );
-        assert_eq!(
-            frame(
-                &ctx,
-                vec![wheel(
-                    MouseWheelUnit::Point,
-                    egui::vec2(12.0, -2.0),
-                    egui::Modifiers::ALT
-                )],
-                0.1
-            ),
-            egui::vec2(0.0, 10.0)
-        );
-        assert_eq!(
-            frame(
-                &ctx,
-                vec![wheel(
-                    MouseWheelUnit::Point,
-                    egui::vec2(0.0, 3.0),
-                    egui::Modifiers::COMMAND
-                )],
-                0.2
-            ),
-            Vec2::ZERO
-        );
-        assert_ne!(ctx.input(|input| input.zoom_delta()), 1.0);
-    }
 }

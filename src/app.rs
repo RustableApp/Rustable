@@ -7352,7 +7352,7 @@ mod interaction_tests {
     }
 
     #[test]
-    fn mouse_wheel_moves_the_grid_in_small_steps_without_an_animation_tail() {
+    fn smooth_mouse_wheel_moves_wide_grid_in_one_layout_pass() {
         fn text_position(shape: &egui::Shape, needle: &str) -> Option<egui::Pos2> {
             match shape {
                 egui::Shape::Text(text) if text.galley.job.text == needle => Some(text.pos),
@@ -7392,16 +7392,16 @@ mod interaction_tests {
                 }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
                 if frame >= 3 {
                     assert_eq!(output.platform_output.num_completed_passes, 1, "scrolling must not force a second layout pass");
-                    positions.push(output.shapes.iter().find_map(|s| text_position(&s.shape, "r5_c2")).expect("reference cell remains visible"));
+                    positions.push(output.shapes.iter().find_map(|s| text_position(&s.shape, "r8_c2")).expect("reference cell remains visible"));
                 }
             }
             let axis = if horizontal { 0 } else { 1 };
-            assert!((positions[0][axis] - positions[1][axis] - 20.0).abs() < 1.0,
-                "wheel movement must be painted in the event frame, not the next frame: {positions:?}");
-            assert!((positions[0][axis] - positions.last().unwrap()[axis] - 20.0*ticks as f32).abs() < 1.0);
+            let tick_distance = if unit == egui::MouseWheelUnit::Line { 40.0 } else { 20.0 };
+            assert!(positions[0][axis] > positions[1][axis], "scrolling starts in the event frame");
+            assert!((positions[0][axis] - positions.last().unwrap()[axis] - tick_distance*ticks as f32).abs() < 1.0);
             assert!((positions[0][1-axis] - positions.last().unwrap()[1-axis]).abs() < 0.01);
             let moving_frames = positions.windows(2).filter(|p| (p[0][axis]-p[1][axis]).abs() > 0.01).count();
-            assert_eq!(moving_frames, ticks, "each tick should produce one small step with no animation tail");
+            assert!(moving_frames > ticks, "wheel movement should be spread across frames");
             assert_eq!(positions[positions.len()-1], positions[positions.len()-2]);
         }
     }
@@ -9010,6 +9010,8 @@ mod workspace_layout_tests {
         render(&mut app, vec![egui::Event::PointerMoved(egui::pos2(100.0, 300.0)),
             egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point,
                 delta: egui::vec2(0.0, -10000.0), modifiers: egui::Modifiers::NONE }]);
+        // Let the wheel interpolation settle before checking the final viewport.
+        for _ in 0..90 { render(&mut app, vec![]); }
         let bottom = render(&mut app, vec![]);
         let (_, last_y) = bottom.iter().find(|(text, _)| text == "table_0199").expect("last table reachable by scrolling");
         let point = egui::pos2(100.0, last_y + 6.0);
@@ -9081,6 +9083,8 @@ mod workspace_layout_tests {
         assert!(initial.iter().filter(|text| text.starts_with("field_")).count() < 25);
         render(&mut app, vec![egui::Event::PointerMoved(egui::pos2(1350.0, 300.0)),
             egui::Event::MouseWheel { unit:egui::MouseWheelUnit::Point, delta:egui::vec2(0.0,-10000.0), modifiers:egui::Modifiers::NONE }]);
+        // Let the wheel interpolation settle before checking the final viewport.
+        for _ in 0..90 { render(&mut app, vec![]); }
         let bottom = render(&mut app, vec![]);
         assert!(bottom.iter().any(|text| text == "field_119"));
         assert!(bottom.iter().any(|text| text == "value_119"));

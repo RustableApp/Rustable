@@ -745,3 +745,35 @@ virtualization is present in the running binary. The next investigation is
 reducing duplicate per-cell widget/text work while preserving editing,
 selection, clipping, auto-fit and context-menu behavior. No new process CPU
 reduction is claimed from this capture alone.
+
+### Browser-style smooth scrolling on desktop (2026-11-01)
+
+The browser host uses egui's default scroll interpolation. Desktop previously
+installed a begin-pass override that converted every wheel event into an
+immediate delta, cleared interpolation, and reduced line distance to 20 points.
+Following comparison with the live WASM demo, desktop now uses the same default
+interpolation and line distance as the browser. The optional scroll trace remains
+available and does not modify input. This supersedes the direct-wheel behavior
+and no-animation-tail expectations described above.
+
+Regression coverage compares desktop and browser deltas for point, line, and
+page events at 60, 120, and 144 Hz, including Shift and Command modifiers. It
+checks total line distance and that interpolation settles at idle. A 120-column,
+500-row grid test checks both axes, first-event response, final displacement,
+and one layout pass per frame. Row/column virtualization and cached text remain
+unchanged. Smoothing intentionally paints intermediate frames; CPU utilization
+with a physical mouse still depends on event rate and monitor refresh rate.
+
+Optimized synthetic benchmark, 120 columns × 500 rows, 120 Hz event timeline:
+
+| Input | Layout p95 | Wheel-event layout p95 | Tessellation p95 |
+| --- | ---: | ---: | ---: |
+| Vertical point | 0.326 ms | 0.326 ms | 0.058 ms |
+| Horizontal point | 0.298 ms | 0.298 ms | 0.051 ms |
+| Vertical mouse | 0.302 ms | 0.358 ms | 0.050 ms |
+| Horizontal mouse | 0.327 ms | 0.316 ms | 0.061 ms |
+
+Command: `mise exec -- cargo test --locked --release --lib wide_grid_scroll_frame_benchmark -- --ignored --nocapture`.
+These CPU measurements exclude GPU presentation, physical input latency and
+OS/browser wheel-event normalization; they do not establish identical physical
+mouse feel or predict total CPU utilization.
