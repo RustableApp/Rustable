@@ -172,3 +172,10 @@ native deltas and clears the otherwise private interpolation accumulator. Zoom
 smoothing is left unchanged. Replacing only the public smooth delta stopped
 visible animation but left the old accumulator requesting invisible repaint
 frames; the idle-repaint regression reproduced that and now passes.
+
+Compiler compatibility cleanup: stroke-width literals explicitly use `f32`
+(including the debug painting paths), avoiding the newer compiler's
+`float_literal_f32_fallback` future-incompatibility warning. The scene module
+no longer imports the legacy `core::f32` module, so `f32::EPSILON` resolves to
+the primitive's associated constant. Numeric values and rendering behavior
+are unchanged; no warning lints are suppressed.

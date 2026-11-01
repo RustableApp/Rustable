@@ -1439,7 +1439,7 @@ impl Ui {
                     crate::StrokeKind::Inside,
                 );
 
-                let stroke = Stroke::new(2.5, Color32::from_rgb(200, 0, 0));
+                let stroke = Stroke::new(2.5_f32, Color32::from_rgb(200, 0, 0));
                 let paint_line_seg = |a, b| self.painter().line_segment([a, b], stroke);
 
                 if debug_expand_width && too_wide {
@@ -1621,7 +1621,7 @@ impl Ui {
     /// let c = rect.center();
     /// let r = rect.width() / 2.0 - 1.0;
     /// let color = Color32::from_gray(128);
-    /// let stroke = Stroke::new(1.0, color);
+    /// let stroke = Stroke::new(1.0_f32, color);
     /// painter.circle_stroke(c, r, stroke);
     /// painter.line_segment([c - vec2(0.0, r), c + vec2(0.0, r)], stroke);
     /// painter.line_segment([c, c + r * Vec2::angled(TAU * 1.0 / 8.0)], stroke);
