@@ -1,7 +1,9 @@
 # Rustable artwork
 
 - `rustable-mark.svg`: original vector logo.
-- `rustable-logo-1024.png`: GitHub avatar and everyday use; transparent rounded corners.
+- `rustable-github-1024.png` / `rustable-github-2048.png`: GitHub avatar; just the rusty R on a fully transparent background.
+- `rustable-github.svg`: editable transparent logo.
+- `rustable-logo-1024.png`: app-style tile with transparent rounded corners.
 - `rustable-logo-2048.png`: larger PNG export.
 - `Rustable.icns`: macOS application icon, generated from the 1024px PNG.
 - `social-preview.png`: 1280 × 640 social card for GitHub and website links.
