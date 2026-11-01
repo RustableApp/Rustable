@@ -40,7 +40,7 @@ fn version_matches(binary: &Path, version: &str) -> bool {
         })
 }
 fn build_servers(root: &Path) -> Result<()> {
-    let sqlite = root.join("target/lsp-tools/bin/syntaqlite");
+    let sqlite = root.join(format!("target/lsp-tools/bin/syntaqlite{}", env::consts::EXE_SUFFIX));
     if !version_matches(&sqlite, SQLITE_VERSION) {
         run(Command::new("mise").current_dir(root).args([
             "exec",
@@ -59,9 +59,9 @@ fn build_servers(root: &Path) -> Result<()> {
             "bundled-sqlite-dialect",
         ]))?;
     }
-    let pg = root.join("target/pg-language-server/release/rustable-postgres-language-server");
+    let pg = root.join(format!("target/pg-language-server/release/rustable-postgres-language-server{}", env::consts::EXE_SUFFIX));
     if !pg.is_file() {
-        let tree_sitter = root.join("target/language-server/bin/tree-sitter");
+        let tree_sitter = root.join(format!("target/language-server/bin/tree-sitter{}", env::consts::EXE_SUFFIX));
         if !version_matches(&tree_sitter, "0.25.9") {
             run(Command::new("mise").current_dir(root).args([
                 "exec",
@@ -125,7 +125,7 @@ fn metadata(manifest: &Path) -> Result<Value> {
 fn registry_manifest(root: &Path) -> Result<PathBuf> {
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").expect("HOME")).join(".cargo"));
+        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")).expect("user home")).join(".cargo"));
     let registries = cargo_home.join("registry/src");
     for entry in fs::read_dir(registries)? {
         let candidate = entry?
@@ -251,8 +251,8 @@ fn notices(root: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 fn bundle(root: &Path, binary: &Path, destination: &Path, plist: &Path) -> Result<()> {
-    let sqlite = root.join("target/lsp-tools/bin/syntaqlite");
-    let pg = root.join("target/pg-language-server/release/rustable-postgres-language-server");
+    let sqlite = root.join(format!("target/lsp-tools/bin/syntaqlite{}", env::consts::EXE_SUFFIX));
+    let pg = root.join(format!("target/pg-language-server/release/rustable-postgres-language-server{}", env::consts::EXE_SUFFIX));
     // Validate everything before touching an existing application bundle.
     for (path, reason) in [
         (binary, "build Rustable first"),

@@ -506,12 +506,12 @@ pub fn discover_postgres_program() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        candidates.push(dir.join("rustable-postgres-language-server"));
+        candidates.push(dir.join(format!("rustable-postgres-language-server{}", std::env::consts::EXE_SUFFIX)));
     }
     #[cfg(debug_assertions)]
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/pg-language-server/release/rustable-postgres-language-server"),
+            .join(format!("target/pg-language-server/release/rustable-postgres-language-server{}", std::env::consts::EXE_SUFFIX)),
     );
     candidates.into_iter().find(|path| path.is_file())
 }
