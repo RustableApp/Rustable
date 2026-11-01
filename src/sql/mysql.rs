@@ -30,16 +30,29 @@ pub fn execution_text(sql: &str, range: Range<usize>, mode: Mode) -> Result<Stri
 }
 
 fn scan(sql: &str, mode: Mode, strict: bool, include_delimiter: bool) -> Result<(Vec<Range<usize>>, &str), String> {
-    scan_from(sql, mode, strict, include_delimiter, ";", false).map(|(ranges, delimiter, _)| (ranges, delimiter))
+    scan_from(sql, mode, strict, include_delimiter, ";", false).map(|(ranges, delimiter, _)| (ranges, delimiter)).map_err(|error| error.message)
 }
 
 /// Scan only the next statement so a preceding SET can change lexical modes.
 pub fn next_statement(sql: &str, mode: Mode, delimiter: &str) -> Result<(Option<Range<usize>>, usize, String), String> {
     scan_from(sql, mode, true, false, delimiter, true)
-        .map(|(ranges, delimiter, consumed)| (ranges.into_iter().next(), consumed, delimiter.to_owned()))
+        .map(|(ranges, delimiter, consumed)| (ranges.into_iter().next(), consumed, delimiter.to_owned())).map_err(|error| error.message)
 }
 
-fn scan_from<'a>(sql: &'a str, mode: Mode, strict: bool, include_delimiter: bool, initial: &'a str, one: bool) -> Result<(Vec<Range<usize>>, &'a str, usize), String> {
+#[derive(Debug)]
+pub struct LexicalError {
+    pub range: Range<usize>,
+    pub message: String,
+}
+
+/// Bounded editor-only lexical check, using the same scanner as execution.
+/// Offsets are bytes. This deliberately does not claim full SQL validation.
+pub fn lexical_error(sql: &str, mode: Mode) -> Option<LexicalError> {
+    if sql.len() > 64 * 1024 { return None; }
+    scan_from(sql, mode, true, false, ";", false).err()
+}
+
+fn scan_from<'a>(sql: &'a str, mode: Mode, strict: bool, include_delimiter: bool, initial: &'a str, one: bool) -> Result<(Vec<Range<usize>>, &'a str, usize), LexicalError> {
     let bytes = sql.as_bytes();
     let (mut i, mut start, mut code) = (0, 0, false);
     let mut delimiter = initial;
@@ -54,7 +67,7 @@ fn scan_from<'a>(sql: &'a str, mode: Mode, strict: bool, include_delimiter: bool
                 && line.as_bytes().get(9).is_none_or(u8::is_ascii_whitespace) {
                 let value = line[9..].trim();
                 if value.is_empty() || value.bytes().any(|b| b.is_ascii_whitespace() || b == 0) {
-                    return Err("DELIMITER needs one nonempty delimiter without whitespace.".into());
+                    return Err(LexicalError { range: i..line_end, message: "DELIMITER needs one nonempty delimiter without whitespace.".into() });
                 }
                 delimiter = value;
                 i = (line_end + 1).min(bytes.len());
@@ -73,6 +86,7 @@ fn scan_from<'a>(sql: &'a str, mode: Mode, strict: bool, include_delimiter: bool
         match bytes[i] {
             b'\'' | b'"' | b'`' => {
                 code = true;
+                let quote_start = i;
                 let quote = bytes[i];
                 let escapes = !mode.no_backslash_escapes && quote != b'`'
                     && !(quote == b'"' && mode.ansi_quotes);
@@ -88,7 +102,7 @@ fn scan_from<'a>(sql: &'a str, mode: Mode, strict: bool, include_delimiter: bool
                     }
                     i += 1;
                 }
-                if !closed && strict { return Err("Unterminated MySQL quote".into()); }
+                if !closed && strict { return Err(LexicalError { range: quote_start..sql.len(), message: "Unterminated MySQL quote".into() }); }
             }
             b'#' => { while i < bytes.len() && bytes[i] != b'\n' { i += 1; } }
             b'-' if bytes.get(i + 1) == Some(&b'-')
@@ -100,7 +114,7 @@ fn scan_from<'a>(sql: &'a str, mode: Mode, strict: bool, include_delimiter: bool
                 // MariaDB also recognizes /*M! ... */.
                 code |= bytes.get(i + 2) == Some(&b'!') || bytes.get(i + 2..i + 4) == Some(b"M!");
                 if let Some(end) = sql[i + 2..].find("*/") { i += end + 4; }
-                else if strict { return Err("Unterminated MySQL comment".into()); }
+                else if strict { return Err(LexicalError { range: i..sql.len(), message: "Unterminated MySQL comment".into() }); }
                 else { i = bytes.len(); }
             }
             b if b.is_ascii_whitespace() => i += 1,
@@ -117,6 +131,24 @@ mod tests {
     fn parts(sql: &str, mode: Mode) -> Vec<&str> {
         ranges(sql, mode, true).unwrap().into_iter().map(|r| sql[r].trim()).collect()
     }
+    #[test]
+    fn lexical_diagnostics_point_to_original_source_bytes() {
+        let mode = Mode::default();
+        for (sql, start, message) in [
+            ("SELECT '日本'; /* unfinished", "SELECT '日本'; ".len(), "comment"),
+            ("SELECT `unfinished", 7, "quote"),
+            ("  DELIMITER  ", 0, "DELIMITER"),
+        ] {
+            let error = lexical_error(sql, mode).unwrap();
+            assert_eq!(error.range, start..sql.len());
+            assert!(error.message.contains(message));
+            assert!(sql.get(error.range).is_some());
+        }
+        assert!(lexical_error("SELECT 4--2; # comment\nSELECT 3", mode).is_none());
+        assert!(lexical_error("/*M! SELECT 1 */", mode).is_none());
+        assert!(lexical_error("SELECT \"name\\\"", crate::sql::mysql::Mode { ansi_quotes: true, ..mode }).is_none());
+    }
+
     #[test]
     fn quotes_comments_and_arithmetic_have_mysql_boundaries() {
         let sql = "SELECT 'it\\'s;ok', `a``;b`, \"x;y\"; # ;ignored\nSELECT 4--2; -- ;ignored\nSELECT '日本';";

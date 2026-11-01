@@ -3570,6 +3570,9 @@ impl Rustable {
             tab.completion
                 .receive_server(&tab.sql, tab.cursor.start, &items);
         }
+        if let crate::sql::Dialect::Mysql(mode) = self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)) {
+            self.language.check_mysql(&tab.sql, mode);
+        }
         let search_action = {
             let tab = &mut self.tabs[self.tab];
             let was_open = tab.search.open;

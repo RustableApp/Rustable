@@ -298,3 +298,25 @@ filling its documented gaps. Reconsider a reusable library or upstream adaptatio
 with the same acceptance matrix; do not launch a Go/TypeScript rewrite solely
 because these two snapshots have gaps. Broader routine semantics, server-version
 syntax, and a complete MySQL/MariaDB diagnostics provider remain open work.
+
+### Initial MySQL/MariaDB lexical editor warnings (2026-11-01)
+
+The editor now reuses the execution scanner to underline unfinished quotes,
+unfinished block comments and invalid DELIMITER directives. Scanner failures
+retain byte ranges internally; the editor converts them to character positions
+so earlier Unicode text does not shift the underline. Changes to the document,
+caret or current session SQL mode invalidate cached results. Corrected input
+clears warnings. No language-server subprocess or database request is started.
+
+These are nonblocking warnings, not full syntax/schema diagnostics. Checks use
+the current connection mode; they do not simulate prospective SET sql_mode
+statements embedded in an unexecuted script. Documents above 64 KiB skip this
+local check and the language-service status explains that limit. The check runs
+once per document/cursor version or mode change, not every repaint.
+
+Validation: five SQL scanner tests and three ordinary editor-language tests pass;
+one opted-in PostgreSQL helper test was skipped. Added coverage includes UTF-8
+source spans, character offsets after emoji, SQL-mode-only changes, cursor moves,
+custom routine delimiters, corrected SQL and oversized documents. Strict
+all-target Clippy passes. Native visual acceptance is still pending; no release
+or deployment was performed.
