@@ -7,6 +7,7 @@ type CatalogRow = (String, String, Option<String>, Option<String>, Option<String
 
 struct MysqlDriver {
     connection: Option<Conn>,
+    config: MysqlConfig,
     engine: &'static str,
     schemas: SchemaCatalog,
     mode: Mode,
@@ -22,6 +23,7 @@ impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
         let names = connection.query("SHOW DATABASES").map_err(|e| e.to_string())?;
         Ok(Box::new(MysqlDriver {
             connection: Some(connection),
+            config: config.clone(),
             engine: if version.contains("MariaDB") { "MariaDB" } else { "MySQL" },
             schemas: SchemaCatalog { names, selected: database },
             mode: parse_mode(&sql_mode),
@@ -37,6 +39,42 @@ fn parse_mode(value: &str) -> Mode {
     }
 }
 fn quote(name: &str) -> String { format!("`{}`", name.replace('`', "``")) }
+
+/// The scoped watcher cannot outlive a query and cancel the next operation.
+/// A control connection is opened only after the user requests cancellation.
+fn with_cancel<T>(config: &MysqlConfig, id: u32, cancel: &AtomicBool, run: impl FnOnce() -> T) -> (T, Option<String>) {
+    std::thread::scope(|scope| {
+        let (done, completion) = std::sync::mpsc::channel::<()>();
+        let watch = scope.spawn(move || -> Result<(), String> {
+            let mut control: Option<Conn> = None;
+            loop {
+                match completion.recv_timeout(Duration::from_millis(if control.is_some() { 50 } else { 10 })) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if !cancel.load(Ordering::Acquire) { continue; }
+                if control.is_none() {
+                    let mut options = config.clone();
+                    options.connect_timeout = Duration::from_secs(1);
+                    options.read_timeout = Duration::from_secs(1);
+                    control = Some(Conn::new(OptsBuilder::from(&options)
+                        .write_timeout(Some(Duration::from_secs(1))))
+                        .map_err(|e| format!("Could not connect to cancel query: {e}"))?);
+                }
+                control.as_mut().unwrap().query_drop(format!("KILL QUERY {id}"))
+                    .map_err(|e| format!("Could not cancel query: {e}"))?;
+                // Repeat until completion to cover cancellation racing query arrival.
+            }
+        });
+        let result = run();
+        drop(done);
+        let error = match watch.join() {
+            Ok(result) => result.err(),
+            Err(_) => Some("Query cancellation worker failed".into()),
+        };
+        (result, error)
+    })
+}
 
 impl MysqlDriver {
     fn conn(&mut self) -> Result<&mut Conn, String> {
@@ -112,8 +150,11 @@ impl Driver for MysqlDriver {
             }
             if cancel.load(Ordering::Relaxed) { report.error = Some("Cancelled before next statement".into()); break; }
             let Some(conn) = self.connection.as_mut() else { report.error = Some("MySQL connection is disconnected".into()); break; };
-            let outcome = conn.query_iter(&sql[range]).map(|results|
-                super::mysql_results::collect_budget(results, &mut remaining, QUERY_LIMIT, 128 - report.grids.len()));
+            let (outcome, cancellation_error) = with_cancel(&self.config, conn.connection_id(), cancel, || {
+                conn.query_iter(&sql[range]).map(|results|
+                    super::mysql_results::collect_budget(results, &mut remaining, QUERY_LIMIT, 128 - report.grids.len()))
+            });
+            if let Some(error) = cancellation_error { report.error = Some(error); }
             let (result, disconnected) = match outcome {
                 Ok(result) => result,
                 Err(error) => {
@@ -124,8 +165,8 @@ impl Driver for MysqlDriver {
                 }
             };
             report.grids.extend(result.grids);
-            if result.error.is_some() {
-                report.error = result.error;
+            if result.error.is_some() || report.error.is_some() {
+                if result.error.is_some() { report.error = result.error; }
                 if disconnected { self.connection = None; }
                 break;
             }
@@ -240,6 +281,36 @@ mod tests {
         assert!(report.error.is_some());
         assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
         assert!(driver.execute("SELECT 1", false, &cancel).error.unwrap().contains("disconnected"));
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_driver_cancellation_preserves_transaction_and_has_no_late_kill() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false,
+            read_timeout: Duration::from_secs(3), ..Default::default() };
+        let mut driver = Box::<dyn Driver>::try_from(&config).unwrap();
+        let cancel = AtomicBool::new(false);
+        assert!(driver.execute("CREATE TEMPORARY TABLE cancel_driver_probe(value INT) ENGINE=InnoDB; INSERT INTO cancel_driver_probe VALUES(7); START TRANSACTION; UPDATE cancel_driver_probe SET value=8;", false, &cancel).error.is_none());
+        let started = std::time::Instant::now();
+        let report = std::thread::scope(|scope| {
+            scope.spawn(|| { std::thread::sleep(Duration::from_millis(100)); cancel.store(true, Ordering::Release); });
+            driver.execute("UPDATE cancel_driver_probe SET value=IF(SLEEP(10)=0,99,100); UPDATE cancel_driver_probe SET value=200;", false, &cancel)
+        });
+        assert!(started.elapsed() < Duration::from_secs(2), "cancellation waited for read timeout");
+        assert!(report.error.is_some());
+        assert_eq!(driver.transaction_state(), TransactionState::Active);
+        cancel.store(false, Ordering::Release);
+        let result = driver.execute("SELECT value FROM cancel_driver_probe", false, &cancel);
+        assert_eq!(result.grids[0].rows, [vec![Value::Integer(8)]]);
+        // A delayed control request must not cancel a subsequent query.
+        let result = driver.execute("SELECT SLEEP(0.2),42", false, &cancel);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(driver.execute("ROLLBACK", false, &cancel).error.is_none());
+        let result = driver.execute("SELECT value FROM cancel_driver_probe", false, &cancel);
+        assert_eq!(result.grids[0].rows, [vec![Value::Integer(7)]]);
     }
 
 }

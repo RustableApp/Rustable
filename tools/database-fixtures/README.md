@@ -100,8 +100,8 @@ Live tests exercise quoted identifiers containing backticks, a literal percent
 filter (not a wildcard), generated columns, sorting/offset, rollback and refusal
 to switch databases during a transaction. SQL result byte budgets span statements.
 
-Before exposing this driver in the connection picker: integrate in-flight
-cancellation,
+Before exposing this driver in the connection picker: extend cancellation to
+metadata/table browsing,
 refresh SQL-mode/delimiter semantics when a script changes session modes,
 implement table-edit concurrency checks and commits, load indexes/triggers/DDL,
 add SSH/TLS fixtures, and connect profile storage/editor dialect state. Safe-mode
@@ -117,3 +117,20 @@ ROLLBACK. An initial statement error is likewise recoverable. A timed-out query
 marks the driver Disconnected and subsequent execute calls are rejected. Value
 conversion failures drain remaining rows explicitly, so later transport errors
 are still observed instead of disappearing in an iterator destructor.
+
+
+The driver now integrates in-flight SQL cancellation using a scoped watcher.
+Ordinary queries open no additional connection; only a raised cancellation flag
+creates a control connection with short connect/read/write timeouts. It sends
+KILL QUERY and retries until the operation finishes, covering cancellation that
+races statement arrival. The watcher joins before returning, preventing a late
+KILL from affecting the next query. No automatic rollback is added: the server's
+active transaction and earlier uncommitted edits remain available.
+
+The live driver test cancels a ten-second UPDATE, verifies completion below two
+seconds (before its three-second read deadline), confirms the following UPDATE
+did not run, checks the earlier uncommitted value, runs another delayed query to
+catch late cancellation, then explicitly rolls back to the original value.
+This passes independently on MySQL 8.4.11 and MariaDB 11.4.13. Control-connection
+failure and permission-denied cancellation paths still need fault coverage;
+the main connection's configured read timeout remains the fallback.
