@@ -2,6 +2,8 @@
 use super::*;
 #[derive(Clone)]
 pub(super) struct QueryFile { pub path: PathBuf, pub name: String, pub group: String }
+#[derive(PartialEq)]
+enum Selection { File(PathBuf), Recovered(usize) }
 type Scan = (PathBuf, Result<(Vec<QueryFile>, Vec<String>), String>);
 #[derive(Default)]
 pub(super) struct Library {
@@ -11,13 +13,14 @@ pub(super) struct Library {
     receiver: Option<mpsc::Receiver<Scan>>,
     refreshed: Option<Instant>,
     search: String,
+    selected: Option<Selection>,
     group: String,
     error: Option<String>,
 }
 impl Library {
     pub fn invalidate(&mut self) { self.refreshed = None; }
     pub fn poll(&mut self, ctx: &egui::Context, root: PathBuf) {
-        if self.root.as_ref() != Some(&root) { self.root = Some(root.clone()); self.files.clear(); self.groups.clear(); self.receiver = None; self.refreshed = None; }
+        if self.root.as_ref() != Some(&root) { self.root = Some(root.clone()); self.files.clear(); self.groups.clear(); self.selected = None; self.receiver = None; self.refreshed = None; }
         if let Some(rx) = &self.receiver && let Ok((scanned, result)) = rx.try_recv() {
             if scanned == root { match result { Ok((files, groups)) => { self.files = files; self.groups = groups; self.error = None; }, Err(error) => self.error = Some(error) } }
             self.receiver = None; self.refreshed = Some(Instant::now());
@@ -100,15 +103,22 @@ impl Rustable {
             for (group, files) in groups {
                 egui::CollapsingHeader::new(RichText::new(format!("▣ {group}")).monospace()).default_open(true).show(ui, |ui| {
                     for file in files {
-                        let active = self.tabs[self.tab].source_path.as_ref() == Some(&file.path);
-                        if ui.add(egui::Button::new(format!("▤ {}", file.name)).selected(active).frame(false)).on_hover_text(file.path.display().to_string()).clicked() { chosen = Some(file.path.clone()); }
+                        let selection = Selection::File(file.path.clone());
+                        let active = self.query_library.selected.as_ref() == Some(&selection);
+                        let response = ui.add(egui::Button::new(format!("▤ {}", file.name)).selected(active).frame(false)).on_hover_text(file.path.display().to_string());
+                        if response.clicked() { self.query_library.selected = Some(selection); }
+                        if response.double_clicked() { chosen = Some(file.path.clone()); }
                     }
                 });
             }
             if !self.prefs.favorites.is_empty() {
                 egui::CollapsingHeader::new("Recovered unsaved queries").show(ui, |ui| {
                     for (index, sql) in self.prefs.favorites.iter().enumerate() {
-                        if ui.button(format!("Recovered query {}", index + 1)).on_hover_text("Open, then Cmd/Ctrl+S to name and save as a file").clicked() { self.tabs.push(QueryTab::new(sql.clone())); self.tab = self.tabs.len()-1; self.view = View::Query; }
+                        let selection = Selection::Recovered(index);
+                        let active = self.query_library.selected.as_ref() == Some(&selection);
+                        let response = ui.add(egui::Button::new(format!("Recovered query {}", index + 1)).selected(active).frame(false)).on_hover_text("Double-click to open, then Cmd/Ctrl+S to name and save as a file");
+                        if response.clicked() { self.query_library.selected = Some(selection); }
+                        if response.double_clicked() { self.tabs.push(QueryTab::new(sql.clone())); self.tab = self.tabs.len()-1; self.view = View::Query; }
                     }
                 });
             }
