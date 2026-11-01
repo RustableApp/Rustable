@@ -28,3 +28,16 @@ The live PostgreSQL fixture test prepares five queries and compares inferred nam
 to actual server column metadata, without executing mutations. It passes. All 27
 ordinary completion tests and strict all-target Clippy pass. This does not fill
 remaining unnamed-expression, JOIN USING/NATURAL wildcard or quoted-scope gaps.
+
+### VALUES source completion (2026-11-01)
+
+The scope scanner now recognizes VALUES query blocks, and PostgreSQL/SQLite
+projection inference supplies column1, column2, etc., bounded to 1024 columns.
+CTEs, derived sources, explicit aliases and a VALUES-leading UNION retain their
+visible output names. PostgreSQL partial column renames preserve trailing names.
+MySQL/MariaDB generated VALUES labels are not inferred by this change.
+
+The PostgreSQL rule is documented at
+https://www.postgresql.org/docs/18/queries-values.html. Actual prepared-statement
+column metadata was checked on the local PostgreSQL fixture and in-memory SQLite.
+All 29 ordinary completion tests pass; the live PostgreSQL check also passes.

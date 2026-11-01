@@ -487,7 +487,7 @@ fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]
         match token.token {
             Token::LParen => stack.push(i),
             Token::RParen => if let Some(start) = stack.pop()
-                && tokens.get(start + 1).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && (w.value.eq_ignore_ascii_case("SELECT") || w.value.eq_ignore_ascii_case("WITH")))) {
+                && tokens.get(start + 1).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && (w.value.eq_ignore_ascii_case("SELECT") || w.value.eq_ignore_ascii_case("WITH") || w.value.eq_ignore_ascii_case("VALUES")))) {
                 blocks.push((start + 1, i));
             },
             _ => {}
@@ -495,7 +495,7 @@ fn scoped_sources(sql: &str, cursor: usize, dialect: Dialect, objects: &[Object]
     }
     // Incomplete subqueries are common while typing.
     for start in stack {
-        if tokens.get(start + 1).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && (w.value.eq_ignore_ascii_case("SELECT") || w.value.eq_ignore_ascii_case("WITH")))) {
+        if tokens.get(start + 1).is_some_and(|t| matches!(&t.token, Token::Word(w) if w.quote_style.is_none() && (w.value.eq_ignore_ascii_case("SELECT") || w.value.eq_ignore_ascii_case("WITH") || w.value.eq_ignore_ascii_case("VALUES")))) {
             blocks.push((start + 1, tokens.len()));
         }
     }
@@ -1132,6 +1132,24 @@ mod tests {
         let mut completion = Completion::default();
         completion.refresh(sql,cursor,&objects,&[],true,Dialect::Mysql(crate::sql::mysql::Mode::default()));
         assert_eq!(completion.items,["order_total"],"inner alias must hide outer table's catalog name");
+    }
+
+    #[test]
+    fn values_ctes_and_derived_tables_offer_output_columns() {
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            for (marked, expected) in [
+                ("WITH pairs AS (VALUES (1, 'one'), (2, 'two')) SELECT pairs.| FROM pairs", vec!["column1", "column2"]),
+                ("SELECT pairs.| FROM (VALUES (1, 'one')) AS pairs", vec!["column1", "column2"]),
+                ("WITH pairs(id,label) AS (VALUES (1, 'one')) SELECT pairs.| FROM pairs", vec!["id", "label"]),
+                ("WITH pairs AS (VALUES (1, 'one') UNION ALL SELECT 2,'two') SELECT pairs.| FROM pairs", vec!["column1", "column2"]),
+            ] {
+                let cursor = marked.find('|').unwrap();
+                let sql = marked.replace('|', "");
+                let mut completion = Completion::default();
+                completion.refresh(&sql, cursor, &[], &[], true, dialect);
+                assert_eq!(completion.items, expected, "{dialect:?}: {sql}");
+            }
+        }
     }
 
     #[test]

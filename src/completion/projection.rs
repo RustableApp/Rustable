@@ -44,6 +44,10 @@ fn query_columns(query: &Query, objects: &[Object], bindings: &Bindings, dialect
 }
 fn body_columns(body: &SetExpr, objects: &[Object], bindings: &Bindings, dialect: Dialect, depth: usize) -> Vec<String> {
     let select = match body {
+        SetExpr::Values(values) if matches!(dialect, Dialect::Postgres | Dialect::Sqlite) => {
+            let count = values.rows.first().map_or(0, |row| row.len()).min(1024);
+            return (1..=count).map(|index| format!("column{index}")).collect();
+        }
         SetExpr::Select(select) => select,
         SetExpr::Query(query) => return query_columns(query, objects, bindings, dialect, depth + 1),
         SetExpr::SetOperation { left, .. } => return body_columns(left, objects, bindings, dialect, depth + 1),
@@ -178,6 +182,19 @@ mod live_tests {
     use super::*;
 
     #[test]
+    fn sqlite_values_projection_matches_engine_labels() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        for sql in ["VALUES (1, 'one'), (2, 'two')",
+            "WITH pairs AS (VALUES (1, 'one')) SELECT * FROM pairs",
+            "WITH pairs(id,label) AS (VALUES (1, 'one')) SELECT * FROM pairs",
+            "SELECT * FROM (VALUES (1, 'one')) AS pairs"] {
+            let statement = connection.prepare(sql).unwrap();
+            let expected = statement.column_names();
+            assert_eq!(columns(sql, Dialect::Sqlite, &[], &Bindings::new()), expected, "{sql}");
+        }
+    }
+
+    #[test]
     #[ignore = "requires disposable PostgreSQL fixture on 54329"]
     fn postgres_function_projection_matches_server_labels() {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
@@ -185,6 +202,9 @@ mod live_tests {
             "host=127.0.0.1 port=54329 dbname=rustable_qa user=postgres password=rustable_qa_only",
             ::postgres::NoTls).unwrap();
         for sql in [
+            "VALUES (1, 'one'), (2, 'two')",
+            "WITH pairs(first) AS (VALUES (1, 'one')) SELECT * FROM pairs",
+            "SELECT * FROM (VALUES (1, 'one')) AS pairs",
             "SELECT COUNT(*)",
             "SELECT pg_catalog.LOWER('A'), count(*) OVER ()",
             "SELECT COUNT(*) AS total",
