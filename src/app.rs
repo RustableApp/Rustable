@@ -1236,6 +1236,12 @@ impl Rustable {
                     match result { Ok(name) => self.status = format!("Download requested: {name}"), Err(error) => self.error = Some(error) }
                     continue;
                 }
+                FileAction::BrowserCsv(path, source) if self.pending.is_some() => {
+                    // A query may start while the browser picker/read is pending.
+                    // Retain the selected snapshot until the database worker is free.
+                    let _ = self.files_tx.send(FileAction::BrowserCsv(path, source));
+                    break;
+                }
                 FileAction::BrowserScript(name, sql) => {
                     let activate = self.finish_cell_edit();
                     let mut tab = QueryTab::new(sql);
