@@ -3,6 +3,22 @@
 use super::Value;
 use ::mysql::{Column, Value as Wire, consts::ColumnType as Ty};
 
+/// Bind values through the prepared protocol. Exact numeric text remains text
+/// until MySQL converts it using the destination column's type.
+impl TryFrom<&Value> for Wire {
+    type Error = String;
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Null => Ok(Self::NULL),
+            Value::Integer(value) => Ok(Self::Int(*value)),
+            Value::Real(value) if value.is_finite() => Ok(Self::Double(*value)),
+            Value::Real(_) => Err("MySQL parameters cannot contain NaN or infinity.".into()),
+            Value::Text(value) => Ok(Self::Bytes(value.as_bytes().to_vec())),
+            Value::Blob(value) => Ok(Self::Bytes(value.clone())),
+        }
+    }
+}
+
 impl TryFrom<(&Column, Wire)> for Value {
     type Error = String;
 
@@ -116,4 +132,39 @@ mod tests {
         assert_eq!(Value::try_from((&column, Wire::Date(2026, 11, 1, 12, 34, 56, 123))).unwrap(), Value::Text("2026-11-01 12:34:56.000123".into()));
         assert_eq!(Value::try_from((&column, Wire::Time(true, 34, 22, 59, 59, 1))).unwrap(), Value::Text("-838:59:59.000001".into()));
     }
+    #[test]
+    fn parameters_reject_nonfinite_numbers_and_preserve_exact_bytes() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(Wire::try_from(&Value::Real(value)).is_err());
+        }
+        assert_eq!(Wire::try_from(&Value::Integer(i64::MIN)).unwrap(), Wire::Int(i64::MIN));
+        assert_eq!(Wire::try_from(&Value::Null).unwrap(), Wire::NULL);
+        assert_eq!(Wire::try_from(&Value::Blob(vec![0,255])).unwrap(), Wire::Bytes(vec![0,255]));
+    }
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_bound_edits_roundtrip_without_sql_interpolation() {
+        use ::mysql::{Conn, OptsBuilder, prelude::Queryable};
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = crate::connection::MysqlConfig { host:"127.0.0.1".into(), port,
+            user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(),
+            tls:false, ..Default::default() };
+        let mut conn = Conn::new(OptsBuilder::from(&config)).unwrap();
+        conn.query_drop("CREATE TEMPORARY TABLE bound_value_probe (big BIGINT UNSIGNED, exact_decimal DECIMAL(30,10), txt TEXT, bin BLOB, nullable INT, signed_value BIGINT, real_value DOUBLE)").unwrap();
+        let values = vec![Value::Text(u64::MAX.to_string()), Value::Text("12345678901234567890.1234567890".into()),
+            Value::Text("日本\0'\\; DROP TABLE bound_value_probe; --".into()), Value::Blob(vec![0,255,39,92]),
+            Value::Null, Value::Integer(i64::MIN), Value::Real(1.25)];
+        for mode in ["", "NO_BACKSLASH_ESCAPES,ANSI_QUOTES"] {
+            conn.exec_drop("SET SESSION sql_mode=?", (mode,)).unwrap();
+            conn.query_drop("DELETE FROM bound_value_probe").unwrap();
+            let parameters = values.iter().map(Wire::try_from).collect::<Result<Vec<_>,_>>().unwrap();
+            conn.exec_drop("INSERT INTO bound_value_probe VALUES (?,?,?,?,?,?,?)", parameters).unwrap();
+            let row: ::mysql::Row = conn.query_first("SELECT * FROM bound_value_probe").unwrap().unwrap();
+            let columns = row.columns_ref().to_vec();
+            let actual = columns.iter().zip(row.unwrap()).map(Value::try_from).collect::<Result<Vec<_>,_>>().unwrap();
+            assert_eq!(actual, values);
+        }
+    }
+
 }

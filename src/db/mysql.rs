@@ -372,9 +372,7 @@ impl Driver for MysqlDriver {
             sql.push_str(&format!(" ORDER BY {} {}", quote(column), if *descending { "DESC" } else { "ASC" }));
         }
         sql.push_str(&format!(" LIMIT {} OFFSET {}", PAGE_SIZE + 1, request.offset));
-        let params: Vec<::mysql::Value> = parameters.iter().map(|value| match value {
-            Value::Text(text) => ::mysql::Value::Bytes(text.as_bytes().to_vec()), _ => unreachable!(),
-        }).collect();
+        let params = parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>, _>>()?;
         let mut remaining = BYTE_LIMIT;
         let ((report, disconnected), cancellation_error) = self.with_connection_status(|conn| conn.exec_iter(&sql, params).map(|results|
             super::mysql_results::collect_budget(results, &mut remaining, PAGE_SIZE + 1, 1)))?;

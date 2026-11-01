@@ -305,3 +305,15 @@ credential checks use the test backend, not the macOS Keychain itself.
 
 All 29 connection-manager tests and strict Clippy pass. Native visual inspection,
 small-window MySQL form interaction and real-keychain acceptance remain open.
+
+Typed prepared-parameter conversion now covers all shared grid Value variants:
+NULL, signed integer, finite double, UTF-8 text and binary bytes. Exact DECIMAL and
+large unsigned text are bound unchanged for destination-column conversion.
+Nonfinite floating-point values are rejected. Browse filtering uses this same
+conversion instead of a text-only special case.
+
+Live temporary-table tests roundtrip u64::MAX, DECIMAL(30,10), i64::MIN, NULL,
+finite real, binary bytes and Unicode/NUL/quote/backslash/SQL-looking text under
+both default and ANSI_QUOTES + NO_BACKSLASH_ESCAPES modes. All 15 driver tests
+pass separately on MySQL/MariaDB; strict Clippy passes. This establishes value
+binding for the upcoming change planner; table plan/apply remain unimplemented.
