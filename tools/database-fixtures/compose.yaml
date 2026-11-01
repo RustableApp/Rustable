@@ -3,6 +3,8 @@ name: rustable-driver-tests
 services:
   mysql:
     image: mysql:8.4
+    # Disposable fixture: allow schema-owned triggers without SUPER privileges.
+    command: ["--skip-log-bin"]
     ports:
       - "127.0.0.1:43316:3306"
     environment:

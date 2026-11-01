@@ -80,6 +80,51 @@ impl MysqlDriver {
     fn conn(&mut self) -> Result<&mut Conn, String> {
         self.connection.as_mut().ok_or_else(|| "MySQL connection is disconnected".into())
     }
+    fn table_metadata(&mut self, schema: &str, table: &str) -> Result<(Vec<Index>, Vec<Object>), String> {
+        let qualified = format!("{}.{}", quote(schema), quote(table));
+        let definition: Option<::mysql::Row> = self.conn()?.query_first(format!("SHOW CREATE TABLE {qualified}"))
+            .map_err(|e| e.to_string())?;
+        let ddl = definition.and_then(|row| row.get::<String, _>(1)).ok_or("Missing table definition")?;
+        let mut indexes = std::collections::BTreeMap::<String, Index>::new();
+        let rows: Vec<::mysql::Row> = self.conn()?.query(format!("SHOW INDEX FROM {qualified}"))
+            .map_err(|e| e.to_string())?;
+        // SHOW INDEX is ordered by index then sequence by the server. Sort
+        // explicitly so multipart keys remain ordered across server versions.
+        let mut entries = Vec::new();
+        for row in rows {
+            let name = row.get::<String, _>("Key_name").ok_or("Missing index name")?;
+            let position = row.get::<u64, _>("Seq_in_index").ok_or("Missing index position")?;
+            let non_unique = row.get::<u64, _>("Non_unique").ok_or("Missing index uniqueness")?;
+            let column = row.get::<Option<String>, _>("Column_name").flatten()
+                .or_else(|| row.get::<Option<String>, _>("Expression").flatten())
+                .unwrap_or_else(|| "(expression)".into());
+            entries.push((name, position, non_unique, column));
+        }
+        entries.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        for (name, _, non_unique, column) in entries {
+            let index = indexes.entry(name.clone()).or_insert_with(|| Index {
+                name, unique: non_unique == 0, origin: "table definition".into(), partial: false,
+                columns: Vec::new(),
+                // Use server-authored DDL, retaining prefix lengths, expressions,
+                // ordering, visibility and engine-specific attributes exactly.
+                ddl: ddl.clone(),
+            });
+            index.columns.push(column);
+        }
+        let names: Vec<String> = self.conn()?.exec(
+            "SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME", (schema, table))
+            .map_err(|e| e.to_string())?;
+        let mut triggers = Vec::new();
+        for name in names {
+            let row: Option<::mysql::Row> = self.conn()?.query_first(format!("SHOW CREATE TRIGGER {}.{}", quote(schema), quote(&name)))
+                .map_err(|e| e.to_string())?;
+            let ddl = row.and_then(|row| row.get::<String, _>("SQL Original Statement"))
+                .ok_or("Missing trigger definition")?;
+            triggers.push(Object { schema: Some(schema.into()), name, display_name: None,
+                metadata_error: None, columns: Vec::new(), kind: "trigger".into(), ddl });
+        }
+        Ok((indexes.into_values().collect(), triggers))
+    }
     fn require_idle(&mut self) -> Result<(), String> {
         match self.transaction_state() {
             TransactionState::Idle => Ok(()),
@@ -208,7 +253,9 @@ impl Driver for MysqlDriver {
         let mut grid = Arc::unwrap_or_clone(report.grids.into_iter().next().ok_or("Missing table result")?);
         if grid.rows.len() > PAGE_SIZE { grid.rows.truncate(PAGE_SIZE); grid.truncated = true; }
         grid.set_browse_total(request.offset, None);
-        Ok(TableData { sql, parameters, grid, columns: object.columns, indexes: vec![], triggers: vec![] })
+        let (indexes, triggers) = if object.kind == "view" { (Vec::new(), Vec::new()) }
+            else { self.table_metadata(&schema, &object.name)? };
+        Ok(TableData { sql, parameters, grid, columns: object.columns, indexes, triggers })
     }
     fn plan(&mut self, _changes: &[Change]) -> Result<ChangePlan, String> {
         Err("MySQL table editing is still being implemented.".into())
@@ -238,10 +285,20 @@ mod tests {
         assert_eq!(object.columns.len(), 3);
         assert!(object.columns[0].pk);
         assert!(object.columns[2].generated);
+        let metadata_setup = driver.execute("CREATE INDEX label_prefix ON `driver``probe` (label(8),id); CREATE TRIGGER `probe``trigger` BEFORE UPDATE ON `driver``probe` FOR EACH ROW SET NEW.label=UPPER(NEW.label);", false, &cancel);
+        assert!(metadata_setup.error.is_none(), "{:?}", metadata_setup.error);
         let table = driver.browse(&Browse { table: "driver`probe".into(), filter_column: Some("label".into()), filter: "%".into(), ..Default::default() }).unwrap();
         assert_eq!(table.grid.rows.len(), 1);
         assert_eq!(table.grid.rows[0][0], Value::Integer(1));
         assert_eq!(table.grid.rows[0][2], Value::Integer(2));
+        let index = table.indexes.iter().find(|index| index.name == "label_prefix").unwrap();
+        assert_eq!(index.columns, ["label", "id"]);
+        assert!(!index.unique);
+        assert!(index.ddl.contains("label_prefix") && index.ddl.contains("(8)"));
+        assert!(table.indexes.iter().find(|index| index.name == "PRIMARY").unwrap().unique);
+        assert_eq!(table.triggers.len(), 1);
+        assert_eq!(table.triggers[0].name, "probe`trigger");
+        assert!(table.triggers[0].ddl.contains("UPPER(NEW.label)"));
         let sorted = driver.browse(&Browse { table: "driver`probe".into(), sort: Some(("id".into(), true)), offset: 1, ..Default::default() }).unwrap();
         assert_eq!(sorted.grid.rows[0][0], Value::Integer(2));
         assert!(driver.execute("START TRANSACTION; UPDATE `driver``probe` SET label='changed' WHERE id=1;", false, &cancel).error.is_none());

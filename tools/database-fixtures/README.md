@@ -103,7 +103,7 @@ to switch databases during a transaction. SQL result byte budgets span statement
 Before exposing this driver in the connection picker: extend cancellation to
 metadata/table browsing,
 refresh SQL-mode/delimiter semantics when a script changes session modes,
-implement table-edit concurrency checks and commits, load indexes/triggers/DDL,
+implement table-edit concurrency checks and commits, optimize metadata round trips,
 add SSH/TLS fixtures, and connect profile storage/editor dialect state. Safe-mode
 requests currently return an explicit unsupported error. Stream collection preserves typed connectivity classification: ordinary SQL
 errors keep the session, while transport failures discard it. No MySQL/MariaDB support
@@ -134,3 +134,15 @@ catch late cancellation, then explicitly rolls back to the original value.
 This passes independently on MySQL 8.4.11 and MariaDB 11.4.13. Control-connection
 failure and permission-denied cancellation paths still need fault coverage;
 the main connection's configured read timeout remains the fallback.
+
+
+Table browsing now returns ordered multipart indexes and triggers. Index details
+include the complete server-authored SHOW CREATE TABLE definition (rather than
+reconstructing and losing prefix lengths, sort order, expressions or visibility).
+Triggers use SHOW CREATE TRIGGER, preserving the server's original definition.
+Live checks on both engines verify primary/secondary uniqueness, a prefix index
+with two ordered columns, and a trigger with a quoted backtick in its name.
+The disposable MySQL fixture disables binary logging so its database-scoped test
+user can create triggers without SUPER. Existing developer databases are unchanged.
+Metadata fetching is currently sequential; batching and cancellation of metadata
+work remain outstanding before performance parity is claimed.
