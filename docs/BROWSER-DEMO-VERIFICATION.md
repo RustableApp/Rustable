@@ -364,3 +364,29 @@ the local 11,188,757-byte build:
 `57853c9d7bc3dbb9edeedbae620e9983927e908a4bc69cb09ce7a54c3bfdd983`.
 Local browser workflow evidence above covers this build; production UI was
 not rerun in this publication pass. No app main push or desktop CI release.
+
+## Local WASM acceptance — 2026-11-01 (completion and font updates)
+
+Built the shared release WASM app from bdc42f8 plus the font-notice packaging
+change to `/tmp/rustable-browser-acceptance/demo`. The resulting WASM is
+13,603,934 bytes. Served on localhost:8791 with COOP/COEP headers; no production
+deployment was performed.
+
+Verified through the actual browser UI:
+
+- The shared main window loaded the SQLite demo and its four tables and view.
+- In `WITH c AS (SELECT '🦀 😀 🚀' AS crab) SELECT c.cr FROM c`, editing the
+  `cr` prefix displayed the `crab` completion.
+- Tab accepted the suggestion; Cmd+Enter ran the completed query and returned
+  one row containing all three emoji.
+- Emoji appeared as monochrome glyphs in both editor and result grid.
+
+Evidence in the session visualization directory
+`~/.codex/visualizations/2026/10/31/01a18f82-8ef6-7c12-b1e5-94903450cc37/`:
+`wasm-cte-completion.png` and `wasm-cte-emoji-result.png`.
+
+Both native and browser packaging now copy the bundled font's OFL license and
+provenance into `Licenses/NotoEmoji`. Browser output was byte-compared against the
+source notices. All five native packaging tests and strict packaging Clippy pass.
+This does not imply native MySQL/MariaDB release readiness or broader browser
+workflow acceptance beyond the interactions listed above.

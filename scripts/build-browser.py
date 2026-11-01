@@ -38,7 +38,11 @@ with tempfile.TemporaryDirectory(prefix='.rustable-demo-', dir=destination.paren
     licenses = out/'Licenses'
     licenses.mkdir(exist_ok=True)
     metadata=json.loads(subprocess.check_output(['mise','exec','--','cargo','metadata','--locked','--format-version','1','--filter-platform','wasm32-unknown-unknown','--manifest-path',str(package/'Cargo.toml')]))
-    index=[]
+    font_notices=licenses/'NotoEmoji'
+    font_notices.mkdir()
+    for name in ['NotoEmoji-OFL.txt', 'README.md']:
+        shutil.copy2(root/'assets/fonts'/name,font_notices/name)
+    index=['Noto Emoji: OFL-1.1 (see NotoEmoji/NotoEmoji-OFL.txt)']
     for dependency in metadata['packages']:
         name=f"{dependency['name']}-{dependency['version']}"
         directory=Path(dependency['manifest_path']).parent

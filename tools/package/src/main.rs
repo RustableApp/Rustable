@@ -193,8 +193,17 @@ fn source_notice_files(package: &Value) -> Result<Vec<PathBuf>> {
     files.dedup();
     Ok(files)
 }
+fn font_notices(root: &Path, destination: &Path) -> Result<()> {
+    let target = destination.join("NotoEmoji");
+    fs::create_dir_all(&target)?;
+    for name in ["NotoEmoji-OFL.txt", "README.md"] {
+        fs::copy(root.join("assets/fonts").join(name), target.join(name))?;
+    }
+    Ok(())
+}
 fn notices(root: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)?;
+    font_notices(root, destination)?;
     for name in [
         "UPSTREAM.md",
         "postgres-language-server-0.28.1-MIT.txt",
@@ -336,6 +345,18 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn font_license_and_provenance_are_packaged_without_font_binary() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+        let destination = env::temp_dir().join(format!("rustable-font-notices-{}", std::process::id()));
+        font_notices(root, &destination).unwrap();
+        for name in ["NotoEmoji-OFL.txt", "README.md"] {
+            assert_eq!(fs::read(destination.join("NotoEmoji").join(name)).unwrap(), fs::read(root.join("assets/fonts").join(name)).unwrap());
+        }
+        assert!(!destination.join("NotoEmoji/NotoEmoji.ttf").exists());
+        fs::remove_dir_all(destination).unwrap();
+    }
+
     #[test]
     fn missing_inputs_fail_before_bundle_mutation() {
         let base = env::temp_dir().join(format!("rustable-package-test-{}", std::process::id()));
