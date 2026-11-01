@@ -11,7 +11,7 @@ inspection. Shared UI acceptance remains in [the parity requirements](TABLEPLUS_
 
 | Operation | SQLite | PostgreSQL | Source / limits |
 | --- | --- | --- | --- |
-| Saved connection | Existing local file; in-memory demo | Server, database, user, password, TLS and optional SSH | `src/connection_profiles.rs::ConnectionKind`; SQLite and PostgreSQL are the established adapters. Experimental MySQL/MariaDB adapters now implement connections, SQL, browsing and export; GUI editing/import/administration remain gated. Redis is not implemented. |
+| Saved connection | Existing local file; in-memory demo | Server, database, user, password, TLS and optional SSH | `src/connection_profiles.rs::ConnectionKind`; SQLite and PostgreSQL are the established adapters. Experimental MySQL/MariaDB adapters now implement connections, SQL, browsing, export and CSV import; GUI editing/administration remain gated. CSV import is locally enabled with backend and app-level verification; native visual acceptance remains pending. Redis is not implemented. |
 | Session reuse | One owned connection per worker | One owned client per worker | `src/db.rs::Driver`, adapter structs. Independent windows own independent sessions. |
 | SQL editor execution | Engine-prepared statements; multiple results | Split statements executed sequentially; multiple results | `sqlite.rs::script`, `postgres.rs::execute`; at most 128 statements per run. Earlier autocommitted statements survive a later error. |
 | Explicit transactions across editor runs | Implemented: BEGIN/savepoint state persists until explicit finish or an engine-driven rollback | Implemented: BEGIN persists until COMMIT/ROLLBACK or connection teardown | Native acceptance remains open; see transaction table below. |
@@ -741,3 +741,24 @@ actual trigger, that removing the trigger permits import, and that revoking INSE
 rejects a subsequent import without changing existing data. Both engines pass.
 All 11 reviewed-save regression tests pass on each engine; strict Clippy passes.
 Import UI enablement/native acceptance remains pending.
+
+
+### Experimental MySQL/MariaDB import UI enabled locally (2026-11-01)
+
+The shared CSV preview, destination mapping and confirmation workflow now permits
+MySQL/MariaDB imports. The review explains the current InnoDB/no-trigger/visibility
+restrictions; the connection editor no longer says CSV import is unavailable.
+Table editing remains gated. No release or deployment is implied by this change.
+
+An ignored, disposable-server app integration test connects through the real worker,
+loads a CSV preview, requests destination metadata, verifies schema binding and
+reordered header mapping, then confirms with Cmd+Enter and Cmd+S. It verifies
+Unicode data reaches the database, successful imports dismiss the review/preview,
+and duplicate-key failures retain the review without adding rows. It passes on
+both MySQL 8.4 and MariaDB 11.4. Existing busy/read-only/shortcut ownership and
+unsupported-engine checks pass. Full library suite: 436 passed, 97 ignored;
+strict all-target Clippy passes.
+
+Native preview/mapping/review screenshots, cancellation interaction, and version
+compatibility remain release acceptance work. This is experimental functionality,
+not a declaration of official MySQL/MariaDB parity.

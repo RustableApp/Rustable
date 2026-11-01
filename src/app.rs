@@ -713,7 +713,7 @@ impl Rustable {
     }
 
     fn supports_csv_import(&self) -> bool {
-        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL")
+        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL" | "MySQL" | "MariaDB")
     }
 
     fn supports_schema_changes(&self) -> bool {
@@ -1945,6 +1945,9 @@ impl Rustable {
             ui.heading(format!("Import into {}", request.table));
             if !import_supported { ui.weak(format!("Importing into {} is not supported yet.", self.engine)); }
             ui.label("All source rows will be inserted in one transaction. An error or cancellation rolls back the entire import.");
+            if matches!(self.engine.as_str(), "MySQL" | "MariaDB") {
+                ui.weak("Experimental · Requires an InnoDB table without triggers and permission to inspect its triggers. Unsupported server expressions are rejected before inserting rows.");
+            }
             ui.weak(if self.engine == "PostgreSQL" { "Import command followed by up to 10 source rows with destination column names. Quoted values are CSV text; the database converts them to column types." } else { "Up to 10 inserts shown below. Remaining rows use the same column mapping." });
             egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
                 for (index, sample) in samples.iter().enumerate() {
@@ -9693,7 +9696,7 @@ mod csv_review_keyboard_tests {
     }
     #[test]
     fn unsupported_engine_import_shortcuts_keep_review_without_dispatching() {
-        for engine in ["MySQL", "MariaDB"] {
+        for engine in ["Redis", "Unknown"] {
             for shortcut in [egui::Key::Enter, egui::Key::S] {
                 let ctx = egui::Context::default();
                 let mut app = setup(&ctx);
@@ -9706,6 +9709,66 @@ mod csv_review_keyboard_tests {
             }
         }
     }
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_mysql_csv_review_imports_and_retains_failed_mapping() {
+        use ::mysql::prelude::Queryable;
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316,43317].contains(&port));
+        let config = crate::connection::MysqlConfig { host:"127.0.0.1".into(),port,
+            user:"rustable".into(),password:"rustable-test-only".into(),
+            database:"rustable_test".into(),tls:false,..Default::default() };
+        let mut observer = ::mysql::Conn::new(::mysql::OptsBuilder::default()
+            .ip_or_hostname(Some("127.0.0.1")).tcp_port(port).user(Some("rustable"))
+            .pass(Some("rustable-test-only")).db_name(Some("rustable_test"))).unwrap();
+        observer.query_drop("DROP TABLE IF EXISTS ui_csv_probe").unwrap();
+        observer.query_drop("CREATE TABLE ui_csv_probe(id INT PRIMARY KEY,label VARCHAR(40)) ENGINE=InnoDB").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx,Preferences::default(),Command::OpenMysql(config),None);
+        wait_for_worker(&mut app);
+        assert!(app.supports_csv_import());
+        assert!(matches!(app.engine.as_str(),"MySQL" | "MariaDB"));
+        app.safe = false;
+        for (id,shortcut) in [(1,egui::Key::Enter),(2,egui::Key::S)] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(),format!("label,id\n日本,{id}\n")).unwrap();
+            app.dispatch(Command::PreviewCsv {path:file.path().into(),options:Default::default(),source:None},Pending::Export);
+            wait_for_worker(&mut app);
+            app.dispatch(Command::ImportTarget("ui_csv_probe".into()),Pending::ImportMetadata);
+            wait_for_worker(&mut app);
+            assert_eq!(app.csv_mapping.schema.as_deref(),Some("rustable_test"));
+            assert_eq!(app.csv_mapping.destinations,vec![Some(1),Some(0)]);
+            let preview = app.csv_preview.as_ref().unwrap();
+            let request = db::csv_import::Request {
+                schema:app.csv_mapping.schema.clone(),source:preview.source.clone().unwrap(),
+                options:preview.options,table:app.csv_mapping.table.clone(),columns:app.csv_mapping.columns.clone(),
+                destinations:app.csv_mapping.destinations.clone(),empty_as_null:false,postgres_inserts:false,
+            };
+            let sample = crate::review_sql::readable_dialect(&request.mysql_sql().unwrap(),
+                &request.values(&preview.rows[0]),app.session_dialect.unwrap());
+            assert!(sample.contains("`rustable_test`.`ui_csv_probe`"));
+            assert!(sample.contains("日本"));
+            let review = (request,vec![sample]);
+            app.csv_review = Some(review.clone());
+            key(&ctx,&mut app,shortcut,egui::Modifiers {command:true,mac_cmd:true,..Default::default()});
+            wait_for_worker(&mut app);
+            assert!(app.error.is_none(),"{:?}",app.error);
+            assert!(app.csv_review.is_none());
+            assert!(app.csv_preview.is_none());
+            assert_eq!(observer.query_first::<u64,_>("SELECT COUNT(*) FROM ui_csv_probe").unwrap(),Some(id));
+            // Retrying the same snapshot causes a PK conflict; keep it reviewable.
+            app.csv_review = Some(review);
+            app.commit_csv_import();
+            wait_for_worker(&mut app);
+            assert!(app.error.is_some());
+            assert!(app.csv_review.is_some());
+            assert_eq!(observer.query_first::<u64,_>("SELECT COUNT(*) FROM ui_csv_probe").unwrap(),Some(id));
+            app.csv_review = None;
+            app.error = None;
+        }
+        observer.query_drop("DROP TABLE ui_csv_probe").unwrap();
+    }
+
     #[test]
     fn failed_import_retains_review_and_renders_error_above_mapping() {
         let ctx = egui::Context::default();

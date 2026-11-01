@@ -717,7 +717,7 @@ impl Rustable {
                                 form_row(ui, "", |ui| { if ui.button("Choose file…").clicked() { pick = Some(false); } });
                             }
                             ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) => {
-                                ui.weak("Experimental · SQL, browsing and exports available. Table editing and CSV import are not ready yet.");
+                                ui.weak("Experimental · SQL, browsing, exports and CSV import available. Table editing is not ready yet.");
                                 form_text(ui, "Host", &mut config.host, false, Some(ProbeField::Host));
                                 ports_valid &= form_port(ui, &mut config.port, ProbeField::Port, self.connection_manager.generation);
                                 form_text(ui, "Database", &mut config.database, false, Some(ProbeField::Database));
