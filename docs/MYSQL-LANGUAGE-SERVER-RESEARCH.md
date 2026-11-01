@@ -320,3 +320,27 @@ source spans, character offsets after emoji, SQL-mode-only changes, cursor moves
 custom routine delimiters, corrected SQL and oversized documents. Strict
 all-target Clippy passes. Native visual acceptance is still pending; no release
 or deployment was performed.
+
+### Native lexical-warning acceptance (2026-11-01)
+
+Rebuilt the native acceptance app from 032fb7c and connected the saved disposable
+MariaDB TLS fixture at localhost:43319 with Verify full. In the SQL editor,
+`SELECT '🦀', 'unfinished` underlined precisely the unfinished second string and
+showed the orange lexical warning. Appending the closing quote and semicolon
+cleared the warning; Cmd+Enter returned both strings, including the crab emoji.
+No table data was changed. Evidence: native-mariadb-lexical-warning.png and
+native-mariadb-lexical-recovery.png in the session visualization directory.
+
+The first unaliased result header appeared as `?` while its emoji value was
+correct. This needs protocol/server-label investigation before claiming complete
+Unicode result-metadata fidelity; it does not invalidate the verified editor
+underline position. Native SQL-mode changes and multiline warning UI remain to
+exercise beyond automated scanner tests.
+
+The same build's status strip reopened the root connection manager with the
+active MariaDB saved profile selected. After discarding the test connection form
+and closing the manager, another status click again showed that profile with its
+saved TLS configuration. No new connection was opened by these status clicks.
+Evidence: native-active-profile-reveal.png. Same-endpoint identity isolation and
+dirty-form blocking remain covered by the automated manager suite rather than
+this native click-through.
