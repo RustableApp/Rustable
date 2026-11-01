@@ -36,6 +36,7 @@ pub(crate) struct Workspace {
     filters_visible: bool,
     database_picker: bool,
     item_search: String,
+    field_search: String,
     cursor: u64,
     scan_started: bool,
     pattern: String,
@@ -136,6 +137,7 @@ impl Workspace {
             filters_visible: false,
             database_picker: false,
             item_search: String::new(),
+            field_search: String::new(),
             cursor: 0,
             scan_started: false,
             pattern: "*".into(),
@@ -370,16 +372,29 @@ impl Workspace {
                 ui.add_space(4.0);
                 let database_name = format!("db{}", self.database);
                 let (heading, _) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
-                ui.painter().text(heading.left_center(), egui::Align2::LEFT_CENTER,
-                    "Databases (1)", egui::FontId::proportional(11.0),
-                    egui::Color32::from_rgb(125, 137, 156));
+                    egui::vec2(ui.available_width(), 22.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().text(
+                    heading.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    "Databases (1)",
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgb(125, 137, 156),
+                );
                 if database_name.contains(&self.item_search.to_lowercase()) {
                     let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+                        egui::vec2(ui.available_width(), 22.0),
+                        egui::Sense::click(),
+                    );
                     crate::app::paint_sidebar_item(ui, rect, &database_name, true, false);
-                    crate::icons::paint(ui.painter(), rect.left_center() + egui::vec2(14.0, 0.0),
-                        "database", 13.0, ui.visuals().selection.stroke.color);
+                    crate::icons::paint(
+                        ui.painter(),
+                        rect.left_center() + egui::vec2(14.0, 0.0),
+                        "database",
+                        13.0,
+                        ui.visuals().selection.stroke.color,
+                    );
                     if response.clicked() && !self.busy {
                         self.refresh();
                     }
@@ -404,13 +419,15 @@ impl Workspace {
             crate::pane_sizes::record_drag(ctx, keys_id, &mut pane_sizes.redis_keys, 0);
         if self.inspector_visible {
             let id = egui::Id::new((ctx.viewport_id(), "redis-row-details"));
-            crate::pane_sizes::restore(ctx, id, pane_sizes.inspector, 260.0, 0);
+            crate::pane_sizes::restore(ctx, id, pane_sizes.inspector, 240.0, 0);
             egui::SidePanel::right(id)
-                .width_range(220.0..=600.0)
+                .default_width(240.0)
+                .width_range(190.0..=420.0)
                 .show(ctx, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.strong("Row details");
-                    ui.separator();
+                    ui.add_space(4.0);
+                    crate::app::sidebar_search(ui, &mut self.field_search, "Search for field…");
+                    ui.add_space(5.0);
                     egui::ScrollArea::vertical()
                         .id_salt("redis-inspector-scroll")
                         .show(ui, |ui| self.inspector(ui));
@@ -456,7 +473,9 @@ impl Workspace {
                                 .on_hover_text("Redis key/value grid");
                             ui.separator();
                             ui.checkbox(&mut self.read_only, "Read-only");
-                            if self.busy { ui.spinner(); }
+                            if self.busy {
+                                ui.spinner();
+                            }
                             ui.label(format!("{} keys loaded", self.keys.len()));
                             if ui
                                 .add(crate::icons::widget("search"))
@@ -554,100 +573,135 @@ impl Workspace {
     fn inspector(&mut self, ui: &mut egui::Ui) {
         let mut job = None;
         if let Some(snapshot) = &self.snapshot {
-            ui.label("Key");
-            ui.monospace(display_key(&snapshot.key));
-            ui.horizontal_wrapped(|ui| {
-                ui.label(format!("Type: {}", snapshot.kind));
-                if let Some(length) = snapshot.length {
-                    ui.label(format!("Length: {length}"));
+            crate::app::compact_inspector_spacing(ui);
+            let search = self.field_search.to_lowercase();
+            for (name, kind, value) in [
+                ("key", "bytes", display_key(&snapshot.key)),
+                ("type", "Redis type", snapshot.kind.clone()),
+                (
+                    "length",
+                    "elements / bytes",
+                    snapshot.length.map_or("—".into(), |n| n.to_string()),
+                ),
+                (
+                    "ttl",
+                    "seconds",
+                    match snapshot.ttl_ms {
+                        -2 => "Key no longer exists".into(),
+                        -1 => "No expiry".into(),
+                        n => format!("{:.1} (at load)", n as f64 / 1000.0),
+                    },
+                ),
+            ] {
+                if search.is_empty() || name.contains(&search) {
+                    inspector_field(ui, name, kind, &value);
                 }
-                ui.label(match snapshot.ttl_ms {
-                    -2 => "Key no longer exists".into(),
-                    -1 => "No expiry".into(),
-                    n => format!("TTL: {:.1}s (at load)", n as f64 / 1000.0),
-                });
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("Refresh"))
-                    .clicked()
-                {
-                    job = Some(Job::Inspect(snapshot.key.clone()));
-                }
-            });
+            }
             if snapshot.truncated {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
                     "Partial preview. Use range/scan commands to inspect the remaining values.",
                 );
             }
-            ui.add_enabled_ui(
-                !self.busy && !self.read_only && snapshot.kind != "none",
-                |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("TTL seconds");
-                        ui.add(
-                            egui::DragValue::new(&mut self.ttl_seconds).range(1..=u64::MAX / 1000),
-                        );
-                        if ui.button("Set TTL").clicked() {
-                            job = Some(Job::Expire(
-                                snapshot.key.clone(),
-                                Some(self.ttl_seconds * 1000),
-                                self.read_only,
-                            ));
+            if search.is_empty() || "value".contains(&search) {
+                inspector_field_heading(ui, "value", &snapshot.kind);
+                if snapshot.kind == "string" && !snapshot.truncated {
+                    ui.add_enabled(
+                        !self.busy && !self.read_only,
+                        egui::TextEdit::multiline(&mut self.value_editor)
+                            .code_editor()
+                            .desired_rows(4)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(3.0);
+                    ui.weak("Quoted bytes · Save preserves expiry");
+                    if ui.small_button("Discard edits").clicked()
+                        && let redis::Value::BulkString(bytes) = &snapshot.value
+                    {
+                        self.value_editor = crate::redis_commands::quote(bytes);
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.busy && !self.read_only,
+                            egui::Button::new("Save value"),
+                        )
+                        .clicked()
+                    {
+                        match crate::redis_commands::parse(&self.value_editor) {
+                            Ok(args) if args.len() == 1 && args[0].len() == 1 => {
+                                if let redis::Value::BulkString(original) = &snapshot.value {
+                                    job = Some(Job::Save(
+                                        snapshot.key.clone(),
+                                        original.clone(),
+                                        args[0][0].clone(),
+                                        self.read_only,
+                                    ));
+                                }
+                            }
+                            _ => self.error = Some(
+                                "Enter exactly one quoted value, such as \"hello\" or \"\\xff\"."
+                                    .into(),
+                            ),
                         }
-                        if ui.button("Remove expiry").clicked() {
-                            job = Some(Job::Expire(snapshot.key.clone(), None, self.read_only));
-                        }
-                        if ui.button("Delete key…").clicked() {
-                            self.delete_confirmation = true;
-                        }
-                    });
-                },
-            );
-            if snapshot.kind == "string" && !snapshot.truncated {
-                ui.weak("Quoted byte string. Escapes preserve binary data.");
-                ui.add_enabled(
-                    !self.busy && !self.read_only,
-                    egui::TextEdit::multiline(&mut self.value_editor)
-                        .code_editor()
-                        .desired_rows(8)
-                        .desired_width(f32::INFINITY),
-                );
-                if ui.button("Discard value edits").clicked()
-                    && let redis::Value::BulkString(bytes) = &snapshot.value
+                    }
+                } else {
+                    egui::Frame::new()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                        .corner_radius(4.0)
+                        .inner_margin(4.0)
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&self.preview).monospace())
+                                    .wrap(),
+                            );
+                        });
+                }
+            }
+            ui.add_space(8.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Refresh"))
+                    .clicked()
                 {
-                    self.value_editor = crate::redis_commands::quote(bytes);
+                    job = Some(Job::Inspect(snapshot.key.clone()));
                 }
                 if ui
                     .add_enabled(
                         !self.busy && !self.read_only,
-                        egui::Button::new("Save string · preserve TTL"),
+                        egui::Button::new("Delete key…"),
                     )
                     .clicked()
                 {
-                    match crate::redis_commands::parse(&self.value_editor) {
-                        Ok(args) if args.len() == 1 && args[0].len() == 1 => {
-                            if let redis::Value::BulkString(original) = &snapshot.value {
-                                job = Some(Job::Save(
+                    self.delete_confirmation = true;
+                }
+            });
+            egui::CollapsingHeader::new("Expiry").show(ui, |ui| {
+                ui.add_enabled_ui(
+                    !self.busy && !self.read_only && snapshot.kind != "none",
+                    |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("TTL seconds");
+                            ui.add(
+                                egui::DragValue::new(&mut self.ttl_seconds)
+                                    .range(1..=u64::MAX / 1000),
+                            );
+                            if ui.button("Set TTL").clicked() {
+                                job = Some(Job::Expire(
                                     snapshot.key.clone(),
-                                    original.clone(),
-                                    args[0][0].clone(),
+                                    Some(self.ttl_seconds * 1000),
                                     self.read_only,
                                 ));
                             }
-                        }
-                        _ => {
-                            self.error = Some(
-                                "Enter exactly one quoted value, such as \"hello\" or \"\\xff\"."
-                                    .into(),
-                            )
-                        }
-                    }
-                }
-            } else {
-                egui::ScrollArea::both().show(ui, |ui| {
-                    ui.monospace(&self.preview);
-                });
-            }
+                            if ui.button("Remove expiry").clicked() {
+                                job = Some(Job::Expire(snapshot.key.clone(), None, self.read_only));
+                            }
+                        });
+                    },
+                );
+            });
         } else {
             ui.centered_and_justified(|ui| {
                 ui.weak("Select a key to inspect its value and expiry.");
@@ -805,6 +859,55 @@ fn display_key(key: &[u8]) -> String {
         _ => crate::redis_commands::quote(key),
     }
 }
+fn inspector_field_heading(ui: &mut egui::Ui, name: &str, kind: &str) {
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(name)
+                    .size(11.0)
+                    .color(ui.visuals().weak_text_color()),
+            )
+            .truncate(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(kind)
+                        .size(10.0)
+                        .color(ui.visuals().weak_text_color()),
+                )
+                .truncate(),
+            );
+        });
+    });
+}
+fn inspector_field(ui: &mut egui::Ui, name: &str, kind: &str, value: &str) {
+    ui.push_id(name, |ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 44.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_height(44.0);
+                inspector_field_heading(ui, name, kind);
+                egui::Frame::new()
+                    .fill(ui.visuals().extreme_bg_color)
+                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                    .corner_radius(4.0)
+                    .inner_margin(1.0)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            if crate::app::clipboard_button(ui).clicked() {
+                                ui.ctx().copy_text(value.to_owned());
+                            }
+                            crate::app::inspector_value_preview(ui, value).on_hover_text(value);
+                        });
+                    });
+            },
+        );
+    });
+}
+
 fn grid_preview(value: &redis::Value, kind: &str) -> String {
     fn json(value: &redis::Value) -> serde_json::Value {
         match value {

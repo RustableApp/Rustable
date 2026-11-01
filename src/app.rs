@@ -6402,7 +6402,7 @@ fn connection_activity_blocks(rect: egui::Rect, seconds: f32) -> Vec<Vec<egui::P
     blocks
 }
 
-fn clipboard_button(ui: &mut egui::Ui) -> egui::Response {
+pub(crate) fn clipboard_button(ui: &mut egui::Ui) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Copy full value")
@@ -6574,12 +6574,12 @@ fn activity_description(command: &Command, dialect: crate::sql::Dialect) -> Opti
 }
 
 // Keep empty and short values as easy to activate as a populated input field.
-fn compact_inspector_spacing(ui: &mut egui::Ui) {
+pub(crate) fn compact_inspector_spacing(ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing = egui::vec2(3.0, 1.0);
     ui.spacing_mut().interact_size.y = 14.0;
 }
 
-fn inspector_value_preview(ui: &mut egui::Ui, text: &str) -> egui::Response {
+pub(crate) fn inspector_value_preview(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let label = if text.is_empty() {
         RichText::new("EMPTY")
             .monospace()
