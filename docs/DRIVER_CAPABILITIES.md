@@ -862,3 +862,30 @@ application test passes on each; the library suite reports 437 passed, 99 ignore
 Clippy all-targets with warnings denied passes. Native grid editing interaction,
 newer server versions and wider effective-privilege coverage remain release gates.
 No push, deployment or release accompanies this local change.
+
+### Native MariaDB grid editing acceptance (2026-11-01)
+
+Built revision 53c7d6a using mise/Cargo and installed it into the local acceptance
+app bundle. Connected to the MariaDB fixture at localhost:43319 with Verify Full
+TLS and the fixture CA; no production connection was opened.
+
+On native_csv_acceptance, double-clicked the label for id=2, entered Japanese text
+plus an ASCII suffix, pressed Return, then Cmd+S. The review showed highlighted,
+schema-qualified UPDATE SQL with inline values. Cmd+Enter saved and refreshed both
+the grid and inspector; pending indicators disappeared.
+
+Changed the same row's primary key to the existing id=1. Confirmation reported
+server error 1062 inside the review and retained the pending edit. Back to editing
+returned to the highlighted pending cell. Correcting the value to id=3, reviewing
+again and confirming succeeded: the selected row followed its new identity and
+the stored generated doubled column refreshed from 4 to 6. The error cleared.
+
+Screenshots are under the local acceptance evidence directory:
+- native-mariadb-grid-review.png
+- native-mariadb-grid-saved.png
+- native-mariadb-grid-rejected.png
+- native-mariadb-grid-recovered.png
+
+This verifies native update, rejection and correction on MariaDB 11.4. It does not
+cover native insert/delete/cancel, MySQL visual acceptance, or additional server
+versions. The fixture remains with ids 1 and 3 for subsequent checks. No release.
