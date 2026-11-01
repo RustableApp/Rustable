@@ -450,3 +450,24 @@ This checks the new generated-column completion through the actual browser UI
 and guards shared-app compatibility after recent native changes. It is not a
 whole-tab memory, cross-engine or full browser-workflow acceptance run. No
 website deployment, main push or desktop release was performed.
+
+## Saved-query workflow acceptance — 2026-11-01
+
+Served the 821c939 build on localhost:8792 with COOP/COEP and exercised the actual
+workspace. Cmd+S opened the naming dialog; saving `Browser acceptance` added a
+selected item under Ungrouped and named the editor tab. After a page reload the
+query remained in the library. Single-click highlighted it while leaving the
+customers table active. Double-click opened the document; Cmd+Enter executed it
+and returned one row. Right-click → Rename query edited the name inline; Enter
+updated both the sidebar selection and open tab to `Browser renamed`.
+
+The query contained `SELECT 'Browser 日本' AS acceptance;`. Japanese glyphs render
+as boxes in both the WASM editor and result grid. This pass does not establish
+Unicode byte fidelity; earlier import/export checks cover that separately.
+Source inspection confirms browser font installation uses only the bundled egui
+and emoji faces, while desktop CJK support loads an OS font. Browser CJK font
+coverage is therefore an outstanding visual defect, not completed parity.
+
+Evidence: `wasm-saved-query-selection.png`, `wasm-saved-query-reopened.png`, and
+`wasm-saved-query-renamed.png` in the session visualization directory. Temporary
+server and tab were closed. No website deployment or release.
