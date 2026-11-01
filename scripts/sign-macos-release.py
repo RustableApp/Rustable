@@ -85,6 +85,17 @@ with tempfile.TemporaryDirectory(prefix='rustable-signing-') as temporary:
         archive.unlink()
         run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(archive))
         run(str(root/'target/sparkle/bin/generate_appcast'), '--ed-key-file', '-', '--maximum-deltas', '0', '--download-url-prefix', f'https://github.com/RustableApp/Rustable/releases/download/{tag}/', '-o', str(dist/feed_name), str(dist), input=private_key+'\n', text=True)
+        # Keep Sparkle's ZIP feed separate from the human-facing DMG installer.
+        dmg = dist / f'Rustable-macos-{arch}.dmg'
+        run('python', 'scripts/create-dmg.py', str(app), str(dmg))
+        run('codesign', '--force', '--timestamp', '--keychain', str(keychain), '--sign', identity, str(dmg))
+        result = run('xcrun', 'notarytool', 'submit', str(dmg), '--key', str(p8), '--key-id', key_id, '--issuer', issuer, '--wait', '--timeout', '30m', '--output-format', 'json', capture_output=True, text=True)
+        response = json.loads(result.stdout)
+        if response.get('status') != 'Accepted':
+            raise SystemExit(f'DMG notarization was not accepted: {response.get("status")}')
+        run('xcrun', 'stapler', 'staple', str(dmg))
+        run('xcrun', 'stapler', 'validate', str(dmg))
+        run('codesign', '--verify', '--verbose=2', str(dmg))
     finally:
         if keychain.exists():
             run('security', 'delete-keychain', str(keychain))

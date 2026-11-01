@@ -29,6 +29,8 @@ if system == 'Darwin':
         info = plistlib.load(f)
     info['CFBundleShortVersionString'] = version
     info['CFBundleVersion'] = version
+    info['CFBundleIconFile'] = 'Rustable.icns'
+    shutil.copy2(ROOT / 'assets/Rustable.icns', app / 'Contents/Resources/Rustable.icns')
     with path.open('wb') as f:
         plistlib.dump(info, f)
     # Signed/notarized distribution archives are created only after signing.
