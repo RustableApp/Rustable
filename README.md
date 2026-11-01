@@ -83,6 +83,8 @@ Results have limits. Export operates on loaded results, not automatically on you
 
 Built for people who want to get their work done. Not clowns. 🤡 (Clowns may build from source.)
 
+Other database apps are built for pros. Rustable is built for bros. Same SQL. Less ceremony.
+
 ## Handcrafted, obviously
 
 Every line lovingly written by skilled artisans. Our artisan is called Astra and works suspiciously quickly.
