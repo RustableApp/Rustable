@@ -28,8 +28,12 @@ export function prepareChange(snapshot, request) {
     let name = validName(request.name);
     if (source.kind === 'sql') name = validName(name.replace(/\.sql$/i, '')) + '.sql';
     path = old.slice(0, old.lastIndexOf('/') + 1) + name;
-    if (path !== old && rows.some(row => row.path === path)) throw new Error('That name already exists.');
-    for (const row of rows) if (row.path === old || row.path.startsWith(old + '/')) row.path = path + row.path.slice(old.length);
+    const moving = row => row.path === old || (source.kind === 'group' && row.path.startsWith(old + '/'));
+    const occupied = new Set(rows.filter(row => !moving(row)).map(row => row.path));
+    // Check every destination before changing paths. A missing group record
+    // does not make its surviving child records safe to overwrite.
+    for (const row of rows) if (moving(row) && occupied.has(path + row.path.slice(old.length))) throw new Error('That name already exists.');
+    for (const row of rows) if (moving(row)) row.path = path + row.path.slice(old.length);
   } else if (request.op === 'save') {
     path = pathInside(request.path);
     if (!path.endsWith('.sql')) throw new Error('Saved queries must use a .sql filename.');

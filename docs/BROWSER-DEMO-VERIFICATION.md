@@ -303,3 +303,18 @@ coverage only, not a claim of complete Firefox workflow verification. Firefox
 required raising its test window before the native screenshot refreshed.
 Actual mobile hardware, sustained whole-tab memory measurements and deeper
 cross-engine file/cancellation workflows remain follow-up work.
+
+### Browser library rename collision checks (2026-11-01)
+
+Group rename preparation now checks every moved record's destination, not only
+the group root. A surviving child record beneath a missing destination group
+cannot be overwritten by the rename. SQL-file renames move only that file,
+never malformed descendant records. Case-only names preserve SQL text and
+unchanged names produce no writes.
+
+Validation: all eight pure browser-library transaction-preparation tests passed
+with `mise exec node@24.22.0 -- node --test tools/browser/tests/query-library.mjs`.
+The tests verify collision failure leaves the input snapshot unchanged and
+compare exact puts/deletes and Unicode content. This change has not yet been
+rebuilt into or deployed with the production WASM bundle; browser IndexedDB
+transaction execution was not rerun in this pass.

@@ -46,3 +46,32 @@ test('group rename deletes only old paths and writes only moved entries', () => 
   changed.puts.forEach(row => applied.set(row.path,row));
   assert.deepEqual([...applied.values()].sort((a,b)=>a.path.localeCompare(b.path)), changed.rows.sort((a,b)=>a.path.localeCompare(b.path)));
 });
+
+test('group rename refuses collisions with surviving destination children', () => {
+  const rows = [
+    {path:'/Queries/A',kind:'group'},
+    {path:'/Queries/A/Nested',kind:'group'},
+    {path:'/Queries/A/Nested/q.sql',kind:'sql',sql:"SELECT 'source';"},
+    {path:'/Queries/B/Nested/q.sql',kind:'sql',sql:"SELECT 'keep destination';"},
+  ];
+  const before = structuredClone(rows);
+  assert.throws(() => prepareChange(rows, {op:'rename',path:'/Queries/A',name:'B'}), /already exists/);
+  assert.deepEqual(rows, before);
+});
+test('case-only browser renames preserve content and no-op renames do not write', () => {
+  const rows = [{path:'/Queries/Report.sql',kind:'sql',sql:"SELECT '日本 🦀';"}];
+  const renamed = prepareChange(rows, {op:'rename',path:'/Queries/Report.sql',name:'report'});
+  assert.deepEqual(renamed.deletes, ['/Queries/Report.sql']);
+  assert.deepEqual(renamed.puts, [{...rows[0],path:'/Queries/report.sql'}]);
+  const unchanged = prepareChange(rows, {op:'rename',path:'/Queries/Report.sql',name:'Report.sql'});
+  assert.deepEqual(unchanged.deletes, []);
+  assert.deepEqual(unchanged.puts, []);
+});
+test('renaming a query never moves unrelated child records', () => {
+  const rows = [{path:'/Queries/q.sql',kind:'sql',sql:'SELECT 1;'},
+    {path:'/Queries/q.sql/child.sql',kind:'sql',sql:'SELECT 2;'}];
+  const changed = prepareChange(rows, {op:'rename',path:'/Queries/q.sql',name:'renamed'});
+  assert.equal(changed.rows[1].path, rows[1].path);
+  assert.deepEqual(changed.deletes, ['/Queries/q.sql']);
+  assert.deepEqual(changed.puts, [{path:'/Queries/renamed.sql',kind:'sql',sql:'SELECT 1;'}]);
+});
