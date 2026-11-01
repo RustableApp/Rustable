@@ -24,6 +24,7 @@ pub(super) struct Library {
     rename_file: Option<(PathBuf, String)>,
     focus_file: bool,
     group_operation: Option<mpsc::Receiver<GroupChange>>,
+    group_operation_root: Option<PathBuf>,
     error: Option<String>,
     #[cfg(target_arch = "wasm32")]
     save_dialog: Option<browser::SaveDraft>,
@@ -204,6 +205,7 @@ impl Rustable {
         if self.query_library.group_operation.is_some() || self.query_library.document_operation.is_some() { return; }
         let root = self.query_directory();
         let (tx, rx) = mpsc::channel(); self.query_library.group_operation = Some(rx);
+        self.query_library.group_operation_root = Some(root.clone());
         let ctx = ctx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let old = rename.as_ref().map(|(path, _)| path.clone());
@@ -224,6 +226,7 @@ impl Rustable {
         if self.pending.is_some() { self.query_library.error = Some("Wait for the current operation before changing query folders.".into()); return; }
         let root = self.query_directory();
         let (tx, rx) = mpsc::channel(); self.query_library.group_operation = Some(rx);
+        self.query_library.group_operation_root = Some(root.clone());
         let ctx = ctx.clone(); let viewport = ctx.viewport_id();
         std::thread::spawn(move || {
             let old = rename.as_ref().map(|(path, _)| path.clone());
@@ -236,6 +239,7 @@ impl Rustable {
         self.poll_browser_documents();
         let Some(result) = self.query_library.group_operation.as_ref().and_then(|rx| rx.try_recv().ok()) else { return; };
         self.query_library.group_operation = None;
+        let operation_root = self.query_library.group_operation_root.take();
         match result {
             Ok((root, old, path)) => {
                 if let Some(old) = old {
@@ -246,6 +250,9 @@ impl Rustable {
                             tab.source_path = Some(destination);
                         }
                     }
+                    // Documents still need their new paths even if the user
+                    // switched libraries while the filesystem operation ran.
+                    if root != self.query_directory() { return; }
                     if let Some(Selection::File(selected)) = &mut self.query_library.selected
                         && let Ok(relative) = selected.strip_prefix(&old) { *selected = if relative.as_os_str().is_empty() { path.clone() } else { path.join(relative) }; }
                     self.query_library.rename_group = None;
@@ -255,10 +262,18 @@ impl Rustable {
                     self.query_library.rename_group = Some((path.clone(), path.file_name().unwrap().to_string_lossy().into_owned()));
                     self.query_library.focus_group = true;
                 }
-                self.query_library.error = None;
-                self.query_library.invalidate();
+                if root == self.query_directory() {
+                    self.query_library.error = None;
+                    self.query_library.invalidate();
+                }
             }
-            Err(error) => { self.query_library.error = Some(error); self.query_library.focus_group = true; self.query_library.focus_file = true; }
+            Err(error) => {
+                if operation_root.as_ref().is_none_or(|root| *root == self.query_directory()) {
+                    self.query_library.error = Some(error);
+                    self.query_library.focus_group = true;
+                    self.query_library.focus_file = true;
+                }
+            }
         }
     }
     pub(super) fn query_directory(&self) -> PathBuf {
@@ -431,6 +446,35 @@ mod tests {
         assert_eq!(app.tabs[0].sql, "SELECT 'unsaved edit';");
         assert!(app.tabs[0].dirty);
     }
+    #[test]
+    fn old_library_operation_does_not_reset_new_library_but_retargets_documents() {
+        let ctx = egui::Context::default();
+        let old_root = tempfile::tempdir().unwrap();
+        let new_root = tempfile::tempdir().unwrap();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.prefs.query_directory = Some(new_root.path().to_owned());
+        let old = old_root.path().join("Old.sql");
+        let renamed = old_root.path().join("Renamed.sql");
+        app.tabs[0].source_path = Some(old.clone());
+        let current = new_root.path().join("Current.sql");
+        app.query_library.rename_file = Some((current.clone(), "Current draft".into()));
+        app.query_library.selected = Some(Selection::File(current.clone()));
+        app.query_library.error = Some("Current library message".into());
+        app.query_library.refreshed = Some(Instant::now());
+        for result in [Ok((old_root.path().to_owned(), Some(old), renamed.clone())), Err("Old operation failed".into())] {
+            let (tx, rx) = mpsc::channel();
+            app.query_library.group_operation = Some(rx);
+            app.query_library.group_operation_root = Some(old_root.path().to_owned());
+            tx.send(result).unwrap();
+            app.poll_query_groups();
+            assert_eq!(app.query_library.rename_file.as_ref().unwrap().1, "Current draft");
+            assert!(app.query_library.selected == Some(Selection::File(current.clone())));
+            assert_eq!(app.query_library.error.as_deref(), Some("Current library message"));
+            assert!(app.query_library.refreshed.is_some());
+        }
+        assert_eq!(app.tabs[0].source_path, Some(renamed));
+    }
+
     #[test]
     fn listing_refresh_preserves_live_rename_and_clears_removed_items() {
         let root = PathBuf::from("/Queries");
