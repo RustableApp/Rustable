@@ -720,6 +720,14 @@ impl Rustable {
                                 });
                                 let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
                                 if form_text(ui, "CA file", &mut ca, false, None) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
+                                for (label, timeout) in [("Connect timeout", &mut config.connect_timeout), ("Read timeout", &mut config.read_timeout)] {
+                                    form_row(ui, label, |ui| {
+                                        let mut seconds = timeout.as_secs_f64();
+                                        if ui.add(egui::DragValue::new(&mut seconds).range(0.1..=3600.0).speed(0.1).suffix(" s")).changed() {
+                                            *timeout = std::time::Duration::from_secs_f64(seconds);
+                                        }
+                                    });
+                                }
                             }
                             ConnectionKind::Postgres(config) => {
                                 if ui.available_width() >= 500.0 {
@@ -1424,46 +1432,48 @@ mod tests {
     }
     #[test]
     fn remembering_and_forgetting_password_uses_secure_worker_and_never_preferences() {
-        let mut app = app();
-        app.connection_action(Action::New(true)).unwrap();
-        app.connection_manager.draft.as_mut().unwrap().name = "Secure profile".into();
-        app.connection_manager
-            .draft
-            .as_mut()
-            .unwrap()
-            .remember_password = true;
-        app.connection_manager.password = "CREDENTIAL_SECRET".into();
-        app.connection_action(Action::Save(false)).unwrap();
-        settle_credentials(&mut app);
-        let profile = app.connection_manager.draft.clone().unwrap();
-        let id = profile.id;
-        app.connection_manager.select(profile);
-        assert!(app.connection_manager.loading_password());
-        assert!(app.connection_action(Action::Save(true)).is_err());
-        settle_credentials(&mut app);
-        assert_eq!(app.connection_manager.password, "CREDENTIAL_SECRET");
-        let mut storage = Storage::default();
-        app.save_with_window_documents(&mut storage, vec![]);
-        assert!(!storage.0["workspace"].contains("CREDENTIAL_SECRET"));
-        app.connection_manager
-            .draft
-            .as_mut()
-            .unwrap()
-            .remember_password = false;
-        app.connection_action(Action::Save(false)).unwrap();
-        settle_credentials(&mut app);
-        let mut remembered = app.prefs.saved_connections.profile(id).unwrap().clone();
-        remembered.remember_password = true; // Explicitly verify the former key was deleted.
-        app.connection_manager.select(remembered);
-        settle_credentials(&mut app);
-        assert!(app.connection_manager.password.is_empty());
-        assert!(
+        for action in [Action::New(true), Action::NewMysql(false), Action::NewMysql(true)] {
+            let mut app = app();
+            app.connection_action(action).unwrap();
+            app.connection_manager.draft.as_mut().unwrap().name = "Secure profile".into();
             app.connection_manager
-                .error
-                .as_deref()
+                .draft
+                .as_mut()
                 .unwrap()
-                .contains("not found")
-        );
+                .remember_password = true;
+            app.connection_manager.password = "CREDENTIAL_SECRET".into();
+            app.connection_action(Action::Save(false)).unwrap();
+            settle_credentials(&mut app);
+            let profile = app.connection_manager.draft.clone().unwrap();
+            let id = profile.id;
+            app.connection_manager.select(profile);
+            assert!(app.connection_manager.loading_password());
+            assert!(app.connection_action(Action::Save(true)).is_err());
+            settle_credentials(&mut app);
+            assert_eq!(app.connection_manager.password, "CREDENTIAL_SECRET");
+            let mut storage = Storage::default();
+            app.save_with_window_documents(&mut storage, vec![]);
+            assert!(!storage.0["workspace"].contains("CREDENTIAL_SECRET"));
+            app.connection_manager
+                .draft
+                .as_mut()
+                .unwrap()
+                .remember_password = false;
+            app.connection_action(Action::Save(false)).unwrap();
+            settle_credentials(&mut app);
+            let mut remembered = app.prefs.saved_connections.profile(id).unwrap().clone();
+            remembered.remember_password = true; // Explicitly verify the former key was deleted.
+            app.connection_manager.select(remembered);
+            settle_credentials(&mut app);
+            assert!(app.connection_manager.password.is_empty());
+            assert!(
+                app.connection_manager
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("not found")
+            );
+        }
     }
     struct LockedCredentials;
     impl crate::credential_store::Backend for LockedCredentials {
@@ -2061,6 +2071,28 @@ mod tests {
                     .map(|(id, _)| *id),
                 Some(group)
             );
+        }
+    }
+    #[test]
+    fn mysql_forms_render_transport_settings_and_fit_the_dialog() {
+        for maria in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app();
+            app.connection_action(Action::NewMysql(maria)).unwrap();
+            app.connections = true;
+            let mut output = None;
+            for _ in 0..5 {
+                output = Some(ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 952.0))),
+                    ..Default::default()
+                }, |ctx| app.connections_window(ctx)));
+            }
+            let output = output.unwrap();
+            for label in ["CA file", "Connect timeout", "Read timeout", "Remember password", "Test", "Connect"] {
+                assert!(painted_text(&output, label).is_some(), "missing {label}");
+            }
+            let (content, rect) = ctx.data(|data| data.get_temp::<(egui::Vec2, egui::Rect)>(egui::Id::new("connection-form-geometry"))).unwrap();
+            assert!(content.y <= rect.height() + 1.0, "form unexpectedly overflows: {content:?} {rect:?}");
         }
     }
     #[test]

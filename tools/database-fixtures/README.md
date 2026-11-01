@@ -294,3 +294,14 @@ probe/open tests pass separately on MySQL and MariaDB. Native visual and interac
 form verification is still required, as are actual system-keychain checks for these
 variants, safe edits, SSH and remaining SQL-language intelligence. Experimental UI
 availability is not official supported-engine status; no release was published.
+
+The experimental connection forms now expose connection/read timeouts (seconds)
+alongside TLS and CA-path settings. Headless egui frame verification checks the
+fields/actions are painted and the form fits the large-screen dialog for both
+engines. The existing credential-worker remember/load/forget regression now runs
+for PostgreSQL, MySQL and MariaDB: opening waits for credential loading, passwords
+never enter saved preferences, and forgetting removes the stored value. These
+credential checks use the test backend, not the macOS Keychain itself.
+
+All 29 connection-manager tests and strict Clippy pass. Native visual inspection,
+small-window MySQL form interaction and real-keychain acceptance remain open.
