@@ -101,11 +101,19 @@ filter (not a wildcard), generated columns, sorting/offset, rollback and refusal
 to switch databases during a transaction. SQL result byte budgets span statements.
 
 Before exposing this driver in the connection picker: integrate in-flight
-cancellation, preserve typed connectivity errors through result collection,
+cancellation,
 refresh SQL-mode/delimiter semantics when a script changes session modes,
 implement table-edit concurrency checks and commits, load indexes/triggers/DDL,
 add SSH/TLS fixtures, and connect profile storage/editor dialect state. Safe-mode
-requests currently return an explicit unsupported error. Stream-result failures
-conservatively close the session; this avoids reusing an uncertain stream but
-still needs differentiated recoverable-error handling. No MySQL/MariaDB support
+requests currently return an explicit unsupported error. Stream collection preserves typed connectivity classification: ordinary SQL
+errors keep the session, while transport failures discard it. No MySQL/MariaDB support
 claim or release is justified by the foundation alone.
+
+
+Driver error-recovery coverage now includes a procedure that emits a result set
+and then SIGNALs an error inside an explicit transaction. Both engines preserve
+the earlier result and uncommitted edit; the same driver remains Active until
+ROLLBACK. An initial statement error is likewise recoverable. A timed-out query
+marks the driver Disconnected and subsequent execute calls are rejected. Value
+conversion failures drain remaining rows explicitly, so later transport errors
+are still observed instead of disappearing in an iterator destructor.

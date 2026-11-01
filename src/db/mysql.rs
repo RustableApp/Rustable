@@ -114,7 +114,7 @@ impl Driver for MysqlDriver {
             let Some(conn) = self.connection.as_mut() else { report.error = Some("MySQL connection is disconnected".into()); break; };
             let outcome = conn.query_iter(&sql[range]).map(|results|
                 super::mysql_results::collect_budget(results, &mut remaining, QUERY_LIMIT, 128 - report.grids.len()));
-            let result = match outcome {
+            let (result, disconnected) = match outcome {
                 Ok(result) => result,
                 Err(error) => {
                     let disconnected = error.is_connectivity_error();
@@ -125,10 +125,8 @@ impl Driver for MysqlDriver {
             };
             report.grids.extend(result.grids);
             if result.error.is_some() {
-                // Until transport error classification is carried through the collector,
-                // conservatively close on stream errors. Never reuse an uncertain stream.
                 report.error = result.error;
-                self.connection = None;
+                if disconnected { self.connection = None; }
                 break;
             }
         }
@@ -154,7 +152,17 @@ impl Driver for MysqlDriver {
         let params: Vec<::mysql::Value> = parameters.iter().map(|value| match value {
             Value::Text(text) => ::mysql::Value::Bytes(text.as_bytes().to_vec()), _ => unreachable!(),
         }).collect();
-        let report = ScriptResult::from(self.conn()?.exec_iter(&sql, params).map_err(|e| e.to_string())?);
+        let mut remaining = BYTE_LIMIT;
+        let outcome = self.conn()?.exec_iter(&sql, params).map(|results|
+            super::mysql_results::collect_budget(results, &mut remaining, PAGE_SIZE + 1, 1));
+        let (report, disconnected) = match outcome {
+            Ok(result) => result,
+            Err(error) => {
+                if error.is_connectivity_error() { self.connection = None; }
+                return Err(error.to_string());
+            }
+        };
+        if disconnected { self.connection = None; }
         if let Some(error) = report.error { return Err(error); }
         let mut grid = Arc::unwrap_or_clone(report.grids.into_iter().next().ok_or("Missing table result")?);
         if grid.rows.len() > PAGE_SIZE { grid.rows.truncate(PAGE_SIZE); grid.truncated = true; }
@@ -198,9 +206,40 @@ mod tests {
         assert!(driver.execute("START TRANSACTION; UPDATE `driver``probe` SET label='changed' WHERE id=1;", false, &cancel).error.is_none());
         assert_eq!(driver.transaction_state(), TransactionState::Active);
         assert!(driver.select_schema("rustable_test").is_err());
+        assert!(driver.execute("SELECT * FROM missing_rustable_table_7423", false, &cancel).error.is_some());
+        assert_eq!(driver.transaction_state(), TransactionState::Active);
         assert!(driver.execute("ROLLBACK", false, &cancel).error.is_none());
         assert_eq!(driver.transaction_state(), TransactionState::Idle);
         assert!(driver.select_schema("rustable_test").is_ok());
         assert!(driver.execute("DROP TABLE `driver``probe`", false, &cancel).error.is_none());
     }
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_stream_error_keeps_transaction_but_timeout_disconnects() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false,
+            read_timeout: Duration::from_millis(100), ..Default::default() };
+        let mut driver = Box::<dyn Driver>::try_from(&config).unwrap();
+        let cancel = AtomicBool::new(false);
+        let setup = "DROP PROCEDURE IF EXISTS rustable_error_probe;";
+        assert!(driver.execute(setup, false, &cancel).error.is_none());
+        let setup = "DELIMITER $$\nCREATE PROCEDURE rustable_error_probe() BEGIN SELECT 42 AS retained; SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='expected fixture error'; END$$";
+        assert!(driver.execute(setup, false, &cancel).error.is_none());
+        assert!(driver.execute("CREATE TEMPORARY TABLE error_tx_probe(value INT) ENGINE=InnoDB; INSERT INTO error_tx_probe VALUES(7); START TRANSACTION; UPDATE error_tx_probe SET value=8;", false, &cancel).error.is_none());
+        let report = driver.execute("CALL rustable_error_probe()", false, &cancel);
+        assert!(report.error.unwrap().contains("expected fixture error"));
+        assert_eq!(report.grids[0].rows, [vec![Value::Integer(42)]]);
+        assert_eq!(driver.transaction_state(), TransactionState::Active);
+        let report = driver.execute("SELECT value FROM error_tx_probe", false, &cancel);
+        assert_eq!(report.grids[0].rows, [vec![Value::Integer(8)]]);
+        assert!(driver.execute("ROLLBACK; DROP PROCEDURE rustable_error_probe;", false, &cancel).error.is_none());
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        let report = driver.execute("SELECT SLEEP(1)", false, &cancel);
+        assert!(report.error.is_some());
+        assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
+        assert!(driver.execute("SELECT 1", false, &cancel).error.unwrap().contains("disconnected"));
+    }
+
 }

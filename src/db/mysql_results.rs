@@ -12,19 +12,20 @@ impl<T: Protocol> From<QueryResult<'_, '_, '_, T>> for ScriptResult {
 }
 
 fn collect<T: Protocol>(results: QueryResult<'_, '_, '_, T>, budget: usize, row_limit: usize) -> ScriptResult {
-    collect_budget(results, &mut { budget }, row_limit, 128)
+    collect_budget(results, &mut { budget }, row_limit, 128).0
 }
 
-pub(super) fn collect_budget<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, set_limit: usize) -> ScriptResult {
+pub(super) fn collect_budget<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, set_limit: usize) -> (ScriptResult, bool) {
     let started = Instant::now();
     let mut report = ScriptResult::default();
     let mut remaining = *budget;
+    let mut disconnected = false;
     while let Some(mut set) = results.iter() {
         // Include structural overhead: a script of empty result sets must also
         // have a bound. Do not misrepresent omitted results as a successful run.
         if report.grids.len() >= set_limit {
             report.error.get_or_insert_with(|| format!("Only the first {set_limit} result sets are retained for this statement."));
-            for row in set.by_ref() { if let Err(error) = row { report.error = Some(error.to_string()); } }
+            for row in set.by_ref() { if let Err(error) = row { disconnected |= error.is_connectivity_error(); report.error = Some(error.to_string()); } }
             continue;
         }
         let columns = set.columns().as_ref().to_vec();
@@ -37,17 +38,18 @@ pub(super) fn collect_budget<T: Protocol>(mut results: QueryResult<'_, '_, '_, T
             sum.saturating_add(std::mem::size_of::<String>()).saturating_add(name.len()));
         if header_bytes > remaining {
             report.error.get_or_insert_with(|| "Result headers exceed the retained-result memory limit.".into());
-            for row in set.by_ref() { if let Err(error) = row { report.error = Some(error.to_string()); } }
+            for row in set.by_ref() { if let Err(error) = row { disconnected |= error.is_connectivity_error(); report.error = Some(error.to_string()); } }
             continue;
         }
         remaining -= header_bytes;
         let set_started = Instant::now();
+        let mut decoding_failed = false;
         for row in set.by_ref() {
             let row = match row {
                 Ok(row) => row,
-                Err(error) => { report.error = Some(error.to_string()); break; }
+                Err(error) => { disconnected |= error.is_connectivity_error(); report.error = Some(error.to_string()); break; }
             };
-            if grid.truncated { continue; }
+            if grid.truncated || decoding_failed { continue; }
             let row_bytes = (0..row.len()).fold(std::mem::size_of::<Vec<Value>>(), |sum, i| {
                 sum.saturating_add(std::mem::size_of::<Value>()).saturating_add(match row.as_ref(i) {
                     Some(Wire::Bytes(bytes)) => bytes.len(),
@@ -63,7 +65,7 @@ pub(super) fn collect_budget<T: Protocol>(mut results: QueryResult<'_, '_, '_, T
                 .collect::<Result<Vec<_>, _>>();
             match values {
                 Ok(values) => { remaining -= row_bytes; grid.rows.push(values); }
-                Err(error) => { report.error = Some(error); break; }
+                Err(error) => { report.error = Some(error); decoding_failed = true; }
             }
         }
         grid.elapsed = set_started.elapsed();
@@ -71,7 +73,7 @@ pub(super) fn collect_budget<T: Protocol>(mut results: QueryResult<'_, '_, '_, T
     }
     report.elapsed = started.elapsed();
     *budget = remaining;
-    report
+    (report, disconnected)
 }
 
 #[cfg(test)]
