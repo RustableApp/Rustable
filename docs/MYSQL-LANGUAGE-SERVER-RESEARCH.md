@@ -87,5 +87,21 @@ Verification: 20 completion tests passed, covering shadowing, sibling isolation,
 correlation, incomplete subqueries, and the earlier quoted-alias cases. The live
 catalog/completion/execution regression passed against both fixture engines;
 strict all-target Clippy passed. Full CTE/derived-table projected-column inference,
-UNION arm scoping, and semantic legality of every correlation remain outstanding.
+set-operation result-column inference, and semantic legality of every correlation remain outstanding.
 This is local cached-catalog completion, not a completed language server.
+
+### Set-operation completion isolation (2026-11-01)
+
+Local MySQL/MariaDB completion now limits relation lookup to the caret's SELECT
+arm for UNION (including ALL), INTERSECT and EXCEPT. Splitting occurs only at the
+current query block's top level; nested operators and quoted operator names are
+not separators. Correlation lookup in ancestor blocks follows that ancestor's
+active arm, preventing unrelated arms from contributing outer aliases.
+
+Verification: 21 completion tests passed, including both sides of each operator,
+reused aliases, absent aliases, nested operators and ancestor-arm isolation.
+The complete native library suite passed: 416 tests, 73 explicitly ignored
+fixture/integration tests. Strict all-target Clippy passed. These are completion
+scope checks, not a claim that every server version accepts every set operator.
+CTE/derived-table output inference and global set-result ORDER BY completion
+remain open semantic work.

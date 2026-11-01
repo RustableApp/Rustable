@@ -563,8 +563,24 @@ fn scoped_relations(sql: &str, cursor: usize, dialect: Dialect) -> Vec<(String, 
     containing.sort_by_key(|(start, end)| end - start);
     let mut result: Vec<(String, String)> = Vec::new();
     for (start, end) in containing {
-        let mut lexemes = Vec::new();
+        // Set-operation arms have independent relation namespaces. Split only
+        // at this block's top level, leaving nested expressions/subqueries alone.
+        let mut arm_start = start;
+        let mut arm_end = end;
+        let mut depth = 0usize;
         for (i, token) in tokens.iter().enumerate().take(end).skip(start) {
+            match &token.token {
+                Token::LParen => depth += 1,
+                Token::RParen => depth = depth.saturating_sub(1),
+                Token::Word(word) if depth == 0 && word.quote_style.is_none()
+                    && ["UNION", "INTERSECT", "EXCEPT"].iter().any(|op| word.value.eq_ignore_ascii_case(op)) => {
+                    if i < caret { arm_start = i + 1; } else { arm_end = i; break; }
+                }
+                _ => {}
+            }
+        }
+        let mut lexemes = Vec::new();
+        for (i, token) in tokens.iter().enumerate().take(arm_end).skip(arm_start) {
             if blocks.iter().any(|&(child_start, child_end)| child_start > start && child_end <= end && child_start <= i && i < child_end) { continue; }
             if let Some(lexeme) = relation_token(token.token.clone()) { lexemes.push(lexeme); }
         }
@@ -977,6 +993,29 @@ mod tests {
         assert!(!local_code_position("SELECT 'escaped \\' FR", normal));
         assert!(local_code_position("SELECT 'escaped \\' FR", no_escape));
         assert!(!local_code_position("SELECT 'escaped \\' FR", Dialect::Mysql(crate::sql::mysql::Mode { no_backslash_escapes: false, ansi_quotes: true })));
+    }
+
+    #[test]
+    fn mysql_completion_isolates_set_operation_arms() {
+        let objects = [object("customers", &["customer_name"]), object("orders", &["order_total"])];
+        for operator in ["UNION", "UNION ALL", "INTERSECT", "EXCEPT"] {
+            for (marked, expected) in [
+                (format!("SELECT x.| FROM customers x {operator} SELECT x.order_total FROM orders x"), vec!["customer_name"]),
+                (format!("SELECT x.customer_name FROM customers x {operator} SELECT x.| FROM orders x"), vec!["order_total"]),
+                (format!("SELECT c.customer_name FROM customers c {operator} SELECT c.| FROM orders o"), vec![]),
+                (format!("SELECT c.| FROM customers c WHERE EXISTS (SELECT 1 FROM orders o {operator} SELECT 1 FROM customers x)"), vec!["customer_name"]),
+                (format!("SELECT 1 FROM customers c WHERE EXISTS (SELECT x.customer_name FROM customers x {operator} SELECT x.| FROM orders x)"), vec!["order_total"]),
+                (format!("SELECT 1 FROM customers c {operator} SELECT 1 FROM orders o WHERE EXISTS (SELECT c.| FROM orders x)"), vec![]),
+            ] {
+                let cursor = marked.find('|').unwrap();
+                let sql = marked.replace('|', "");
+                let mut completion = Completion::default();
+                completion.refresh(&sql, cursor, &objects, &[], true, Dialect::Mysql(crate::sql::mysql::Mode::default()));
+                assert_eq!(completion.items, expected, "{sql}");
+            }
+        }
+        let dialect = Dialect::Mysql(crate::sql::mysql::Mode::default());
+        assert_eq!(scoped_relations("SELECT `UNION`.customer_name FROM customers `UNION`", 15, dialect), vec![("customers".into(), "UNION".into())]);
     }
 
     #[test]
