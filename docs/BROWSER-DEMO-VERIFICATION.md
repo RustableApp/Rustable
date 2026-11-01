@@ -428,3 +428,25 @@ Executed a two-statement document with Cmd+Shift+Enter: customer count returned
 `wasm-production-overnight-audit.png` in the session visualization directory.
 This is a check of the existing deployment, not the newer local WASM build;
 no deployment was performed. Cross-engine and sustained memory checks remain.
+
+## Shared-code regression and VALUES completion acceptance — 2026-11-01
+
+At source 821c939, the full native library suite passed 444 tests, with 102
+fixture/manual tests ignored. All nine browser adapter tests passed. The release
+WASM build linked and generated assets at /tmp/rustable-browser-821c939/demo;
+52 Rustable browser-target warnings remain (plus the existing eframe deprecation).
+WASM SHA-256:
+`33b1b91f181d46b39c91c9ca8e5255eaacc58fc0b6e6a7c41efc3d3e9d7e72c6`.
+
+Served locally with COOP/COEP headers on localhost:8792. The full shared workspace
+loaded its virtual SQLite customers table. Entering
+`WITH pairs AS (VALUES (1, 'one')) SELECT * FROM pairs WHERE pairs.col`
+displayed column1 and column2 suggestions. Tab accepted column1; Cmd+Enter
+returned the row `(1, one)` with both generated column names. Screenshot:
+`wasm-821c939-values-completion.png` in the session visualization directory.
+The temporary server and verification tab were closed afterward.
+
+This checks the new generated-column completion through the actual browser UI
+and guards shared-app compatibility after recent native changes. It is not a
+whole-tab memory, cross-engine or full browser-workflow acceptance run. No
+website deployment, main push or desktop release was performed.
