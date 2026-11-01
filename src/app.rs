@@ -2468,13 +2468,7 @@ impl Rustable {
                     ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
                     for (index, label) in ["Items", "Queries", "History"].iter().enumerate() {
                         let selected = self.sidebar_section == index;
-                        let mut button = egui::Button::new(*label).corner_radius(5.0);
-                        if selected {
-                            button = button.fill(ui.visuals().widgets.active.bg_fill);
-                        }
-                        if ui
-                            .add_sized([ui.available_width().min(64.0), 23.0], button)
-                            .clicked()
+                        if sidebar_section_button(ui, label, selected).clicked()
                         {
                             self.sidebar_section = index;
                         }
@@ -2563,30 +2557,8 @@ impl Rustable {
                             if !ui.is_rect_visible(rect) { return; }
                             // Item backgrounds reflect committed selection or pending edits,
                             // never hover state. Primary press below commits selection.
-                            if selected || changed {
-                                ui.painter().rect_filled(
-                                    rect,
-                                    4.0,
-                                    if changed {
-                                        pending_fill(ui)
-                                    } else {
-                                        ui.visuals().selection.bg_fill
-                                    },
-                                );
-                            }
+                            paint_sidebar_item(ui, rect, object.display_name(), selected, changed);
                             navigator::paint_object_icon(ui.painter(), rect.left_center() + egui::vec2(14.0, 0.0), &object.kind, 13.0);
-                            let painter = ui.painter().with_clip_rect(rect);
-                            painter.text(
-                                rect.left_center() + egui::vec2(27.0, 0.0),
-                                egui::Align2::LEFT_CENTER,
-                                object.display_name(),
-                                egui::FontId::monospace(12.0),
-                                if selected && !changed {
-                                    ui.visuals().selection.stroke.color
-                                } else {
-                                    ui.visuals().text_color()
-                                },
-                            );
                             let response = response.on_hover_text(match &object.schema {
                                 Some(schema) => format!("Schema: {schema}\n{}", object.name),
                                 None => object.name.clone(),
@@ -5959,7 +5931,25 @@ fn accept_completion(tab: &mut QueryTab, value: &str, state: &mut egui::text_edi
     state.set_undoer(undoer);
 }
 
-fn sidebar_search(ui: &mut egui::Ui, text: &mut String, hint: &str) {
+/// Shared item geometry and selection styling for SQL and Redis sidebars.
+pub(crate) fn paint_sidebar_item(ui: &egui::Ui, rect: egui::Rect, label: &str, selected: bool, changed: bool) {
+    if selected || changed {
+        ui.painter().rect_filled(rect, 4.0, if changed { pending_fill(ui) } else { ui.visuals().selection.bg_fill });
+    }
+    ui.painter().with_clip_rect(rect).text(
+        rect.left_center() + egui::vec2(27.0, 0.0),
+        egui::Align2::LEFT_CENTER, label, egui::FontId::monospace(12.0),
+        if selected && !changed { ui.visuals().selection.stroke.color } else { ui.visuals().text_color() },
+    );
+}
+
+pub(crate) fn sidebar_section_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let mut button = egui::Button::new(label).corner_radius(5.0);
+    if selected { button = button.fill(ui.visuals().widgets.active.bg_fill); }
+    ui.add_sized([ui.available_width().min(64.0), 23.0], button)
+}
+
+pub(crate) fn sidebar_search(ui: &mut egui::Ui, text: &mut String, hint: &str) {
     egui::Frame::new()
         .fill(ui.visuals().extreme_bg_color)
         .stroke(ui.visuals().widgets.noninteractive.bg_stroke)

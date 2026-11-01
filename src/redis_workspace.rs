@@ -35,6 +35,7 @@ pub(crate) struct Workspace {
     inspector_visible: bool,
     filters_visible: bool,
     database_picker: bool,
+    item_search: String,
     cursor: u64,
     scan_started: bool,
     pattern: String,
@@ -134,6 +135,7 @@ impl Workspace {
             inspector_visible: true,
             filters_visible: false,
             database_picker: false,
+            item_search: String::new(),
             cursor: 0,
             scan_started: false,
             pattern: "*".into(),
@@ -357,24 +359,31 @@ impl Workspace {
         let keys_id = egui::Id::new((ctx.viewport_id(), "redis-databases"));
         crate::pane_sizes::restore(ctx, keys_id, pane_sizes.redis_keys, 220.0, 0);
         egui::SidePanel::left(keys_id)
-            .width_range(160.0..=400.0)
+            .width_range(160.0..=360.0)
             .show(ctx, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.strong("Items");
+                    crate::app::sidebar_section_button(ui, "Items", true);
                 });
-                ui.add_space(8.0);
-                if ui
-                    .add_sized(
-                        [ui.available_width(), 26.0],
-                        egui::Button::selectable(true, format!("db{}", self.database)),
-                    )
-                    .clicked()
-                    && !self.busy
-                {
-                    self.refresh();
+                ui.add_space(4.0);
+                crate::app::sidebar_search(ui, &mut self.item_search, "Search for item…");
+                ui.add_space(4.0);
+                let database_name = format!("db{}", self.database);
+                let (heading, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 22.0), egui::Sense::hover());
+                ui.painter().text(heading.left_center(), egui::Align2::LEFT_CENTER,
+                    "Databases (1)", egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgb(125, 137, 156));
+                if database_name.contains(&self.item_search.to_lowercase()) {
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 22.0), egui::Sense::click());
+                    crate::app::paint_sidebar_item(ui, rect, &database_name, true, false);
+                    crate::icons::paint(ui.painter(), rect.left_center() + egui::vec2(14.0, 0.0),
+                        "database", 13.0, ui.visuals().selection.stroke.color);
+                    if response.clicked() && !self.busy {
+                        self.refresh();
+                    }
                 }
-                ui.add_space(12.0);
                 if self.database_picker {
                     ui.horizontal(|ui| {
                         ui.label("Database");
@@ -389,11 +398,6 @@ impl Workspace {
                             self.send(Job::Database(self.database_draft));
                         }
                     });
-                }
-                ui.separator();
-                ui.checkbox(&mut self.read_only, "Read-only");
-                if self.busy {
-                    ui.spinner();
                 }
             });
         *preferences_dirty |=
@@ -451,6 +455,8 @@ impl Workspace {
                             ui.selectable_label(true, "Data")
                                 .on_hover_text("Redis key/value grid");
                             ui.separator();
+                            ui.checkbox(&mut self.read_only, "Read-only");
+                            if self.busy { ui.spinner(); }
                             ui.label(format!("{} keys loaded", self.keys.len()));
                             if ui
                                 .add(crate::icons::widget("search"))
