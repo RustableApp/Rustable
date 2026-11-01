@@ -1,0 +1,34 @@
+name: Package candidates
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+      - name: Linux development libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev clang libclang-dev
+      - run: mise exec -- cargo test --locked
+      - run: mise exec -- cargo build --locked --release
+      - run: mise run build-lsps
+      - run: python scripts/package-release.py
+      - name: Archive unsigned macOS candidate
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent target/packages/Rustable-darwin-arm64/Rustable.app dist/Rustable-macos-arm64-unsigned.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: candidate-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

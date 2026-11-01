@@ -18,3 +18,5 @@
 
 # Local compatibility link for the separate private website checkout.
 /site
+
+/dist/
