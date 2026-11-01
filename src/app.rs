@@ -826,7 +826,7 @@ impl Rustable {
             focus_filter: false,
             focus_page_grid: false,
             filter_column: String::new(),
-            safe: true,
+            safe: false,
             status: "Ready".into(),
             error: None,
             selected: None,
@@ -888,7 +888,7 @@ impl Rustable {
         let description = activity_description(&command);
         match self.worker.send(command) {
             Ok(()) => {
-                self.log_activity(description);
+                if let Some(sql) = description { self.log_activity(sql); }
                 self.pending = Some(pending);
                 self.started = Instant::now();
                 self.error = None;
@@ -902,49 +902,18 @@ impl Rustable {
         while let Ok(result) = self.worker.rx.try_recv() {
             let elapsed = self.started.elapsed().as_secs_f64() * 1000.0;
             self.last_operation_ms = Some(elapsed);
-            let outcome = match &result {
-                Err(error) => format!("Failed · {elapsed:.1} ms · {error}"),
-                Ok(Payload::Table { grid, .. }) => {
-                    self.last_operation_ms = Some(grid.elapsed.as_secs_f64() * 1000.0);
-                    format!(
-                        "{} rows · {:.1} ms",
-                        grid.rows.len(),
-                        grid.elapsed.as_secs_f64() * 1000.0
-                    )
-                }
-                Ok(Payload::Query { report, .. }) => {
-                    self.last_operation_ms = Some(report.elapsed.as_secs_f64() * 1000.0);
-                    format!(
-                        "{} statements · {:.1} ms{}",
-                        report.grids.len(),
-                        report.elapsed.as_secs_f64() * 1000.0,
-                        report
-                            .error
-                            .as_ref()
-                            .map(|e| format!(" · {e}"))
-                            .unwrap_or_default()
-                    )
-                }
-                _ => format!("Completed · {elapsed:.1} ms"),
-            };
+            match &result {
+                Ok(Payload::Table { grid, .. }) => self.last_operation_ms = Some(grid.elapsed.as_secs_f64() * 1000.0),
+                Ok(Payload::Query { report, .. }) => self.last_operation_ms = Some(report.elapsed.as_secs_f64() * 1000.0),
+                _ => {}
+            }
             if let Ok(Payload::Table {
                 sql, parameters, ..
             }) = &result
             {
-                let mut statement = bounded_log_text(sql);
-                for (index, value) in parameters.iter().enumerate() {
-                    statement.push_str(&format!(
-                        "\n-- ?{} = {}",
-                        index + 1,
-                        db::preview(value, 256)
-                    ));
-                    if statement.len() > 8192 {
-                        break;
-                    }
-                }
+                let statement = bounded_log_text(&crate::review_sql::readable(sql, parameters));
                 self.log_activity(statement);
             }
-            self.log_activity(outcome);
             let pending = self.pending.take();
             match result {
                 Err(e) => {
@@ -1033,7 +1002,7 @@ impl Rustable {
                     self.schemas = schemas;
                     self.objects = objects;
                     self.language.invalidate();
-                    self.safe = true;
+                    self.safe = false;
                     self.table = Arc::default();
                     self.columns.clear();
                     self.indexes.clear();
@@ -1124,7 +1093,6 @@ impl Rustable {
                             let warning = format!(
                                 "Schema refresh failed after execution: {error}. Query results are retained. Review execution results before retrying writes."
                             );
-                            self.log_activity(warning.clone());
                             self.error = Some(match self.error.take() {
                                 Some(execution_error) => format!("{execution_error}\n\n{warning}"),
                                 None => warning,
@@ -1138,7 +1106,6 @@ impl Rustable {
                     self.csv_preview = None;
                     self.csv_review = None;
                     self.status = format!("Imported {count} CSV rows");
-                    self.log_activity(self.status.clone());
                     if !self.browse.table.is_empty() {
                         self.refresh();
                     }
@@ -2008,7 +1975,7 @@ impl Rustable {
             .as_secs()
             % 86400;
         self.activity.push_back(format!(
-            "-- {:02}:{:02}:{:02} UTC · {}",
+            "-- {:02}:{:02}:{:02} UTC\n{}",
             seconds / 3600,
             seconds / 60 % 60,
             seconds % 60,
@@ -2040,7 +2007,7 @@ impl Rustable {
 
     fn activity_log(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.strong("Activity log");
+            ui.strong("SQL activity");
             if ui.small_button("Clear").clicked() {
                 self.activity.clear();
             }
@@ -2061,11 +2028,11 @@ impl Rustable {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 if self.activity.is_empty() {
-                    ui.weak("Database activity will appear here.");
+                    ui.weak("Executed SQL will appear here.");
                 }
                 for entry in &self.activity {
                     ui.add(
-                        egui::Label::new(RichText::new(entry).monospace().size(11.0))
+                        egui::Label::new(crate::editor::layout(ui, entry, ui.available_width()))
                             .wrap()
                             .selectable(true),
                     );
@@ -2244,9 +2211,6 @@ impl Rustable {
                             self.shared_preferences_dirty = true;
                             ctx.set_theme(self.prefs.appearance.preference());
                         }
-                        ui.checkbox(&mut self.safe, "Safe mode").on_hover_text(
-                            "Blocks write queries and cell edits. Disable to allow changes.",
-                        );
                     });
                 });
             });
@@ -6365,59 +6329,20 @@ fn bounded_log_text(text: &str) -> String {
     format!("{}… [log truncated]", &text[..end])
 }
 
-fn activity_description(command: &Command) -> String {
+fn activity_description(command: &Command) -> Option<String> {
     match command {
-        Command::RefreshSchema => "Refresh database schema".into(),
-        Command::SelectSchema(name) => format!("Browse schema: {name}"),
-        Command::Query { sql, .. } => bounded_log_text(sql),
-        Command::Open(path) => format!(
-            "Connect: {}",
-            path.as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "Studio demo".into())
-        ),
-        Command::OpenPostgres(config) => format!("Connect: PostgreSQL {}", config.label()),
-        Command::Browse(browse) => format!(
-            "Browse {} · offset {} · filter {:?} {:?} · sort {:?}",
-            browse.table, browse.offset, browse.filter_column, browse.filter, browse.sort
-        ),
-        Command::Plan(changes) => {
-            format!("Preview {} pending changes (not executed)", changes.len())
-        }
+        Command::Query { sql, .. } => Some(bounded_log_text(sql)),
         Command::Apply(plan) => {
-            let mut text = String::from("Apply transaction\n");
-            for (index, statement) in plan.statements.iter().enumerate() {
-                for check in plan
-                    .preconditions
-                    .iter()
-                    .filter(|check| check.before_statement == index)
-                {
-                    text.push_str("-- Verify unchanged row\n");
-                    text.push_str(&bounded_log_text(&crate::review_sql::expand(
-                        &check.sql,
-                        &check.parameters,
-                    )));
-                    text.push('\n');
-                }
-                text.push_str(&bounded_log_text(&statement.sql));
-                text.push('\n');
-                if text.len() > 8192 {
-                    break;
-                }
+            let mut sql = String::from("BEGIN;\n");
+            for statement in &plan.statements {
+                sql.push_str(&crate::review_sql::readable(&statement.sql, &statement.parameters));
+                sql.push('\n');
+                if sql.len() > 8192 { break; }
             }
-            bounded_log_text(&text)
+            // Logged on dispatch: these are submitted statements, not a claim of success.
+            Some(bounded_log_text(&sql))
         }
-        Command::OpenScript(path) => format!("Open SQL: {}", path.display()),
-        Command::SaveScript { path, .. } => format!("Save SQL: {}", path.display()),
-        Command::ImportCsv { request, .. } => format!("Import CSV into {}", request.table),
-        Command::ImportTarget(table) => format!("Load import destination: {table}"),
-        Command::PreviewCsv { path, .. } => format!("Preview CSV: {}", path.display()),
-        Command::ExportTable { path, browse, .. } => format!(
-            "Export all matching rows from {}: {}",
-            browse.table,
-            path.display()
-        ),
-        Command::Export { path, .. } => format!("Export loaded rows: {}", path.display()),
+        _ => None,
     }
 }
 
@@ -8636,7 +8561,7 @@ mod workspace_layout_tests {
             positions
         };
         let table = render(View::Data);
-        assert!(table.iter().any(|(s, _)| s == "Activity log"));
+        assert!(table.iter().any(|(s, _)| s == "SQL activity"));
         assert!(!table.iter().any(|(s, _)| s == "Run current"));
         let query = render(View::Query);
         let y = |text: &str| query.iter().find(|(s, _)| s == text).unwrap().1;
@@ -8645,7 +8570,7 @@ mod workspace_layout_tests {
         assert!(y("3") < y("4"));
         assert!(y("4") < y("Run current"));
         assert!(y("Run current") < y("Message"));
-        assert!(y("Message") < y("Activity log"));
+        assert!(y("Message") < y("SQL activity"));
     }
 
     #[test]
@@ -9046,6 +8971,9 @@ mod workspace_layout_tests {
         let clipped = bounded_log_text(&text);
         assert!(clipped.len() < 8250);
         assert!(clipped.ends_with("[log truncated]"));
+        assert!(activity_description(&Command::RefreshSchema).is_none());
+        assert!(activity_description(&Command::SelectSchema("public".into())).is_none());
+        assert!(activity_description(&Command::Open(None)).is_none());
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
         for i in 0..300 {
@@ -9591,6 +9519,7 @@ mod csv_review_keyboard_tests {
         let ctx = egui::Context::default();
         let mut app = setup(&ctx);
         let tabs = app.tabs.len();
+        app.safe = true; // Exercise the internal read-only guard explicitly.
         for k in [
             egui::Key::T,
             egui::Key::W,
