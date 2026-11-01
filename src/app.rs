@@ -3117,16 +3117,20 @@ impl Rustable {
             if self.view == View::Triggers {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.triggers.is_empty() {
-                        ui.label("This table has no triggers.");
+                        ui.label("No visible triggers for this table.");
                     }
                     for trigger in &self.triggers {
                         ui.horizontal(|ui| {
                             ui.strong(&trigger.name);
-                            if clipboard_button(ui).clicked() {
+                            if trigger.metadata_error.is_none() && clipboard_button(ui).clicked() {
                                 ui.ctx().copy_text(trigger.ddl.clone());
                             }
                         });
-                        ui.code(&trigger.ddl);
+                        if let Some(error) = &trigger.metadata_error {
+                            ui.label("Trigger definition unavailable").on_hover_text(error);
+                        } else {
+                            ui.code(&trigger.ddl);
+                        }
                         ui.separator();
                     }
                 });

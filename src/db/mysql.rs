@@ -213,11 +213,22 @@ impl MysqlDriver {
             "SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME", (schema, table)))?;
         let mut triggers = Vec::new();
         for name in names {
-            let row: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(format!("SHOW CREATE TRIGGER {}.{}", quote(schema), quote(&name))))?;
-            let ddl = row.and_then(|row| row.get::<String, _>("SQL Original Statement"))
-                .ok_or("Missing trigger definition")?;
+            let definition = self.with_connection(|conn| {
+                match conn.query_first::<::mysql::Row, _>(format!("SHOW CREATE TRIGGER {}.{}", quote(schema), quote(&name))) {
+                    // MariaDB can expose a trigger name while refusing its DDL.
+                    // Preserve that distinction without hiding cancellation or
+                    // transport failures, which still abort the browse request.
+                    Err(::mysql::Error::MySqlError(error)) if matches!(error.code, 1142 | 1227) => Ok(Err(error.to_string())),
+                    result => result.map(|row| row.and_then(|row| row.get::<String, _>("SQL Original Statement"))
+                        .ok_or_else(|| "Trigger definition is unavailable to this account.".to_owned())),
+                }
+            })?;
+            let (ddl, metadata_error) = match definition {
+                Ok(ddl) => (ddl, None),
+                Err(error) => (String::new(), Some(error)),
+            };
             triggers.push(Object { schema: Some(schema.into()), name, display_name: None,
-                metadata_error: None, columns: Vec::new(), kind: "trigger".into(), ddl });
+                metadata_error, columns: Vec::new(), kind: "trigger".into(), ddl });
         }
         Ok((indexes.into_values().collect(), triggers))
     }
@@ -798,6 +809,15 @@ mod tests {
             assert_eq!(count, Some(0), "MySQL hides triggers from this account");
         } else {
             assert!(driver.conn().unwrap().query_drop("SHOW CREATE TRIGGER hidden_trigger_probe_t").is_err(), "MariaDB must deny the trigger definition");
+        }
+        let limited_rows = driver.browse(&Browse { table:"hidden_trigger_probe".into(), ..Default::default() }).unwrap();
+        assert_eq!(limited_rows.grid.rows, [vec![Value::Integer(1), Value::Text("original".into())]]);
+        if port == 43317 {
+            assert_eq!(limited_rows.triggers.len(), 1);
+            assert!(limited_rows.triggers[0].metadata_error.is_some());
+            assert!(limited_rows.triggers[0].ddl.is_empty());
+        } else {
+            assert!(limited_rows.triggers.is_empty());
         }
         // Review produced by a privileged session must still be rejected when
         // applied under a session that cannot establish complete visibility.

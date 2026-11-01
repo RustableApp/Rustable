@@ -163,3 +163,18 @@ COMMIT replies; expand inserts/deletes and native review UI acceptance. Also fix
 MariaDB browsing so inaccessible SHOW CREATE TRIGGER metadata does not prevent
 reading otherwise permitted table rows. These are remaining work, not reasons to
 weaken the safety gate.
+
+### Restricted-account trigger browsing fixed (2026-11-01)
+
+Table browsing now retains a visible trigger as an Object with `metadata_error`
+when SHOW CREATE TRIGGER returns permission errors 1142/1227 or no readable DDL.
+The Triggers view shows "Trigger definition unavailable" with the server detail
+on hover and omits the empty copy action. Its empty state says "No visible
+triggers" rather than claiming that no hidden triggers exist. Cancellation,
+connectivity and other server failures still propagate normally.
+
+The restricted-account integration test now also browses and checks the actual
+row values on each engine. MariaDB returns one unavailable trigger; MySQL hides
+it entirely. Both still reject the reviewed save. These tests passed independently
+on both fixtures, and strict all-target Clippy passed. Native visual acceptance
+of the unavailable-definition label remains unverified.
