@@ -164,6 +164,13 @@ mod tests {
             let columns = row.columns_ref().to_vec();
             let actual = columns.iter().zip(row.unwrap()).map(Value::try_from).collect::<Result<Vec<_>,_>>().unwrap();
             assert_eq!(actual, values);
+            for value in &values {
+                let sql = crate::review_sql::readable_dialect("SELECT ?", std::slice::from_ref(value),
+                    crate::sql::Dialect::Mysql(crate::sql::mysql::Mode::default()));
+                let row: ::mysql::Row = conn.query_first(&sql).unwrap().unwrap();
+                let rendered = Value::try_from((&row.columns_ref()[0], row.get::<Wire,_>(0).unwrap())).unwrap();
+                assert_eq!(&rendered, value, "review literal changed value under mode {mode}: {sql}");
+            }
         }
     }
 

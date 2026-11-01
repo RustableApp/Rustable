@@ -929,7 +929,7 @@ impl Rustable {
         #[cfg(target_arch = "wasm32")]
         if matches!(command, Command::Open(None)) { self.worker.restart_if_failed(); }
         let history_sql = match &command { Command::Query { sql, .. } => Some(sql.clone()), _ => None };
-        let description = activity_description(&command);
+        let description = activity_description(&command, crate::sql::Dialect::for_engine(&self.engine));
         match self.worker.send(command) {
             Ok(()) => {
                 if let Some(sql) = description { self.log_activity(sql); }
@@ -964,7 +964,7 @@ impl Rustable {
                 sql, parameters, ..
             }) = &result
             {
-                let statement = bounded_log_text(&crate::review_sql::readable(sql, parameters));
+                let statement = bounded_log_text(&crate::review_sql::readable_dialect(sql, parameters, crate::sql::Dialect::for_engine(&self.engine)));
                 self.record_query_history(statement.clone());
                 self.log_activity(statement);
             }
@@ -982,7 +982,7 @@ impl Rustable {
                     self.review_sql = plan
                         .statements
                         .iter()
-                        .map(|s| crate::review_sql::readable(&s.sql, &s.parameters))
+                        .map(|s| crate::review_sql::readable_dialect(&s.sql, &s.parameters, crate::sql::Dialect::for_engine(&self.engine)))
                         .collect();
                     self.review = Some(plan);
                     self.status = "Review generated changes".into();
@@ -5412,7 +5412,7 @@ impl Rustable {
                             egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
                                 for check in &plan.preconditions {
                                     ui.weak(format!("Before statement {} · {}", check.before_statement + 1, if schema_plan { "must match the reviewed definition" } else { "must match exactly one row" }));
-                                    let sql = crate::review_sql::readable(&check.sql, &check.parameters);
+                                    let sql = crate::review_sql::readable_dialect(&check.sql, &check.parameters, crate::sql::Dialect::for_engine(&self.engine));
                                     if clipboard_button(ui).on_hover_text("Copy check SQL").clicked() { ui.ctx().copy_text(sql.clone()); }
                                     ui.add(egui::Label::new(crate::editor::layout(ui, &sql.as_str(), ui.available_width())).selectable(true));
                                 }
@@ -6421,13 +6421,13 @@ fn bounded_log_text(text: &str) -> String {
     format!("{}… [log truncated]", &text[..end])
 }
 
-fn activity_description(command: &Command) -> Option<String> {
+fn activity_description(command: &Command, dialect: crate::sql::Dialect) -> Option<String> {
     match command {
         Command::Query { sql, .. } => Some(bounded_log_text(sql)),
         Command::Apply(plan) => {
             let mut sql = String::from("BEGIN;\n");
             for statement in &plan.statements {
-                sql.push_str(&crate::review_sql::readable(&statement.sql, &statement.parameters));
+                sql.push_str(&crate::review_sql::readable_dialect(&statement.sql, &statement.parameters, dialect));
                 sql.push('\n');
                 if sql.len() > 8192 { break; }
             }
@@ -9069,9 +9069,9 @@ mod workspace_layout_tests {
         let clipped = bounded_log_text(&text);
         assert!(clipped.len() < 8250);
         assert!(clipped.ends_with("[log truncated]"));
-        assert!(activity_description(&Command::RefreshSchema).is_none());
-        assert!(activity_description(&Command::SelectSchema("public".into())).is_none());
-        assert!(activity_description(&Command::Open(None)).is_none());
+        assert!(activity_description(&Command::RefreshSchema, crate::sql::Dialect::Sqlite).is_none());
+        assert!(activity_description(&Command::SelectSchema("public".into()), crate::sql::Dialect::Postgres).is_none());
+        assert!(activity_description(&Command::Open(None), crate::sql::Dialect::Sqlite).is_none());
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
         for i in 0..300 {

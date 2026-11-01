@@ -1,4 +1,4 @@
-//! Display-only expansion of generated SQLite/PostgreSQL statements. Execution stays bound.
+//! Display-only expansion of generated database statements. Execution stays bound.
 use crate::db::Value;
 
 fn literal(value: &Value) -> String {
@@ -29,16 +29,35 @@ fn blob(bytes: &[u8]) -> String {
 }
 
 pub fn expand(sql: &str, parameters: &[Value]) -> String {
-    expand_impl(sql, parameters, false)
+    expand_impl(sql, parameters, false, false)
 }
 
 /// Readable presentation of our generated bound statements; never used for execution.
 /// Only recognize the exact cast chain emitted by the PostgreSQL change planner.
 pub fn readable(sql: &str, parameters: &[Value]) -> String {
-    expand_impl(sql, parameters, true)
+    expand_impl(sql, parameters, true, false)
 }
 
-fn expand_impl(sql: &str, parameters: &[Value], readable: bool) -> String {
+pub fn readable_dialect(sql: &str, parameters: &[Value], dialect: crate::sql::Dialect) -> String {
+    if matches!(dialect, crate::sql::Dialect::Mysql(_)) { expand_impl(sql, parameters, true, true) }
+    else { readable(sql, parameters) }
+}
+
+fn mysql_literal(value: &Value) -> String {
+    match value {
+        Value::Real(value) if value.is_finite() => {
+            let number = format!("{value:?}");
+            if number.contains(['e', 'E']) { number } else { format!("{number}e0") }
+        }
+        // Hex conversion preserves UTF-8, NUL and backslashes in both normal
+        // and NO_BACKSLASH_ESCAPES modes, without unreadable escape guessing.
+        Value::Text(text) if text.contains(['\\', '\0']) =>
+            format!("CONVERT({} USING utf8mb4)", blob(text.as_bytes())),
+        _ => literal(value),
+    }
+}
+
+fn expand_impl(sql: &str, parameters: &[Value], readable: bool, mysql: bool) -> String {
     let mut out = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();
     let mut parameter = 0;
@@ -89,7 +108,7 @@ fn expand_impl(sql: &str, parameters: &[Value], readable: bool) -> String {
                     .and_then(|i| i.checked_sub(1))
                     .unwrap_or(parameter);
                 if let Some(value) = parameters.get(index) {
-                    out.push_str(&literal(value));
+                    out.push_str(&if mysql { mysql_literal(value) } else { literal(value) });
                 } else {
                     out.push('?');
                     out.push_str(&digits);
@@ -317,6 +336,16 @@ mod tests {
             "UPDATE \"why?\" SET x='O''Brien' WHERE y=NULL; -- ?\n/* ? */ SELECT '?', 'O''Brien';"
         );
     }
+    #[test]
+    fn mysql_review_preserves_backslashes_and_nul_in_all_modes() {
+        for mode in [crate::sql::mysql::Mode::default(), crate::sql::mysql::Mode { ansi_quotes: true, no_backslash_escapes: true }] {
+            let dialect = crate::sql::Dialect::Mysql(mode);
+            assert_eq!(readable_dialect("UPDATE `why?` SET `value`=? WHERE id=?", &[Value::Text("a\\b\0".into()), Value::Integer(1)], dialect),
+                "UPDATE `why?` SET `value`=CONVERT(X'615C6200' USING utf8mb4) WHERE id=1");
+            assert_eq!(readable_dialect("SELECT ?", &[Value::Text("O'Brien".into())], dialect), "SELECT 'O''Brien'");
+        }
+    }
+
     #[test]
     fn rendered_literals_round_trip_through_sqlite() {
         let db = rusqlite::Connection::open_in_memory().unwrap();

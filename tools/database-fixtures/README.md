@@ -367,3 +367,19 @@ It also rejects small FLOAT and DOUBLE changes. The full db::mysql test selectio
 passed 17 tests against each disposable engine, including the earlier case-only
 conflict check; strict all-target Clippy passed. Transactional apply remains
 unfinished and disabled; these are planner/precondition results.
+
+### MySQL review and activity SQL literals (2026-11-01)
+
+Review statements, concurrency checks, table history and applied-statement logs
+now select the display renderer by engine. MySQL text containing backslashes or
+NUL uses CONVERT(X'…' USING utf8mb4), preserving bytes under both normal and
+NO_BACKSLASH_ESCAPES modes; ordinary text remains readable quoted text. Floating
+values use an exponent suffix when needed to retain approximate numeric typing.
+Execution still uses bound parameters; rendered SQL is presentation only.
+
+Seven renderer tests and the existing activity test pass. The live bound-value
+regression now executes each displayed literal on both MySQL and MariaDB under
+normal and ANSI_QUOTES/NO_BACKSLASH_ESCAPES modes, checking exact Unicode/NUL/
+quote/backslash text, binary bytes, integer extremes, NULL and DOUBLE values.
+Both engines pass, as does strict all-target Clippy. This does not enable the
+unfinished transactional editing executor.
