@@ -270,3 +270,31 @@ completion acceptance and MariaDB-specific semantic behavior remain unverified.
 The harness completed successfully; it intentionally reports capability gaps
 rather than asserting a passing acceptance suite. Candidate compilation also
 emitted a bundled C grammar signedness warning. No dependency was added.
+
+### Second candidate completion probe (2026-11-01)
+
+Ran `tools/language-evaluation/duck_mysql_candidate.rs` against duck-sqllsp
+revision `76a1a75dbb602820e89e339a7617049ea234bb0d`, through its public `complete`
+function (which also infers the document's derived catalog), MySql parser and
+source-aware resolver. Same fictional catalog and eight caret contexts as the
+lsp_sqls probe; no server access.
+
+- Plain alias: exactly the three catalog columns.
+- Backtick-quoted alias: 788 candidates, including the correct columns but also
+  unrelated PostgreSQL functions such as pg_try_advisory_lock and pg_get_acl.
+- Derived-table alias: no candidates; the projected label is missing.
+- CTE alias: the projected label is correctly suggested.
+- Unicode prefix: 日本語 present alongside the other two columns.
+- Inside string and block comment: no candidates, correctly suppressed.
+- Double-quoted alias: columns returned, with no session SQL-mode distinction.
+
+The locked build succeeded, including transitive pg_query compilation. This is
+not proof of a pure-Rust or WASM-compatible completion dependency configuration.
+The probe itself passed because it records observations, not acceptance claims.
+
+Neither inspected candidate is a drop-in improvement for Rustable's existing
+MySQL/MariaDB completion. Retain the current mode-aware implementation while
+filling its documented gaps. Reconsider a reusable library or upstream adaptation
+with the same acceptance matrix; do not launch a Go/TypeScript rewrite solely
+because these two snapshots have gaps. Broader routine semantics, server-version
+syntax, and a complete MySQL/MariaDB diagnostics provider remain open work.

@@ -16,3 +16,17 @@ handling, and no suggestions inside strings/comments. Mode-dependent SQL needs
 separate session-mode inputs; the inspected candidate API has none.
 
 See `docs/MYSQL-LANGUAGE-SERVER-RESEARCH.md` for results and the adoption decision.
+
+`duck_mysql_candidate.rs` runs the same catalog/completion contexts against
+`gentleeduck/duck-sqllsp` revision
+`76a1a75dbb602820e89e339a7617049ea234bb0d`. Copy it into
+`dsl-completion/tests/rustable_acceptance.rs` and run:
+
+```sh
+mise exec -- cargo test --locked -p dsl-completion --test rustable_acceptance -- --nocapture
+```
+
+This exercises the public `complete` entry point, including its derived-catalog
+inference, using the MySql parser. The current manifest builds PostgreSQL's C
+parser transitively even for this MySQL-only probe. Labels are reported with a
+bounded sample because a failing context can produce hundreds of candidates.
