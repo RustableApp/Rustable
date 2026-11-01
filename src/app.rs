@@ -517,28 +517,8 @@ impl Rustable {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.connections = true;
-        let mut quit = false;
-        egui::TopBottomPanel::top("launcher-status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if !self.window_recovery.is_empty() {
-                    ui.checkbox(&mut self.recover_next_window, format!("Restore {} SQL drafts with next connection", self.window_recovery.len()))
-                        .on_hover_text("Recovered SQL is never executed automatically. Check the selected connection before running it.");
-                } else {
-                    ui.weak("Connections");
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    quit = ui.small_button("Quit").on_hover_text("Quit Rustable · ⌘Q").clicked();
-                });
-            });
-            if let Some(error) = self.error.clone() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
-                    if ui.small_button("Dismiss").clicked() { self.error = None; }
-                });
-            }
-        });
         self.connections_window(ctx);
-        quit
+        false
     }
     pub(crate) fn take_manager_request(&mut self) -> bool {
         std::mem::take(&mut self.manager_requested)
@@ -2367,19 +2347,7 @@ impl Rustable {
                                         },
                                     );
                                 }
-                                let icon = rect.left_center() + egui::vec2(8.0, -5.0);
-                                for y in 0..3 {
-                                    for x in 0..3 {
-                                        ui.painter().rect_filled(
-                                            egui::Rect::from_min_size(
-                                                icon + egui::vec2(x as f32 * 4.0, y as f32 * 4.0),
-                                                egui::vec2(3.0, 3.0),
-                                            ),
-                                            0.0,
-                                            Color32::from_rgb(84, 149, 175),
-                                        );
-                                    }
-                                }
+                                navigator::paint_object_icon(ui.painter(), rect.left_center() + egui::vec2(14.0, 0.0), &object.kind, 13.0);
                                 let painter = ui.painter().with_clip_rect(rect);
                                 painter.text(
                                     rect.left_center() + egui::vec2(27.0, 0.0),
@@ -2585,20 +2553,13 @@ impl Rustable {
                         }
                     });
                 } else {
-                    ui.label(RichText::new("Select a row to inspect its fields.").color(ui.visuals().weak_text_color()));
-                    ui.add_space(2.0);
-                    ui.separator();
-                    ui.add_space(3.0);
-                    ui.label(RichText::new("CONNECTION").size(10.0).color(ui.visuals().weak_text_color()));
-                    ui.add(egui::Label::new(&self.label).wrap());
-                    ui.add_space(2.0);
-                    ui.label(format!("Engine     {}", self.engine));
-                    ui.label(format!("Objects    {}", self.objects.len()));
-                    ui.add_space(20.0);
-                    ui.label(
-                        RichText::new("Results stay on this device.")
-                            .size(11.0)
-                            .color(ui.visuals().weak_text_color()),
+                    let empty = ui.available_rect_before_wrap();
+                    ui.painter().text(
+                        egui::pos2(empty.center().x, empty.top() + empty.height() * 0.72),
+                        egui::Align2::CENTER_CENTER,
+                        "No row selected",
+                        egui::FontId::proportional(15.0),
+                        ui.visuals().weak_text_color(),
                     );
                 }
             });
@@ -7166,8 +7127,16 @@ mod interaction_tests {
                 _ => None,
             })
             .expect("first data column resize handle");
-        let start = egui::pos2(edge, 100.0);
-        let end = start + egui::vec2(80.25, 0.0);
+        let body_start = egui::pos2(edge, 100.0);
+        let body_end = body_start + egui::vec2(80.25, 0.0);
+        let hover = render(vec![egui::Event::PointerMoved(body_start)]);
+        assert_ne!(hover.platform_output.cursor_icon, egui::CursorIcon::ResizeColumn);
+        render(vec![egui::Event::PointerButton { pos: body_start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE }]);
+        render(vec![egui::Event::PointerMoved(body_end)]);
+        render(vec![egui::Event::PointerButton { pos: body_end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }]);
+        let start = egui::pos2(edge, 18.0);
+        // A header-acquired resize must continue if the pointer enters the body.
+        let end = start + egui::vec2(80.25, 100.0);
         render(vec![egui::Event::PointerMoved(start)]);
         render(vec![egui::Event::PointerButton {
             pos: start,

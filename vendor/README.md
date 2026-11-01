@@ -100,3 +100,11 @@ Regression checks:
 ```sh
 mise exec -- cargo test --manifest-path vendor/eframe/Cargo.toml --no-default-features --features persistence,glow,x11,wayland,default_fonts checked_persistence_tests
 ```
+
+## egui_extras header-only column resizing
+
+`egui_extras 0.33.3` retains upstream MIT/Apache licenses. The table divider
+continues to paint through the body, but its resize interaction rectangle covers
+only the header, with horizontal grab padding. Existing header drags can continue
+outside the header. Rustable's grid interaction regression checks both body
+non-resizing and persisted header resizing.

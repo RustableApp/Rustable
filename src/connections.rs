@@ -492,6 +492,11 @@ impl Rustable {
                             self.window_requests.push(crate::session_windows::WindowRequest { title: "Studio demo".into(), recover_sql: false, identity: None, connection: crate::session_windows::WindowConnection::Demo });
                             ui.close();
                         }
+                        if !self.window_recovery.is_empty() {
+                            ui.separator();
+                            ui.checkbox(&mut self.recover_next_window, format!("Restore {} recovered SQL drafts on next connection", self.window_recovery.len()))
+                                .on_hover_text("Drafts are restored without executing SQL.");
+                        }
                     }).response.on_hover_text("New connection");
                     ui.menu_button("New group", |ui| {
                         ui.add(TextEdit::singleline(&mut self.connection_manager.group_name).hint_text("Group name").desired_width(180.0));
@@ -514,6 +519,12 @@ impl Rustable {
                     }
                     connection_search(ui, &mut self.connection_manager.search);
                 });
+                if let Some(error) = self.error.clone() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                        if ui.small_button("Dismiss").clicked() { self.error = None; }
+                    });
+                }
                 if let Some(error) = &self.connection_manager.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
