@@ -335,3 +335,19 @@ driver tests pass on each engine; strict Clippy passes. Execution is intentional
 still rejected by apply(): schema/trigger revalidation under metadata locks,
 transaction ownership, affected-row semantics, rollback and ambiguous commit
 handling must be implemented before this can save data.
+
+### Reviewed MySQL/MariaDB trigger snapshots (2026-11-01)
+
+Data-change plans now capture a structured snapshot of SHOW CREATE TABLE and
+all visible triggers, including body, timing, event, execution order, definer,
+creation SQL mode and character/collation settings. The snapshot uses JSON
+encoding rather than SQL-text delimiters. Live planner regression passes on
+both disposable engines (ports 43316 and 43317): unchanged metadata is stable,
+adding/replacing/removing a trigger changes the snapshot appropriately, and
+recreating identical trigger SQL under a different SQL mode changes it too.
+Strict all-target Clippy passes.
+
+This is preparation for transactional apply, which remains disabled. It does
+not yet establish metadata locking, privilege-complete visibility, save-time
+revalidation or safe handling of trigger effects on nontransactional tables.
+Those must be resolved before claiming safe MySQL/MariaDB table editing.

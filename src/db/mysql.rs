@@ -220,6 +220,19 @@ impl MysqlDriver {
         }
         Ok((indexes.into_values().collect(), triggers))
     }
+    fn edit_schema_snapshot(&mut self, schema: &str, table: &str) -> Result<String, String> {
+        let row: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(
+            format!("SHOW CREATE TABLE {}.{}", quote(schema), quote(table))))?;
+        let definition: String = row.and_then(|row| row.get(1)).ok_or("Missing table definition")?;
+        // Trigger execution depends on its creation context, not just its body.
+        // Capture order, definer, SQL mode and character settings as well.
+        type Trigger = (String, String, String, String, u64, String, String, String, String, String);
+        let triggers: Vec<Trigger> = self.with_connection(|conn| conn.exec(
+            "SELECT TRIGGER_NAME,ACTION_TIMING,EVENT_MANIPULATION,ACTION_STATEMENT,ACTION_ORDER,SQL_MODE,DEFINER,CHARACTER_SET_CLIENT,COLLATION_CONNECTION,DATABASE_COLLATION FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME",
+            (schema, table)))?;
+        // Structured encoding avoids delimiter collisions in arbitrary SQL text.
+        serde_json::to_string(&(definition, triggers)).map_err(|error| error.to_string())
+    }
     fn require_idle(&mut self) -> Result<(), String> {
         match self.transaction_state() {
             TransactionState::Idle => Ok(()),
@@ -394,17 +407,20 @@ impl Driver for MysqlDriver {
         self.require_idle()?;
         let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
         let mut objects = Vec::new();
+        let mut snapshots = Vec::new();
         for change in changes {
             if objects.iter().any(|object: &Object| object.name == change.table()) { continue; }
-            let mut object = self.catalog_objects(Some(change.table()))?.into_iter().next().ok_or("Table no longer exists")?;
+            let object = self.catalog_objects(Some(change.table()))?.into_iter().next().ok_or("Table no longer exists")?;
             let engine: Option<String> = self.with_connection(|conn| conn.exec_first(
                 "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", (&schema, change.table())))?;
             if engine.as_deref() != Some("InnoDB") { return Err("Reviewed data changes currently require an InnoDB base table.".into()); }
-            let row: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(format!("SHOW CREATE TABLE {}.{}", quote(&schema), quote(change.table()))))?;
-            object.ddl = row.and_then(|row| row.get(1)).ok_or("Missing table definition")?;
+            snapshots.push((format!("{}.{}", quote(&schema), quote(change.table())),
+                self.edit_schema_snapshot(&schema, change.table())?));
             objects.push(object);
         }
-        editing::plan(changes, &objects)
+        let mut plan = editing::plan(changes, &objects)?;
+        plan.schemas = snapshots;
+        Ok(plan)
     }
     fn apply(&mut self, _plan: &ChangePlan) -> Result<(), String> {
         Err("MySQL table editing is still being implemented.".into())
@@ -717,6 +733,22 @@ mod tests {
         assert_eq!(plan.statements[0].parameters.len(),3);
         assert!(!plan.statements[0].sql.contains("DROP TABLE"));
         assert_eq!(plan.schemas.len(),1);
+        assert_eq!(driver.plan(&edits).unwrap().schemas, plan.schemas, "unchanged schema must have a stable snapshot");
+        driver.conn().unwrap().query_drop("CREATE TRIGGER plan_trigger_probe BEFORE UPDATE ON plan_data_probe FOR EACH ROW SET NEW.n=NEW.n+1").unwrap();
+        let with_trigger = driver.plan(&edits).unwrap().schemas;
+        assert_ne!(with_trigger, plan.schemas, "adding a trigger must invalidate review");
+        assert_eq!(driver.plan(&edits).unwrap().schemas, with_trigger);
+        let original_mode: String = driver.conn().unwrap().query_first("SELECT @@sql_mode").unwrap().unwrap();
+        driver.conn().unwrap().query_drop("DROP TRIGGER plan_trigger_probe").unwrap();
+        driver.conn().unwrap().query_drop("SET sql_mode='ANSI_QUOTES'").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TRIGGER plan_trigger_probe BEFORE UPDATE ON plan_data_probe FOR EACH ROW SET NEW.n=NEW.n+1").unwrap();
+        driver.conn().unwrap().exec_drop("SET sql_mode=?", (&original_mode,)).unwrap();
+        assert_ne!(driver.plan(&edits).unwrap().schemas, with_trigger, "same trigger text with different creation SQL mode must invalidate review");
+        driver.conn().unwrap().query_drop("DROP TRIGGER plan_trigger_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TRIGGER plan_trigger_probe BEFORE UPDATE ON plan_data_probe FOR EACH ROW SET NEW.n=NEW.n+2").unwrap();
+        assert_ne!(driver.plan(&edits).unwrap().schemas, with_trigger, "changing a trigger body must invalidate review");
+        driver.conn().unwrap().query_drop("DROP TRIGGER plan_trigger_probe").unwrap();
+        assert_eq!(driver.plan(&edits).unwrap().schemas, plan.schemas);
         let check = &plan.preconditions[0];
         let params = check.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>,_>>().unwrap();
         let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, params.clone()).unwrap();

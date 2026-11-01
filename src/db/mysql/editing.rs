@@ -42,8 +42,6 @@ pub(super) fn plan(changes: &[Change], objects: &[Object]) -> Result<ChangePlan,
     let mut edits: Vec<RowEdits> = Vec::new();
     for change in changes {
         let table = object(change.table())?;
-        let name = qualified(table)?;
-        if !plan.schemas.iter().any(|(existing, _)| existing == &name) { plan.schemas.push((name, table.ddl.clone())); }
         match change {
             Change::Cell { table, column, original, value } => {
                 writable(object(table)?, column, value)?;
