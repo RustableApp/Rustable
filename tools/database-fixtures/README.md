@@ -198,3 +198,15 @@ Validation: all nine db::mysql* tests, including live browse, results, cancellat
 timeout, mode changes and failed-routine coverage, pass independently against
 MySQL 8.4 and MariaDB 11.4 fixtures. Strict all-target Clippy passes. Ordinary
 SELECT/DML with session tracking enabled still adds no session-refresh exchange.
+
+Table browsing now constrains the information_schema table/column query to the
+requested table with a bound TABLE_NAME parameter. It no longer loads columns
+for every object in the database on each page/filter/refresh. Full catalog
+requests still load all objects for navigation and completion. No metadata cache
+was added, so each browse still sees current column definitions.
+
+The live catalog/browse regression verifies a quoted table name returns exactly
+one object, and an injection-shaped name returns no matches. All nine driver
+checks pass on both MySQL and MariaDB; strict Clippy passes. This reduces metadata
+volume, not the number of round trips; index/trigger retrieval and cancellation
+remain further optimization work. No WAN latency improvement is claimed yet.

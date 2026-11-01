@@ -103,6 +103,33 @@ fn with_cancel<T>(config: &MysqlConfig, id: u32, cancel: &AtomicBool, run: impl 
 }
 
 impl MysqlDriver {
+    fn catalog_objects(&mut self, table: Option<&str>) -> Result<Vec<Object>, String> {
+        let Some(schema) = self.schemas.selected.clone() else { return Ok(Vec::new()); };
+        let mut result = Vec::<Object>::new();
+        let mut sql = "SELECT t.TABLE_NAME,t.TABLE_TYPE,c.COLUMN_NAME,c.COLUMN_TYPE,c.IS_NULLABLE,c.COLUMN_DEFAULT,c.COLUMN_KEY,c.EXTRA FROM information_schema.TABLES t LEFT JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA=t.TABLE_SCHEMA AND c.TABLE_NAME=t.TABLE_NAME WHERE t.TABLE_SCHEMA=?".to_owned();
+        let mut parameters = vec![::mysql::Value::from(schema.as_str())];
+        if let Some(table) = table {
+            sql.push_str(" AND t.TABLE_NAME=?");
+            parameters.push(::mysql::Value::from(table));
+        }
+        sql.push_str(" ORDER BY t.TABLE_NAME,c.ORDINAL_POSITION");
+        let rows = self.conn()?.exec_iter(sql, parameters).map_err(|e| e.to_string())?;
+        for row in rows {
+            let row = row.map_err(|e| e.to_string())?;
+            let (name, kind, column, ty, nullable, default, key, extra): CatalogRow =
+                ::mysql::from_row_opt(row).map_err(|e| e.to_string())?;
+            if result.last().is_none_or(|object| object.name != name) {
+                result.push(Object { schema: Some(schema.clone()), display_name: None, metadata_error: None,
+                    name, kind: if kind == "VIEW" { "view" } else { "table" }.into(), columns: vec![], ddl: String::new() });
+            }
+            if let Some(name) = column {
+                result.last_mut().unwrap().columns.push(Column { name, data_type: ty.unwrap_or_default(),
+                    not_null: nullable.as_deref() == Some("NO"), default: default.unwrap_or_default(),
+                    pk: key.as_deref() == Some("PRI"), generated: extra.is_some_and(|v| v.contains("VIRTUAL GENERATED") || v.contains("STORED GENERATED") || v.contains("PERSISTENT")) });
+            }
+        }
+        Ok(result)
+    }
     fn refresh_session(&mut self) -> Result<(), String> {
         let result = self.conn()?.query_first::<(String, String, Option<String>), _>(
             "SELECT @@SESSION.sql_mode, @@SESSION.session_track_system_variables, DATABASE()");
@@ -204,26 +231,9 @@ impl Driver for MysqlDriver {
         self.objects()
     }
     fn objects(&mut self) -> Result<Vec<Object>, String> {
-        let Some(schema) = self.schemas.selected.clone() else { return Ok(Vec::new()); };
-        let mut result = Vec::<Object>::new();
-        let rows = self.conn()?.exec_iter(
-            "SELECT t.TABLE_NAME,t.TABLE_TYPE,c.COLUMN_NAME,c.COLUMN_TYPE,c.IS_NULLABLE,c.COLUMN_DEFAULT,c.COLUMN_KEY,c.EXTRA FROM information_schema.TABLES t LEFT JOIN information_schema.COLUMNS c ON c.TABLE_SCHEMA=t.TABLE_SCHEMA AND c.TABLE_NAME=t.TABLE_NAME WHERE t.TABLE_SCHEMA=? ORDER BY t.TABLE_NAME,c.ORDINAL_POSITION", (&schema,)).map_err(|e| e.to_string())?;
-        for row in rows {
-            let row = row.map_err(|e| e.to_string())?;
-            let (name, kind, column, ty, nullable, default, key, extra): CatalogRow =
-                ::mysql::from_row_opt(row).map_err(|e| e.to_string())?;
-            if result.last().is_none_or(|object| object.name != name) {
-                result.push(Object { schema: Some(schema.clone()), display_name: None, metadata_error: None,
-                    name, kind: if kind == "VIEW" { "view" } else { "table" }.into(), columns: vec![], ddl: String::new() });
-            }
-            if let Some(name) = column {
-                result.last_mut().unwrap().columns.push(Column { name, data_type: ty.unwrap_or_default(),
-                    not_null: nullable.as_deref() == Some("NO"), default: default.unwrap_or_default(),
-                    pk: key.as_deref() == Some("PRI"), generated: extra.is_some_and(|v| v.contains("VIRTUAL GENERATED") || v.contains("STORED GENERATED") || v.contains("PERSISTENT")) });
-            }
-        }
-        Ok(result)
+        self.catalog_objects(None)
     }
+
     fn execute(&mut self, sql: &str, safe: bool, cancel: &AtomicBool) -> ScriptResult {
         let started = std::time::Instant::now();
         let mut report = ScriptResult::default();
@@ -317,7 +327,7 @@ impl Driver for MysqlDriver {
     }
     fn browse(&mut self, request: &Browse) -> Result<TableData, String> {
         let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
-        let object = self.objects()?.into_iter().find(|o| o.name == request.table).ok_or("Table no longer exists")?;
+        let object = self.catalog_objects(Some(&request.table))?.into_iter().next().ok_or("Table no longer exists")?;
         let mut sql = format!("SELECT * FROM {}.{}", quote(&schema), quote(&object.name));
         let mut parameters = Vec::new();
         if !request.filter.is_empty() {
@@ -371,13 +381,17 @@ mod tests {
         assert!([43316, 43317].contains(&port));
         let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
             user: "rustable".into(), password: "rustable-test-only".into(), tls: false, ..Default::default() };
-        let mut driver = Box::<dyn Driver>::try_from(&config).unwrap();
+        let mut driver = MysqlDriver::connect(&config).unwrap();
         assert_eq!(driver.engine_name(), if port == 43317 { "MariaDB" } else { "MySQL" });
         assert!(driver.databases().unwrap().contains(&"rustable_test".into()));
         let cancel = AtomicBool::new(false);
         let setup = driver.execute("DROP TABLE IF EXISTS `driver``probe`; CREATE TABLE `driver``probe` (id BIGINT PRIMARY KEY, label VARCHAR(100), doubled BIGINT GENERATED ALWAYS AS (id*2) STORED); INSERT INTO `driver``probe` (id,label) VALUES (1,'100%'),(2,'100x'),(3,'日本');", false, &cancel);
         assert!(setup.error.is_none(), "{:?}", setup.error);
         let object = driver.objects().unwrap().into_iter().find(|o| o.name == "driver`probe").unwrap();
+        let targeted = driver.catalog_objects(Some("driver`probe")).unwrap();
+        assert_eq!(targeted.len(), 1);
+        assert_eq!(targeted[0].name, object.name);
+        assert!(driver.catalog_objects(Some("driver`probe' OR 1=1 --")).unwrap().is_empty());
         assert_eq!(object.columns.len(), 3);
         assert!(object.columns[0].pk);
         assert!(object.columns[2].generated);
