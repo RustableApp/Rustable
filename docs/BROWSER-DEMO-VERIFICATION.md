@@ -318,3 +318,19 @@ The tests verify collision failure leaves the input snapshot unchanged and
 compare exact puts/deletes and Unicode content. This change has not yet been
 rebuilt into or deployed with the production WASM bundle; browser IndexedDB
 transaction execution was not rerun in this pass.
+
+### Rebuilt shared-app library workflow (2026-11-01)
+
+Built optimized WASM from app revision 475fce3 into
+`/tmp/rustable-embed-clean/demo` with scripts/build-browser.py. The local preview
+at localhost:8768/demo loaded in the in-app browser and executed
+`SELECT COUNT(*) AS customers FROM customers;` with result 2400.
+Saved via Cmd+S as `Refresh verification`, renamed via the row context menu to
+`refresh verification`, reloaded the page, reopened the persistent query with a
+double click, and reran it. The SQL text, lowercase filename, selected row and
+2400 result were visibly verified. Evidence: `wasm-library-refresh.png` in the
+thread visualization directory.
+
+The library overflow button renders as a missing-glyph square in this WASM
+build. Replace its font-dependent icon before publishing the refreshed bundle.
+This pass did not update the production website.
