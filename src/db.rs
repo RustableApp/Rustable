@@ -564,7 +564,7 @@ fn handle(
     #[cfg(not(target_arch = "wasm32"))]
     if let Command::OpenMysql(config) = command {
         if cancel.load(Ordering::Acquire) { return Err("Connection cancelled".into()); }
-        let mut driver = Box::<dyn Driver>::try_from(&config)?;
+        let mut driver = mysql::open(&config, cancel)?;
         driver.set_cancellation(cancel.clone());
         let objects = driver.objects()?;
         let schemas = driver.schema_catalog();
@@ -1540,7 +1540,7 @@ mod browser_database_tests {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn probe_mysql(config: &crate::connection::MysqlConfig, cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) { return Err("Connection test cancelled".into()); }
-    let mut driver = Box::<dyn Driver>::try_from(config)?;
+    let mut driver = mysql::open(config, cancel)?;
     let report = driver.execute("SELECT 1", false, cancel);
     match report.error { Some(error) => Err(error), None => Ok(()) }
 }

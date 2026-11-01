@@ -57,6 +57,7 @@ pub struct MysqlConfig {
     pub password: String,
     pub tls: bool,
     pub root_certificate: Option<std::path::PathBuf>,
+    pub ssh: Option<crate::ssh_tunnel::Config>,
     pub connect_timeout: std::time::Duration,
     pub read_timeout: std::time::Duration,
 }
@@ -71,6 +72,7 @@ impl Default for MysqlConfig {
             password: String::new(),
             tls: true,
             root_certificate: None,
+            ssh: None,
             connect_timeout: std::time::Duration::from_secs(5),
             read_timeout: std::time::Duration::from_secs(120),
         }

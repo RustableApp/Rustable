@@ -98,6 +98,7 @@ pub struct MysqlProfile {
     pub user: String,
     pub tls: bool,
     pub root_certificate: Option<PathBuf>,
+    pub ssh: Option<SshOptions>,
     pub connect_timeout: std::time::Duration,
     pub read_timeout: std::time::Duration,
 }
@@ -108,6 +109,7 @@ impl From<&crate::connection::MysqlConfig> for MysqlProfile {
     fn from(config: &crate::connection::MysqlConfig) -> Self {
         Self { host: config.host.clone(), port: config.port, database: config.database.clone(),
             user: config.user.clone(), tls: config.tls, root_certificate: config.root_certificate.clone(),
+            ssh: config.ssh.as_ref().map(|ssh| SshOptions { host:ssh.host.clone(),port:ssh.port,user:ssh.user.clone(),identity_file:ssh.identity_file.clone() }),
             connect_timeout: config.connect_timeout, read_timeout: config.read_timeout }
     }
 }
@@ -115,6 +117,7 @@ impl MysqlProfile {
     pub fn with_password(&self, password: String) -> crate::connection::MysqlConfig {
         crate::connection::MysqlConfig { host: self.host.clone(), port: self.port, database: self.database.clone(),
             user: self.user.clone(), password, tls: self.tls, root_certificate: self.root_certificate.clone(),
+            ssh: self.ssh.as_ref().map(|ssh| crate::ssh_tunnel::Config { host:ssh.host.clone(),port:ssh.port,user:ssh.user.clone(),identity_file:ssh.identity_file.clone(),known_hosts_file:None,config_file:None,remote_host:self.host.clone(),remote_port:self.port }),
             connect_timeout: self.connect_timeout, read_timeout: self.read_timeout }
     }
     pub fn validate(&self) -> Result<(), String> {
@@ -123,6 +126,12 @@ impl MysqlProfile {
         if self.port == 0 { return Err("Database port must be between 1 and 65535.".into()); }
         if self.connect_timeout.is_zero() || self.read_timeout.is_zero() {
             return Err("Connection and read timeouts must be greater than zero.".into());
+        }
+        if let Some(ssh) = &self.ssh {
+            required(&ssh.host, "SSH host")?;
+            if ssh.identity_file.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
+                return Err("Choose an SSH key file or leave it unset to use the agent.".into());
+            }
         }
         if self.root_certificate.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
             return Err("Choose a CA certificate file or leave it unset to use system roots.".into());
@@ -781,6 +790,25 @@ mod mysql_profile_tests {
         let restored: MysqlProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(restored, profile);
         assert!(restored.validate().is_ok());
+    }
+    #[test]
+    fn mysql_ssh_profile_restores_destination_without_credentials() {
+        let profile = MysqlProfile { host:"db.internal".into(),port:3307,
+            ssh:Some(SshOptions { host:"gateway".into(),user:"ssh-user".into(),identity_file:Some("/keys/client".into()),..Default::default() }),..Default::default() };
+        let config = profile.with_password("SESSION_SECRET".into());
+        let ssh = config.ssh.as_ref().unwrap();
+        assert_eq!((&ssh.remote_host,ssh.remote_port),(&profile.host,3307));
+        assert_eq!(ssh.host,"gateway");
+        assert_eq!(ssh.port,0);
+        assert!(ssh.known_hosts_file.is_none() && ssh.config_file.is_none());
+        assert_eq!(MysqlProfile::from(&config),profile);
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(!json.contains("SESSION_SECRET"));
+        assert_eq!(serde_json::from_str::<MysqlProfile>(&json).unwrap(),profile);
+        assert!(profile.validate().is_ok());
+        let mut invalid = profile;
+        invalid.ssh.as_mut().unwrap().host.clear();
+        assert!(invalid.validate().unwrap_err().contains("SSH host"));
     }
     #[test]
     fn mysql_profile_defaults_and_validation_allow_database_selection_later() {

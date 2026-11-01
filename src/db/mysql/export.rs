@@ -7,9 +7,10 @@ pub(super) fn table(driver: &mut MysqlDriver, path: &Path, browse: &Browse, canc
     let (_, sql, parameters) = driver.table_select(browse)?;
     let parameters = parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>, _>>()?;
     let config = driver.config.clone();
+    let destination = driver.destination;
     let conn = driver.conn()?;
     let mut disconnected = false;
-    let (result, cancellation_error) = with_cancel(&config, conn.connection_id(), cancel, || {
+    let (result, cancellation_error) = with_cancel(&config, destination, conn.connection_id(), cancel, || {
         csv::publish(path, cancel, |output| {
             let mut results = conn.exec_iter(&sql, parameters).map_err(|error| {
                 disconnected |= error.is_connectivity_error();

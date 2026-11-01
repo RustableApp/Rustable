@@ -418,3 +418,22 @@ untrusted certificates fail. Strict all-target Clippy passed.
 This is transport plumbing only: MySQL/MariaDB SSH profile fields, tunnel lifetime,
 connection probes and cancellation routing still need integration and live SSH
 acceptance. The UI continues to describe SSH as unavailable.
+
+### MySQL SSH driver wiring (2026-11-01)
+
+MySQL/MariaDB connection configs and persisted profiles now carry optional SSH
+settings, retaining only gateway/user/key paths. Passwords stay session-only.
+The driver owns the tunnel lease, derives its loopback destination and applies
+that destination to both the main connection and scoped cancellation connection.
+TLS still uses the original database host; forwarded remote host/port are derived
+from that same database configuration rather than trusting stale embedded values.
+Worker connection/probe entry points now pass cancellation into tunnel startup.
+Metadata access checks tunnel health; dropping the driver releases the lease.
+
+Validation: 30 MySQL-filtered native tests passed; 38 driver tests passed on each
+engine including direct TLS, cancellation, export and transport regression paths.
+New unit coverage verifies SSH profile restoration without credentials and rejects
+pre-cancelled/invalid SSH connections without direct fallback. Strict all-target
+Clippy passed. These runs did not establish a live SSH tunnel: live SSH lifecycle,
+TLS-through-tunnel/cancellation acceptance and connection-form/probe presentation
+remain pending. The UI still labels SSH unavailable until that work is verified.

@@ -12,6 +12,8 @@ type CatalogRow = (String, String, Option<String>, Option<String>, Option<String
 
 struct MysqlDriver {
     connection: Option<Conn>,
+    tunnel: Option<crate::ssh_tunnel::Tunnel>,
+    destination: Option<std::net::SocketAddr>,
     cancel: Arc<AtomicBool>,
     config: MysqlConfig,
     engine: &'static str,
@@ -20,6 +22,10 @@ struct MysqlDriver {
     mode_tracking: bool,
     session_dirty: bool,
     global_trigger_at_connect: bool,
+}
+
+pub(super) fn open(config: &MysqlConfig, cancel: &AtomicBool) -> Result<Box<dyn Driver>, String> {
+    MysqlDriver::connect_with_cancel(config, cancel).map(|driver| Box::new(driver) as Box<dyn Driver>)
 }
 
 impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
@@ -31,8 +37,19 @@ impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
 
 impl MysqlDriver {
     fn connect(config: &MysqlConfig) -> Result<Self, String> {
+        Self::connect_with_cancel(config, &AtomicBool::new(false))
+    }
+    fn connect_with_cancel(config: &MysqlConfig, cancel: &AtomicBool) -> Result<Self, String> {
         crate::connection_profiles::MysqlProfile::from(config).validate()?;
-        let mut connection = Conn::new(OptsBuilder::from(config)).map_err(|e| e.to_string())?;
+        if cancel.load(Ordering::Acquire) { return Err("Connection cancelled".into()); }
+        let tunnel = if let Some(ssh) = &config.ssh {
+            let mut ssh = ssh.clone();
+            ssh.remote_host = config.host.clone();
+            ssh.remote_port = config.port;
+            Some(crate::ssh_tunnel::Tunnel::start(&ssh, cancel)?)
+        } else { None };
+        let destination = tunnel.as_ref().map(|t| std::net::SocketAddr::from(([127,0,0,1],t.local_port())));
+        let mut connection = Conn::new(OptsBuilder::from(config).tcp_destination(destination)).map_err(|e| e.to_string())?;
         connection.query_drop("SET SESSION session_track_system_variables = 'sql_mode'").map_err(|e| e.to_string())?;
         let (version, database, sql_mode, account): (String, Option<String>, String, String) = connection.query_first(
             "SELECT VERSION(), DATABASE(), @@SESSION.sql_mode, CURRENT_USER()").map_err(|e| e.to_string())?
@@ -48,6 +65,8 @@ impl MysqlDriver {
         let names = connection.query("SHOW DATABASES").map_err(|e| e.to_string())?;
         Ok(Self {
             connection: Some(connection),
+            tunnel,
+            destination,
             cancel: Arc::new(AtomicBool::new(false)),
             config: config.clone(),
             engine: if version.contains("MariaDB") { "MariaDB" } else { "MySQL" },
@@ -86,7 +105,7 @@ fn quote(name: &str) -> String { format!("`{}`", name.replace('`', "``")) }
 
 /// The scoped watcher cannot outlive a query and cancel the next operation.
 /// A control connection is opened only after the user requests cancellation.
-fn with_cancel<T>(config: &MysqlConfig, id: u32, cancel: &AtomicBool, run: impl FnOnce() -> T) -> (T, Option<String>) {
+fn with_cancel<T>(config: &MysqlConfig, destination: Option<std::net::SocketAddr>, id: u32, cancel: &AtomicBool, run: impl FnOnce() -> T) -> (T, Option<String>) {
     std::thread::scope(|scope| {
         let (done, completion) = std::sync::mpsc::channel::<()>();
         let watch = scope.spawn(move || -> Result<(), String> {
@@ -101,7 +120,7 @@ fn with_cancel<T>(config: &MysqlConfig, id: u32, cancel: &AtomicBool, run: impl 
                     let mut options = config.clone();
                     options.connect_timeout = Duration::from_secs(1);
                     options.read_timeout = Duration::from_secs(1);
-                    control = Some(Conn::new(OptsBuilder::from(&options)
+                    control = Some(Conn::new(OptsBuilder::from(&options).tcp_destination(destination)
                         .write_timeout(Some(Duration::from_secs(1))))
                         .map_err(|e| format!("Could not connect to cancel query: {e}"))?);
                 }
@@ -169,6 +188,10 @@ impl MysqlDriver {
         }
     }
     fn conn(&mut self) -> Result<&mut Conn, String> {
+        if let Some(tunnel) = &mut self.tunnel && let Err(error) = tunnel.check_alive() {
+            self.connection = None;
+            return Err(error);
+        }
         self.connection.as_mut().ok_or_else(|| "MySQL connection is disconnected".into())
     }
     fn with_connection<T>(&mut self, operation: impl FnOnce(&mut Conn) -> Result<T, ::mysql::Error>) -> Result<T, String> {
@@ -179,8 +202,9 @@ impl MysqlDriver {
         if self.cancel.load(Ordering::Acquire) { return Err("Cancelled before metadata request".into()); }
         let config = self.config.clone();
         let cancel = self.cancel.clone();
+        let destination = self.destination;
         let conn = self.conn()?;
-        let (result, cancellation_error) = with_cancel(&config, conn.connection_id(), &cancel, || operation(conn));
+        let (result, cancellation_error) = with_cancel(&config, destination, conn.connection_id(), &cancel, || operation(conn));
         match result {
             Ok(value) => Ok((value, cancellation_error)),
             Err(error) => {
@@ -363,7 +387,7 @@ impl Driver for MysqlDriver {
             if cancel.load(Ordering::Relaxed) { report.error = Some("Cancelled before next statement".into()); break; }
             self.session_dirty = may_change_session(&sql[range.clone()]);
             let Some(conn) = self.connection.as_mut() else { report.error = Some("MySQL connection is disconnected".into()); break; };
-            let (outcome, cancellation_error) = with_cancel(&self.config, conn.connection_id(), cancel, || {
+            let (outcome, cancellation_error) = with_cancel(&self.config, self.destination, conn.connection_id(), cancel, || {
                 conn.query_iter(&sql[range]).map(|results|
                     super::mysql_results::collect_budget(results, &mut remaining, QUERY_LIMIT, 128 - report.grids.len()))
             });
@@ -484,6 +508,18 @@ impl Driver for MysqlDriver {
 mod tests {
     use super::*;
     use bincode::Options;
+    #[test]
+    fn ssh_failure_and_pre_cancel_do_not_fall_back_to_direct_database() {
+        let config = MysqlConfig { ssh:Some(crate::ssh_tunnel::Config {
+            host:"-invalid-gateway".into(),port:22,user:String::new(),identity_file:None,
+            known_hosts_file:None,config_file:None,remote_host:"unused".into(),remote_port:1,
+        }), ..Default::default() };
+        let error = MysqlDriver::connect_with_cancel(&config,&AtomicBool::new(true)).err().unwrap();
+        assert_eq!(error,"Connection cancelled");
+        let error = MysqlDriver::connect(&config).err().unwrap();
+        assert!(error.contains("host") || error.contains("Windows"), "must reject SSH configuration before any database connection: {error}");
+    }
+
     #[test]
     #[ignore = "requires disposable TLS fixture and RUSTABLE_MYSQL_TEST_CA"]
     fn live_driver_over_verified_tls() {
