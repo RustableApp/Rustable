@@ -106,13 +106,11 @@ impl Rustable {
         let mut chosen = None;
         let databases_only = self.navigator.databases_only;
         let size = if databases_only { egui::vec2(400.0, 430.0) } else { egui::vec2(560.0, 440.0) };
-        egui::Window::new(if databases_only { "Open database" } else { "Find anything" })
-            .id(egui::Id::new("database-navigator"))
-            .title_bar(false).collapsible(false).resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .fixed_size(size)
+        let modal = egui::Modal::new(egui::Id::new("database-navigator"))
             .frame(egui::Frame::window(&ctx.style()).corner_radius(16.0).inner_margin(16.0))
             .show(ctx, |ui| {
+                ui.set_min_size(size);
+                ui.set_max_width(size.x);
                 if databases_only {
                     ui.vertical_centered(|ui| { ui.label(RichText::new("Open database").strong().size(18.0)); });
                     ui.add_space(12.0);
@@ -165,7 +163,7 @@ impl Rustable {
                     });
                 }
             });
-        self.navigator.open = open;
+        self.navigator.open = open && !modal.should_close();
         if let Some(destination) = chosen {
             if self.pending.is_some() && !matches!(destination, Destination::Action(Action::Cancel | Action::Connections | Action::Activity | Action::Inspector)) { return; }
             self.navigator.open = false;
@@ -178,7 +176,7 @@ impl Rustable {
                     Action::OpenSql => self.script_dialog(ctx, false),
                     Action::ImportCsv => self.preview_csv_dialog(ctx),
                     Action::NewQuery => { self.tabs.push(QueryTab::new(String::new())); self.activate_query(self.tabs.len() - 1); }
-                    Action::Activity => self.prefs.activity_visible = !self.prefs.activity_visible,
+                    Action::Activity => { self.prefs.activity_visible = !self.prefs.activity_visible; self.shared_preferences_dirty = true; },
                     Action::Inspector => self.inspector = !self.inspector,
                 },
                 Destination::Database(name) => {
@@ -271,6 +269,28 @@ mod tests {
         key(&ctx, &mut app, egui::Key::Escape, egui::Modifiers::NONE);
         assert!(!app.navigator.open);
     }
+    #[test]
+    fn outside_click_dismisses_palette() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        key(&ctx, &mut app, egui::Key::P, egui::Modifiers::COMMAND);
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0))),
+                ..Default::default()
+            }, |ctx| app.navigator_window(ctx));
+        }
+        for pressed in [true, false] {
+            let pos = egui::pos2(10.0, 10.0);
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0))),
+                events: vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }],
+                ..Default::default()
+            }, |ctx| app.navigator_window(ctx));
+        }
+        assert!(!app.navigator.open);
+    }
+
     #[test]
     fn search_matches_names_and_kinds_without_case_or_word_order_constraints() {
         assert!(matches_query("Address table public", "public addr"));

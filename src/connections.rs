@@ -482,6 +482,15 @@ impl Rustable {
             self.manager_requested = true;
             return;
         }
+        // Browser workspaces share their canvas with the manager. Returning must
+        // preserve the live database, tabs, and any connection form draft.
+        let can_return = cfg!(target_arch = "wasm32") && self.has_connection();
+        if can_return && self.connection_manager.new_connection.is_none()
+            && !egui::Popup::is_any_open(ctx) && !ctx.wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.connections = false;
+            return;
+        }
         self.poll_credentials();
         if !self.connection_manager.credential_pending.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -512,6 +521,9 @@ impl Rustable {
                 ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(8);
                 ui.visuals_mut().widgets.active.corner_radius = egui::CornerRadius::same(8);
                 ui.horizontal(|ui| {
+                    if can_return && ui.button("Back to database").clicked() {
+                        self.connections = false;
+                    }
                     if ui.add(crate::icons::widget("plus")).on_hover_text("New connection").clicked() {
                         if self.connection_manager.dirty(&self.prefs.saved_connections) {
                             self.connection_manager.error = Some("Save or discard the connection form before adding another.".into());
