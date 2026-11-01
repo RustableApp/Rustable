@@ -18,13 +18,19 @@ struct MysqlDriver {
 impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
     type Error = String;
     fn try_from(config: &MysqlConfig) -> Result<Self, String> {
+        MysqlDriver::connect(config).map(|driver| Box::new(driver) as Box<dyn Driver>)
+    }
+}
+
+impl MysqlDriver {
+    fn connect(config: &MysqlConfig) -> Result<Self, String> {
         let mut connection = Conn::new(OptsBuilder::from(config)).map_err(|e| e.to_string())?;
         connection.query_drop("SET SESSION session_track_system_variables = 'sql_mode'").map_err(|e| e.to_string())?;
         let (version, database, sql_mode): (String, Option<String>, String) = connection.query_first(
             "SELECT VERSION(), DATABASE(), @@SESSION.sql_mode").map_err(|e| e.to_string())?
             .ok_or("Server did not return session metadata")?;
         let names = connection.query("SHOW DATABASES").map_err(|e| e.to_string())?;
-        Ok(Box::new(MysqlDriver {
+        Ok(Self {
             connection: Some(connection),
             config: config.clone(),
             engine: if version.contains("MariaDB") { "MariaDB" } else { "MySQL" },
@@ -32,7 +38,7 @@ impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
             mode: parse_mode(&sql_mode),
             mode_tracking: true,
             session_dirty: false,
-        }))
+        })
     }
 }
 
@@ -223,11 +229,13 @@ impl Driver for MysqlDriver {
         let mut report = ScriptResult::default();
         if safe { report.error = Some("MySQL read-only execution is not yet available.".into()); return report; }
         let mut remaining = BYTE_LIMIT;
+        let mut session_refresh_failed = false;
         let mut offset = 0;
         let mut delimiter = ";".to_owned();
         while offset < sql.len() {
             if cancel.load(Ordering::Relaxed) { report.error = Some("Cancelled before next statement".into()); break; }
             if (self.session_dirty || !self.mode_tracking) && let Err(error) = self.refresh_session() {
+                session_refresh_failed = true;
                 report.error = Some(error); break;
             }
             let (range, consumed, next_delimiter) = match crate::sql::mysql::next_statement(&sql[offset..], self.mode, &delimiter) {
@@ -290,9 +298,20 @@ impl Driver for MysqlDriver {
                 break;
             }
             if self.session_dirty && let Err(error) = self.refresh_session() {
+                session_refresh_failed = true;
                 report.error = Some(error); break;
             }
         }
+        // Failed SET/CALL/EXECUTE can still alter session settings. Publish an
+        // authoritative dialect/catalog with the reply, not only on the next run.
+        if self.session_dirty && !session_refresh_failed && self.connection.is_some()
+            && let Err(error) = self.refresh_session() {
+                let message = format!("Could not refresh MySQL session state: {error}");
+                report.error = Some(match report.error.take() {
+                    Some(original) => format!("{original}\n{message}"),
+                    None => message,
+                });
+            }
         report.elapsed = started.elapsed();
         report
     }
@@ -476,6 +495,30 @@ mod tests {
         let result = driver.execute("-- leading comment\nUSE rustable_test;", false, &cancel);
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(driver.schema_catalog().selected.as_deref(), Some("rustable_test"));
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn failed_routine_refreshes_tracking_before_reply() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let cancel = AtomicBool::new(false);
+        let setup = "DROP PROCEDURE IF EXISTS driver_tracking_failure;\nDELIMITER $$\nCREATE PROCEDURE driver_tracking_failure() BEGIN SET session_track_system_variables=''; SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='tracking changed before error'; END$$\nDELIMITER ;";
+        let result = driver.execute(setup, false, &cancel);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!(driver.mode_tracking);
+        let result = driver.execute("CALL driver_tracking_failure(); SELECT 123;", false, &cancel);
+        assert!(result.error.as_deref().unwrap().contains("tracking changed before error"));
+        assert!(!driver.mode_tracking, "tracking state must refresh before returning the failed call");
+        assert!(!driver.session_dirty);
+        assert!(result.grids.iter().all(|grid| grid.rows.is_empty()), "later SQL must not run");
+        let server_mode: String = driver.conn().unwrap().query_first("SELECT @@sql_mode").unwrap().unwrap();
+        assert_eq!(driver.sql_dialect(), crate::sql::Dialect::Mysql(parse_mode(&server_mode)));
+        let cleanup = driver.execute("DROP PROCEDURE driver_tracking_failure;", false, &cancel);
+        assert!(cleanup.error.is_none(), "{:?}", cleanup.error);
     }
 
 }

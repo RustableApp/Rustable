@@ -171,9 +171,9 @@ Schema notifications also update the selected database. Live tests on both
 engines disable tracking, toggle quoting modes, re-enable tracking, disable schema
 tracking, and issue USE with and without a leading comment. Selected-database
 state and query values match the server. Normal SELECT/DML with tracking enabled
-adds no session-refresh exchange. A failed session-changing command leaves the
-state dirty for refresh before the next run; immediate UI mode propagation and
-session-refresh failure coverage still need integration.
+adds no session-refresh exchange. A failed session-changing command now refreshes state before returning its
+reply when the connection remains usable. Refresh failure coverage still needs
+extending; failed refreshes preserve the dirty marker for a later retry.
 
 
 Worker payloads now carry the driver's active dialect on connect and after SQL
@@ -185,3 +185,16 @@ NO_BACKSLASH_ESCAPES. Binary transport verifies both mode flags survive roundtri
 Full native library suite: 399 passed, 53 ignored; strict Clippy passed. This does
 not imply the hidden driver is connected to the profile picker or that a MySQL
 language server is integrated.
+
+
+Failed-routine regression: a procedure disables session tracking and then raises
+SQLSTATE 45000. Before returning its error, the driver now updates tracking mode,
+clears the dirty state after a successful refresh, and publishes a dialect that
+matches the server. Later statements do not execute. The original SQL error is
+preserved; if refresh also fails, its diagnostic is appended instead of replacing
+the original. A failed refresh is not retried twice within one execution call.
+
+Validation: all nine db::mysql* tests, including live browse, results, cancellation,
+timeout, mode changes and failed-routine coverage, pass independently against
+MySQL 8.4 and MariaDB 11.4 fixtures. Strict all-target Clippy passes. Ordinary
+SELECT/DML with session tracking enabled still adds no session-refresh exchange.
