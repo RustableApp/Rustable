@@ -238,19 +238,29 @@ impl MysqlDriver {
             Ok(sets)
         })
     }
+    #[cfg(test)]
     fn table_metadata(&mut self, schema: &str, table: &str) -> Result<(Vec<Index>, Vec<Object>), String> {
+        self.table_metadata_with_definition(schema, table, None)
+    }
+    fn table_metadata_with_definition(&mut self, schema: &str, table: &str, definition: Option<&str>) -> Result<(Vec<Index>, Vec<Object>), String> {
         let qualified = format!("{}.{}", quote(schema), quote(table));
         // These independent reads share one COM_QUERY round trip. Keep the
         // existing session (including temporary tables and transaction state),
         // and consume every result so a later server error cannot be hidden.
         let schema_literal = ::mysql::Value::from(schema).as_sql(self.mode.no_backslash_escapes);
         let table_literal = ::mysql::Value::from(table).as_sql(self.mode.no_backslash_escapes);
-        let mut sets = self.metadata_query_sets(&format!("SHOW CREATE TABLE {qualified}; SHOW INDEX FROM {qualified}; SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA={schema_literal} AND EVENT_OBJECT_TABLE={table_literal} ORDER BY TRIGGER_NAME"))?;
-        if sets.len() != 3 { return Err("Missing table metadata results".into()); }
+        // A browse already read the definition in table_select on this connection.
+        // Reuse that request-local snapshot, never a cross-request schema cache.
+        let prefix = if definition.is_some() { String::new() } else { format!("SHOW CREATE TABLE {qualified}; ") };
+        let mut sets = self.metadata_query_sets(&format!("{prefix}SHOW INDEX FROM {qualified}; SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA={schema_literal} AND EVENT_OBJECT_TABLE={table_literal} ORDER BY TRIGGER_NAME"))?;
+        if sets.len() != if definition.is_some() { 2 } else { 3 } { return Err("Missing table metadata results".into()); }
         let mut names = sets.pop().unwrap().into_iter().map(::mysql::from_row_opt::<(String,)>)
             .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
         let rows = sets.pop().unwrap();
-        let ddl = sets.pop().unwrap().into_iter().next().and_then(|row| row.get::<String, _>(1)).ok_or("Missing table definition")?;
+        let ddl = match definition {
+            Some(ddl) => ddl.to_owned(),
+            None => sets.pop().unwrap().into_iter().next().and_then(|row| row.get::<String, _>(1)).ok_or("Missing table definition")?,
+        };
         // Catalog triggers belong to the hidden persistent table, never its
         // session-local temporary replacement.
         if ddl.starts_with("CREATE TEMPORARY TABLE") { names.clear(); }
@@ -577,7 +587,7 @@ impl Driver for MysqlDriver {
         if grid.rows.len() > PAGE_SIZE { grid.rows.truncate(PAGE_SIZE); grid.truncated = true; }
         grid.set_browse_total(request.offset, None);
         let (indexes, triggers) = if object.kind == "view" { (Vec::new(), Vec::new()) }
-            else { self.table_metadata(&schema, &object.name)? };
+            else { self.table_metadata_with_definition(&schema, &object.name, (!object.ddl.is_empty()).then_some(object.ddl.as_str()))? };
         Ok(TableData { sql, parameters, grid, columns: object.columns, indexes, triggers })
     }
     fn plan(&mut self, changes: &[Change]) -> Result<ChangePlan, String> {
@@ -725,6 +735,11 @@ mod tests {
         assert!(data.columns[0].pk);
         assert!(data.columns[2].generated);
         assert!(data.indexes.iter().any(|index| index.name == "PRIMARY"));
+        assert!(driver.execute("ALTER TABLE `temporary``browse` ADD COLUMN refreshed INT DEFAULT 7", false, &cancel).error.is_none());
+        let refreshed = driver.browse(&Browse { table: "temporary`browse".into(), ..Default::default() }).unwrap();
+        assert_eq!(refreshed.columns.last().unwrap().name, "refreshed");
+        assert_eq!(refreshed.grid.rows[0].last(), Some(&Value::Integer(7)));
+        assert!(refreshed.indexes.iter().all(|index| index.ddl.contains("refreshed")), "definition must refresh on each browse");
         assert!(driver.browse(&Browse { table: "missing_temporary_browse".into(), ..Default::default() }).is_err());
         assert_eq!(driver.transaction_state(), TransactionState::Idle);
         let setup = driver.execute("DROP TABLE IF EXISTS rustable_shadow_probe; CREATE TABLE rustable_shadow_probe (persistent_id INT PRIMARY KEY); CREATE TRIGGER rustable_shadow_trigger BEFORE INSERT ON rustable_shadow_probe FOR EACH ROW SET NEW.persistent_id=1; CREATE TEMPORARY TABLE rustable_shadow_probe (temporary_id INT PRIMARY KEY); INSERT INTO rustable_shadow_probe VALUES (42);", false, &cancel);

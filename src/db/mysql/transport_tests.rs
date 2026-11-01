@@ -202,9 +202,15 @@ fn metadata_batch_uses_one_wire_request() {
     enabled.store(true, Ordering::Release);
     protocol.lock().unwrap().clear();
     let started = std::time::Instant::now();
+    commands.lock().unwrap().clear();
     let first = driver.browse(&Browse { table:"wire_metadata_probe".into(), sort:Some(("id".into(),false)), ..Default::default() }).unwrap();
     let first_elapsed = started.elapsed();
     assert_eq!(first.grid.rows.len(), 500);
+    let browse_queries = commands.lock().unwrap().iter().map(|query| String::from_utf8_lossy(query).into_owned()).collect::<Vec<_>>();
+    assert_eq!(browse_queries.iter().map(|query| query.matches("SHOW CREATE TABLE").count()).sum::<usize>(), 1,
+        "browse must not fetch the same definition twice: {browse_queries:?}");
+    assert!(first.indexes.iter().any(|index| index.name == "by_label" && index.ddl.contains("wire_metadata_probe")));
+
     assert_eq!(protocol.lock().unwrap().iter().filter(|&&command| command == 22).count(), 1);
     protocol.lock().unwrap().clear();
     let started = std::time::Instant::now();

@@ -450,3 +450,20 @@ The same run still measures ordinary table browsing at 176.88/121.36 ms for
 first/next page on MySQL and 161.86/100.56 ms on MariaDB. Thus eliminating
 per-trigger requests does not resolve the remaining column/data/metadata sequencing.
 The protocol test passes on both fixtures; all-target Clippy passes.
+
+### Request-local MySQL/MariaDB definition reuse (2026-11-01)
+
+Table browsing previously executed SHOW CREATE TABLE in both the column-read
+batch and the later index/trigger-list batch. The latter now reuses the former's
+server-authored definition within that browse request. Empty/unavailable
+snapshots retain the existing fallback. This removes one redundant SQL statement
+and response body, not a network round trip; there is no cross-request cache.
+
+Wire-capture regression asserts exactly one SHOW CREATE TABLE per browse and
+retained index DDL. It passed on MySQL 8.4 and MariaDB 11.4 with the existing 30 ms
+request-delay proxy. Temporary-table shadowing, restricted-view browsing and
+locked-table cancellation tests passed on both engines. An added ALTER-between-
+browses case verifies new column data and updated index DDL on the next browse.
+Strict all-target Clippy passes. No production latency improvement is claimed;
+three sequential ordinary browse requests remain, plus the first SELECT prepare
+and any trigger-definition batches.
