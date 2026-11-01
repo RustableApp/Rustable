@@ -186,3 +186,20 @@ the original worker script, Start fresh demo loaded the sample tables again.
 Evidence: `wasm-oversized-response.png` in the session visualization directory.
 The fault was preview-only. This avoids an extra oversized WASM allocation; it
 cannot prevent the browser from receiving the original structured-clone buffer.
+
+### Complete generated-directory replacement (2026-11-01)
+
+The browser build now stages bindings, web assets and dependency licenses in a
+sibling temporary directory before replacing its output. This removes stale
+miniature-demo workers, SQLite assets and obsolete licenses instead of merging
+new files into an old deployment. Nonempty output directories must carry the
+Rustable browser-demo BUILD.txt marker; unrelated directories are rejected.
+
+The current release WASM build succeeded into the local embedded preview.
+A sentinel from the previous generated directory was removed. An injected
+wasm-bindgen failure preserved every previous output file byte-for-byte, and
+an unrelated directory containing user.txt was rejected without modifying it.
+Installation uses two directory renames with rollback on an installation error;
+it is not a claim of atomic replacement for concurrent HTTP readers. Build into
+staging before deploying. Existing WASM warnings remain. No public deployment
+or desktop release was performed for this change.
