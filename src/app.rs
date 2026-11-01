@@ -713,7 +713,7 @@ impl Rustable {
     }
 
     fn supports_csv_import(&self) -> bool {
-        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL" | "MySQL" | "MariaDB")
+        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL")
     }
 
     fn supports_schema_changes(&self) -> bool {
@@ -1464,6 +1464,7 @@ impl Rustable {
     }
 
     fn csv_preview_window(&mut self, ctx: &egui::Context) {
+        let import_supported = self.supports_csv_import();
         let Some(preview) = &self.csv_preview else {
             return;
         };
@@ -1481,7 +1482,11 @@ impl Rustable {
                         .unwrap_or_default()
                         .to_string_lossy(),
                 );
-                ui.weak("Review the mapping before importing. No changes until you confirm.");
+                if import_supported {
+                    ui.weak("Review the mapping before importing. No changes until you confirm.");
+                } else {
+                    ui.weak(format!("CSV preview is available. Importing into {} is not supported yet.", self.engine));
+                }
                 if let Some(source) = &preview.source {
                     ui.weak(format!("Source snapshot · {} bytes", source.bytes)).on_hover_text("Changing the original file will not change this preview. Reopen the file to load a new version.");
                 }
@@ -1564,7 +1569,7 @@ impl Rustable {
                         ui.checkbox(&mut self.csv_postgres_inserts, "Use INSERT (supports row-level security)")
                             .on_hover_text("Batches rows through INSERT so PostgreSQL applies row policies. COPY is faster for tables without row-level security.");
                     }
-                    if ui.add_enabled(matches!(self.engine.as_str(), "SQLite" | "PostgreSQL") && !self.safe && self.pending.is_none() && options == preview.options && self.csv_mapping.validate().is_ok(), egui::Button::new("Review import…")).clicked()
+                    if ui.add_enabled(import_supported && !self.safe && self.pending.is_none() && options == preview.options && self.csv_mapping.validate().is_ok(), egui::Button::new("Review import…")).clicked()
                         && let Some(source) = &preview.source {
                         let request = db::csv_import::Request {
                             source: source.clone(), options, table: self.csv_mapping.table.clone(), columns: self.csv_mapping.columns.clone(),
@@ -1914,6 +1919,7 @@ impl Rustable {
     }
 
     fn csv_import_review(&mut self, ctx: &egui::Context) {
+        let import_supported = self.supports_csv_import();
         let Some((request, samples)) = &self.csv_review else {
             return;
         };
@@ -1923,6 +1929,7 @@ impl Rustable {
         egui::Modal::new(egui::Id::new((ctx.viewport_id(), "csv-import-review"))).show(ctx, |ui| {
             ui.set_max_width(700.0);
             ui.heading(format!("Import into {}", request.table));
+            if !import_supported { ui.weak(format!("Importing into {} is not supported yet.", self.engine)); }
             ui.label("All source rows will be inserted in one transaction. An error or cancellation rolls back the entire import.");
             ui.weak(if self.engine == "PostgreSQL" { "Import command followed by up to 10 source rows with destination column names. Quoted values are CSV text; the database converts them to column types." } else { "Up to 10 inserts shown below. Remaining rows use the same column mapping." });
             egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
@@ -1955,7 +1962,7 @@ impl Rustable {
                 });
             }
             ui.horizontal(|ui| {
-                commit = ui.add_enabled(matches!(self.engine.as_str(), "SQLite" | "PostgreSQL") && !self.safe && self.pending.is_none(), egui::Button::new("Import all rows")).on_hover_text("Cmd/Ctrl+Enter or Cmd/Ctrl+S").clicked();
+                commit = ui.add_enabled(import_supported && !self.safe && self.pending.is_none(), egui::Button::new("Import all rows")).on_hover_text("Cmd/Ctrl+Enter or Cmd/Ctrl+S").clicked();
                 close = ui.add_enabled(!importing, egui::Button::new("Back to mapping")).on_hover_text("Escape").clicked();
             });
         });
@@ -9667,6 +9674,21 @@ mod csv_review_keyboard_tests {
             assert!(matches!(app.pending, Some(Pending::Import)));
             key(&ctx, &mut app, egui::Key::Escape, egui::Modifiers::NONE);
             assert!(app.csv_review.is_some());
+        }
+    }
+    #[test]
+    fn unsupported_engine_import_shortcuts_keep_review_without_dispatching() {
+        for engine in ["MySQL", "MariaDB"] {
+            for shortcut in [egui::Key::Enter, egui::Key::S] {
+                let ctx = egui::Context::default();
+                let mut app = setup(&ctx);
+                app.engine = engine.into();
+                app.safe = false;
+                let modifiers = egui::Modifiers { command:true, mac_cmd:true, ..Default::default() };
+                key(&ctx, &mut app, shortcut, modifiers);
+                assert!(app.csv_review.is_some(), "{engine} review remains available");
+                assert!(app.pending.is_none(), "{engine} must not dispatch an unsupported import");
+            }
         }
     }
     #[test]

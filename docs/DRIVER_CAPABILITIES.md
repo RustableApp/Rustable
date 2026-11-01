@@ -268,3 +268,18 @@ transactionality from the target table's InnoDB engine alone.
 - [MariaDB generated columns](https://mariadb.com/docs/server/reference/sql-statements/data-definition/create/generated-columns)
 - [MariaDB constraints](https://mariadb.com/docs/server/reference/sql-statements/data-definition/constraint)
 - [MySQL default expressions](https://dev.mysql.com/doc/refman/8.0/en/data-type-defaults.html)
+
+### CSV import capability consistency (2026-11-01)
+
+UI audit found the MySQL/MariaDB CSV buttons disabled but commit_csv_import's
+capability guard enabled, allowing modal Cmd+Enter/Cmd+S to dispatch an unsupported
+import. The buttons and keyboard path now use the same SQLite/PostgreSQL-only
+capability. CSV preview stays available and explains why import is unavailable.
+Connection forms now accurately list SQL, browsing and exports as available, with
+editing, CSV import and SSH unfinished. This prevents a dead-end operation while
+preserving the requirement to implement MySQL/MariaDB import later.
+
+All four CSV review keyboard tests passed, including both shortcuts for each
+unsupported engine; existing busy, Escape and failed-import retention tests passed.
+Strict all-target Clippy passed. Native visual review of the new explanatory text
+remains pending.
