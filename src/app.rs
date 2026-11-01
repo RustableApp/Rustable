@@ -908,6 +908,7 @@ impl Rustable {
     }
 
     fn poll(&mut self) {
+        self.poll_query_groups();
         while let Ok(result) = self.worker.rx.try_recv() {
             let elapsed = self.started.elapsed().as_secs_f64() * 1000.0;
             self.last_operation_ms = Some(elapsed);
