@@ -582,3 +582,17 @@ value to 9 after the temporary replacement is removed. MariaDB independently rej
 the MyISAM case at its engine check; MySQL's persistent catalog engine requires the
 new session-resolved definition check. The InnoDB temporary case exercises the new
 exclusion on both engines.
+
+### Native temporary-table browse acceptance (2026-11-01)
+
+Rebuilt the disposable native acceptance bundle from `392a46a` with mise/Cargo.
+Connected through the MariaDB form to localhost:43319 using Verify Full and the
+fixture CA, without remembering the password. Cmd+Shift+Enter executed CREATE
+TEMPORARY TABLE, INSERT and SELECT as three result sets. Double-clicking the new
+sidebar item opened both rows successfully, replacing the previously observed
+“No readable columns” error. Refresh retained the correct values; selecting the
+first row populated all three inspector fields (id=1, label="🦀 fixed", doubled=2).
+The generated second-row value was 4, and the outline crab rendered in both grid
+and inspector. Evidence: `native-mariadb-temporary-browse-fixed.png` in the session
+visualization folder. This is native acceptance of browsing/refresh/inspection,
+not GUI editing or full MySQL/MariaDB production acceptance.
