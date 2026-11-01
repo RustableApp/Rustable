@@ -149,3 +149,42 @@ mod tests {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DatabaseEngine { Postgres, Sqlite, Mysql, MariaDb }
+impl DatabaseEngine {
+    pub const ALL: [Self; 4] = [Self::Postgres, Self::Sqlite, Self::Mysql, Self::MariaDb];
+    pub fn name(self) -> &'static str {
+        match self { Self::Postgres => "PostgreSQL", Self::Sqlite => "SQLite", Self::Mysql => "MySQL", Self::MariaDb => "MariaDB" }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Postgres => "Connect to a PostgreSQL server.",
+            Self::Sqlite => "Open a local SQLite database file.",
+            Self::Mysql => "Connect to a MySQL server.",
+            Self::MariaDb => "Connect to a MariaDB server.",
+        }
+    }
+    pub fn image(self) -> egui::Image<'static> {
+        egui::Image::new(match self {
+            Self::Postgres => egui::include_image!("../assets/icons/databases/postgresql.svg"),
+            Self::Sqlite => egui::include_image!("../assets/icons/databases/sqlite.svg"),
+            Self::Mysql => egui::include_image!("../assets/icons/databases/mysql.svg"),
+            Self::MariaDb => egui::include_image!("../assets/icons/databases/mariadb.svg"),
+        })
+    }
+    pub fn tile(self, ui: &mut egui::Ui, selected: bool) -> egui::Response {
+        egui_extras::install_image_loaders(ui.ctx());
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(108.0, 112.0), egui::Sense::click());
+        let visuals = ui.style().interact_selectable(&response, selected);
+        ui.painter().rect(rect, 10.0, if selected { ui.visuals().selection.bg_fill.gamma_multiply(0.3) } else { visuals.weak_bg_fill },
+            if selected || response.has_focus() { egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill) } else { visuals.bg_stroke }, egui::StrokeKind::Inside);
+        let center = egui::pos2(rect.center().x, rect.top() + 39.0);
+        ui.painter().circle_filled(center, 28.0, egui::Color32::from_rgb(244, 241, 234));
+        self.image().paint_at(ui, egui::Rect::from_center_size(center, egui::vec2(43.0, 43.0)));
+        ui.painter().text(egui::pos2(rect.center().x, rect.bottom() - 23.0), egui::Align2::CENTER_CENTER,
+            self.name(), egui::FontId::proportional(14.0), ui.visuals().text_color());
+        response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, ui.is_enabled(), selected, self.name()));
+        response
+    }
+}

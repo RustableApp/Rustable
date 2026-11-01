@@ -47,7 +47,12 @@ with tempfile.TemporaryDirectory(prefix='.rustable-demo-', dir=destination.paren
     icon_notices.mkdir()
     for name in ['LICENSE', 'README.md']:
         shutil.copy2(root/'assets/icons/lucide'/name, icon_notices/name)
-    index=['Noto Emoji: OFL-1.1 (see NotoEmoji/NotoEmoji-OFL.txt)',
+    database_notices=licenses/'Devicon'
+    database_notices.mkdir()
+    for name in ['LICENSE', 'README.md']:
+        shutil.copy2(root/'assets/icons/databases'/name, database_notices/name)
+    index=['Devicon database icons: MIT (see Devicon/LICENSE)',
+           'Noto Emoji: OFL-1.1 (see NotoEmoji/NotoEmoji-OFL.txt)',
            'Lucide: ISC and MIT (see Lucide/LICENSE)']
     (out/'fonts').mkdir()
     shutil.copy2(root/'assets/fonts/NotoSansCJKjp-Regular.otf',out/'fonts/NotoSansCJKjp-Regular.otf')

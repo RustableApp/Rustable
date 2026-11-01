@@ -9,6 +9,7 @@ use crate::credential_store::{Operation as CredentialOperation, Worker as Creden
 #[derive(Default)]
 pub(super) struct Manager {
     draft: Option<Profile>,
+    new_connection: Option<crate::icons::DatabaseEngine>,
     password: String,
     generation: u64,
     focus_group_name: bool,
@@ -511,22 +512,16 @@ impl Rustable {
                 ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(8);
                 ui.visuals_mut().widgets.active.corner_radius = egui::CornerRadius::same(8);
                 ui.horizontal(|ui| {
-                    ui.menu_button("+", |ui| {
-                        if ui.button("SQLite connection").clicked() { action = Some(Action::New(false)); ui.close(); }
-                        if ui.button("PostgreSQL connection").clicked() { action = Some(Action::New(true)); ui.close(); }
-                        if ui.button("MySQL connection (experimental)").clicked() { action = Some(Action::NewMysql(false)); ui.close(); }
-                        if ui.button("MariaDB connection (experimental)").clicked() { action = Some(Action::NewMysql(true)); ui.close(); }
-                        ui.separator();
-                        if ui.add_enabled(self.pending.is_none(), egui::Button::new("Studio demo")).clicked() {
-                            self.window_requests.push(crate::session_windows::WindowRequest { title: "Studio demo".into(), recover_sql: false, identity: None, connection: crate::session_windows::WindowConnection::Demo });
-                            ui.close();
+                    if ui.add(crate::icons::widget("plus")).on_hover_text("New connection").clicked() {
+                        if self.connection_manager.dirty(&self.prefs.saved_connections) {
+                            self.connection_manager.error = Some("Save or discard the connection form before adding another.".into());
+                        } else {
+                            self.connection_manager.new_connection = Some(crate::icons::DatabaseEngine::Postgres);
                         }
-                        if !self.window_recovery.is_empty() {
-                            ui.separator();
-                            ui.checkbox(&mut self.recover_next_window, format!("Restore {} recovered SQL drafts on next connection", self.window_recovery.len()))
-                                .on_hover_text("Drafts are restored without executing SQL.");
-                        }
-                    }).response.on_hover_text("New connection");
+                    }
+                    if ui.add_enabled(self.pending.is_none(), egui::Button::new("Studio demo")).clicked() {
+                        self.window_requests.push(crate::session_windows::WindowRequest { title: "Studio demo".into(), recover_sql: false, identity: None, connection: crate::session_windows::WindowConnection::Demo });
+                    }
                     if ui.button("New group").clicked() { action = Some(Action::AddGroup); }
                     if let Some(id) = self.connection_search_navigation(ctx) {
                         action = Some(Action::Select(id));
@@ -703,7 +698,17 @@ impl Rustable {
                     let form_height = (ctx.content_rect().height() - 160.0).clamp(180.0, 850.0);
                     let form = egui::ScrollArea::vertical().id_salt("connection-form").max_height(form_height).auto_shrink([false, true]).show(ui, |ui| {
                         let title = match draft.connection { ConnectionKind::SQLite { .. } => "SQLite Connection", ConnectionKind::Postgres(_) => "PostgreSQL Connection", ConnectionKind::Mysql(_) => "MySQL Connection", ConnectionKind::MariaDb(_) => "MariaDB Connection" };
-                        ui.heading(title);
+                        ui.horizontal(|ui| {
+                            use crate::icons::DatabaseEngine;
+                            let engine = match draft.connection {
+                                ConnectionKind::SQLite { .. } => DatabaseEngine::Sqlite, ConnectionKind::Postgres(_) => DatabaseEngine::Postgres,
+                                ConnectionKind::Mysql(_) => DatabaseEngine::Mysql, ConnectionKind::MariaDb(_) => DatabaseEngine::MariaDb,
+                            };
+                            egui::Frame::new().fill(Color32::from_rgb(244, 241, 234)).corner_radius(7).inner_margin(4).show(ui, |ui| {
+                                ui.add(engine.image().fit_to_exact_size(egui::vec2(24.0, 24.0)));
+                            });
+                            ui.heading(title);
+                        });
                         ui.add_space(8.0);
                         form_card(ui).show(ui, |ui| {
                         form_text(ui, "Name", &mut draft.name, false, None);
@@ -823,6 +828,41 @@ impl Rustable {
         });
         #[cfg(not(test))]
         let _ = panel;
+        if let Some(mut engine) = self.connection_manager.new_connection {
+            let mut create = false;
+            let mut cancel = false;
+            let picker = egui::Modal::new(egui::Id::new("new-connection-picker")).show(ctx, |ui| {
+                ui.set_width(456.0);
+                ui.heading("New connection");
+                ui.weak("Choose your database");
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    for candidate in crate::icons::DatabaseEngine::ALL {
+                        let tile = candidate.tile(ui, engine == candidate);
+                        if tile.clicked() || tile.double_clicked() { engine = candidate; }
+                        create |= tile.double_clicked();
+                    }
+                });
+                ui.add_space(12.0);
+                ui.label(engine.description());
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    cancel = ui.button("Cancel").clicked();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        create |= ui.button("Create connection").clicked();
+                    });
+                });
+            });
+            self.connection_manager.new_connection = if cancel || create || picker.should_close() { None } else { Some(engine) };
+            if create {
+                use crate::icons::DatabaseEngine;
+                action = Some(match engine {
+                    DatabaseEngine::Postgres => Action::New(true), DatabaseEngine::Sqlite => Action::New(false),
+                    DatabaseEngine::Mysql => Action::NewMysql(false), DatabaseEngine::MariaDb => Action::NewMysql(true),
+                });
+            }
+        }
         // Typing or changing transport invalidates highlights immediately and cancels the old worker.
         self.connection_manager.poll_probe();
         if !ports_valid {

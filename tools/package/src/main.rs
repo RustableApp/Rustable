@@ -202,10 +202,12 @@ fn font_notices(root: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 fn icon_notices(root: &Path, destination: &Path) -> Result<()> {
-    let target = destination.join("Lucide");
-    fs::create_dir_all(&target)?;
-    for name in ["LICENSE", "README.md"] {
-        fs::copy(root.join("assets/icons/lucide").join(name), target.join(name))?;
+    for (folder, name) in [("lucide", "Lucide"), ("databases", "Devicon")] {
+        let target = destination.join(name);
+        fs::create_dir_all(&target)?;
+        for file in ["LICENSE", "README.md"] {
+            fs::copy(root.join("assets/icons").join(folder).join(file), target.join(file))?;
+        }
     }
     Ok(())
 }
