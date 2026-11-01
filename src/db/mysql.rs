@@ -251,7 +251,12 @@ impl MysqlDriver {
     fn table_select(&mut self, request: &Browse) -> Result<(Object, String, Vec<Value>), String> {
         let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
         let object = self.catalog_objects(Some(&request.table))?.into_iter().next().ok_or("Table no longer exists")?;
-        let mut sql = format!("SELECT * FROM {}.{}", quote(&schema), quote(&object.name));
+        // SELECT * omits invisible columns, including possible primary keys.
+        // Project the catalog order explicitly so values and editing metadata
+        // stay aligned, and full-table exports match the table browser.
+        if object.columns.is_empty() { return Err("No readable columns found for this table.".into()); }
+        let projection = object.columns.iter().map(|column| quote(&column.name)).collect::<Vec<_>>().join(", ");
+        let mut sql = format!("SELECT {projection} FROM {}.{}", quote(&schema), quote(&object.name));
         let mut parameters = Vec::new();
         if !request.filter.is_empty() {
             let column = request.filter_column.as_ref().ok_or("Choose a filter column")?;
@@ -789,6 +794,41 @@ mod tests {
         let inserted = driver.plan(&[Change::InsertRow { id:1, table:"plan_data_probe".into(), fields:vec![("id".into(),Value::Integer(2))] }]).unwrap();
         assert!(!inserted.statements[0].sql.contains("generated_value"));
         driver.conn().unwrap().query_drop("DROP TABLE plan_data_probe").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_invisible_columns_align_browse_export_and_edit_preconditions() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(), port, user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut other = Conn::new(OptsBuilder::from(&config)).unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS invisible_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE invisible_probe(id INT NOT NULL DEFAULT 0 PRIMARY KEY INVISIBLE, label VARCHAR(30), `hidden``value` INT INVISIBLE, qty INT) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO invisible_probe(id,label,`hidden``value`,qty) VALUES(7,'visible',42,3)").unwrap();
+        let handwritten = driver.execute("SELECT * FROM invisible_probe", false, &AtomicBool::new(false));
+        assert_eq!(handwritten.grids[0].rows[0].len(),2, "handwritten SQL keeps server star semantics");
+        let request = Browse { table:"invisible_probe".into(), ..Default::default() };
+        let data = driver.browse(&request).unwrap();
+        assert_eq!(data.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id","label","hidden`value","qty"]);
+        assert_eq!(data.grid.rows[0], [Value::Integer(7),Value::Text("visible".into()),Value::Integer(42),Value::Integer(3)]);
+        assert!(data.columns[0].pk);
+        let change = Change::Cell { table:"invisible_probe".into(), column:"label".into(), original:data.grid.rows[0].clone(), value:Value::Text("edited".into()) };
+        let plan = driver.plan(&[change]).unwrap();
+        driver.apply(&plan).unwrap();
+        let data = driver.browse(&request).unwrap();
+        let change = Change::Cell { table:"invisible_probe".into(), column:"label".into(), original:data.grid.rows[0].clone(), value:Value::Text("again".into()) };
+        let stale = driver.plan(&[change]).unwrap();
+        other.query_drop("UPDATE invisible_probe SET `hidden``value`=43 WHERE id=7").unwrap();
+        assert!(driver.apply(&stale).unwrap_err().contains("Row changed"));
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("invisible.csv");
+        driver.export_table(&path, &request, &AtomicBool::new(false), ExportFormat::Csv).unwrap();
+        let mut csv = ::csv::Reader::from_path(&path).unwrap();
+        assert_eq!(csv.headers().unwrap().iter().collect::<Vec<_>>(), ["id","label","hidden`value","qty"]);
+        assert_eq!(csv.records().next().unwrap().unwrap().iter().collect::<Vec<_>>(), ["7","edited","43","3"]);
+        other.query_drop("DROP TABLE invisible_probe").unwrap();
     }
 
     #[test]

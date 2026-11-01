@@ -246,3 +246,25 @@ Strict Clippy passed for the new fault tests before the final error-text adjustm
 both engine tests were rerun after that adjustment. The native UI editing gate
 remains closed pending effective privileges, expression/trigger auditing and native
 workflow acceptance.
+
+### Invisible columns and expression audit (2026-11-01)
+
+MySQL/MariaDB table browsing and full-table export now select the explicit catalog
+column list in ordinal order. SELECT * omitted invisible columns while the catalog
+included them, misaligning row values and preventing original-row checks when the
+primary key was invisible. Handwritten SELECT * is unchanged. The live test covers
+an invisible PK, a backtick-containing invisible column, a successful reviewed
+update, rejection after a competing invisible-column change, and CSV headers/values.
+MariaDB requires a default on its invisible non-null PK, so the shared fixture uses
+an explicit default. All 30 driver tests passed on each engine; strict Clippy passed.
+
+Expression audit references establish that MariaDB disallows stored functions in
+DEFAULT and generated expressions, but allows loadable UDFs in generated columns
+(and CHECK expressions). This is not evidence that arbitrary expression side
+effects roll back. Keep the expression/trigger safety gate open rather than inferring
+transactionality from the target table's InnoDB engine alone.
+
+- [MariaDB defaults](https://mariadb.com/docs/server/server-usage/tables/create-table)
+- [MariaDB generated columns](https://mariadb.com/docs/server/reference/sql-statements/data-definition/create/generated-columns)
+- [MariaDB constraints](https://mariadb.com/docs/server/reference/sql-statements/data-definition/constraint)
+- [MySQL default expressions](https://dev.mysql.com/doc/refman/8.0/en/data-type-defaults.html)
