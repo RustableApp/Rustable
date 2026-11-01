@@ -105,3 +105,27 @@ fixture/integration tests. Strict all-target Clippy passed. These are completion
 scope checks, not a claim that every server version accepts every set operator.
 CTE/derived-table output inference and global set-result ORDER BY completion
 remain open semantic work.
+
+### Large-catalog candidate construction (2026-11-01)
+
+Candidate enumeration now borrows catalog names and builds quoted replacement
+SQL only for accepted suggestions, stopping at the existing 12-item limit.
+Previously every table/schema name and table replacement was allocated before
+filtering. Candidate ordering, quoting and duplicate handling are preserved.
+
+Reproducible manual timing: `mise exec -- cargo test --lib
+completion::tests::large_catalog_completion_timing -- --ignored --nocapture`
+(on one shell line). Synthetic catalog: 20,000 schema-qualified tables with
+three columns each, plus the referenced customers table; 50 refreshes per input.
+Local debug-build median timings before/after:
+
+| Input | Before | After |
+| --- | ---: | ---: |
+| `SELECT * FROM ta` | 11.97 ms | 1.81 ms |
+| `SELECT c.cu FROM customers c` (caret after cu) | 2.07 ms | 2.01 ms |
+| `SELECT nonexistent` | 11.66 ms | 2.32 ms |
+
+These are local debug CPU measurements, not release-build or end-to-end UI
+latency guarantees. The manual test checks the candidate cap and expected
+qualified-column output but intentionally has no machine-dependent timing
+threshold. All 21 ordinary completion tests and strict all-target Clippy passed.

@@ -101,54 +101,34 @@ impl Completion {
                 })
             })
             .collect();
-        let mut names: Vec<(String, bool, Option<String>)> = relevant
-            .iter()
-            .flat_map(|object| {
-                object
-                    .columns
-                    .iter()
-                    .map(|column| (column.name.clone(), true, None))
-            })
-            .collect();
-        for object in objects {
-            if qualifier.as_ref().is_none_or(|q| {
-                object
-                    .schema
-                    .as_ref()
-                    .is_some_and(|schema| schema.eq_ignore_ascii_case(q))
-            }) {
-                let name = object
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&object.name)
-                    .to_owned();
-                let replacement = if matches!(dialect, Dialect::Mysql(_)) {
-                    Some(match (&qualifier, &object.schema) {
-                        (None, Some(schema)) => format!("{}.{}", mysql_identifier(schema), mysql_identifier(&name)),
-                        _ => mysql_identifier(&name),
-                    })
-                } else { object.schema.as_ref().map(|_| {
-                    if qualifier.is_some() {
-                        format!("\"{}\"", name.replace('"', "\"\""))
-                    } else {
-                        object.name.clone()
-                    }
-                }) };
-                names.push((name, true, replacement));
-            }
-        }
-        if qualifier.is_none() {
-            for schema in objects.iter().filter_map(|object| object.schema.as_ref()) {
-                names.push((schema.clone(), true, None));
-            }
-            names.extend(KEYWORDS.iter().map(|word| ((*word).into(), false, None)));
-        }
-        for (name, identifier, replacement) in names {
+        // Borrow candidates and stop after the visible limit. Large catalogs
+        // should not allocate names or quoted SQL for every table on each key.
+        let columns = relevant.iter().flat_map(|object| object.columns.iter()
+            .map(|column| (column.name.as_str(), true, None)));
+        let tables = objects.iter().filter(|object| qualifier.as_ref().is_none_or(|q| {
+            object.schema.as_ref().is_some_and(|schema| schema.eq_ignore_ascii_case(q))
+        })).map(|object| (object.display_name.as_deref().unwrap_or(&object.name), true, Some(object)));
+        let schemas = objects.iter().take(if qualifier.is_none() { objects.len() } else { 0 })
+            .filter_map(|object| object.schema.as_deref()).map(|schema| (schema, true, None));
+        let keywords = KEYWORDS.iter().filter(|_| qualifier.is_none()).map(|word| (*word, false, None));
+        for (name, identifier, table) in columns.chain(tables).chain(schemas).chain(keywords) {
             if name.to_lowercase().starts_with(&prefix)
                 && (!name.eq_ignore_ascii_case(&prefix)
-                    || (identifier && identifier_needs_quotes(&name)))
-                && !self.items.contains(&name)
+                    || (identifier && identifier_needs_quotes(name)))
+                && !self.items.iter().any(|item| item == name)
             {
+                let replacement = table.and_then(|object| {
+                    if matches!(dialect, Dialect::Mysql(_)) {
+                        Some(match (&qualifier, &object.schema) {
+                            (None, Some(schema)) => format!("{}.{}", mysql_identifier(schema), mysql_identifier(name)),
+                            _ => mysql_identifier(name),
+                        })
+                    } else { object.schema.as_ref().map(|_| {
+                        if qualifier.is_some() { format!("\"{}\"", name.replace('"', "\"\"")) }
+                        else { object.name.clone() }
+                    }) }
+                });
+                let name = name.to_owned();
                 self.items.push(name.clone());
                 if identifier {
                     self.identifiers.insert(name.clone());
@@ -993,6 +973,32 @@ mod tests {
         assert!(!local_code_position("SELECT 'escaped \\' FR", normal));
         assert!(local_code_position("SELECT 'escaped \\' FR", no_escape));
         assert!(!local_code_position("SELECT 'escaped \\' FR", Dialect::Mysql(crate::sql::mysql::Mode { no_backslash_escapes: false, ansi_quotes: true })));
+    }
+
+    #[test]
+    #[ignore = "manual large-catalog completion timing"]
+    fn large_catalog_completion_timing() {
+        let mut objects: Vec<_> = (0..20_000).map(|i| {
+            let mut table = object(&format!("table_{i:05}"), &["id", "customer_name", "order_total"]);
+            table.schema = Some("public".into());
+            table
+        }).collect();
+        objects.push(object("customers", &["customer_name"]));
+        let mut completion = Completion::default();
+        for sql in ["SELECT * FROM ta", "SELECT c.cu FROM customers c", "SELECT nonexistent"] {
+            let cursor = sql.find(" FROM customers").unwrap_or(sql.len());
+            let mut samples = Vec::new();
+            for _ in 0..50 {
+                let start = std::time::Instant::now();
+                completion.refresh(sql, cursor, &objects, &[], true, Dialect::Mysql(crate::sql::mysql::Mode::default()));
+                samples.push(start.elapsed());
+                assert!(completion.items.len() <= 12);
+            }
+            samples.sort();
+            eprintln!("{sql}: median={:?}, p95={:?}", samples[25], samples[47]);
+            if sql.ends_with(" ta") { assert_eq!(completion.items.len(), 12); }
+            if sql.contains("c.cu") { assert_eq!(completion.items, vec!["customer_name"]); }
+        }
     }
 
     #[test]
