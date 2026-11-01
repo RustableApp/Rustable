@@ -479,3 +479,19 @@ require secure transport, the separate successful KILL QUERY connection also
 uses TLS. Removing its trusted CA after the main connection is established
 produces a certificate error; the main query's read deadline then disconnects
 the session rather than reporting successful cancellation or reusing it.
+
+### Focused partial-revoke acceptance test
+
+Run this alone, with no other MySQL fixture tests/processes. It temporarily
+changes the disposable server's global partial_revokes setting, which changes
+how existing schema grants are interpreted. The test restores the old setting
+and removes its restriction even if an assertion fails.
+
+```sh
+RUSTABLE_MYSQL_TEST_PORT=43316 RUSTABLE_MYSQL_PARTIAL_REVOKES_TEST=1 \
+  mise exec -- cargo test --lib live_review_global_trigger_privilege -- --ignored
+```
+
+Ordinary driver-suite runs leave this server-wide branch disabled. Both engines
+still exercise unrestricted global grants, actual triggers, late grants, and
+revocation in the ordinary ignored integration suite.

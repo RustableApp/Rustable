@@ -19,6 +19,7 @@ struct MysqlDriver {
     mode: Mode,
     mode_tracking: bool,
     session_dirty: bool,
+    global_trigger_at_connect: bool,
 }
 
 impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
@@ -33,9 +34,17 @@ impl MysqlDriver {
         crate::connection_profiles::MysqlProfile::from(config).validate()?;
         let mut connection = Conn::new(OptsBuilder::from(config)).map_err(|e| e.to_string())?;
         connection.query_drop("SET SESSION session_track_system_variables = 'sql_mode'").map_err(|e| e.to_string())?;
-        let (version, database, sql_mode): (String, Option<String>, String) = connection.query_first(
-            "SELECT VERSION(), DATABASE(), @@SESSION.sql_mode").map_err(|e| e.to_string())?
+        let (version, database, sql_mode, account): (String, Option<String>, String, String) = connection.query_first(
+            "SELECT VERSION(), DATABASE(), @@SESSION.sql_mode, CURRENT_USER()").map_err(|e| e.to_string())?
             .ok_or("Server did not return session metadata")?;
+        // Static global privilege changes take effect only on a new session.
+        // Remember the login-time grant so later grants cannot imply visibility
+        // that this connection does not actually have.
+        let global_trigger_at_connect = if let Some(grantee) = editing::grantee(&account) {
+            connection.exec_first::<u8, _, _>(
+                "SELECT 1 FROM information_schema.USER_PRIVILEGES WHERE GRANTEE=? AND PRIVILEGE_TYPE='TRIGGER' LIMIT 1",
+                (grantee,)).map_err(|e| e.to_string())?.is_some()
+        } else { false };
         let names = connection.query("SHOW DATABASES").map_err(|e| e.to_string())?;
         Ok(Self {
             connection: Some(connection),
@@ -46,6 +55,7 @@ impl MysqlDriver {
             mode: parse_mode(&sql_mode),
             mode_tracking: true,
             session_dirty: false,
+            global_trigger_at_connect,
         })
     }
 }
@@ -1124,6 +1134,75 @@ mod tests {
         drop(driver);
         admin.query_drop("DROP TABLE hidden_trigger_probe").unwrap();
         admin.query_drop("DROP USER 'rustable_review_limited'@'%'").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_global_trigger_privilege_and_revocation() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let mut config = MysqlConfig { host:"127.0.0.1".into(), port, user:"root".into(), password:"rustable-test-only".into(), database:"rustable_test".into(), tls:false, ..Default::default() };
+        let mut admin = Conn::new(OptsBuilder::from(&config)).unwrap();
+        admin.query_drop("DROP USER IF EXISTS 'rustable_global_review'@'%'").unwrap();
+        admin.query_drop("CREATE USER 'rustable_global_review'@'%' IDENTIFIED BY 'rustable-test-only'").unwrap();
+        admin.query_drop("GRANT SELECT, UPDATE ON rustable_test.* TO 'rustable_global_review'@'%'").unwrap();
+        let mut pregrant_config = config.clone();
+        pregrant_config.user = "rustable_global_review".into();
+        let mut pregrant = MysqlDriver::connect(&pregrant_config).unwrap();
+        admin.query_drop("GRANT TRIGGER ON *.* TO 'rustable_global_review'@'%'").unwrap();
+        admin.query_drop("DROP TABLE IF EXISTS global_review_probe").unwrap();
+        admin.query_drop("CREATE TABLE global_review_probe(id INT PRIMARY KEY, label VARCHAR(20)) ENGINE=InnoDB").unwrap();
+        admin.query_drop("INSERT INTO global_review_probe VALUES(1,'original')").unwrap();
+        config.user = "rustable_global_review".into();
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let plan_for = |driver: &mut MysqlDriver, value: &str| {
+            let rows = driver.browse(&Browse { table:"global_review_probe".into(), ..Default::default() }).unwrap();
+            driver.plan(&[Change::Cell { table:"global_review_probe".into(), column:"label".into(), original:rows.grid.rows[0].clone(), value:Value::Text(value.into()) }]).unwrap()
+        };
+        let plan = plan_for(&mut driver, "saved");
+        driver.apply(&plan).unwrap();
+        assert_eq!(admin.query_first::<String,_>("SELECT label FROM global_review_probe").unwrap().as_deref(), Some("saved"));
+        // A globally privileged session must still reject actual triggers.
+        admin.query_drop("CREATE TRIGGER global_review_trigger BEFORE UPDATE ON global_review_probe FOR EACH ROW SET NEW.label='trigger'").unwrap();
+        let plan = plan_for(&mut driver, "rejected");
+        assert!(driver.apply(&plan).unwrap_err().contains("tables with triggers"));
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        // A grant issued after login must not make stale session privileges
+        // mistake hidden triggers for an empty trigger list.
+        let late_grant_error = pregrant.apply(&plan).unwrap_err();
+        assert!(late_grant_error.contains("direct privileges") || late_grant_error.contains("tables with triggers"), "late global grant must fail the visibility/trigger gate, not a later incidental check: {late_grant_error}");
+        assert_eq!(pregrant.transaction_state(), TransactionState::Idle);
+        drop(pregrant);
+        // This changes global grant interpretation, so run only in the focused
+        // opt-in invocation, never concurrently with other fixture tests.
+        if port == 43316 && std::env::var_os("RUSTABLE_MYSQL_PARTIAL_REVOKES_TEST").is_some() {
+            let previous: u8 = admin.query_first("SELECT @@GLOBAL.partial_revokes").unwrap().unwrap();
+            admin.query_drop("SET GLOBAL partial_revokes=ON").unwrap();
+            let check = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                admin.query_drop("REVOKE TRIGGER ON rustable_test.* FROM 'rustable_global_review'@'%'").unwrap();
+                let mut restricted = MysqlDriver::connect(&config).unwrap();
+                let global: Option<u8> = restricted.conn().unwrap().query_first("SELECT 1 FROM information_schema.USER_PRIVILEGES WHERE PRIVILEGE_TYPE='TRIGGER' LIMIT 1").unwrap();
+                assert_eq!(global, Some(1), "global privilege still appears despite schema restriction");
+                let visible: Option<u64> = restricted.conn().unwrap().query_first("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_TABLE='global_review_probe'").unwrap();
+                assert_eq!(visible, Some(0), "schema restriction hides the trigger");
+                assert!(restricted.apply(&plan).unwrap_err().contains("direct privileges"));
+                assert_eq!(restricted.transaction_state(), TransactionState::Idle);
+            }));
+            // Restore fixture-wide state even if a regression assertion fails.
+            admin.query_drop("GRANT TRIGGER ON *.* TO 'rustable_global_review'@'%'").unwrap();
+            admin.query_drop(format!("SET GLOBAL partial_revokes={previous}")).unwrap();
+            if let Err(panic) = check { std::panic::resume_unwind(panic); }
+        }
+        // New sessions after revocation cannot treat hidden metadata as no triggers.
+        admin.query_drop("REVOKE TRIGGER ON *.* FROM 'rustable_global_review'@'%'").unwrap();
+        drop(driver);
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        assert!(driver.apply(&plan).unwrap_err().contains("direct privileges"));
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+        assert_eq!(admin.query_first::<String,_>("SELECT label FROM global_review_probe").unwrap().as_deref(), Some("saved"));
+        drop(driver);
+        admin.query_drop("DROP TABLE global_review_probe").unwrap();
+        admin.query_drop("DROP USER 'rustable_global_review'@'%'").unwrap();
     }
 
     #[test]

@@ -154,16 +154,18 @@ fn snapshot_table(key: &str) -> Result<(String, String), String> {
     }
 }
 
+pub(super) fn grantee(account: &str) -> Option<String> {
+    let (user, host) = account.rsplit_once('@')?;
+    if user.contains(['\'', '\\']) || host.contains(['\'', '\\']) { return None; }
+    Some(format!("'{user}'@'{host}'"))
+}
+
 // Fail closed when trigger visibility cannot be established. Role-derived and
 // wildcard database grants need a separate effective-privilege implementation.
 fn require_trigger_visibility(driver: &mut MysqlDriver, schema: &str, table: &str) -> Result<(), String> {
     let account: String = driver.with_connection(|conn| conn.query_first("SELECT CURRENT_USER()"))?
         .ok_or("Missing current database account")?;
-    let (user, host) = account.rsplit_once('@').ok_or("Invalid current database account")?;
-    if user.contains(['\'', '\\']) || host.contains(['\'', '\\']) {
-        return Err("Cannot yet establish trigger visibility for this account name.".into());
-    }
-    let grantee = format!("'{user}'@'{host}'");
+    let grantee = grantee(&account).ok_or("Cannot yet establish trigger visibility for this account name.")?;
     let table_grant: Option<u8> = driver.with_connection(|conn| conn.exec_first(
         "SELECT 1 FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE=? AND TABLE_SCHEMA=? AND TABLE_NAME=? AND PRIVILEGE_TYPE='TRIGGER' LIMIT 1",
         (&grantee, schema, table)))?;
@@ -184,7 +186,17 @@ fn require_trigger_visibility(driver: &mut MysqlDriver, schema: &str, table: &st
         }
         name == schema
     });
-    if table_grant.is_none() && !schema_grant {
+    // Global grants are sufficient only when schema-level partial revokes cannot
+    // hide triggers. Do not infer effective role or restricted global privileges.
+    let global_grant = if table_grant.is_none() && !schema_grant && driver.global_trigger_at_connect {
+        let unrestricted = if driver.engine == "MariaDB" { true } else {
+            driver.with_connection(|conn| conn.query_first::<u8, _>("SELECT @@GLOBAL.partial_revokes"))? == Some(0)
+        };
+        unrestricted && driver.with_connection(|conn| conn.exec_first::<u8, _, _>(
+            "SELECT 1 FROM information_schema.USER_PRIVILEGES WHERE GRANTEE=? AND PRIVILEGE_TYPE='TRIGGER' LIMIT 1",
+            (&grantee,)))?.is_some()
+    } else { false };
+    if table_grant.is_none() && !schema_grant && !global_grant {
         return Err("Cannot verify all table triggers with this account's direct privileges. Reviewed MySQL saves are unavailable for this account.".into());
     }
     Ok(())

@@ -358,3 +358,32 @@ wait, and the timed-out main connection is discarded. No plaintext fallback.
 Combined `db::mysql` suites passed with both fixture types configured: 35 tests
 on MySQL 8.4 and 35 on MariaDB 11.4. Strict all-target Clippy passed. Native
 connection-form/keychain acceptance and broader production-readiness gates remain.
+
+### Global trigger grants and live-session changes (2026-11-01)
+
+Reviewed-save trigger visibility now also recognizes direct global TRIGGER grants
+present in the connection's startup privilege snapshot and still present at save
+time. A grant added after login cannot establish visibility for that existing
+session: the live MySQL fixture showed information_schema reports the new global
+grant while the session still hides the trigger. A fresh connection is required.
+The startup snapshot adds one metadata request per connection, not per query.
+
+MySQL global grants are accepted only with partial_revokes disabled. With it
+enabled, a global grant may coexist with a schema restriction that hides triggers.
+The focused fixture proves both the retained global metadata row and hidden
+trigger, and verifies rejection before writes. Explicit table/exact-schema grants
+continue to work. Roles, wildcard grants and restricted global grants remain
+unimplemented; GUI editing remains disabled pending the other acceptance gates.
+
+Validation: 36 driver tests passed on each MySQL 8.4 and MariaDB 11.4 fixture,
+including TLS/cancellation/transport tests. The new live test checks successful
+commit, actual-trigger rejection, a late grant on an existing session, and revoked
+grants on a new session. The focused partial-revoke variant passed separately.
+Strict all-target Clippy passed. An initial concurrent run exposed fixture
+interference from partial_revokes changing schema-grant interpretation; this
+server-wide test now requires an explicit opt-in and must run alone.
+
+References:
+- https://dev.mysql.com/doc/mysql-infoschema-excerpt/8.0/en/information-schema-user-privileges-table.html
+- https://dev.mysql.com/doc/refman/8.4/en/partial-revokes.html
+- https://mariadb.com/docs/server/reference/system-tables/information-schema/information-schema-tables/information-schema-user_privileges-table
