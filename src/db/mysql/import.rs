@@ -118,12 +118,19 @@ mod tests {
         admin.query_drop("DROP TABLE IF EXISTS csv_privilege_probe").unwrap();
         admin.query_drop("CREATE TABLE csv_privilege_probe(id INT PRIMARY KEY,label VARCHAR(20)) ENGINE=InnoDB").unwrap();
         admin.query_drop("CREATE TRIGGER csv_privilege_trigger BEFORE INSERT ON csv_privilege_probe FOR EACH ROW SET NEW.label='triggered'").unwrap();
+        admin.query_drop("CREATE TRIGGER csv_privilege_update BEFORE UPDATE ON csv_privilege_probe FOR EACH ROW SET NEW.label='updated'").unwrap();
         admin.query_drop("GRANT SELECT, INSERT ON rustable_test.csv_privilege_probe TO 'rustable_csv_limited'@'%'").unwrap();
         config.user = "rustable_csv_limited".into();
         let mut driver = MysqlDriver::connect(&config).unwrap();
         let cancel = AtomicBool::new(false);
         let request = request_for(&mut driver,"csv_privilege_probe","label,id\noriginal,1\n");
         driver.edit_schema_snapshot("rustable_test","csv_privilege_probe").unwrap();
+        let (_, triggers) = driver.table_metadata("rustable_test", "csv_privilege_probe").unwrap();
+        if driver.engine == "MariaDB" {
+            assert_eq!(triggers.len(), 2);
+            assert!(triggers.iter().all(|trigger| trigger.metadata_error.is_some()));
+        }
+        assert_eq!(driver.conn().unwrap().query_first::<u64, _>("SELECT 42").unwrap(), Some(42));
         let plan = driver.plan(&[Change::InsertRow { id:1, table:"csv_privilege_probe".into(),
             fields:vec![("id".into(),Value::Integer(1)),("label".into(),Value::Text("original".into()))] }]).unwrap();
         assert!(driver.apply(&plan).unwrap_err().contains("direct privileges"));
@@ -134,6 +141,10 @@ mod tests {
         driver = MysqlDriver::connect(&config).unwrap();
         assert!(driver.import_csv(&request,&cancel).unwrap_err().contains("tables with triggers"));
         assert_eq!(admin.query_first::<u64,_>("SELECT COUNT(*) FROM csv_privilege_probe").unwrap(),Some(0));
+        let (_, triggers) = driver.table_metadata("rustable_test", "csv_privilege_probe").unwrap();
+        assert_eq!(triggers.len(), 2);
+        assert!(triggers.iter().all(|trigger| trigger.metadata_error.is_none()));
+        admin.query_drop("DROP TRIGGER csv_privilege_update").unwrap();
         admin.query_drop("DROP TRIGGER csv_privilege_trigger").unwrap();
         assert_eq!(driver.import_csv(&request,&cancel).unwrap(),1);
         admin.query_drop("REVOKE INSERT ON rustable_test.csv_privilege_probe FROM 'rustable_csv_limited'@'%'").unwrap();

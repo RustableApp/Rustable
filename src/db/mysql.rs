@@ -278,9 +278,42 @@ impl MysqlDriver {
             });
             index.columns.push(column);
         }
+        // Bound each batch while avoiding one network round trip per trigger.
+        // Permission errors terminate multi-statement execution; retry that
+        // chunk individually so unreadable definitions retain their own errors.
+        let mut definitions = std::collections::BTreeMap::new();
+        for chunk in names.chunks(64).filter(|chunk| chunk.len() > 1) {
+            let sql = chunk.iter().map(|(name,)| format!("SHOW CREATE TRIGGER {}.{}", quote(schema), quote(name)))
+                .collect::<Vec<_>>().join("; ");
+            let batch = self.with_connection(|conn| {
+                let read = (|| -> Result<Vec<::mysql::Row>, ::mysql::Error> {
+                    let mut result = conn.query_iter(&sql)?;
+                    let mut rows = Vec::new();
+                    while let Some(set) = result.iter() {
+                        let mut set = set.collect::<Result<Vec<_>, _>>()?;
+                        if set.len() != 1 {
+                            return Err(std::io::Error::other("Missing trigger definition result").into());
+                        }
+                        rows.push(set.remove(0));
+                    }
+                    Ok(rows)
+                })();
+                match read {
+                    Err(::mysql::Error::MySqlError(error)) if matches!(error.code, 1142 | 1227) => Ok(None),
+                    result => result.map(Some),
+                }
+            })?;
+            if let Some(rows) = batch {
+                if rows.len() != chunk.len() { return Err("Missing trigger definition results".into()); }
+                for ((name,), row) in chunk.iter().zip(rows) {
+                    definitions.insert(name.clone(), row.get::<String, _>("SQL Original Statement")
+                        .ok_or_else(|| "Trigger definition is unavailable to this account.".to_owned()));
+                }
+            }
+        }
         let mut triggers = Vec::new();
         for (name,) in names {
-            let definition = self.with_connection(|conn| {
+            let definition = if let Some(definition) = definitions.remove(&name) { definition } else { self.with_connection(|conn| {
                 match conn.query_first::<::mysql::Row, _>(format!("SHOW CREATE TRIGGER {}.{}", quote(schema), quote(&name))) {
                     // MariaDB can expose a trigger name while refusing its DDL.
                     // Preserve that distinction without hiding cancellation or
@@ -289,7 +322,7 @@ impl MysqlDriver {
                     result => result.map(|row| row.and_then(|row| row.get::<String, _>("SQL Original Statement"))
                         .ok_or_else(|| "Trigger definition is unavailable to this account.".to_owned())),
                 }
-            })?;
+            })? };
             let (ddl, metadata_error) = match definition {
                 Ok(ddl) => (ddl, None),
                 Err(error) => (String::new(), Some(error)),
@@ -751,15 +784,22 @@ mod tests {
         driver.conn().unwrap().query_drop(format!("DROP TABLE IF EXISTS {}",quote(table))).unwrap();
         driver.conn().unwrap().query_drop(format!("CREATE TABLE {}(id INT PRIMARY KEY,n INT,INDEX by_n(n)) ENGINE=InnoDB",quote(table))).unwrap();
         driver.conn().unwrap().query_drop(format!("CREATE TRIGGER {} BEFORE UPDATE ON {} FOR EACH ROW SET NEW.n=NEW.n+1",quote(trigger),quote(table))).unwrap();
+        let second_trigger = "metadata second trigger";
+        driver.conn().unwrap().query_drop(format!("CREATE TRIGGER {} BEFORE INSERT ON {} FOR EACH ROW SET NEW.n=COALESCE(NEW.n,0)",quote(second_trigger),quote(table))).unwrap();
+        let connection_id = driver.conn().unwrap().connection_id();
         for mode in ["", "NO_BACKSLASH_ESCAPES", "ANSI_QUOTES,NO_BACKSLASH_ESCAPES"] {
             assert!(driver.execute(&format!("SET SESSION sql_mode='{mode}'"),false,&AtomicBool::new(false)).error.is_none());
             let (indexes,triggers) = driver.table_metadata("rustable_test",table).unwrap();
             assert_eq!(indexes.len(),2);
             assert!(indexes.iter().any(|index| index.name == "by_n" && index.columns == ["n"]));
-            assert_eq!(triggers.len(),1);
-            assert_eq!(triggers[0].name,trigger);
-            assert!(triggers[0].metadata_error.is_none());
-            assert!(!triggers[0].ddl.is_empty());
+            assert_eq!(triggers.len(),2);
+            for name in [trigger, second_trigger] {
+                let trigger = triggers.iter().find(|trigger| trigger.name == name).unwrap();
+                assert!(trigger.metadata_error.is_none());
+                let row: ::mysql::Row = driver.conn().unwrap().query_first(format!("SHOW CREATE TRIGGER {}", quote(name))).unwrap().unwrap();
+                assert_eq!(trigger.ddl, row.get::<String, _>("SQL Original Statement").unwrap());
+            }
+            assert_eq!(driver.conn().unwrap().connection_id(), connection_id);
         }
         driver.conn().unwrap().query_drop(format!("DROP TABLE {}",quote(table))).unwrap();
     }

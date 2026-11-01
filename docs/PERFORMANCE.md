@@ -406,3 +406,23 @@ Raw output: `docs/benchmarks/completion-protocol-m4-max.json`. The harness has
 bounded response waits, verifies protocol results, shuts down the helper and
 removes its temporary catalog. Whole-app/concurrent-session RSS, pathological SQL
 parsing, and native input-to-paint measurements remain separate open gates.
+
+### MySQL/MariaDB trigger metadata batching (2026-11-01)
+
+Table browsing previously issued one SHOW CREATE TRIGGER command per trigger
+while waiting to return the grid. Definitions now use multi-statement batches of
+up to 64 on the worker's existing session. For N readable triggers this reduces
+the definition command count from N to ceil(N/64); it does not remove the earlier
+column, row or index/catalog requests. No second connection or implicit transaction
+is introduced.
+
+A privilege error stops a server's multi-statement batch. That chunk therefore
+falls back to individual reads, preserving per-trigger metadata errors and the
+existing behavior for restricted accounts. Other errors still fail the request.
+
+Live checks on MySQL 8.4 and MariaDB 11.4 compare two batched definitions with
+individual server definitions across SQL modes and quoted names. Limited-account
+checks cover two hidden MariaDB triggers, subsequent query synchronization, then
+readable definitions after granting the fixture account TRIGGER. All passed.
+This establishes the functional path and reduced command structure, not a measured
+WAN latency improvement; overall browse latency still needs remote-style timing.
