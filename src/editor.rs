@@ -14,6 +14,15 @@ pub fn layout(
     text: &dyn egui::TextBuffer,
     width: f32,
 ) -> std::sync::Arc<egui::Galley> {
+    layout_rows(ui, text, width, usize::MAX)
+}
+
+/// Compact highlighted preview with whole lines and an overflow ellipsis.
+pub fn preview(ui: &egui::Ui, text: &str, width: f32) -> std::sync::Arc<egui::Galley> {
+    layout_rows(ui, &text, width, 2)
+}
+
+fn layout_rows(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32, max_rows: usize) -> std::sync::Arc<egui::Galley> {
     type Cache = egui::cache::FrameCache<LayoutJob, Highlighter>;
     let mut job = ui.ctx().memory_mut(|memory| {
         memory
@@ -22,6 +31,7 @@ pub fn layout(
             .get((text.as_str(), ui.visuals().dark_mode))
     });
     job.wrap.max_width = width.max(1.0);
+    job.wrap.max_rows = max_rows;
     ui.fonts_mut(|fonts| fonts.layout_job(job))
 }
 
@@ -225,6 +235,21 @@ const KEYWORDS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preview_elides_long_sql_without_limiting_the_editor() {
+        let ctx = egui::Context::default();
+        let sql = "SELECT customer_id, customer_name, total_value FROM customers WHERE total_value > 100 ORDER BY customer_name;";
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let compact = preview(ui, sql, 120.0);
+                assert_eq!(compact.rows.len(), 2);
+                assert!(compact.elided);
+                let full = layout(ui, &sql, 120.0);
+                assert!(full.rows.len() > 2);
+                assert!(!full.elided);
+            });
+        });
+    }
     #[test]
     fn highlighting_preserves_unicode_and_incomplete_input() {
         for sql in [

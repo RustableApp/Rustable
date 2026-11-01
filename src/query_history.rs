@@ -53,7 +53,7 @@ impl Rustable {
                         let content = rect.shrink2(egui::vec2(8.0, 5.0));
                         ui.painter().text(content.left_top(), egui::Align2::LEFT_TOP, time, egui::FontId::proportional(11.0), ui.visuals().weak_text_color());
                         let sql: String = entry.sql.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect();
-                        let galley = crate::editor::layout(ui, &sql, content.width());
+                        let galley = crate::editor::preview(ui, &sql, content.width());
                         let clip = egui::Rect::from_min_max(content.min + egui::vec2(0.0, 17.0), content.max);
                         ui.painter().with_clip_rect(clip).galley(clip.min, galley, ui.visuals().text_color());
                         if primary_pressed(&response) { self.history_selected = Some(index); }
