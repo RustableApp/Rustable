@@ -613,3 +613,25 @@ MySQL first/next page 151.35/111.43 ms; MariaDB 158.12/105.35 ms. These are diag
 fixture timings (different row counts), not production latency benchmarks or a
 claim that metadata/data now run concurrently. Existing ordinary/filter/sort browse
 tests passed on both engines; strict all-target Clippy passed.
+
+### Initial MySQL/MariaDB CSV import driver (2026-11-01)
+
+Added a streaming driver path using prepared INSERT batches of at most 64 rows,
+a 1 MiB batching threshold (individual records retain the shared CSV parser's
+limits), and one transaction for the entire source snapshot. Mapping is validated,
+column names are quoted, values are bound, defaults apply to omitted columns, and
+empty-to-NULL follows the request. The transaction holds metadata while checking
+current columns, InnoDB, constraint enforcement, temporary-table exclusion and
+trigger visibility; tables with triggers remain unsupported. Every batch checks
+warnings and affected rows. Errors roll back all batches; unknown commit/rollback
+outcomes disconnect without replay.
+
+`live_csv_batches_are_atomic_and_validate_destination` passed on MySQL and MariaDB:
+130-row multi-batch Unicode import, omitted defaults/generated values, exact large
+integer/NULL mapping, duplicate failure after an earlier successful batch, schema
+change rejection, pre-cancellation, non-strict conversion-warning rollback, retry,
+and active-transaction exclusion. Strict all-target Clippy passed.
+
+This does not enable UI import. Remaining gates include in-flight cancellation,
+transport-failure tests, schema identity across preview/database switches, broader
+expression/privilege coverage and native mapping/review/import acceptance.

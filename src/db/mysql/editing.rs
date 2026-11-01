@@ -162,7 +162,7 @@ pub(super) fn grantee(account: &str) -> Option<String> {
 
 // Fail closed when trigger visibility cannot be established. Role-derived and
 // wildcard database grants need a separate effective-privilege implementation.
-fn require_trigger_visibility(driver: &mut MysqlDriver, schema: &str, table: &str) -> Result<(), String> {
+pub(super) fn require_trigger_visibility(driver: &mut MysqlDriver, schema: &str, table: &str) -> Result<(), String> {
     let account: String = driver.with_connection(|conn| conn.query_first("SELECT CURRENT_USER()"))?
         .ok_or("Missing current database account")?;
     let grantee = grantee(&account).ok_or("Cannot yet establish trigger visibility for this account name.")?;

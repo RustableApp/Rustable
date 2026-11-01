@@ -5,6 +5,7 @@ use crate::{connection::MysqlConfig, sql::mysql::Mode};
 
 mod editing;
 mod export;
+mod import;
 #[cfg(test)]
 mod transport_tests;
 
@@ -556,6 +557,9 @@ impl Driver for MysqlDriver {
     }
     fn apply(&mut self, plan: &ChangePlan) -> Result<(), String> {
         editing::apply(self, plan)
+    }
+    fn import_csv(&mut self, request: &csv_import::Request, cancel: &AtomicBool) -> Result<u64, String> {
+        import::table(self, request, cancel)
     }
 }
 
