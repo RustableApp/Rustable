@@ -38,6 +38,15 @@ impl Request {
             vec!["?"; names.len()].join(", ")
         ))
     }
+    /// Generated review SQL; execution remains parameterized by the driver.
+    pub fn mysql_sql(&self) -> Result<String, String> {
+        self.sql()?; // Same mapping rules for all engines.
+        let schema = self.schema.as_deref().filter(|name| !name.is_empty())
+            .ok_or("Select the destination database again before importing")?;
+        Ok(mysql_insert(schema, &self.table, self.destinations.iter().flatten()
+            .map(|index| self.columns[*index].name.as_str())))
+    }
+
     fn postgres_target(&self) -> Result<(String, String), String> {
         self.sql()?;
         use sqlparser::{dialect::PostgreSqlDialect, parser::Parser, tokenizer::Token};
@@ -105,6 +114,13 @@ impl Request {
     }
 }
 
+fn mysql_insert<'a>(schema: &str, table: &str, columns: impl Iterator<Item = &'a str>) -> String {
+    let quote = |name: &str| format!("`{}`", name.replace('`', "``"));
+    let columns: Vec<_> = columns.map(quote).collect();
+    format!("INSERT INTO {}.{} ({}) VALUES ({});", quote(schema), quote(table),
+        columns.join(", "), vec!["?"; columns.len()].join(", "))
+}
+
 fn named_source_sample<'a>(fields: impl Iterator<Item = (&'a str, Value)>) -> String {
     let fields = fields.map(|(name, value)| {
         let name = serde_json::to_string(name).expect("string serialization");
@@ -121,6 +137,19 @@ fn named_source_sample<'a>(fields: impl Iterator<Item = (&'a str, Value)>) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mysql_import_preview_quotes_database_table_and_columns() {
+        let sql = mysql_insert("store`data", "order?details", ["key`name", "note?"].into_iter());
+        assert_eq!(sql, "INSERT INTO `store``data`.`order?details` (`key``name`, `note?`) VALUES (?, ?);");
+        let preview = crate::review_sql::readable_dialect(&sql,
+            &[Value::Text("O'Reilly".into()), Value::Text("a\\b".into())],
+            crate::sql::Dialect::Mysql(Default::default()));
+        assert!(preview.contains("'O''Reilly'"));
+        assert!(preview.contains("CONVERT(X'615C62' USING utf8mb4)"));
+        assert!(preview.contains("`order?details`"));
+        assert!(preview.contains("`note?`"));
+    }
 
     #[test]
     fn source_sample_preserves_names_text_null_and_escaping() {

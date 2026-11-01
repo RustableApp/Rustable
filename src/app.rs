@@ -1579,7 +1579,12 @@ impl Rustable {
                             source: source.clone(), options, table: self.csv_mapping.table.clone(), columns: self.csv_mapping.columns.clone(),
                             destinations: self.csv_mapping.destinations.clone(), empty_as_null: self.csv_empty_as_null, postgres_inserts: self.csv_postgres_inserts,
                         };
-                        match if self.engine == "PostgreSQL" { request.postgres_sql() } else { request.sql() } {
+                        let import_sql = match self.engine.as_str() {
+                            "PostgreSQL" => request.postgres_sql(),
+                            "MySQL" | "MariaDB" => request.mysql_sql(),
+                            _ => request.sql(),
+                        };
+                        match import_sql {
                             Ok(sql) => {
                                 let mut bytes = 0;
                                 let mut samples: Vec<String> = preview.rows.iter().take(10).map(|row| {
@@ -1588,7 +1593,9 @@ impl Rustable {
                                     bytes += size;
                                     if bytes > 32_768 { "-- Large row omitted from the visual sample; its full value will be imported.".into() }
                                     else if self.engine == "PostgreSQL" { request.source_sample(row) }
-                                    else { crate::review_sql::expand(&sql, &values) }
+                                    else if matches!(self.engine.as_str(), "MySQL" | "MariaDB") {
+                                        crate::review_sql::readable_dialect(&sql, &values, self.session_dialect.unwrap_or(crate::sql::Dialect::for_engine(&self.engine)))
+                                    } else { crate::review_sql::expand(&sql, &values) }
                                 }).collect();
                                 if self.engine == "PostgreSQL" { samples.insert(0, sql); }
                                 self.csv_review = Some((request, samples));

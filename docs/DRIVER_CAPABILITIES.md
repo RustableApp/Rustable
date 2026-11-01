@@ -669,3 +669,15 @@ All four reply-loss tests passed independently on MySQL and MariaDB. Strict
 all-target Clippy passed. These checks cover lost transaction acknowledgements;
 other transport phases, effective-privilege/expression coverage and native import
 acceptance remain distinct work. UI import remains gated.
+
+### MySQL CSV review SQL (2026-11-01)
+
+The shared review flow now selects MySQL-specific INSERT generation for MySQL and
+MariaDB, quoting the captured database, table and column names with backticks.
+Display-only expansion uses the existing MySQL literal renderer, including safe
+representation of backslashes/NUL independently of session escaping mode. Driver
+validation uses the same generated request contract; writes remain bound batches.
+Unit coverage verifies backticks and literal question marks in identifiers plus
+apostrophes/backslashes in values. Both live CSV tests passed again on each engine;
+strict all-target Clippy passed. This prepares review for UI enablement but does
+not change the current disabled import capability or close native acceptance.

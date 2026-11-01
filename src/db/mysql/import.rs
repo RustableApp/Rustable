@@ -2,7 +2,7 @@
 use super::*;
 
 pub(super) fn table(driver: &mut MysqlDriver, request: &csv_import::Request, cancel: &AtomicBool) -> Result<u64, String> {
-    request.sql()?; // Shared mapping validation (generated/duplicate/missing columns).
+    request.mysql_sql()?; // Shared mapping and explicit destination identity validation.
     driver.require_idle()?;
     if cancel.load(Ordering::Acquire) { return Err("CSV import cancelled".into()); }
     let schema = driver.schemas.selected.clone().ok_or("Choose a database first")?;
@@ -189,7 +189,7 @@ mod tests {
         assert!(driver.import_csv(&fresh,&cancel).unwrap_err().contains("database changed"));
         assert!(driver.execute("USE rustable_test",false,&cancel).error.is_none());
         let mut unbound = fresh.clone(); unbound.schema = None;
-        assert!(driver.import_csv(&unbound,&cancel).unwrap_err().contains("database changed"));
+        assert!(driver.import_csv(&unbound,&cancel).unwrap_err().contains("destination database"));
         cancel.store(true,Ordering::Release);
         assert!(driver.import_csv(&fresh,&cancel).unwrap_err().contains("cancelled"));
         cancel.store(false,Ordering::Release);
