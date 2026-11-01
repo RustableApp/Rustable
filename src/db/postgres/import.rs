@@ -190,6 +190,7 @@ mod tests {
         )
         .unwrap();
         csv_import::Request {
+            schema: None,
             source: preview.source.unwrap(),
             options: preview.options,
             table: "pg_temp.import_qa".into(),
@@ -587,6 +588,7 @@ mod tests {
         let source = preview.source.unwrap();
         let bytes = source.bytes;
         let request = csv_import::Request {
+            schema: None,
             source,
             options: preview.options,
             table: "pg_temp.import_qa".into(),

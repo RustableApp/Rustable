@@ -7,6 +7,8 @@ pub struct Request {
     pub source: Arc<csv_preview::Source>,
     pub options: csv_preview::Options,
     pub table: String,
+    #[cfg_attr(target_arch = "wasm32", serde(default))]
+    pub schema: Option<String>,
     pub columns: Vec<Column>,
     pub destinations: Vec<Option<usize>>,
     pub empty_as_null: bool,

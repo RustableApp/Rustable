@@ -4,12 +4,14 @@ use crate::db::Column;
 #[derive(Default)]
 pub struct Mapping {
     pub table: String,
+    pub schema: Option<String>,
     pub columns: Vec<Column>,
     pub destinations: Vec<Option<usize>>,
 }
 impl Mapping {
     pub fn new(table: String, columns: Vec<Column>, source: &[String], header: bool) -> Self {
         let mut mapping = Self {
+            schema: None,
             table,
             columns,
             destinations: vec![None; source.len()],

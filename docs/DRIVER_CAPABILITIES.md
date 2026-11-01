@@ -635,3 +635,22 @@ and active-transaction exclusion. Strict all-target Clippy passed.
 This does not enable UI import. Remaining gates include in-flight cancellation,
 transport-failure tests, schema identity across preview/database switches, broader
 expression/privilege coverage and native mapping/review/import acceptance.
+
+### CSV cancellation and destination database binding (2026-11-01)
+
+An in-flight cancellation test now verifies an actual completed 64-row batch via
+an independent READ UNCOMMITTED observer while a second connection blocks the
+last insert. Cancellation rolls back all 64 rows, leaves the driver idle on the
+same connection ID, and permits a successful 65-row retry. Both MySQL and MariaDB
+passed, with a three-second cancellation bound in the disposable local test.
+
+Import mapping/review now retains the destination schema from fresh metadata.
+MySQL/MariaDB require that captured database to match the active session; absent
+identity or a USE/database change rejects the request before beginning an import.
+Live tests switch to information_schema after constructing a request and verify
+rejection, then return to the original database and verify normal operation.
+The UI preserves the schema when re-previewing the same CSV with changed options.
+
+Both CSV live tests passed on both engines. Full library suite: 433 passed,
+92 fixture/manual tests ignored. Strict all-target Clippy passed. GUI import is
+still gated pending transport failure, expression/privilege and native acceptance.

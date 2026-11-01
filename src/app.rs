@@ -1178,6 +1178,7 @@ impl Rustable {
                             &preview.columns,
                             preview.options.header,
                         );
+                        self.csv_mapping.schema = object.schema;
                     }
                 }
                 Ok(Payload::CsvPreview(preview)) => {
@@ -1194,12 +1195,14 @@ impl Rustable {
                     } else {
                         (String::new(), Vec::new())
                     };
+                    let schema = if table.is_empty() { None } else { self.csv_mapping.schema.clone() };
                     self.csv_mapping = csv_mapping::Mapping::new(
                         table,
                         columns,
                         &preview.columns,
                         preview.options.header,
                     );
+                    self.csv_mapping.schema = schema;
                     self.csv_preview = Some(preview);
                 }
                 Ok(Payload::ScriptOpened { path, sql }) => {
@@ -1572,6 +1575,7 @@ impl Rustable {
                     if ui.add_enabled(import_supported && !self.safe && self.pending.is_none() && options == preview.options && self.csv_mapping.validate().is_ok(), egui::Button::new("Review import…")).clicked()
                         && let Some(source) = &preview.source {
                         let request = db::csv_import::Request {
+                            schema: self.csv_mapping.schema.clone(),
                             source: source.clone(), options, table: self.csv_mapping.table.clone(), columns: self.csv_mapping.columns.clone(),
                             destinations: self.csv_mapping.destinations.clone(), empty_as_null: self.csv_empty_as_null, postgres_inserts: self.csv_postgres_inserts,
                         };
@@ -9585,6 +9589,7 @@ mod csv_review_keyboard_tests {
         wait_for_worker(&mut app);
         app.csv_review = Some((
             db::csv_import::Request {
+                schema: None,
                 source: preview.source.clone().unwrap(),
                 options: preview.options,
                 table: "test".into(),
@@ -10916,6 +10921,7 @@ mod transaction_window_tests {
         let preview = db::csv_preview::load(csv.path(), Default::default(), None,
             &std::sync::atomic::AtomicBool::new(false)).unwrap();
         app.worker.send(Command::ImportCsv { request: db::csv_import::Request {
+            schema: None,
             source: preview.source.unwrap(), options: preview.options, table: "t".into(),
             columns: vec![], destinations: vec![], empty_as_null: false, postgres_inserts: false,
         }, safe: false }).unwrap();

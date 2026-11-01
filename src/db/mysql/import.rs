@@ -6,6 +6,9 @@ pub(super) fn table(driver: &mut MysqlDriver, request: &csv_import::Request, can
     driver.require_idle()?;
     if cancel.load(Ordering::Acquire) { return Err("CSV import cancelled".into()); }
     let schema = driver.schemas.selected.clone().ok_or("Choose a database first")?;
+    if request.schema.as_deref() != Some(schema.as_str()) {
+        return Err("Import destination database changed; select the destination again before importing.".into());
+    }
     let qualified = format!("{}.{}", quote(&schema), quote(&request.table));
     let fields = request.destinations.iter().flatten().map(|i| quote(&request.columns[*i].name)).collect::<Vec<_>>();
     let checks = if driver.engine == "MariaDB" {
@@ -91,12 +94,66 @@ pub(super) fn table(driver: &mut MysqlDriver, request: &csv_import::Request, can
 mod tests {
     use super::*;
     fn request(driver: &mut MysqlDriver, text: &str) -> csv_import::Request {
+        request_for(driver, "mysql_csv_probe", text)
+    }
+    fn request_for(driver: &mut MysqlDriver, table: &str, text: &str) -> csv_import::Request {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), text).unwrap();
         let preview = csv_preview::load(file.path(), csv_preview::Options::default(), None, &driver.cancel).unwrap();
-        csv_import::Request { source:preview.source.unwrap(), options:preview.options,
-            table:"mysql_csv_probe".into(), columns:driver.catalog_objects(Some("mysql_csv_probe")).unwrap().remove(0).columns,
+        csv_import::Request { schema:driver.schemas.selected.clone(), source:preview.source.unwrap(), options:preview.options,
+            table:table.into(), columns:driver.catalog_objects(Some(table)).unwrap().remove(0).columns,
             destinations:vec![Some(1),Some(0)], empty_as_null:true, postgres_inserts:false }
+    }
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_csv_cancel_after_batch_rolls_back_and_reuses_session() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316,43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(),port,user:"rustable".into(),password:"rustable-test-only".into(),database:"rustable_test".into(),tls:false,read_timeout:Duration::from_secs(5),..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut blocker = Conn::new(OptsBuilder::from(&config)).unwrap();
+        let mut observer = Conn::new(OptsBuilder::from(&config)).unwrap();
+        observer.query_drop("DROP TABLE IF EXISTS mysql_csv_cancel_probe").unwrap();
+        observer.query_drop("CREATE TABLE mysql_csv_cancel_probe(id INT PRIMARY KEY, label VARCHAR(20)) ENGINE=InnoDB").unwrap();
+        observer.query_drop("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED").unwrap();
+        let mut text = String::from("label,id\n");
+        for id in 1..=64 { text.push_str(&format!("first,{id}\n")); }
+        text.push_str("blocked,2000\n");
+        let request = request_for(&mut driver,"mysql_csv_cancel_probe",&text);
+        let retry = request.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        driver.set_cancellation(cancel.clone());
+        let connection_id = driver.conn().unwrap().connection_id();
+        blocker.query_drop("START TRANSACTION").unwrap();
+        blocker.query_drop("INSERT INTO mysql_csv_cancel_probe VALUES(2000,'blocker')").unwrap();
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::spawn(move || {
+            let result = driver.import_csv(&request,&worker_cancel);
+            (driver,result)
+        });
+        let deadline = std::time::Instant::now()+Duration::from_secs(3);
+        let mut first_batch_visible = false;
+        while std::time::Instant::now() < deadline {
+            if observer.query_first::<u64,_>("SELECT COUNT(*) FROM mysql_csv_cancel_probe WHERE id<2000").unwrap()==Some(64) {
+                first_batch_visible = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let started = std::time::Instant::now();
+        cancel.store(true,Ordering::Release);
+        let (mut driver,result) = worker.join().unwrap();
+        blocker.query_drop("ROLLBACK").unwrap();
+        assert!(first_batch_visible,"test must observe a real completed batch before cancellation: {result:?}");
+        assert!(result.is_err(),"cancelled import must not commit");
+        assert!(started.elapsed()<Duration::from_secs(3));
+        assert_eq!(driver.transaction_state(),TransactionState::Idle);
+        assert_eq!(observer.query_first::<u64,_>("SELECT COUNT(*) FROM mysql_csv_cancel_probe").unwrap(),Some(0));
+        cancel.store(false,Ordering::Release);
+        assert_eq!(driver.conn().unwrap().connection_id(),connection_id);
+        assert_eq!(driver.import_csv(&retry,&cancel).unwrap(),65);
+        assert_eq!(observer.query_first::<u64,_>("SELECT COUNT(*) FROM mysql_csv_cancel_probe").unwrap(),Some(65));
+        observer.query_drop("DROP TABLE mysql_csv_cancel_probe").unwrap();
     }
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
@@ -128,6 +185,11 @@ mod tests {
         driver.conn().unwrap().query_drop("ALTER TABLE mysql_csv_probe ADD newer INT").unwrap();
         assert!(driver.import_csv(&stale,&cancel).unwrap_err().contains("schema changed"));
         let fresh = request(&mut driver,"label,id\nnew,500\n");
+        assert!(driver.execute("USE information_schema",false,&cancel).error.is_none());
+        assert!(driver.import_csv(&fresh,&cancel).unwrap_err().contains("database changed"));
+        assert!(driver.execute("USE rustable_test",false,&cancel).error.is_none());
+        let mut unbound = fresh.clone(); unbound.schema = None;
+        assert!(driver.import_csv(&unbound,&cancel).unwrap_err().contains("database changed"));
         cancel.store(true,Ordering::Release);
         assert!(driver.import_csv(&fresh,&cancel).unwrap_err().contains("cancelled"));
         cancel.store(false,Ordering::Release);

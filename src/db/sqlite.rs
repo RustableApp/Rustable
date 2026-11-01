@@ -3406,6 +3406,7 @@ mod csv_import_tests {
         let preview =
             csv_preview::load(file.path(), csv_preview::Options::default(), None, cancel).unwrap();
         csv_import::Request {
+            schema: None,
             source: preview.source.unwrap(),
             options: preview.options,
             table: "import_target".into(),

@@ -1115,6 +1115,7 @@ mod tests {
             ).unwrap();
             if review {
                 app.csv_review = Some((db::csv_import::Request {
+                    schema: None,
                     source: preview.source.clone().unwrap(), options: preview.options,
                     table: "t".into(), columns: vec![], destinations: vec![],
                     empty_as_null: false, postgres_inserts: false,
