@@ -192,6 +192,7 @@ enum Drag {
     Group(GroupId),
 }
 enum Action {
+    NewMysql(bool),
     Select(ProfileId),
     New(bool),
     Save(bool),
@@ -487,6 +488,8 @@ impl Rustable {
                     ui.menu_button("+", |ui| {
                         if ui.button("SQLite connection").clicked() { action = Some(Action::New(false)); ui.close(); }
                         if ui.button("PostgreSQL connection").clicked() { action = Some(Action::New(true)); ui.close(); }
+                        if ui.button("MySQL connection (experimental)").clicked() { action = Some(Action::NewMysql(false)); ui.close(); }
+                        if ui.button("MariaDB connection (experimental)").clicked() { action = Some(Action::NewMysql(true)); ui.close(); }
                         ui.separator();
                         if ui.add_enabled(self.pending.is_none(), egui::Button::new("Studio demo")).clicked() {
                             self.window_requests.push(crate::session_windows::WindowRequest { title: "Studio demo".into(), recover_sql: false, identity: None, connection: crate::session_windows::WindowConnection::Demo });
@@ -673,7 +676,7 @@ impl Rustable {
                     ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(6);
                     let form_height = (ctx.content_rect().height() - 160.0).clamp(180.0, 850.0);
                     let form = egui::ScrollArea::vertical().id_salt("connection-form").max_height(form_height).auto_shrink([false, true]).show(ui, |ui| {
-                        let title = match draft.connection { ConnectionKind::SQLite { .. } => "SQLite Connection", ConnectionKind::Postgres(_) => "PostgreSQL Connection" };
+                        let title = match draft.connection { ConnectionKind::SQLite { .. } => "SQLite Connection", ConnectionKind::Postgres(_) => "PostgreSQL Connection", ConnectionKind::Mysql(_) => "MySQL Connection", ConnectionKind::MariaDb(_) => "MariaDB Connection" };
                         ui.heading(title);
                         ui.add_space(8.0);
                         form_card(ui).show(ui, |ui| {
@@ -700,6 +703,23 @@ impl Rustable {
                                     ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
                                 });
                                 form_row(ui, "", |ui| { if ui.button("Choose file…").clicked() { pick = Some(false); } });
+                            }
+                            ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) => {
+                                ui.weak("Experimental · SQL and browsing available. Table editing and SSH are not ready yet.");
+                                form_text(ui, "Host", &mut config.host, false, Some(ProbeField::Host));
+                                ports_valid &= form_port(ui, &mut config.port, ProbeField::Port, self.connection_manager.generation);
+                                form_text(ui, "Database", &mut config.database, false, Some(ProbeField::Database));
+                                form_text(ui, "User", &mut config.user, false, Some(ProbeField::User));
+                                if form_text(ui, "Password", &mut self.connection_manager.password, true, Some(ProbeField::Password)) { self.connection_manager.password_revision = self.connection_manager.password_revision.wrapping_add(1); }
+                                form_row(ui, "", |ui| { form_checkbox(ui, &mut draft.remember_password, "Remember password"); });
+                                status_row(ui, "TLS", Some(ProbeField::Tls), |ui| {
+                                    egui::ComboBox::from_id_salt("mysql-tls").selected_text(if config.tls { "Verify full" } else { "Disabled" }).show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut config.tls, true, "Verify full");
+                                        ui.selectable_value(&mut config.tls, false, "Disabled (unencrypted)");
+                                    });
+                                });
+                                let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
+                                if form_text(ui, "CA file", &mut ca, false, None) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
                             }
                             ConnectionKind::Postgres(config) => {
                                 if ui.available_width() >= 500.0 {
@@ -889,6 +909,11 @@ impl Rustable {
                     .clone();
                 self.connection_manager.select(profile);
             }
+            Action::NewMysql(maria) => {
+                if self.connection_manager.dirty(&self.prefs.saved_connections) { return Err("Save or discard the connection form before adding another.".into()); }
+                let config = crate::connection_profiles::MysqlProfile::default();
+                self.connection_manager.select(Profile::draft(String::new(), if maria { ConnectionKind::MariaDb(config) } else { ConnectionKind::Mysql(config) }));
+            }
             Action::New(postgres) => {
                 if self.connection_manager.dirty(&self.prefs.saved_connections) {
                     return Err("Save or discard the connection form before adding another.".into());
@@ -914,6 +939,9 @@ impl Rustable {
                 let connection = match &profile.connection {
                     ConnectionKind::SQLite { path } => {
                         crate::session_windows::WindowConnection::Sqlite(path.clone())
+                    }
+                    ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) => {
+                        crate::session_windows::WindowConnection::Mysql(Box::new(config.with_password(self.connection_manager.password.clone())))
                     }
                     ConnectionKind::Postgres(config) => {
                         crate::session_windows::WindowConnection::Postgres(Box::new(
@@ -958,7 +986,7 @@ impl Rustable {
                 self.connection_manager.draft =
                     self.prefs.saved_connections.profile(profile.id).cloned();
                 self.profiles_changed();
-                if matches!(profile.connection, ConnectionKind::Postgres(_)) {
+                if matches!(profile.connection, ConnectionKind::Postgres(_) | ConnectionKind::Mysql(_) | ConnectionKind::MariaDb(_)) {
                     if profile.remember_password {
                         self.connection_manager.queue_credential(
                             profile.id,
@@ -1130,6 +1158,8 @@ fn connection_row(ui: &mut egui::Ui, profile: &Profile, selected: bool) -> egui:
             Color32::from_rgb(137, 72, 224),
             path.display().to_string(),
         ),
+        ConnectionKind::Mysql(config) => ("My", Color32::from_rgb(216, 140, 48), format!("{} · {}", config.host, config.database)),
+        ConnectionKind::MariaDb(config) => ("Ma", Color32::from_rgb(45, 156, 167), format!("{} · {}", config.host, config.database)),
         ConnectionKind::Postgres(config) => (
             "Pg",
             Color32::from_rgb(0, 141, 204),
@@ -1275,6 +1305,34 @@ mod tests {
             self.0.insert(key.into(), value);
         }
         fn flush(&mut self) {}
+    }
+    #[test]
+    fn mysql_and_mariadb_profiles_open_windows_without_persisting_passwords() {
+        for maria in [false, true] {
+            let mut app = app();
+            app.connection_action(Action::NewMysql(maria)).unwrap();
+            let draft = app.connection_manager.draft.as_mut().unwrap();
+            draft.name = if maria { "MariaDB fixture" } else { "MySQL fixture" }.into();
+            let config = match &mut draft.connection {
+                ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) => config,
+                _ => panic!("MySQL-compatible profile expected"),
+            };
+            config.host = "127.0.0.1".into();
+            config.database = "rustable_test".into();
+            config.port = if maria { 43317 } else { 43316 };
+            app.connection_manager.password = "MYSQL_WINDOW_SECRET".into();
+            app.connection_action(Action::Save(true)).unwrap();
+            let requests = app.take_window_requests();
+            assert_eq!(requests.len(), 1);
+            assert!(matches!(&requests[0].connection, crate::session_windows::WindowConnection::Mysql(config)
+                if config.password == "MYSQL_WINDOW_SECRET" && config.database == "rustable_test"));
+            let json = serde_json::to_string(&app.prefs.saved_connections).unwrap();
+            assert!(!json.contains("MYSQL_WINDOW_SECRET"));
+            let restored: crate::connection_profiles::ConnectionProfiles = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.profiles.len(), 1);
+            assert_eq!(restored.profiles[0].connection, app.prefs.saved_connections.profiles[0].connection);
+            assert!(app.pending.is_none());
+        }
     }
     fn app() -> Rustable {
         let mut app = Rustable::with_preferences(&egui::Context::default(), Preferences::default());

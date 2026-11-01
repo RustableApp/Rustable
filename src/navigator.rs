@@ -1,11 +1,24 @@
 //! Keyboard-first navigation without replacing the active database session.
 use super::*;
+#[derive(Clone)]
+enum ServerConfig {
+    Postgres(crate::connection::PostgresConfig),
+    Mysql(crate::connection::MysqlConfig),
+}
+impl ServerConfig {
+    fn database(self, name: String) -> crate::session_windows::WindowConnection {
+        match self {
+            Self::Postgres(mut config) => { config.database = name; crate::session_windows::WindowConnection::Postgres(Box::new(config)) }
+            Self::Mysql(mut config) => { config.database = name; crate::session_windows::WindowConnection::Mysql(Box::new(config)) }
+        }
+    }
+}
 #[derive(Default)]
 pub(super) struct Navigator {
     pub open: bool,
     pub loaded: bool,
     pub databases: Vec<String>,
-    config: Option<crate::connection::PostgresConfig>,
+    config: Option<ServerConfig>,
     query: String,
     selected: usize,
     focus: bool,
@@ -14,7 +27,7 @@ pub(super) struct Navigator {
 }
 impl Navigator {
     pub fn new(command: Option<&Command>) -> Self {
-        Self { config: match command { Some(Command::OpenPostgres(config)) => Some(config.clone()), _ => None }, ..Default::default() }
+        Self { config: match command { Some(Command::OpenPostgres(config)) => Some(ServerConfig::Postgres(config.clone())), Some(Command::OpenMysql(config)) => Some(ServerConfig::Mysql(config.clone())), _ => None }, ..Default::default() }
     }
 }
 #[derive(Clone)]
@@ -158,9 +171,8 @@ impl Rustable {
                 },
                 Destination::Database(name) => {
                     if self.connected_database.as_deref() == Some(&name) || self.navigator.config.is_none() { return; }
-                    if let Some(mut config) = self.navigator.config.clone() {
-                        config.database = name.clone();
-                        self.window_requests.push(crate::session_windows::WindowRequest { title: format!("{} · {name}", self.active_connection_name()), recover_sql: false, identity: self.active_profile.clone(), connection: crate::session_windows::WindowConnection::Postgres(Box::new(config)) });
+                    if let Some(config) = self.navigator.config.clone() {
+                        self.window_requests.push(crate::session_windows::WindowRequest { title: format!("{} · {name}", self.active_connection_name()), recover_sql: false, identity: self.active_profile.clone(), connection: config.database(name) });
                     }
                 }
                 Destination::Schema(name) => self.dispatch(Command::SelectSchema(name), Pending::Export),
@@ -304,5 +316,20 @@ mod tests {
         assert!(matches_query("Address table public", "public addr"));
         assert!(matches_query("Address table public", "ADDRESS"));
         assert!(!matches_query("Address table public", "private addr"));
+    }
+}
+
+#[cfg(test)]
+mod mysql_navigation_tests {
+    use super::*;
+    #[test]
+    fn database_navigation_preserves_mysql_transport_and_changes_only_database() {
+        let config = crate::connection::MysqlConfig { password: "session-only".into(), root_certificate: Some("/ca.pem".into()), ..Default::default() };
+        let navigator = Navigator::new(Some(&Command::OpenMysql(config.clone())));
+        let crate::session_windows::WindowConnection::Mysql(next) = navigator.config.unwrap().database("other".into()) else { panic!("wrong driver"); };
+        assert_eq!(next.database, "other");
+        assert_eq!(next.password, config.password);
+        assert_eq!(next.root_certificate, config.root_certificate);
+        assert_eq!(next.tls, config.tls);
     }
 }

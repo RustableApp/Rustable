@@ -658,6 +658,8 @@ mod tests {
         assert!([43316, 43317].contains(&port));
         let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
             user: "rustable".into(), password: "rustable-test-only".into(), tls: false, ..Default::default() };
+        crate::db::probe_mysql(&config, &AtomicBool::new(false)).unwrap();
+        assert!(crate::db::probe_mysql(&config, &AtomicBool::new(true)).is_err());
         let cancel = Arc::new(AtomicBool::new(false));
         let mut session = None;
         handle(&mut session, Command::Open(None), &cancel).unwrap();

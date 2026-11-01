@@ -278,3 +278,19 @@ Ten connection-profile tests pass, including password-free serialization/Debug
 and settings roundtrip, default behavior and invalid configuration rejection;
 strict Clippy passes. This profile type is not yet a ConnectionKind variant or
 part of the manager form, so saved MySQL/MariaDB connections remain unfinished.
+
+Experimental MySQL and MariaDB entries are now wired into the connection manager:
+profiles persist without passwords, use the existing opt-in credential-store flow,
+and open separate workspace windows through OpenMysql. Forms include host, port,
+optional database, user/password, verified TLS and optional CA path. The form
+explicitly identifies table editing and SSH as unfinished. Test uses the real
+driver with bounded five-second connection/read timeouts and SELECT 1. Database
+navigation preserves the MySQL session configuration when opening another database.
+
+Validation: native library suite 403 passed, 58 ignored; strict Clippy and WASM
+check pass. New tests cover both profile variants, persistence without passwords,
+window requests, and database navigation with TLS settings intact. Live connection
+probe/open tests pass separately on MySQL and MariaDB. Native visual and interactive
+form verification is still required, as are actual system-keychain checks for these
+variants, safe edits, SSH and remaining SQL-language intelligence. Experimental UI
+availability is not official supported-engine status; no release was published.

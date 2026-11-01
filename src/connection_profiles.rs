@@ -112,6 +112,11 @@ impl From<&crate::connection::MysqlConfig> for MysqlProfile {
     }
 }
 impl MysqlProfile {
+    pub fn with_password(&self, password: String) -> crate::connection::MysqlConfig {
+        crate::connection::MysqlConfig { host: self.host.clone(), port: self.port, database: self.database.clone(),
+            user: self.user.clone(), password, tls: self.tls, root_certificate: self.root_certificate.clone(),
+            connect_timeout: self.connect_timeout, read_timeout: self.read_timeout }
+    }
     pub fn validate(&self) -> Result<(), String> {
         required(&self.host, "Database host")?;
         required(&self.user, "Database user")?;
@@ -130,6 +135,8 @@ impl MysqlProfile {
 pub enum ConnectionKind {
     SQLite { path: PathBuf },
     Postgres(PostgresProfile),
+    Mysql(MysqlProfile),
+    MariaDb(MysqlProfile),
 }
 impl ConnectionKind {
     pub fn validate(&self) -> Result<(), String> {
@@ -138,6 +145,7 @@ impl ConnectionKind {
                 Err("Choose a SQLite file.".into())
             }
             Self::SQLite { .. } => Ok(()),
+            Self::Mysql(config) | Self::MariaDb(config) => config.validate(),
             Self::Postgres(config) => {
                 required(&config.host, "Database host")?;
                 required(&config.database, "Database name")?;
@@ -244,6 +252,10 @@ impl ConnectionProfiles {
                 match &profile.connection {
                     ConnectionKind::SQLite { path } => {
                         contains("SQLite") || contains(&path.to_string_lossy())
+                    }
+                    ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) => {
+                        contains(if matches!(profile.connection, ConnectionKind::MariaDb(_)) { "MariaDB" } else { "MySQL" })
+                            || contains(&format!("{}@{}:{}/{}", config.user, config.host, config.port, config.database))
                     }
                     ConnectionKind::Postgres(config) => {
                         contains("PostgreSQL")

@@ -18,6 +18,17 @@ pub(super) fn run(connection: ConnectionKind, password: String, cancel: &AtomicB
                 Err(error) => emit(Event::Failed(vec![File], error.to_string())),
             }
         }
+        ConnectionKind::Mysql(profile) | ConnectionKind::MariaDb(profile) => {
+            let fields = vec![Host, Port, Database, User, Password, Tls];
+            emit(Event::Running(fields.clone()));
+            let mut config = profile.with_password(password);
+            config.connect_timeout = std::time::Duration::from_secs(5);
+            config.read_timeout = std::time::Duration::from_secs(5);
+            match crate::db::probe_mysql(&config, cancel) {
+                Ok(()) => emit(Event::Success(fields)),
+                Err(error) => emit(Event::Failed(fields, error)),
+            }
+        }
         ConnectionKind::Postgres(profile) => {
             let config = profile.with_password(password);
             let ssh_fields = vec![SshHost, SshPort, SshUser, SshIdentity];

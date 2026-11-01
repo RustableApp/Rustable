@@ -1536,3 +1536,11 @@ mod browser_database_tests {
         assert_eq!(fresh.execute("SELECT name FROM imported", false, &cancel).grids[0].rows[0][0], Value::Text("original".into()));
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn probe_mysql(config: &crate::connection::MysqlConfig, cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Acquire) { return Err("Connection test cancelled".into()); }
+    let mut driver = Box::<dyn Driver>::try_from(config)?;
+    let report = driver.execute("SELECT 1", false, cancel);
+    match report.error { Some(error) => Err(error), None => Ok(()) }
+}

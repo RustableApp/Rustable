@@ -10,6 +10,7 @@ pub enum WindowConnection {
     Demo,
     Sqlite(PathBuf),
     Postgres(Box<PostgresConfig>),
+    Mysql(Box<crate::connection::MysqlConfig>),
 }
 pub struct WindowRequest {
     pub recover_sql: bool,

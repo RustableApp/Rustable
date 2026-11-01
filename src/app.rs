@@ -663,6 +663,7 @@ impl Rustable {
         let command = match request.connection {
             crate::session_windows::WindowConnection::Demo => Command::Open(None),
             crate::session_windows::WindowConnection::Sqlite(path) => Command::Open(Some(path)),
+            crate::session_windows::WindowConnection::Mysql(config) => Command::OpenMysql(*config),
             crate::session_windows::WindowConnection::Postgres(config) => {
                 Command::OpenPostgres(*config)
             }
