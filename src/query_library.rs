@@ -170,7 +170,20 @@ fn change_group(root: &std::path::Path, rename: Option<(PathBuf, String)>) -> Re
         } else { name };
         let target = old.parent().ok_or("Missing group parent")?.join(name);
         if target == old { return Ok(old); }
-        if target.try_exists().map_err(|e| e.to_string())? { return Err("A folder with that name already exists.".into()); }
+        if target.try_exists().map_err(|e| e.to_string())? {
+            // On case-insensitive volumes the new spelling resolves to the old
+            // item. Permit that rename, but not a distinct hard link or symlink
+            // directory entry which happens to point at the same file.
+            let same_item = same_file::is_same_file(&old, &target).map_err(|e| e.to_string())?;
+            let mut distinct_entry = false;
+            if same_item {
+                for entry in std::fs::read_dir(old.parent().ok_or("Missing group parent")?).map_err(|e| e.to_string())? {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    if entry.file_name() == target.file_name().unwrap() { distinct_entry = true; break; }
+                }
+            }
+            if !same_item || distinct_entry { return Err("A query or folder with that name already exists.".into()); }
+        }
         std::fs::rename(&old, &target).map_err(|e| e.to_string())?;
         Ok(target)
     } else {
@@ -486,6 +499,28 @@ mod tests {
         let tabs = app.tabs.len();
         let _ = ctx.run(egui::RawInput { events: vec![egui::Event::Key { key: egui::Key::T, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }], ..Default::default() }, |ctx| app.workspace_shortcuts(ctx));
         assert_eq!(app.tabs.len(), tabs + 1, "workspace shortcuts resume when renaming ends");
+    }
+
+    #[test]
+    fn query_and_group_renames_allow_case_changes_but_reject_hard_link_collisions() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("Report.sql");
+        std::fs::write(&original, "SELECT 'keep this';").unwrap();
+        let renamed = change_group(root.path(), Some((original, "report".into()))).unwrap();
+        assert_eq!(std::fs::read_to_string(&renamed).unwrap(), "SELECT 'keep this';");
+        let names: Vec<_> = std::fs::read_dir(root.path()).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert!(names.iter().any(|name| name == "report.sql"));
+        assert!(!names.iter().any(|name| name == "Report.sql"));
+        let alias = root.path().join("Alias.sql");
+        std::fs::hard_link(&renamed, &alias).unwrap();
+        assert!(change_group(root.path(), Some((renamed.clone(), "Alias".into()))).is_err());
+        assert!(renamed.exists() && alias.exists());
+        let group = root.path().join("Reports");
+        std::fs::create_dir(&group).unwrap();
+        std::fs::write(group.join("Nested.sql"), "SELECT 2;").unwrap();
+        let renamed_group = change_group(root.path(), Some((group, "reports".into()))).unwrap();
+        assert_eq!(std::fs::read_to_string(renamed_group.join("Nested.sql")).unwrap(), "SELECT 2;");
+        assert!(std::fs::read_dir(root.path()).unwrap().any(|entry| entry.unwrap().file_name() == "reports"));
     }
 
     #[test]
