@@ -167,3 +167,57 @@ mod selection_tests {
         assert_eq!(extracted[parts[1].clone()].trim(), "SELECT 3");
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod server_tests {
+    use super::*;
+    use ::mysql::{Conn, OptsBuilder, prelude::Queryable};
+
+    /// Run separately for the disposable MySQL and MariaDB compose services.
+    #[test]
+    #[ignore = "requires disposable server: RUSTABLE_MYSQL_TEST_PORT=43316 or 43317"]
+    fn live_server_routines_modes_and_transaction_status() {
+        let port: u16 = std::env::var("RUSTABLE_MYSQL_TEST_PORT")
+            .expect("set disposable server port").parse().unwrap();
+        assert!([43316, 43317].contains(&port), "use the isolated fixture ports");
+        let options = OptsBuilder::default()
+            .ip_or_hostname(Some("127.0.0.1"))
+            .tcp_port(port)
+            .user(Some("rustable"))
+            .pass(Some("rustable-test-only"))
+            .db_name(Some("rustable_test"))
+            .prefer_socket(false);
+        let mut conn = Conn::new(options).unwrap();
+        let version: String = conn.query_first("SELECT VERSION()").unwrap().unwrap();
+        eprintln!("server: {version}");
+        // The protocol connection is reused; no implicit BEGIN is needed for reads.
+        let id: u64 = conn.query_first("SELECT CONNECTION_ID()").unwrap().unwrap();
+        conn.query_drop("DROP PROCEDURE IF EXISTS rustable_delimiter_probe").unwrap();
+        let script = "DELIMITER $$\nCREATE PROCEDURE rustable_delimiter_probe() BEGIN SELECT '日本' AS label; SELECT 9007199254740993 AS exact_integer; END$$\nDELIMITER ;\nSELECT 3;";
+        let routine = editor_ranges(script, Mode::default()).remove(0);
+        let prepared = execution_text(script, routine, Mode::default()).unwrap();
+        for range in ranges(&prepared, Mode::default(), true).unwrap() {
+            conn.query_drop(&prepared[range]).unwrap();
+        }
+        let mut results = conn.query_iter("CALL rustable_delimiter_probe()").unwrap();
+        let first: Vec<::mysql::Row> = results.iter().unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(first[0].get::<String, _>(0).unwrap(), "日本");
+        let second: Vec<::mysql::Row> = results.iter().unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(second[0].get::<u64, _>(0).unwrap(), 9007199254740993);
+        drop(results); // Drain CALL's final status result before reusing connection.
+        assert_eq!(conn.query_first::<u64, _>("SELECT CONNECTION_ID()").unwrap(), Some(id));
+        conn.query_drop("SET SESSION sql_mode='ANSI_QUOTES,NO_BACKSLASH_ESCAPES'").unwrap();
+        let mode = Mode { ansi_quotes: true, no_backslash_escapes: true };
+        let sql = "SELECT 'a\\' AS value; SELECT 2 AS value;";
+        let statements = ranges(sql, mode, true).unwrap();
+        assert_eq!(statements.len(), 2);
+        assert_eq!(conn.query_first::<String, _>(&sql[statements[0].clone()]).unwrap(), Some("a\\".into()));
+        conn.query_drop("CREATE TEMPORARY TABLE rustable_tx_probe (value INT) ENGINE=InnoDB").unwrap();
+        conn.query_drop("INSERT INTO rustable_tx_probe VALUES (7)").unwrap();
+        conn.query_drop("START TRANSACTION").unwrap();
+        conn.query_drop("UPDATE rustable_tx_probe SET value=8").unwrap();
+        conn.query_drop("ROLLBACK").unwrap();
+        assert_eq!(conn.query_first::<i64, _>("SELECT value FROM rustable_tx_probe").unwrap(), Some(7));
+        conn.query_drop("DROP PROCEDURE rustable_delimiter_probe").unwrap();
+    }
+}

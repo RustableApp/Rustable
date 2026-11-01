@@ -33,6 +33,7 @@ native-tls = "0.2"
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
 tokio = { version = "1.54.1", features = ["rt", "time"] }
 tokio-postgres = "0.7.18"
+mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }

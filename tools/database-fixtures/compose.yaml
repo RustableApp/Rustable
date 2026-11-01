@@ -1,0 +1,35 @@
+# Disposable local integration servers; never point these tests at real data.
+name: rustable-driver-tests
+services:
+  mysql:
+    image: mysql:8.4
+    ports:
+      - "127.0.0.1:43316:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: rustable-test-only
+      MYSQL_DATABASE: rustable_test
+      MYSQL_USER: rustable
+      MYSQL_PASSWORD: rustable-test-only
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  mariadb:
+    image: mariadb:11.4
+    ports:
+      - "127.0.0.1:43317:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: rustable-test-only
+      MARIADB_DATABASE: rustable_test
+      MARIADB_USER: rustable
+      MARIADB_PASSWORD: rustable-test-only
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 2s
+      retries: 60

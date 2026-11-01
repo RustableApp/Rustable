@@ -50,3 +50,19 @@ routine bodies, delimiter resets, selected-script overrides, and directive-line
 caret handling. Strict native all-target Clippy passed. This is editor/lexical
 preparation, not evidence of completed drivers or live MySQL/MariaDB execution.
 Session SQL mode propagation remains required when wiring the drivers.
+
+### Live transport foundation (2026-11-01)
+
+Added native-only mysql 28.0.4 with minimal-rust and rustls-tls-ring. Official
+API reference: https://docs.rs/mysql/28.0.4/mysql/. Separate loopback-only,
+tmpfs-backed Docker fixtures now run MySQL 8.4 and MariaDB 11.4; existing staging
+containers are untouched. The ignored live test passed separately on MySQL
+8.4.11 and MariaDB 11.4.13-MariaDB-ubu2404. See tools/database-fixtures/README.md
+for reproduction and the explicitly limited verification scope.
+
+Driver integration still needs authoritative transaction-state handling.
+mysql 28.0.4 keeps ConnInner.status_flags private, although its no_backslash_escape
+accessor reads a protocol flag. SQL-prefix guesses cannot accurately track
+implicit commits or errors. Investigate a minimal accessor patch/upstream API
+before wiring connection replacement; cancellation and connection-loss semantics
+also need live tests. Do not label these engines officially supported yet.
