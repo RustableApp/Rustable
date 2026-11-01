@@ -265,3 +265,20 @@ trigger executing a recursive sum from 1 through 1,000,000; CSV contains header
 id and values 1 through 100. Evidence in the session visualization directory:
 `wasm-import-trigger-before.png`, `wasm-import-cancel-fixed.png`, and
 `wasm-import-cancel-recovery.png`. The public demo remains unchanged.
+
+### Parent-page startup deadline (2026-11-01)
+
+The website embed controller now falls back if the boot script cannot run or
+never signals readiness. Its 60-second deadline starts when the lazy iframe
+approaches the viewport or loads, not when an offscreen page is first opened.
+Only messages from that frame and the same origin can signal readiness/failure.
+On failure it removes the iframe and reveals the existing desktop screenshot.
+
+Three Node tests in rustable-website/tests/demo-embed.mjs pass: lazy startup,
+missing readiness, ready-before-load ordering, foreign-message rejection and
+explicit/frame errors. In local preview only, temporarily removed boot.js and
+shortened the deadline to three seconds: the screenshot and explanatory caption
+appeared. Restored boot.js and the production 60-second controller; reloading
+rendered the live workspace normally. Evidence: wasm-missing-boot-fallback.png
+in the session visualization directory. No fault code remains in preview.
+This does not close cross-browser, mobile-device or whole-tab-memory checks.
