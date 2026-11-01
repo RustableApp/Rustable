@@ -113,22 +113,24 @@ impl MysqlDriver {
             parameters.push(::mysql::Value::from(table));
         }
         sql.push_str(" ORDER BY t.TABLE_NAME,c.ORDINAL_POSITION");
-        let rows = self.conn()?.exec_iter(sql, parameters).map_err(|e| e.to_string())?;
-        for row in rows {
-            let row = row.map_err(|e| e.to_string())?;
-            let (name, kind, column, ty, nullable, default, key, extra): CatalogRow =
-                ::mysql::from_row_opt(row).map_err(|e| e.to_string())?;
-            if result.last().is_none_or(|object| object.name != name) {
-                result.push(Object { schema: Some(schema.clone()), display_name: None, metadata_error: None,
-                    name, kind: if kind == "VIEW" { "view" } else { "table" }.into(), columns: vec![], ddl: String::new() });
+        self.with_connection(|conn| {
+            let rows = conn.exec_iter(sql, parameters)?;
+            for row in rows {
+                let row = row?;
+                let (name, kind, column, ty, nullable, default, key, extra): CatalogRow =
+                    ::mysql::from_row_opt(row)?;
+                if result.last().is_none_or(|object| object.name != name) {
+                    result.push(Object { schema: Some(schema.clone()), display_name: None, metadata_error: None,
+                        name, kind: if kind == "VIEW" { "view" } else { "table" }.into(), columns: vec![], ddl: String::new() });
+                }
+                if let Some(name) = column {
+                    result.last_mut().unwrap().columns.push(Column { name, data_type: ty.unwrap_or_default(),
+                        not_null: nullable.as_deref() == Some("NO"), default: default.unwrap_or_default(),
+                        pk: key.as_deref() == Some("PRI"), generated: extra.is_some_and(|v| v.contains("VIRTUAL GENERATED") || v.contains("STORED GENERATED") || v.contains("PERSISTENT")) });
+                }
             }
-            if let Some(name) = column {
-                result.last_mut().unwrap().columns.push(Column { name, data_type: ty.unwrap_or_default(),
-                    not_null: nullable.as_deref() == Some("NO"), default: default.unwrap_or_default(),
-                    pk: key.as_deref() == Some("PRI"), generated: extra.is_some_and(|v| v.contains("VIRTUAL GENERATED") || v.contains("STORED GENERATED") || v.contains("PERSISTENT")) });
-            }
-        }
-        Ok(result)
+            Ok(result)
+        })
     }
     fn refresh_session(&mut self) -> Result<(), String> {
         let result = self.conn()?.query_first::<(String, String, Option<String>), _>(
@@ -151,14 +153,21 @@ impl MysqlDriver {
     fn conn(&mut self) -> Result<&mut Conn, String> {
         self.connection.as_mut().ok_or_else(|| "MySQL connection is disconnected".into())
     }
+    fn with_connection<T>(&mut self, operation: impl FnOnce(&mut Conn) -> Result<T, ::mysql::Error>) -> Result<T, String> {
+        match operation(self.conn()?) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if error.is_connectivity_error() { self.connection = None; }
+                Err(error.to_string())
+            }
+        }
+    }
     fn table_metadata(&mut self, schema: &str, table: &str) -> Result<(Vec<Index>, Vec<Object>), String> {
         let qualified = format!("{}.{}", quote(schema), quote(table));
-        let definition: Option<::mysql::Row> = self.conn()?.query_first(format!("SHOW CREATE TABLE {qualified}"))
-            .map_err(|e| e.to_string())?;
+        let definition: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(format!("SHOW CREATE TABLE {qualified}")))?;
         let ddl = definition.and_then(|row| row.get::<String, _>(1)).ok_or("Missing table definition")?;
         let mut indexes = std::collections::BTreeMap::<String, Index>::new();
-        let rows: Vec<::mysql::Row> = self.conn()?.query(format!("SHOW INDEX FROM {qualified}"))
-            .map_err(|e| e.to_string())?;
+        let rows: Vec<::mysql::Row> = self.with_connection(|conn| conn.query(format!("SHOW INDEX FROM {qualified}")))?;
         // SHOW INDEX is ordered by index then sequence by the server. Sort
         // explicitly so multipart keys remain ordered across server versions.
         let mut entries = Vec::new();
@@ -182,13 +191,11 @@ impl MysqlDriver {
             });
             index.columns.push(column);
         }
-        let names: Vec<String> = self.conn()?.exec(
-            "SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME", (schema, table))
-            .map_err(|e| e.to_string())?;
+        let names: Vec<String> = self.with_connection(|conn| conn.exec(
+            "SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=? AND EVENT_OBJECT_TABLE=? ORDER BY TRIGGER_NAME", (schema, table)))?;
         let mut triggers = Vec::new();
         for name in names {
-            let row: Option<::mysql::Row> = self.conn()?.query_first(format!("SHOW CREATE TRIGGER {}.{}", quote(schema), quote(&name)))
-                .map_err(|e| e.to_string())?;
+            let row: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(format!("SHOW CREATE TRIGGER {}.{}", quote(schema), quote(&name))))?;
             let ddl = row.and_then(|row| row.get::<String, _>("SQL Original Statement"))
                 .ok_or("Missing trigger definition")?;
             triggers.push(Object { schema: Some(schema.into()), name, display_name: None,
@@ -220,13 +227,13 @@ impl Driver for MysqlDriver {
         }
     }
     fn databases(&mut self) -> Result<Vec<String>, String> {
-        self.conn()?.query("SHOW DATABASES").map_err(|e| e.to_string())
+        self.with_connection(|conn| conn.query("SHOW DATABASES"))
     }
     fn schema_catalog(&self) -> SchemaCatalog { self.schemas.clone() }
     fn select_schema(&mut self, name: &str) -> Result<Vec<Object>, String> {
         self.require_idle()?;
         // Quote the whole identifier; a database name is never a SQL fragment.
-        self.conn()?.query_drop(format!("USE {}", quote(name))).map_err(|e| e.to_string())?;
+        self.with_connection(|conn| conn.query_drop(format!("USE {}", quote(name))))?;
         self.schemas.selected = Some(name.into());
         self.objects()
     }
@@ -533,6 +540,32 @@ mod tests {
         assert_eq!(driver.sql_dialect(), crate::sql::Dialect::Mysql(parse_mode(&server_mode)));
         let cleanup = driver.execute("DROP PROCEDURE driver_tracking_failure;", false, &cancel);
         assert!(cleanup.error.is_none(), "{:?}", cleanup.error);
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn metadata_transport_failure_disconnects_but_sql_error_preserves_session() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false, ..Default::default() };
+        let mut control = Conn::new(OptsBuilder::from(&config)).unwrap();
+        for operation in 0..3 {
+            let mut driver = MysqlDriver::connect(&config).unwrap();
+            assert!(driver.table_metadata("rustable_test", "missing_metadata_probe_741").is_err());
+            assert!(driver.connection.is_some(), "ordinary SQL errors must not discard the session");
+            assert_eq!(driver.transaction_state(), TransactionState::Idle);
+            let id = driver.conn().unwrap().connection_id();
+            control.query_drop(format!("KILL CONNECTION {id}")).unwrap();
+            let failed = match operation {
+                0 => driver.objects().map(|_| ()),
+                1 => driver.databases().map(|_| ()),
+                _ => driver.table_metadata("rustable_test", "customers").map(|_| ()),
+            };
+            assert!(failed.is_err());
+            assert!(driver.connection.is_none(), "metadata failure must discard the socket immediately");
+            assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
+        }
     }
 
 }

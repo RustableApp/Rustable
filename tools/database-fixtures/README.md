@@ -210,3 +210,12 @@ one object, and an injection-shaped name returns no matches. All nine driver
 checks pass on both MySQL and MariaDB; strict Clippy passes. This reduces metadata
 volume, not the number of round trips; index/trigger retrieval and cancellation
 remain further optimization work. No WAN latency improvement is claimed yet.
+
+Metadata now uses the same typed connectivity classification as query execution.
+Catalog streaming, database listing, schema switching, table/index definitions
+and trigger requests discard the connection on transport failure. Ordinary SQL
+errors leave it available. A live regression kills only its own fixture session
+before catalog/list/table-metadata operations and verifies the socket is discarded
+before transaction-state polling; a missing-table error preserves it instead.
+All ten driver tests pass independently against MySQL and MariaDB, and strict
+all-target Clippy passes. Metadata cancellation remains outstanding.
