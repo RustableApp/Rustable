@@ -100,6 +100,8 @@ fn metadata_batch_uses_one_wire_request() {
     let port = listener.local_addr().unwrap().port();
     let enabled = Arc::new(AtomicBool::new(false));
     let commands = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+    let protocol = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let proxy_protocol = protocol.clone();
     let proxy_enabled = enabled.clone();
     let proxy_commands = commands.clone();
     let proxy = std::thread::spawn(move || {
@@ -113,9 +115,11 @@ fn metadata_batch_uses_one_wire_request() {
         let mut output = upstream.try_clone().unwrap();
         let requests = std::thread::spawn(move || {
             while let Ok(bytes) = packet(&mut input) {
-                if proxy_enabled.load(Ordering::Acquire) && bytes.get(4) == Some(&3) {
-                    proxy_commands.lock().unwrap().push(bytes[5..].to_vec());
-                    std::thread::sleep(Duration::from_millis(30));
+                if proxy_enabled.load(Ordering::Acquire) {
+                    let command = bytes[4];
+                    proxy_protocol.lock().unwrap().push(command);
+                    if command == 3 { proxy_commands.lock().unwrap().push(bytes[5..].to_vec()); }
+                    if matches!(command, 3 | 22 | 23) { std::thread::sleep(Duration::from_millis(30)); }
                 }
                 if output.write_all(&bytes).is_err() { break; }
             }
@@ -163,6 +167,28 @@ fn metadata_batch_uses_one_wire_request() {
     assert_eq!(captured.len(), 1, "definition, indexes and trigger list share one request");
     let metadata_sql = String::from_utf8(captured[0].clone()).unwrap();
     assert!(metadata_sql.starts_with(&format!("{definition}; SHOW INDEX FROM `rustable_test`.`wire_metadata_probe`; SELECT TRIGGER_NAME")));
+    enabled.store(false, Ordering::Release);
+    let values = (0..502).map(|id| format!("({id},'row')")).collect::<Vec<_>>().join(",");
+    driver.conn().unwrap().query_drop(format!("INSERT INTO wire_metadata_probe VALUES {values}")).unwrap();
+    enabled.store(true, Ordering::Release);
+    protocol.lock().unwrap().clear();
+    let started = std::time::Instant::now();
+    let first = driver.browse(&Browse { table:"wire_metadata_probe".into(), sort:Some(("id".into(),false)), ..Default::default() }).unwrap();
+    let first_elapsed = started.elapsed();
+    assert_eq!(first.grid.rows.len(), 500);
+    assert_eq!(protocol.lock().unwrap().iter().filter(|&&command| command == 22).count(), 1);
+    protocol.lock().unwrap().clear();
+    let started = std::time::Instant::now();
+    let next = driver.browse(&Browse { table:"wire_metadata_probe".into(), sort:Some(("id".into(),false)), offset:500, ..Default::default() }).unwrap();
+    let next_elapsed = started.elapsed();
+    assert_eq!(next.grid.rows.len(), 2);
+    assert_eq!(next.grid.rows[0][0], Value::Integer(500));
+    let captured = protocol.lock().unwrap().clone();
+    assert!(!captured.contains(&22), "next page must reuse the prepared statement: {captured:?}");
+    assert_eq!(captured.iter().filter(|&&command| command == 23).count(), 1);
+    assert_eq!(first.sql, next.sql);
+    assert_eq!(next.parameters.last(), Some(&Value::Integer(500)));
+    eprintln!("30 ms simulated request delay: first browse {first_elapsed:?}; next page {next_elapsed:?}");
     drop(driver);
     proxy.join().unwrap();
 }

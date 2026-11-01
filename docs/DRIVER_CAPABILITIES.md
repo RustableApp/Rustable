@@ -596,3 +596,20 @@ The generated second-row value was 4, and the outline crab rendered in both grid
 and inspector. Evidence: `native-mariadb-temporary-browse-fixed.png` in the session
 visualization folder. This is native acceptance of browsing/refresh/inspection,
 not GUI editing or full MySQL/MariaDB production acceptance.
+
+### Reuse prepared browse statements across pages (2026-11-01)
+
+LIMIT and OFFSET are now bound values in MySQL/MariaDB browse requests. Changing
+the page offset previously changed the statement text and required another
+COM_STMT_PREPARE; the same table/filter/sort now reuses the connection's prepared
+statement cache. Binary result decoding remains in use for accurate FLOAT and
+other typed values. The SQL activity payload carries the bound pagination values.
+
+Extended the disposable protocol-proxy check to populate 502 rows, browse the
+first 500, then fetch rows 500–501. On each engine it observes one prepare for the
+first page and no prepare for the second, with one execute and correct results.
+With 30 ms artificial delay per QUERY/PREPARE/EXECUTE request, this run measured:
+MySQL first/next page 151.35/111.43 ms; MariaDB 158.12/105.35 ms. These are diagnostic
+fixture timings (different row counts), not production latency benchmarks or a
+claim that metadata/data now run concurrently. Existing ordinary/filter/sort browse
+tests passed on both engines; strict all-target Clippy passed.

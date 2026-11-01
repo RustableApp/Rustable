@@ -509,8 +509,12 @@ impl Driver for MysqlDriver {
     }
     fn browse(&mut self, request: &Browse) -> Result<TableData, String> {
         let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
-        let (object, mut sql, parameters) = self.table_select(request)?;
-        sql.push_str(&format!(" LIMIT {} OFFSET {}", PAGE_SIZE + 1, request.offset));
+        let (object, mut sql, mut parameters) = self.table_select(request)?;
+        // Keep page changes on the same cached prepared statement. Literal
+        // offsets force COM_STMT_PREPARE for every page and churn the cache.
+        sql.push_str(" LIMIT ? OFFSET ?");
+        parameters.push(Value::Integer((PAGE_SIZE + 1) as i64));
+        parameters.push(Value::Integer(i64::try_from(request.offset).map_err(|_| "Page offset exceeds the supported range")?));
         let params = parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>, _>>()?;
         let mut remaining = BYTE_LIMIT;
         let query_started = std::time::Instant::now();
