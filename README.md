@@ -10,7 +10,7 @@ It’s written in Rust. Of course it is. We also use mise, and mise is written i
 
 **App code: 100% Rust.** We’re not kidding. Even GitHub says so. [Check the sauce for yourself.](https://github.com/RustableApp/Rustable)
 
-<a href="https://github.com/RustableApp/Rustable"><img src="assets/github-rust-languages.png" width="420" alt="GitHub’s Languages panel showing Rust 100%"></a>
+<a href="https://github.com/RustableApp/Rustable"><img src="assets/rust-language-bar.svg" width="420" alt="Application language breakdown: Rust 100%"></a>
 
 <sub>GitHub’s breakdown covers the app; packaging and benchmark scripts are excluded.</sub>
 

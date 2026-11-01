@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="594" height="150" viewBox="0 0 594 150" role="img" aria-labelledby="title desc">
+  <title id="title">Rust 100%</title>
+  <desc id="desc">Application language breakdown, styled after GitHub. Packaging and benchmark scripts excluded.</desc>
+  <text x="0" y="30" fill="#dedbd3" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="24" font-weight="600">Languages</text>
+  <rect x="0" y="55" width="594" height="12" rx="6" fill="#dea584"/>
+  <circle cx="8" cy="104" r="7" fill="#dea584"/>
+  <text x="25" y="111" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20"><tspan fill="#dedbd3" font-weight="600">Rust</tspan><tspan fill="#a5a29a"> 100%</tspan></text>
+</svg>
