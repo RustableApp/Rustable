@@ -3,7 +3,7 @@
 use super::*;
 use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 
-pub(super) fn validate_import(driver: &mut MysqlDriver, schema: &str, table: &str) -> Result<(), String> {
+pub(super) fn validate_managed_write(driver: &mut MysqlDriver, schema: &str, table: &str) -> Result<(), String> {
     if driver.engine != "MariaDB" { return Ok(()); }
     let columns = driver.with_connection(|conn| conn.exec::<(String,Option<String>,Option<String>),_,_>(
         "SELECT COLUMN_NAME, COLUMN_DEFAULT, GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?",
@@ -11,7 +11,7 @@ pub(super) fn validate_import(driver: &mut MysqlDriver, schema: &str, table: &st
     for (name, default, generated) in columns {
         for expression in [default, generated].into_iter().flatten() {
             validate(&expression, driver.mode)
-                .map_err(|error| format!("Cannot import into column {name}: {error}"))?;
+                .map_err(|error| format!("Cannot save changes to column {name}: {error}"))?;
         }
     }
     // MariaDB exposes TABLE_NAME directly, including column-level CHECKs.
@@ -20,7 +20,7 @@ pub(super) fn validate_import(driver: &mut MysqlDriver, schema: &str, table: &st
         (schema,table)))?;
     for (name, expression) in checks {
         validate(&expression, driver.mode)
-            .map_err(|error| format!("Cannot import into table with CHECK {name}: {error}"))?;
+            .map_err(|error| format!("Cannot save changes to table with CHECK {name}: {error}"))?;
     }
     Ok(())
 }
@@ -32,13 +32,13 @@ fn validate(expression: &str, mode: Mode) -> Result<(), String> {
     // Do not discard executable version comments as if they were whitespace.
     if tokens.iter().any(|token| matches!(token, Token::Whitespace(
         Whitespace::MultiLineComment(_) | Whitespace::SingleLineComment { .. }))) {
-        return Err("Commented server expressions are not supported for imports yet.".into());
+        return Err("Commented server expressions are not supported for managed saves yet.".into());
     }
     let tokens = tokens.into_iter().filter(|token| !matches!(token, Token::Whitespace(_))).collect::<Vec<_>>();
     // MariaDB also supports sequence advancement without a parenthesized call.
     if tokens.iter().any(|token| matches!(token, Token::Word(word)
         if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("NEXT"))) {
-        return Err("Sequence expressions are not supported for transactional imports.".into());
+        return Err("Sequence expressions are not supported for managed saves.".into());
     }
     for (i, token) in tokens.iter().enumerate() {
         if !matches!(tokens.get(i+1), Some(Token::LParen)) { continue; }
@@ -46,7 +46,7 @@ fn validate(expression: &str, mode: Mode) -> Result<(), String> {
             let name = word.value.to_ascii_uppercase();
             if word.quote_style.is_some() || (i > 0 && tokens[i-1] == Token::Period)
                 || !supported_call(&name) {
-                return Err(format!("Function {} is not validated for transactional imports yet.", word.value));
+                return Err(format!("Function {} is not validated for managed saves yet.", word.value));
             }
         }
     }
@@ -81,6 +81,49 @@ fn supported_call(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_review_checks_expressions_before_any_mutation() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316,43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(),port,user:"rustable".into(),
+            password:"rustable-test-only".into(),database:"rustable_test".into(),tls:false,..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let mut observer = Conn::new(OptsBuilder::from(&config)).unwrap();
+        for table in ["expression_review_first", "expression_review_last"] {
+            observer.query_drop(format!("DROP TABLE IF EXISTS {table}")).unwrap();
+            observer.query_drop(format!("CREATE TABLE {table}(id INT PRIMARY KEY, qty INT DEFAULT 7, computed INT GENERATED ALWAYS AS (qty*2) STORED, CHECK (abs(qty)>=0)) ENGINE=InnoDB")).unwrap();
+        }
+        let insert = |id, table: &str| Change::InsertRow { id, table:table.into(),
+            fields:vec![("id".into(),Value::Integer(id as i64))] };
+        let changes = [insert(1,"expression_review_first"),insert(2,"expression_review_last")];
+        if driver.engine == "MariaDB" {
+            for (install, restore) in [
+                ("ALTER TABLE expression_review_last ALTER qty SET DEFAULT (rand())",
+                 "ALTER TABLE expression_review_last ALTER qty SET DEFAULT 7"),
+                ("ALTER TABLE expression_review_last MODIFY computed INT GENERATED ALWAYS AS (bit_count(qty)) STORED",
+                 "ALTER TABLE expression_review_last MODIFY computed INT GENERATED ALWAYS AS (qty*2) STORED"),
+                ("ALTER TABLE expression_review_last ADD CONSTRAINT unsupported_check CHECK (crc32(qty)>=0)",
+                 "ALTER TABLE expression_review_last DROP CONSTRAINT unsupported_check"),
+            ] {
+                observer.query_drop(install).unwrap();
+                let plan = driver.plan(&changes).unwrap();
+                assert!(driver.apply(&plan).unwrap_err().contains("not validated"));
+                assert_eq!(driver.transaction_state(),TransactionState::Idle);
+                for table in ["expression_review_first", "expression_review_last"] {
+                    assert_eq!(observer.query_first::<u64,_>(format!("SELECT COUNT(*) FROM {table}")).unwrap(),Some(0));
+                }
+                observer.query_drop(restore).unwrap();
+            }
+        }
+        let plan = driver.plan(&changes).unwrap();
+        driver.apply(&plan).unwrap();
+        for table in ["expression_review_first", "expression_review_last"] {
+            assert_eq!(observer.query_first::<(i32,i32),_>(format!("SELECT qty,computed FROM {table}")).unwrap(),Some((7,14)));
+            observer.query_drop(format!("DROP TABLE {table}")).unwrap();
+        }
+    }
+
     #[test]
     fn permits_common_server_expressions_without_inspecting_literal_contents() {
         for expression in [

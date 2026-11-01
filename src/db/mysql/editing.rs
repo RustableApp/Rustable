@@ -237,6 +237,7 @@ pub(super) fn apply(driver: &mut MysqlDriver, plan: &ChangePlan) -> Result<(), S
             if driver.edit_schema_snapshot(schema, table)? != **expected {
                 return Err("Table definition changed since review. Refresh and review again.".into());
             }
+            expressions::validate_managed_write(driver, schema, table)?;
         }
         for (index, statement) in plan.statements.iter().enumerate() {
             let update = statement.sql.starts_with("UPDATE ");

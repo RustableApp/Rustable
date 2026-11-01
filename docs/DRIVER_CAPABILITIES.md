@@ -707,3 +707,21 @@ Strict all-target Clippy passes.
 This closes part of the expression gate, not the entire MySQL/MariaDB release gate:
 effective privileges, managed-edit expression validation, remaining transport phases
 and native import acceptance still need work. The import UI remains disabled.
+
+### Managed-save expression validation (2026-11-01)
+
+The MariaDB expression validator is now shared by CSV imports and reviewed table
+saves. Apply checks every directly edited table under its metadata lock, after
+verifying the reviewed schema and before running any row precondition or write.
+Error messages refer to managed saves rather than imports alone.
+
+A two-table live test puts unsupported default, generated and CHECK expressions
+on the second table in turn. Each rejected batch leaves both tables empty and the
+connection idle; restoring supported expressions allows both inserts, including
+default and generated values. All 11 live reviewed-save tests pass on MySQL 8.4
+and MariaDB 11.4, covering conflict checks, warnings, rollback, cancellation,
+privileges, temporary replacements and metadata locks. Strict Clippy also passes.
+
+This does not enable the editing UI. Indirect effects through foreign-key cascades,
+effective privilege coverage and native editing/import acceptance still require
+verification before declaring these workflows supported.

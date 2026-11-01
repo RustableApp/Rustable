@@ -33,7 +33,7 @@ pub(super) fn table(driver: &mut MysqlDriver, request: &csv_import::Request, can
         if object.kind != "table" || object.columns != request.columns {
             return Err("Destination schema changed; select the table again before importing".into());
         }
-        expressions::validate_import(driver, &schema, &request.table)?;
+        expressions::validate_managed_write(driver, &schema, &request.table)?;
         let mut parameters = Vec::new();
         let (mut rows, mut bytes, mut inserted) = (0usize, 0usize, 0u64);
         // Stay below protocol parameter limits even for very wide CSVs.
