@@ -334,3 +334,13 @@ thread visualization directory.
 The library overflow button renders as a missing-glyph square in this WASM
 build. Replace its font-dependent icon before publishing the refreshed bundle.
 This pass did not update the production website.
+
+### Query-library menu icon repair (2026-11-01)
+
+Replaced the font-dependent overflow glyph with three painted circles on a
+labeled egui button, retaining the menu and hover help. Native query-library
+suite passed (11 tests), strict all-target Clippy passed, and the optimized WASM
+bundle rebuilt successfully. In the local in-app browser, verified the visible
+three-dot icon, opened its popup, chose New group, observed the focused inline
+editor, and saved the group as Reports. Evidence: `wasm-library-menu-fixed.png`
+in the thread visualization directory. Production deployment remains pending.

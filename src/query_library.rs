@@ -307,7 +307,14 @@ impl Rustable {
             egui::Frame::new().corner_radius(16.0).fill(ui.visuals().extreme_bg_color).stroke(ui.visuals().widgets.noninteractive.bg_stroke).inner_margin(egui::Margin::symmetric(8,5)).show(ui, |ui| {
                 ui.add(TextEdit::singleline(&mut self.query_library.search).frame(false).hint_text("Search for query…").desired_width((ui.available_width()-40.0).max(70.0)));
             });
-            ui.menu_button("⋯", |ui| {
+            let options = ui.add(egui::Button::new("").min_size(egui::vec2(28.0, 26.0)).frame(false));
+            options.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Query library options"));
+            let ink = ui.style().interact(&options).fg_stroke.color;
+            for x in [-5.0, 0.0, 5.0] {
+                ui.painter().circle_filled(options.rect.center() + egui::vec2(x, 0.0), 1.5, ink);
+            }
+            let options = options.on_hover_text("Query library options");
+            egui::Popup::menu(&options).show(|ui| {
                 ui.label(if cfg!(target_arch = "wasm32") { "Stored in this browser".into() } else { root.display().to_string() });
                 if !cfg!(target_arch = "wasm32") && ui.button("Choose storage folder…").clicked() { self.choose_query_directory(ui.ctx()); ui.close(); }
                 if ui.button("Refresh").clicked() { self.query_library.invalidate(); ui.close(); }
