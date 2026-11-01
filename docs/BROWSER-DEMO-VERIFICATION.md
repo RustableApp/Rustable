@@ -43,6 +43,9 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 
 - Saved-query conflict UI passed with two independent browser tabs sharing IndexedDB. Both loaded the same baseline; tab A saved SELECT 2, tab B attempted SELECT 3 and received a conflict without losing its dirty SQL. Save As preserved tab B as a separate query. Reloading tab A and reopening the original returned SELECT 2. This exposed a stale conflict banner after recovery; successful browser document operations now clear prior browser-storage errors while leaving unrelated errors alone. Save-dialog errors now belong to the draft rather than the refreshed sidebar listing: a conflict remained visible with stable dialog geometry after waiting beyond the five-second refresh interval. Cancelling the dialog remained functional.
 
+- Full native library regression after the shared browser adapters: 391 passed, 0 failed, 44 existing manual/integration tests ignored. This does not replace live database integration coverage.
+- Startup now dynamically imports its JS module inside the error handler. Temporarily removing the built module from local preview produced the visible startup failure and screenshot fallback, rather than an endless loading screen. The module was restored after the check.
+
 ## Required before replacement deployment
 
 - Extend CSV failure-path verification and verify database-copy opening with additional browser engines and larger files. Verify recovery after storage failures, and file transfers in additional browser engines.
