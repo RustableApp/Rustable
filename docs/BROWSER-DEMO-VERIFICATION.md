@@ -2,7 +2,7 @@
 
 ## Current source versus deployment
 
-The local browser host now creates `rustable::Rustable::new_demo`, using the actual main window in `src/app.rs`. Native and browser builds share the SQLite adapter and command handler. The earlier separate BrowserApp UI has been removed from source. The public website still serves that earlier reduced demo; the replacement has not been deployed.
+The local browser host now creates `rustable::Rustable::new_demo`, using the actual main window in `src/app.rs`. Native and browser builds share the SQLite adapter and command handler. The earlier separate BrowserApp UI has been removed from source. The full shared workspace has since been deployed; see the dated production entries below. Subsequent local builds are not deployed automatically.
 
 ## Verified locally
 
@@ -48,7 +48,7 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 
 - Clean full-app build embedded in a copy of the actual landing page at localhost:8768. Production `_headers` now include COOP same-origin and COEP require-corp, and the preview served these plus the existing CSP. The app rendered without console errors and Cmd+Enter inside the iframe returned 42. A 390×844 responsive check exposed a cramped desktop workspace; mobile presentation remains to fix before publication. Temporary viewport override was reset. Website copy now describes actual file-copy/import/export and browser-local saved-query behavior.
 
-## Required before replacement deployment
+## Remaining browser acceptance
 
 - Extend CSV failure-path verification and verify database-copy opening with additional browser engines and larger files. Verify recovery after storage failures, and file transfers in additional browser engines.
 - Measure whole-tab memory under sustained use. Manual transactional-write cancellation, transactional timeout rollback, and worker loss after an uncommitted write have passed in the in-app browser (details below). Worker startup crash/no-response recovery also passed. Shared cancellation requires cross-origin-isolated hosting and fallback deadline is two seconds.
@@ -402,3 +402,18 @@ table, four tables and one view. Embedding fallback checks passed (3 tests), and
 public COOP/COEP/CSP headers remain present. Evidence:
 `wasm-production-completion-font-update.png` in the session visualization folder.
 No main push or native release build was performed.
+
+## Shared-code regression build — 2026-11-01 (1f7d65c)
+
+After reviewed MySQL/MariaDB editing, trigger batching, generated-field labels and
+completion changes, the native library suite passed 441 tests with 101 opted-in
+fixture/manual tests ignored. The full release browser build linked successfully
+and wasm-bindgen generated assets at
+`/tmp/rustable-browser-verification-20261101/demo`.
+WASM SHA-256: `92a24992a23a1ce9b8d98159e9d10cc7845fc2022f535c0e312954affa855cf1`.
+The build still reports 52 browser-target warnings; this is not a warning-free
+browser build. All nine browser file-download/query-library adapter tests pass.
+
+This pass establishes compilation/linking and adapter regression status only.
+It does not replace browser UI acceptance of this bundle, whole-tab memory
+measurement or additional-browser checks. No deployment or native release.

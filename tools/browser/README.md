@@ -2,7 +2,7 @@
 
 This package hosts **the actual Rustable main window** from the root library. It does not implement a second UI. The desktop SQLite driver and command handler run inside a dedicated Web Worker, compiled through rusqlite/sqlite-wasm-rs. JavaScript provides loading, worker transport, browser file transfers and IndexedDB access; SQL execution and the app UI run in Rust/WASM.
 
-This replacement is under development and locally verified. The public site still serves the earlier reduced demo until the remaining browser adapters pass acceptance.
+The full shared workspace has been deployed to the public site. See `docs/BROWSER-DEMO-VERIFICATION.md` for the deployment history and the exact workflows verified; local source changes are not automatically published. Broader browser acceptance remains open.
 
 ## Build
 
@@ -25,7 +25,7 @@ SQL import/download, loaded-result CSV/JSON downloads, and full-table CSV/JSON d
 
 CSV preview, mapping, review and transactional import accept browser-selected files up to 8 MiB using immutable in-memory snapshots. Cmd/Ctrl+O opens a standalone SQLite file up to 8 MiB as a writable browser-local copy, without modifying the selected file. Invalid files preserve the current session; WAL-mode files require a standalone backup first. Server connections and OS keychains remain desktop integrations. Browser language-server processes are not started; shared catalog completion remains available.
 
-Verify cancellation, error recovery, keyboard shortcuts, browser memory bounds and more browsers before publishing. The full workspace is not a claim that every native OS integration exists in a browser.
+Continue acceptance of cancellation, error recovery, keyboard shortcuts, whole-tab memory bounds and additional browsers before claiming browser parity. The full workspace is not a claim that every native OS integration exists in a browser.
 
 Download object URLs retain at most 32 MiB total for up to 60 seconds. Additional
 exports show a wait-and-retry error until that budget is released. Failed launch
