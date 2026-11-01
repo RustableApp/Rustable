@@ -1217,6 +1217,8 @@ impl Rustable {
                     self.language.invalidate();
                     self.status = "Schema refreshed".into();
                 }
+                #[cfg(target_arch = "wasm32")]
+                Ok(Payload::Download { bytes, format }) => self.download_table(&bytes, format),
                 Ok(Payload::Exported(path)) => {
                     self.status = format!("Exported to {}", path.display())
                 }
@@ -1290,7 +1292,10 @@ impl Rustable {
                     if self.label != label {
                         self.error = Some("Connection changed while choosing the export destination. Start export again.".into());
                     } else {
+                        #[cfg(not(target_arch = "wasm32"))]
                         self.dispatch(Command::ExportTable { path, browse, format }, Pending::Export);
+                        #[cfg(target_arch = "wasm32")]
+                        { let _ = path; self.dispatch(Command::DownloadTable { browse, format }, Pending::Export); }
                     }
                 }
                 FileAction::Export(path, grid, format) => {

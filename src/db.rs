@@ -95,6 +95,10 @@ trait Driver: Send {
     ) -> Result<(), String> {
         Err("Full-table export is not supported by this driver".into())
     }
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn export_table_bytes(&mut self, _browse: &Browse, _cancel: &AtomicBool, _format: ExportFormat) -> Result<Vec<u8>, String> {
+        Err("Browser table export is not supported by this driver".into())
+    }
     fn import_csv(
         &mut self,
         _request: &csv_import::Request,
@@ -276,6 +280,8 @@ pub enum Command {
         path: PathBuf,
         grid: Arc<Grid>,
     },
+    #[cfg(target_arch = "wasm32")]
+    DownloadTable { format: ExportFormat, browse: Browse },
     ExportTable {
         format: ExportFormat,
         path: PathBuf,
@@ -327,6 +333,8 @@ pub enum Payload {
         triggers: Vec<Object>,
     },
     Exported(PathBuf),
+    #[cfg(target_arch = "wasm32")]
+    Download { bytes: Vec<u8>, format: ExportFormat },
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -574,6 +582,11 @@ fn handle(
                 objects: refresh.then(|| driver.objects()),
                 schemas: driver.schema_catalog(),
             })
+        }
+        #[cfg(target_arch = "wasm32")]
+        Command::DownloadTable { browse, format } => {
+            let bytes = driver.export_table_bytes(&browse, cancel, format)?;
+            Ok(Payload::Download { bytes, format })
         }
         Command::ExportTable { path, browse, format } => {
             driver.export_table(&path, &browse, cancel, format)?;

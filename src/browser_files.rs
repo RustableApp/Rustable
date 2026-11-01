@@ -18,7 +18,18 @@ impl Rustable {
         ctx.request_repaint();
     }
     pub(super) fn preview_csv_dialog(&self, ctx: &egui::Context) { self.browser_file_unavailable(ctx); }
-    pub(super) fn export_table_dialog(&self, ctx: &egui::Context, _format: db::ExportFormat) { self.browser_file_unavailable(ctx); }
+    pub(super) fn export_table_dialog(&self, ctx: &egui::Context, format: db::ExportFormat) {
+        if !self.supports_table_export() { return; }
+        let _ = self.files_tx.send(FileAction::ExportTable(PathBuf::new(), self.browse.clone(), self.label.clone(), format));
+        ctx.request_repaint();
+    }
+    pub(super) fn download_table(&mut self, bytes: &[u8], format: db::ExportFormat) {
+        let (name, mime) = match format { db::ExportFormat::Csv => ("table.csv", "text/csv;charset=utf-8"), db::ExportFormat::Json => ("table.json", "application/json") };
+        match download_bytes(name, bytes, mime) {
+            Ok(()) => self.status = format!("Download requested: {name}"),
+            Err(error) => self.error = Some(format!("Download failed: {}", crate::browser_error(error))),
+        }
+    }
     pub(super) fn script_dialog(&self, ctx: &egui::Context, save: bool) {
         let tx = self.files_tx.clone();
         let ctx = ctx.clone();

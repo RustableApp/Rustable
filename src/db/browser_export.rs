@@ -2,7 +2,11 @@
 use super::{ExportFormat, Grid, csv, row_export};
 use std::{io::{self, Write}, sync::atomic::AtomicBool};
 const LIMIT: usize = 16 * 1024 * 1024;
-struct Bounded { bytes: Vec<u8>, limit: usize }
+pub(super) struct Bounded { bytes: Vec<u8>, limit: usize }
+impl Bounded {
+    pub(super) fn new() -> Self { Self { bytes: Vec::new(), limit: LIMIT } }
+    pub(super) fn into_bytes(self) -> Vec<u8> { self.bytes }
+}
 impl Write for Bounded {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
@@ -13,12 +17,12 @@ impl Write for Bounded {
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 pub(crate) fn encode(grid: &Grid, format: ExportFormat) -> Result<Vec<u8>, String> {
-    let mut output = Bounded { bytes: Vec::new(), limit: LIMIT };
+    let mut output = Bounded::new();
     let cancel = AtomicBool::new(false);
     let mut writer = row_export::Writer::new(&mut output, &grid.columns, &cancel, format).map_err(|e| e.to_string())?;
     for row in &grid.rows { writer.row(row.iter().map(|value| Ok(csv::Cell::from(value)))).map_err(|e| e.to_string())?; }
     writer.finish().map_err(|e| e.to_string())?;
-    Ok(output.bytes)
+    Ok(output.into_bytes())
 }
 #[cfg(test)]
 mod tests {

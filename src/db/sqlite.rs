@@ -109,6 +109,13 @@ impl Driver for SqliteDriver {
         self.validate_export_path(path)?;
         export_table(&self.connection, path, browse, cancel, format).map_err(|e| e.to_string())
     }
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn export_table_bytes(&mut self, browse: &Browse, cancel: &AtomicBool, format: ExportFormat) -> Result<Vec<u8>, String> {
+        require_idle_transaction(&self.connection)?;
+        let mut output = super::browser_export::Bounded::new();
+        export_table_to(&self.connection, &mut output, browse, cancel, format).map_err(|e| e.to_string())?;
+        Ok(output.into_bytes())
+    }
     fn import_csv(
         &mut self,
         request: &csv_import::Request,
@@ -468,6 +475,16 @@ fn export_table(
     cancel: &AtomicBool,
     format: ExportFormat,
 ) -> std::io::Result<()> {
+    csv::publish(path, cancel, |writer| export_table_to(conn, writer, browse, cancel, format))
+}
+
+fn export_table_to(
+    conn: &Connection,
+    output: &mut dyn std::io::Write,
+    browse: &Browse,
+    cancel: &AtomicBool,
+    format: ExportFormat,
+) -> std::io::Result<()> {
     let metadata = columns(conn, &browse.table).map_err(std::io::Error::other)?;
     for column in browse.filter_column.iter().chain(browse.sort.iter().map(|(column, _)| column)) {
         if !metadata.iter().any(|field| &field.name == column) {
@@ -512,8 +529,8 @@ fn export_table(
     let mut rows = statement
         .query(params_from_iter(&parameters))
         .map_err(std::io::Error::other)?;
-    csv::publish(path, cancel, |writer| {
-        let mut writer = row_export::Writer::new(writer, &header.columns, cancel, format)?;
+    {
+        let mut writer = row_export::Writer::new(output, &header.columns, cancel, format)?;
         while let Some(row) = rows.next().map_err(std::io::Error::other)? {
             // SQLite owns these buffers until rows.next(); encode them before
             // advancing, without cloning an entire row or a large cell.
@@ -532,7 +549,7 @@ fn export_table(
             writer.row(values)?;
         }
         writer.finish()
-    })
+    }
 }
 
 fn browse_table_after(
@@ -3150,6 +3167,31 @@ mod insert_tests {
 
 #[cfg(test)]
 mod full_export_tests {
+    #[test]
+    fn browser_table_download_spans_pages_and_preserves_filter_sort() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut driver = SqliteDriver::open(None, cancel.clone()).unwrap();
+        driver.connection.execute_batch("CREATE TABLE download_probe(id INTEGER PRIMARY KEY, label TEXT); WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1200) INSERT INTO download_probe SELECT x, 'matching' FROM n;").unwrap();
+        let browse = Browse { table: "download_probe".into(), offset: 500, filter_column: Some("label".into()), filter: "matching".into(), sort: Some(("id".into(), true)) };
+        let bytes = driver.export_table_bytes(&browse, &cancel, ExportFormat::Json).unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1200);
+        assert_eq!(rows[0]["id"], 1200);
+        assert_eq!(rows[1199]["id"], 1);
+        let mut missing = browse.clone(); missing.filter = "absent".into();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&driver.export_table_bytes(&missing, &cancel, ExportFormat::Json).unwrap()).unwrap(), serde_json::json!([]));
+        cancel.store(true, Ordering::Relaxed);
+        assert!(driver.export_table_bytes(&browse, &cancel, ExportFormat::Csv).is_err());
+        cancel.store(false, Ordering::Relaxed);
+        driver.connection.execute_batch("BEGIN").unwrap();
+        assert!(driver.export_table_bytes(&browse, &cancel, ExportFormat::Csv).is_err());
+        driver.connection.execute_batch("ROLLBACK").unwrap();
+        driver.connection.execute_batch("UPDATE download_probe SET label=printf('%20000d',id)").unwrap();
+        let large = Browse { table: "download_probe".into(), ..Default::default() };
+        assert!(driver.export_table_bytes(&large, &cancel, ExportFormat::Csv).unwrap_err().contains("16 MiB"));
+        assert!(driver.connection.is_autocommit());
+        assert_eq!(driver.connection.query_row("SELECT count(*) FROM download_probe", [], |r| r.get::<_, i64>(0)).unwrap(), 1200);
+    }
     #[test]
     #[ignore = "manual release export throughput and process RSS measurement"]
     fn export_streaming_benchmark() {
