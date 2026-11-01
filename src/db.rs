@@ -58,6 +58,7 @@ impl TransactionState {
 
 /// A session owns one driver on its worker thread; only owned results cross threads.
 trait Driver: Send {
+    fn databases(&mut self) -> Result<Vec<String>, String> { Ok(Vec::new()) }
     fn transaction_state(&mut self) -> TransactionState { TransactionState::Idle }
     fn engine_name(&self) -> &'static str;
     fn objects(&mut self) -> Result<Vec<Object>, String>;
@@ -218,6 +219,7 @@ impl Browse {
 }
 
 pub enum Command {
+    ListDatabases,
     RefreshSchema,
     SelectSchema(String),
     OpenScript(PathBuf),
@@ -259,6 +261,7 @@ pub enum Command {
 }
 
 pub enum Payload {
+    Databases(Vec<String>),
     Schema {
         objects: Vec<Object>,
         schemas: SchemaCatalog,
@@ -558,6 +561,7 @@ fn handle(
             }
             Ok(Payload::ImportTarget(object))
         }
+        Command::ListDatabases => driver.databases().map(Payload::Databases),
         Command::RefreshSchema => {
             let objects = driver.objects()?;
             Ok(Payload::Schema {

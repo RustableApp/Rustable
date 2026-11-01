@@ -1,3 +1,5 @@
+#[path = "navigator.rs"]
+mod navigator;
 #[path = "bulk_rows.rs"]
 mod bulk_rows;
 #[path = "change_history.rs"]
@@ -410,6 +412,7 @@ pub struct Rustable {
     csv_review: Option<(db::csv_import::Request, Vec<String>)>,
     inspector: bool,
     history: bool,
+    navigator: navigator::Navigator,
     activity: std::collections::VecDeque<String>,
     last_operation_ms: Option<f64>,
     sidebar_section: usize,
@@ -842,6 +845,7 @@ impl Rustable {
             csv_review: None,
             inspector: true,
             history: false,
+            navigator: navigator::Navigator::new(initial.as_ref()),
             activity: Default::default(),
             last_operation_ms: None,
             sidebar_section: 0,
@@ -916,6 +920,7 @@ impl Rustable {
             }
             let pending = self.pending.take();
             match result {
+                Ok(Payload::Databases(names)) => { self.navigator.databases = names; self.navigator.loaded = true; }
                 Err(e) => {
                     if matches!(pending, Some(Pending::Table)) {
                         self.saved_selection = None;
@@ -1613,7 +1618,7 @@ impl Rustable {
     }
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
-        self.connections || self.review.is_some() || self.history
+        self.navigator.open || self.connections || self.review.is_some() || self.history
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some() || self.alter_column.is_some()
             || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some()
@@ -1640,6 +1645,14 @@ impl Rustable {
             return;
         }
         if self.dialog_owns_workspace_shortcuts() { return; }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
+            self.open_navigator(false);
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {
+            self.open_navigator(true);
+            return;
+        }
         self.workspace_tab_shortcuts(ctx);
         self.staged_history_shortcuts(ctx);
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
@@ -2164,15 +2177,9 @@ impl Rustable {
                     {
                         self.connections = true;
                     }
-                    if ui
-                        .add_enabled_ui(self.pending.is_none(), |ui| {
-                            toolbar_action(ui, 1, false).on_hover_text("Open database…")
-                        })
-                        .inner
-                        .clicked()
-                    {
-                        self.file_dialog(ctx, false);
-                    }
+                    if toolbar_action(ui, 1, self.navigator.open)
+                        .on_hover_text("Browse databases · Cmd/Ctrl+K · Find anything: Cmd/Ctrl+P")
+                        .clicked() { self.open_navigator(true); }
                     if toolbar_action(ui, 2, self.view == View::Query)
                         .on_hover_text("Open query editor")
                         .clicked()
@@ -2428,11 +2435,11 @@ impl Rustable {
         egui::TopBottomPanel::bottom(egui::Id::new((ctx.viewport_id(), "status"))).exact_height(24.0).show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.add_space(10.0);
-                if self.pending.is_some() { ui.spinner(); } else { ui.label(RichText::new("•").color(GREEN)); }
+                if self.pending.is_some() { ui.add(egui::Spinner::new().size(12.0)); } else { ui.label(RichText::new("•").color(GREEN)); }
                 ui.label(RichText::new(&self.status).size(11.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(10.0);
-                    ui.label(RichText::new(format!("UI {:.2} ms  ·  {}  ·  {}", self.frame_ms, self.engine, if self.safe { "READ ONLY" } else { "WRITES ENABLED" })).size(10.0).color(MUTED))
+                    ui.label(RichText::new(format!("UI {:.2} ms  ·  {}", self.frame_ms, self.engine)).size(10.0).color(MUTED))
                         .on_hover_text("UI measures CPU time spent building the previous frame, not display FPS or GPU time.");
                 });
             });
@@ -5450,11 +5457,12 @@ impl eframe::App for Rustable {
         self.poll();
         self.workspace_shortcuts(ctx);
         self.toolbar(ctx);
-        self.footer(ctx);
+        if cfg!(feature = "qa") { self.footer(ctx); }
         self.sidebar(ctx);
         self.inspector(ctx);
         self.workspace(ctx);
         self.windows(ctx);
+        self.navigator_window(ctx);
         self.csv_preview_window(ctx);
         self.csv_import_review(ctx);
         if ctx.input(|i| i.viewport().close_requested())
@@ -5558,18 +5566,11 @@ fn toolbar_action(ui: &mut egui::Ui, kind: u8, selected: bool) -> egui::Response
             line([-3.0, -6.0], [-3.0, 6.0]);
         }
         1 => {
-            ui.painter().add(egui::Shape::line(
-                vec![
-                    c + egui::vec2(-8.0, 6.0),
-                    c + egui::vec2(-8.0, -6.0),
-                    c + egui::vec2(-2.0, -6.0),
-                    c + egui::vec2(0.0, -3.0),
-                    c + egui::vec2(8.0, -3.0),
-                    c + egui::vec2(8.0, 6.0),
-                    c + egui::vec2(-8.0, 6.0),
-                ],
-                stroke,
-            ));
+            for y in [-5.0, 5.0] {
+                ui.painter().add(egui::Shape::ellipse_stroke(c + egui::vec2(0.0, y), egui::vec2(7.0, 3.0), stroke));
+            }
+            line([-7.0, -5.0], [-7.0, 5.0]);
+            line([7.0, -5.0], [7.0, 5.0]);
         }
         2 => {
             ui.painter().text(

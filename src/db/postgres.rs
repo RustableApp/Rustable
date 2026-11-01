@@ -172,6 +172,16 @@ impl PostgresDriver {
 }
 
 impl Driver for PostgresDriver {
+    fn databases(&mut self) -> Result<Vec<String>, String> {
+        self.check_tunnel()?;
+        if self.transaction_state().blocks_replacement() {
+            return Err("Finish the current transaction before refreshing databases".into());
+        }
+        let _watch = self.watch();
+        self.client.query("SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND NOT datistemplate AND pg_catalog.has_database_privilege(oid, 'CONNECT') ORDER BY datname", &[])
+            .map(|rows| rows.into_iter().map(|row| row.get(0)).collect()).map_err(error)
+    }
+
     fn transaction_state(&mut self) -> TransactionState {
         if self.client.is_closed() {
             return TransactionState::Disconnected;

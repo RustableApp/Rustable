@@ -61,10 +61,16 @@ impl SessionWindows {
             }),
         }
     }
-    fn collect_requests(&mut self) {
-        for request in self.root.take_window_requests() {
+    fn collect_requests(&mut self) -> Option<egui::ViewportId> {
+        let mut requests = self.root.take_window_requests();
+        for window in &mut self.windows {
+            if let Some(app) = &mut window.app { requests.extend(app.take_window_requests()); }
+        }
+        let mut opened = None;
+        for request in requests {
             let id = egui::ViewportId::from_hash_of(("database-session", self.next_id));
             self.next_id += 1;
+            opened = Some(id);
             self.windows.push(SessionWindow {
                 id,
                 title: request.title.clone(),
@@ -74,6 +80,7 @@ impl SessionWindows {
                 connected: false,
             });
         }
+        opened
     }
     fn show_launcher(&mut self, ctx: &egui::Context) {
         self.launcher_hidden = false;
@@ -104,11 +111,10 @@ impl eframe::App for SessionWindows {
         let mut quit_requested = consume_quit(ctx) || crate::native_menu::take_requested();
         quit_requested |= self.root.render_launcher(ctx);
         let mut shared_changed = self.root.publish_shared_preferences();
-        self.collect_requests();
+        let opened_window = self.collect_requests();
         let had_windows = !self.windows.is_empty();
         let root_close_requested = ctx.input(|input| input.viewport().close_requested());
         let mut manager_requested = false;
-        let mut connected_window = None;
         for window in &mut self.windows {
             ctx.show_viewport_immediate(window.id, egui::ViewportBuilder::default()
                 .with_title(format!("{} — Rustable", window.title))
@@ -139,9 +145,7 @@ impl eframe::App for SessionWindows {
                     } else { window.closed = true; }
                 }
                 let connected = app.has_connection();
-                if window.connection_completed(connected) && !window.closed {
-                    connected_window = Some(window.id);
-                }
+                window.connection_completed(connected);
             });
         }
         if shared_changed {
@@ -190,10 +194,10 @@ impl eframe::App for SessionWindows {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.launcher_hidden = true;
         }
-        if let Some(id) = connected_window.filter(|_| !self.quitting && !manager_requested) {
-            // Only dismiss after the worker confirms a connection. Failed attempts
-            // leave the picker available, and existing sessions never re-hide it
-            // after the user reopens Connections with Cmd+N.
+        if let Some(id) = opened_window.filter(|_| !self.quitting && !manager_requested) {
+            // Hand off immediately to the new window, which owns connection
+            // progress and errors. Later connection completion must not re-hide
+            // a launcher explicitly reopened by the user.
             self.launcher_hidden = true;
             ctx.send_viewport_cmd_to(
                 egui::ViewportId::ROOT,
