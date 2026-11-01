@@ -50,3 +50,10 @@ For each release:
 
 Do not mark a release complete with a stale demo. Never overwrite published
 versioned assets; fix failures before publishing, or bump the version afterward.
+
+
+Runner recovery: macOS 14 was retired in November 2026; workflows use macOS 15.
+If an infrastructure failure affects only macOS, manually dispatch Signed release
+with the original tag and `platform: macos-15`. This builds/signs only macOS and
+leaves draft creation to the release operator, who combines only artifacts from
+the exact same source tag. Do not rebuild successful Windows/Linux/WASM jobs.
