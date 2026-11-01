@@ -7,6 +7,7 @@ type CatalogRow = (String, String, Option<String>, Option<String>, Option<String
 
 struct MysqlDriver {
     connection: Option<Conn>,
+    cancel: Arc<AtomicBool>,
     config: MysqlConfig,
     engine: &'static str,
     schemas: SchemaCatalog,
@@ -32,6 +33,7 @@ impl MysqlDriver {
         let names = connection.query("SHOW DATABASES").map_err(|e| e.to_string())?;
         Ok(Self {
             connection: Some(connection),
+            cancel: Arc::new(AtomicBool::new(false)),
             config: config.clone(),
             engine: if version.contains("MariaDB") { "MariaDB" } else { "MySQL" },
             schemas: SchemaCatalog { names, selected: database },
@@ -154,8 +156,16 @@ impl MysqlDriver {
         self.connection.as_mut().ok_or_else(|| "MySQL connection is disconnected".into())
     }
     fn with_connection<T>(&mut self, operation: impl FnOnce(&mut Conn) -> Result<T, ::mysql::Error>) -> Result<T, String> {
-        match operation(self.conn()?) {
-            Ok(value) => Ok(value),
+        if self.cancel.load(Ordering::Acquire) { return Err("Cancelled before metadata request".into()); }
+        let config = self.config.clone();
+        let cancel = self.cancel.clone();
+        let conn = self.conn()?;
+        let (result, cancellation_error) = with_cancel(&config, conn.connection_id(), &cancel, || operation(conn));
+        match result {
+            Ok(value) => match cancellation_error {
+                Some(error) => Err(error),
+                None => Ok(value),
+            },
             Err(error) => {
                 if error.is_connectivity_error() { self.connection = None; }
                 Err(error.to_string())
@@ -212,6 +222,7 @@ impl MysqlDriver {
 }
 
 impl Driver for MysqlDriver {
+    fn set_cancellation(&mut self, cancel: Arc<AtomicBool>) { self.cancel = cancel; }
     fn engine_name(&self) -> &'static str { self.engine }
     fn sql_dialect(&self) -> crate::sql::Dialect { crate::sql::Dialect::Mysql(self.mode) }
     fn transaction_state(&mut self) -> TransactionState {
@@ -352,15 +363,8 @@ impl Driver for MysqlDriver {
             Value::Text(text) => ::mysql::Value::Bytes(text.as_bytes().to_vec()), _ => unreachable!(),
         }).collect();
         let mut remaining = BYTE_LIMIT;
-        let outcome = self.conn()?.exec_iter(&sql, params).map(|results|
-            super::mysql_results::collect_budget(results, &mut remaining, PAGE_SIZE + 1, 1));
-        let (report, disconnected) = match outcome {
-            Ok(result) => result,
-            Err(error) => {
-                if error.is_connectivity_error() { self.connection = None; }
-                return Err(error.to_string());
-            }
-        };
+        let (report, disconnected) = self.with_connection(|conn| conn.exec_iter(&sql, params).map(|results|
+            super::mysql_results::collect_budget(results, &mut remaining, PAGE_SIZE + 1, 1)))?;
         if disconnected { self.connection = None; }
         if let Some(error) = report.error { return Err(error); }
         let mut grid = Arc::unwrap_or_clone(report.grids.into_iter().next().ok_or("Missing table result")?);
@@ -566,6 +570,37 @@ mod tests {
             assert!(driver.connection.is_none(), "metadata failure must discard the socket immediately");
             assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
         }
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_browse_can_cancel_a_locked_table() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false,
+            read_timeout: Duration::from_secs(3), ..Default::default() };
+        let mut lock = Conn::new(OptsBuilder::from(&config)).unwrap();
+        lock.query_drop("DROP TABLE IF EXISTS driver_locked_browse").unwrap();
+        lock.query_drop("CREATE TABLE driver_locked_browse(id INT PRIMARY KEY)").unwrap();
+        lock.query_drop("INSERT INTO driver_locked_browse VALUES (1)").unwrap();
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        lock.query_drop("LOCK TABLES driver_locked_browse WRITE").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        driver.set_cancellation(cancel.clone());
+        let started = std::time::Instant::now();
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| { std::thread::sleep(Duration::from_millis(100)); cancel.store(true, Ordering::Release); });
+            driver.browse(&Browse { table: "driver_locked_browse".into(), ..Default::default() })
+        });
+        lock.query_drop("UNLOCK TABLES").unwrap();
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(2), "cancellation should beat read timeout");
+        assert!(driver.connection.is_some(), "query cancellation should preserve the session");
+        cancel.store(false, Ordering::Release);
+        let table = driver.browse(&Browse { table: "driver_locked_browse".into(), ..Default::default() }).unwrap();
+        assert_eq!(table.grid.rows, [vec![Value::Integer(1)]]);
+        lock.query_drop("DROP TABLE driver_locked_browse").unwrap();
     }
 
 }

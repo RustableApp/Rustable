@@ -219,3 +219,18 @@ before catalog/list/table-metadata operations and verifies the socket is discard
 before transaction-state polling; a missing-table error preserves it instead.
 All ten driver tests pass independently against MySQL and MariaDB, and strict
 all-target Clippy passes. Metadata cancellation remains outstanding.
+
+Catalog, database listing, schema switching, table/index/trigger metadata, and
+browse data now use the shared command cancellation flag and a scoped KILL QUERY
+watcher. The worker binds its flag before dispatch; pending cancellation stops
+before the next request. The watcher is joined before returning, preventing a
+late cancellation from killing the next command. Control connections are opened
+only after cancellation, with bounded connection/read timeouts.
+
+A live test holds a write lock from a separate fixture connection, starts browsing,
+cancels after 100 ms, and verifies completion before the 3-second read timeout.
+After releasing the lock and clearing cancellation, the same driver browses the
+row successfully. All 11 driver tests pass on each engine. Full native suite:
+399 passed, 56 ignored; strict Clippy and WASM cargo check pass. Initial connection
+setup and session-state refresh cancellation still need coverage; cancellation
+permission/control-connection failures also remain to exercise.

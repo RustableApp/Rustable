@@ -77,6 +77,7 @@ impl TransactionState {
 
 /// A session owns one driver on its worker thread; only owned results cross threads.
 trait Driver: Send {
+    fn set_cancellation(&mut self, _cancel: Arc<AtomicBool>) {}
     fn databases(&mut self) -> Result<Vec<String>, String> { Ok(Vec::new()) }
     fn transaction_state(&mut self) -> TransactionState { TransactionState::Idle }
     fn engine_name(&self) -> &'static str;
@@ -601,6 +602,7 @@ fn handle(
         return Ok(Payload::Exported(path));
     }
     let driver = connection.as_mut().ok_or("Open a database first")?;
+    driver.set_cancellation(cancel.clone());
     match command {
         Command::Query { sql, safe } => {
             let refresh = query_needs_catalog_refresh(
