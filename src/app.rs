@@ -3854,8 +3854,7 @@ impl Rustable {
                 });
                 let tab = &mut self.tabs[self.tab];
                 if ui.add_enabled(!tab.formatter.busy() && !tab.sql.trim().is_empty(),
-                    egui::Button::new(if tab.formatter.busy() { "Formatting…" } else { "Beautify" })
-                        .shortcut_text(if ui.ctx().os() == egui::os::OperatingSystem::Mac { "⌘I" } else { "Ctrl+I" }))
+                    crate::icons::shortcut_button(if tab.formatter.busy() { "Formatting…" } else { "Beautify" }, false, "I", None))
                     .on_hover_text("Format selection, or the whole SQL document. Undo with Cmd/Ctrl+Z.")
                     .clicked() {
                     tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
@@ -3869,11 +3868,7 @@ impl Rustable {
                 if ui
                     .add_enabled(
                         self.pending.is_none(),
-                        egui::Button::new("Run all").shortcut_text(if ui.ctx().os() == egui::os::OperatingSystem::Mac {
-                            if cfg!(target_arch = "wasm32") { "Shift+⌘Enter" } else { "⇧⌘↵" }
-                        } else {
-                            "Ctrl+Shift+Enter"
-                        }),
+                        crate::icons::shortcut_button("Run all", true, "Enter", None),
                     )
                     .on_hover_text("Cmd/Ctrl + Shift + Enter")
                     .clicked()
@@ -3883,22 +3878,9 @@ impl Rustable {
                 if ui
                     .add_enabled(
                         self.pending.is_none(),
-                        egui::Button::new(
-                            RichText::new(if self.tabs[self.tab].cursor.is_empty() {
-                                "Run current"
-                            } else {
-                                "Run selection"
-                            })
-                            .color(Color32::WHITE),
-                        )
-                        .fill(BLUE)
-                        .shortcut_text(
-                            RichText::new(if ui.ctx().os() == egui::os::OperatingSystem::Mac {
-                                if cfg!(target_arch = "wasm32") { "⌘Enter" } else { "⌘↵" }
-                            } else {
-                                "Ctrl+Enter"
-                            })
-                            .color(Color32::WHITE),
+                        crate::icons::shortcut_button(
+                            if self.tabs[self.tab].cursor.is_empty() { "Run current" } else { "Run selection" },
+                            false, "Enter", Some(BLUE),
                         ),
                     )
                     .clicked()

@@ -78,6 +78,36 @@ pub fn toolbar_group<R>(ui: &mut egui::Ui, count: usize, contents: impl FnOnce(&
     egui::InnerResponse { inner, response }
 }
 
+/// Shortcut keys are artwork, not font glyphs: identical on native and WASM.
+/// Leave 12 points before the shortcut and 2 points between its keys.
+pub fn shortcut_button(label: &'static str, shift: bool, key: &'static str, fill: Option<egui::Color32>) -> impl egui::Widget {
+    move |ui: &mut egui::Ui| {
+        egui_extras::install_image_loaders(ui.ctx());
+        ui.scope(|ui| {
+            ui.spacing_mut().icon_spacing = 2.0;
+            let mut atoms = egui::Atoms::new(label);
+            atoms.push_right(egui::Atom { size: Some(egui::vec2(8.0, 0.0)), ..Default::default() });
+            let icon = |source| egui::Image::new(source).fit_to_exact_size(egui::vec2(14.0, 14.0));
+            let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
+            if !mac { atoms.push_right("Ctrl"); }
+            if shift { atoms.push_right(icon(egui::include_image!("../assets/icons/lucide/arrow-big-up.svg"))); }
+            if mac { atoms.push_right(icon(egui::include_image!("../assets/icons/lucide/command.svg"))); }
+            if key == "Enter" {
+                atoms.push_right(icon(egui::include_image!("../assets/icons/lucide/corner-down-left.svg")));
+            } else {
+                atoms.push_right(key);
+            }
+            let button = egui::Button::new(atoms).image_tint_follows_text_color(fill.is_none());
+            if let Some(fill) = fill {
+                ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
+                ui.add(button.fill(fill))
+            } else {
+                ui.add(button)
+            }
+        }).inner
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
