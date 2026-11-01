@@ -1,7 +1,7 @@
 //! Browser transport for the same database commands and SQLite driver as desktop.
 use super::*;
 use bincode::Options;
-use std::cell::{Cell, RefCell};
+use std::{cell::{Cell, RefCell}, rc::Rc};
 use wasm_bindgen::{JsCast, prelude::*};
 
 use super::transport::codec;
@@ -56,28 +56,50 @@ pub struct Worker {
     pub rx: Receiver<Result<Payload, String>>,
     transaction: Arc<AtomicU8>,
     cancellation: Option<js_sys::Int32Array>,
+    failed: Rc<Cell<bool>>,
+    started: Rc<Cell<Option<web_time::Instant>>>,
+    replies: mpsc::Sender<Result<Payload, String>>,
+    ctx: eframe::egui::Context,
     _message: Closure<dyn FnMut(web_sys::MessageEvent)>,
     _error: Closure<dyn FnMut(web_sys::ErrorEvent)>,
 }
 impl Worker {
     pub fn new(ctx: eframe::egui::Context) -> Self {
         let (tx, rx) = mpsc::channel();
+        let replies = tx.clone();
+        let context = ctx.clone();
+        let failed = Rc::new(Cell::new(false));
+        let started = Rc::new(Cell::new(None));
+        let message_failed = failed.clone();
+        let message_started = started.clone();
+        let error_failed = failed.clone();
+        let error_started = started.clone();
         let transaction = Arc::new(AtomicU8::new(0));
         let status = transaction.clone();
+        let error_status = transaction.clone();
         let repaint = ctx.clone();
         let errors = tx.clone();
         let message = Closure::wrap(Box::new(move |event: web_sys::MessageEvent| {
+            if message_failed.get() { return; }
+            message_started.set(None);
             let bytes = js_sys::Uint8Array::new(&event.data()).to_vec();
             let result = codec().deserialize::<(Result<Payload, String>, TransactionState)>(&bytes);
             let reply = match result {
                 Ok((reply, state)) => { status.store(state as u8, Ordering::Release); reply }
-                Err(error) => Err(format!("Invalid database worker response: {error}")),
+                Err(error) => {
+                    message_failed.set(true);
+                    status.store(TransactionState::Disconnected as u8, Ordering::Release);
+                    Err(format!("Invalid database worker response: {error}. Open the demo again to start a fresh database."))
+                },
             };
             let _ = tx.send(reply);
             repaint.request_repaint();
         }) as Box<dyn FnMut(_)>);
         let error = Closure::wrap(Box::new(move |event: web_sys::ErrorEvent| {
-            let _ = errors.send(Err(format!("Browser database worker failed: {}", event.message())));
+            if error_failed.replace(true) { return; }
+            error_started.set(None);
+            error_status.store(TransactionState::Disconnected as u8, Ordering::Release);
+            let _ = errors.send(Err(format!("Browser database worker failed: {}. Open the demo again to start a fresh database; changes in the failed database cannot be recovered.", event.message())));
             ctx.request_repaint();
         }) as Box<dyn FnMut(_)>);
         let options = web_sys::WorkerOptions::new();
@@ -97,13 +119,36 @@ impl Worker {
                 }
             }
         }
-        Self { worker, rx, transaction, cancellation, _message: message, _error: error }
+        if worker.is_err() { failed.set(true); transaction.store(TransactionState::Disconnected as u8, Ordering::Release); }
+        Self { worker, rx, transaction, cancellation, failed, started, replies, ctx: context, _message: message, _error: error }
     }
     pub fn send(&self, command: Command) -> Result<(), String> {
+        if self.failed.get() { return Err("The browser database worker is disconnected. Open the demo again to start a fresh database.".into()); }
+        if self.started.get().is_some() { return Err("A browser database operation is already running.".into()); }
         validate_command(&command)?;
         if let Some(flag) = &self.cancellation { let _ = js_sys::Atomics::store(flag, 0, 0); }
         let bytes = codec().serialize(&command).map_err(|e| format!("Operation is not available in this browser session: {e}"))?;
-        self.worker.as_ref().map_err(Clone::clone)?.post_message(&js_sys::Uint8Array::from(bytes.as_slice())).map_err(|e| format!("Could not send database command: {e:?}"))
+        self.worker.as_ref().map_err(Clone::clone)?.post_message(&js_sys::Uint8Array::from(bytes.as_slice())).map_err(|e| format!("Could not send database command: {e:?}"))?;
+        self.started.set(Some(web_time::Instant::now()));
+        self.ctx.request_repaint_after(Duration::from_secs(10));
+        Ok(())
+    }
+    pub fn restart_if_failed(&mut self) {
+        if self.failed.get() { *self = Self::new(self.ctx.clone()); }
+    }
+    pub fn check_health(&self) {
+        if self.failed.get() {
+            if let Ok(worker) = &self.worker { worker.terminate(); }
+            return;
+        }
+        if self.started.get().is_some_and(|start| start.elapsed() >= Duration::from_secs(10)) {
+            self.failed.set(true);
+            self.started.set(None);
+            self.transaction.store(TransactionState::Disconnected as u8, Ordering::Release);
+            if let Ok(worker) = &self.worker { worker.terminate(); }
+            let _ = self.replies.send(Err("The browser database worker stopped responding and was terminated. Open the demo again to start a fresh database; its previous contents are lost.".into()));
+            self.ctx.request_repaint();
+        }
     }
     pub fn transaction_state(&self) -> TransactionState {
         match self.transaction.load(Ordering::Acquire) { 1 => TransactionState::Active, 2 => TransactionState::Failed, 3 => TransactionState::Disconnected, _ => TransactionState::Idle }

@@ -28,11 +28,13 @@ The local browser host now creates `rustable::Rustable::new_demo`, using the act
 
 - Loaded-result CSV/JSON export now runs in a separate WASM worker using the desktop streaming encoders, with a 16 MiB encoded-output cap and ten-second worker deadline. Two tests verify exact large integers, NULL, Unicode, binary data, duplicate JSON-name rejection, and bounded writes. The browser JSON export action completed without console errors, but no resulting download file was available at the expected Downloads path: completed-download content is not yet verified.
 
+- Database-worker failures now mark the session disconnected and reject further SQL. A ten-second no-response watchdog terminates the worker and clears the pending operation. Local preview fault injection verified both an immediate worker crash and a worker that never replied (10013.4 ms); `Start fresh demo` restored the sample tables in both cases, and browser-saved queries survived. Fault scripts were removed from preview staging; no fault hooks ship in source.
+
 ## Required before replacement deployment
 
 - SQL import/download adapters now compile in the full WASM build. Imported files use shared UTF-8/BOM/NUL/8 MiB validation and are opened as copies without an owned filesystem path. Download requests do not mark a disk file as saved. Native script-file tests (3) and strict Clippy pass. Actual picker import/download still requires end-to-end verification: the in-app browser picker did not expose an accessible dialog and native Codex UI control is prohibited.
 - Finish CSV/database import and full-table export, which still report temporary explicit errors. Verify SQL/result downloads through the browser end to end, saved-query conflict UI, and recovery after storage failures.
-- Verify timeout/cancellation during transactional writes, allocation-limit exhaustion, whole-tab memory, and worker crash recovery. Basic timeout/cancel/read recovery passed; shared cancellation requires cross-origin-isolated hosting and fallback deadline is two seconds.
+- Verify timeout/cancellation during transactional writes, allocation-limit exhaustion, whole-tab memory, and failure during transactional writes. Worker startup crash/no-response recovery passed. Basic timeout/cancel/read recovery passed; shared cancellation requires cross-origin-isolated hosting and fallback deadline is two seconds.
 - Extend keyboard verification to additional browsers and grid navigation. Cell select-all and current/selected/all query execution passed in the in-app browser with browser-native key events.
 - Verify reset/reload isolation, download actions, same-origin embedding headers, responsive layout and additional browser engines. Keep website claims synchronized with tested capabilities.
 - Remove stale miniature-demo build assets from the deployment staging directory when publishing the replacement. No desktop release or main push is needed for each iteration.

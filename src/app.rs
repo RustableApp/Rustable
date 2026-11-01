@@ -917,6 +917,8 @@ impl Rustable {
                 Some("Finish SQL transactions with COMMIT or ROLLBACK and save or discard pending changes before switching connections.".into());
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        if matches!(command, Command::Open(None)) { self.worker.restart_if_failed(); }
         let history_sql = match &command { Command::Query { sql, .. } => Some(sql.clone()), _ => None };
         let description = activity_description(&command);
         match self.worker.send(command) {
@@ -934,6 +936,8 @@ impl Rustable {
 
     fn poll(&mut self) {
         self.poll_query_groups();
+        #[cfg(target_arch = "wasm32")]
+        self.worker.check_health();
         #[cfg(target_arch = "wasm32")]
         if self.browser_export.borrow().as_ref().is_some_and(|worker| worker.expired()) {
             self.browser_export.borrow_mut().take();
@@ -2717,6 +2721,13 @@ impl Rustable {
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new(error).color(Color32::WHITE));
+                            #[cfg(target_arch = "wasm32")]
+                            if self.worker.transaction_state() == db::TransactionState::Disconnected
+                                && ui.add_enabled(self.changes.is_empty() && self.edit.is_none(), egui::Button::new("Start fresh demo"))
+                                    .on_hover_text("Starts a new disposable database. Discard any staged edits first. Saved queries remain in this browser.")
+                                    .clicked() {
+                                self.dispatch(Command::Open(None), Pending::Connect(None));
+                            }
                             if ui.small_button("Dismiss").clicked() {
                                 self.error = None;
                             }
