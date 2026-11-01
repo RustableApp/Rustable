@@ -18,6 +18,7 @@ pub(super) struct Manager {
     rename_group: Option<(GroupId, String)>,
     collapsed_groups: std::collections::HashSet<Option<GroupId>>,
     error: Option<String>,
+    saved_feedback: Option<(Profile, u64)>,
     probe: Option<Probe>,
     probe_snapshot: Option<(Profile, String)>,
     probe_status: Vec<(ProbeField, FieldStatus)>,
@@ -436,6 +437,7 @@ impl Rustable {
                         continue;
                     }
                     if let Err(error) = response.result {
+                        manager.saved_feedback = None;
                         if matches!(pending.kind, CredentialKind::Write) {
                             if let Some(profile) = self
                                 .prefs
@@ -816,6 +818,10 @@ impl Rustable {
                     if password_loading { ui.weak("Reading saved password…"); }
                     ui.horizontal(|ui| {
                         if ui.button("Discard").clicked() { action = Some(Action::Discard); }
+                        if self.connection_manager.saved_feedback.as_ref().is_some_and(|(saved, revision)| saved == draft && *revision == self.connection_manager.password_revision) {
+                            let credentials_pending = self.connection_manager.credential_pending.iter().any(|pending| pending.id == draft.id && !matches!(pending.kind, CredentialKind::Read(_)));
+                            ui.label(RichText::new(if credentials_pending { "Connection saved · updating password…" } else { "Connection saved" }).color(ui.visuals().hyperlink_color));
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let can_connect = valid && !password_loading && self.pending.is_none();
                         if ui.add_enabled(can_connect, egui::Button::new("Connect").fill(ui.visuals().selection.bg_fill))
@@ -1049,6 +1055,8 @@ impl Rustable {
                 self.connection_manager.draft =
                     self.prefs.saved_connections.profile(profile.id).cloned();
                 self.profiles_changed();
+                self.connection_manager.error = None;
+                self.connection_manager.saved_feedback = self.connection_manager.draft.clone().map(|saved| (saved, self.connection_manager.password_revision));
                 if matches!(profile.connection, ConnectionKind::Postgres(_) | ConnectionKind::Mysql(_) | ConnectionKind::MariaDb(_)) {
                     if profile.remember_password {
                         self.connection_manager.queue_credential(
@@ -1385,6 +1393,20 @@ mod tests {
         }
         fn flush(&mut self) {}
     }
+    #[test]
+    fn successful_save_reports_exact_saved_draft_and_revision() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_launcher_preferences(&ctx, Preferences::default());
+        app.connection_manager.select(Profile::draft("Saved feedback".into(), ConnectionKind::SQLite { path: PathBuf::from("/tmp/feedback.sqlite") }));
+        app.connection_action(Action::Save(false)).unwrap();
+        let (saved, revision) = app.connection_manager.saved_feedback.as_ref().unwrap();
+        assert_eq!(Some(saved), app.connection_manager.draft.as_ref());
+        assert_eq!(*revision, app.connection_manager.password_revision);
+        assert!(app.prefs.saved_connections.profile(saved.id).is_some());
+        app.connection_manager.draft.as_mut().unwrap().name = "Unsaved change".into();
+        assert_ne!(app.connection_manager.saved_feedback.as_ref().map(|(saved, _)| saved), app.connection_manager.draft.as_ref());
+    }
+
     #[test]
     fn connection_test_summary_distinguishes_tls_and_preserves_failures() {
         for tls in [false, true] {
