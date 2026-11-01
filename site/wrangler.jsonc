@@ -1,9 +1,0 @@
-{
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "rustable-site",
-  "account_id": "be77030f93622f6880466e25f82ff21b",
-  "compatibility_date": "2026-10-31",
-  "workers_dev": false,
-  "preview_urls": false,
-  "assets": { "directory": "./public", "not_found_handling": "404-page" }
-}

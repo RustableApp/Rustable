@@ -1,4 +1,4 @@
-<p align="left"><img src="site/public/assets/rustable-mark.svg" width="80" alt="Rustable icon"></p>
+<p align="left"><img src="assets/rustable-mark.svg" width="80" alt="Rustable icon"></p>
 
 # Rustable
 
