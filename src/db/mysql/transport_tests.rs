@@ -218,6 +218,44 @@ fn metadata_batch_uses_one_wire_request() {
     assert_eq!(first.sql, next.sql);
     assert_eq!(next.parameters.last(), Some(&Value::Integer(500)));
     eprintln!("30 ms simulated request delay: first browse {first_elapsed:?}; next page {next_elapsed:?}");
+    enabled.store(false, Ordering::Release);
+    driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS wire_trigger_batch_probe").unwrap();
+    driver.conn().unwrap().query_drop("CREATE TABLE wire_trigger_batch_probe(id INT PRIMARY KEY, n INT) ENGINE=InnoDB").unwrap();
+    let names = (0..65).map(|i| format!("wire_trigger_batch_{i:03}")).collect::<Vec<_>>();
+    for name in &names {
+        driver.conn().unwrap().query_drop(format!("CREATE TRIGGER {} BEFORE INSERT ON wire_trigger_batch_probe FOR EACH ROW SET NEW.n=COALESCE(NEW.n,0)", quote(name))).unwrap();
+    }
+    let mut serial = Vec::new();
+    let mut batched = Vec::new();
+    enabled.store(true, Ordering::Release);
+    for _ in 0..3 {
+        commands.lock().unwrap().clear();
+        let started = std::time::Instant::now();
+        let expected = names.iter().map(|name| {
+            let row: ::mysql::Row = driver.conn().unwrap().query_first(format!("SHOW CREATE TRIGGER {}", quote(name))).unwrap().unwrap();
+            row.get::<String, _>("SQL Original Statement").unwrap()
+        }).collect::<Vec<_>>();
+        serial.push(started.elapsed());
+        assert_eq!(commands.lock().unwrap().len(), 65);
+        commands.lock().unwrap().clear();
+        let started = std::time::Instant::now();
+        let (_, triggers) = driver.table_metadata("rustable_test", "wire_trigger_batch_probe").unwrap();
+        batched.push(started.elapsed());
+        assert_eq!(triggers.len(), 65);
+        for ((trigger, name), ddl) in triggers.iter().zip(&names).zip(expected) {
+            assert_eq!(&trigger.name, name);
+            assert_eq!(trigger.ddl, ddl);
+            assert!(trigger.metadata_error.is_none());
+        }
+        let captured = commands.lock().unwrap();
+        assert_eq!(captured.len(), 3, "one catalog batch plus two trigger-definition batches");
+        assert_eq!(captured.iter().filter(|sql| sql.starts_with(b"SHOW CREATE TRIGGER ")).count(), 2);
+    }
+    serial.sort();
+    batched.sort();
+    eprintln!("30 ms simulated request delay, 65 triggers: serial definitions median {:?}; batched full metadata median {:?}", serial[1], batched[1]);
+    enabled.store(false, Ordering::Release);
+    driver.conn().unwrap().query_drop("DROP TABLE wire_trigger_batch_probe").unwrap();
     drop(driver);
     proxy.join().unwrap();
 }

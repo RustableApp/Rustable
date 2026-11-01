@@ -426,3 +426,27 @@ checks cover two hidden MariaDB triggers, subsequent query synchronization, then
 readable definitions after granting the fixture account TRIGGER. All passed.
 This establishes the functional path and reduced command structure, not a measured
 WAN latency improvement; overall browse latency still needs remote-style timing.
+
+### Trigger batch wire-count and delayed-network measurement (2026-11-01)
+
+Extended the existing loopback protocol proxy test with 65 real triggers, crossing
+the 64-definition batch boundary. The proxy adds 30 ms before forwarding each
+query/prepare/execute request. Setup and cleanup run without injected delay.
+Three serial/batched samples use the same connection. All 65 names and definitions
+are checked against individual SHOW CREATE TRIGGER results, with no metadata errors.
+
+| Fixture | Serial definitions median | Batched full table metadata median |
+| --- | ---: | ---: |
+| MySQL 8.4 | 2573.34 ms | 164.19 ms |
+| MariaDB 11.4 | 2507.51 ms | 126.62 ms |
+
+Wire assertions confirm 65 individual definition commands versus three commands
+for the optimized full metadata path: one catalog batch, one 64-definition batch,
+and one final definition. This comparison includes extra index/catalog work on
+the optimized side. It is simulated request latency, not a production WAN or
+end-to-end native UI benchmark; scheduling and server time add to injected delay.
+
+The same run still measures ordinary table browsing at 176.88/121.36 ms for
+first/next page on MySQL and 161.86/100.56 ms on MariaDB. Thus eliminating
+per-trigger requests does not resolve the remaining column/data/metadata sequencing.
+The protocol test passes on both fixtures; all-target Clippy passes.
