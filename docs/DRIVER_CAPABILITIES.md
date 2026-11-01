@@ -511,3 +511,18 @@ fallback remain pending.
 Local screenshot evidence: `native-mysql-tls-probe.png` and
 `native-mysql-query-timing-before.png` in the session visualization directory
 `~/.codex/visualizations/2026/10/31/01a18f82-8ef6-7c12-b1e5-94903450cc37/`.
+
+### Emoji fallback and timing UI recheck (2026-11-01)
+
+A rebuilt native acceptance bundle now renders Japanese plus crab, smile and rocket
+characters in the SQL editor and MySQL result grid. The same query's `SLEEP(0.15)`
+reported 164 ms in the footer and 164.0 ms in the script header, verifying the
+previous timing fix visually. Evidence: `native-mysql-emoji-and-timing.png` in the
+session visualization directory above.
+
+Bundled Noto Emoji outlines supplement the default faces for both proportional
+and monospace text, including WASM's font installation path; no runtime download
+is needed. The unmodified font and OFL license are under assets/fonts. Native
+font coverage tests and strict all-target Clippy pass. This does not implement
+color emoji or combined emoji sequence shaping, and this font change has not yet
+been browser-rendered or deployed.
