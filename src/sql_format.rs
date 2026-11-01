@@ -116,11 +116,28 @@ impl Formatter {
         }
     }
 }
+// Tokenizer-only adapter: retain MySQL token categories while honoring the
+// session's quote rules. Parsing/execution still use the shared SQL scanner.
+#[derive(Debug)]
+struct MysqlLexer(crate::sql::mysql::Mode);
+impl sqlparser::dialect::Dialect for MysqlLexer {
+    fn dialect(&self) -> std::any::TypeId { std::any::TypeId::of::<MySqlDialect>() }
+    fn is_identifier_start(&self, ch: char) -> bool { MySqlDialect {}.is_identifier_start(ch) }
+    fn is_identifier_part(&self, ch: char) -> bool { MySqlDialect {}.is_identifier_part(ch) }
+    fn is_delimited_identifier_start(&self, ch: char) -> bool { ch == '`' || (self.0.ansi_quotes && ch == '"') }
+    fn supports_string_literal_backslash_escape(&self) -> bool { !self.0.no_backslash_escapes }
+    fn ignores_wildcard_escapes(&self) -> bool { true }
+    fn supports_numeric_prefix(&self) -> bool { true }
+    fn supports_multiline_comment_hints(&self) -> bool { true }
+    fn requires_single_line_comment_whitespace(&self) -> bool { true }
+}
+
 fn signature(sql: &str, dialect: Dialect) -> Result<Vec<(Token, bool)>, String> {
+    let mysql = MysqlLexer(match dialect { Dialect::Mysql(mode) => mode, _ => Default::default() });
     let dialect: &dyn sqlparser::dialect::Dialect = match dialect {
         Dialect::Postgres => &PostgreSqlDialect {},
         Dialect::Sqlite => &SQLiteDialect {},
-        Dialect::Mysql(_) => &MySqlDialect {},
+        Dialect::Mysql(_) => &mysql,
     };
     let tokens = Tokenizer::new(dialect, sql)
         .with_unescape(false)
@@ -149,10 +166,11 @@ fn signature(sql: &str, dialect: Dialect) -> Result<Vec<(Token, bool)>, String> 
 // Give the formatter opaque stand-ins for text it must never rewrite. Locations
 // are consumed monotonically, avoiding repeated scans of long one-line scripts.
 fn protected_format(input: &str, dialect: Dialect) -> Result<String, String> {
+    let mysql = MysqlLexer(match dialect { Dialect::Mysql(mode) => mode, _ => Default::default() });
     let lexer: &dyn sqlparser::dialect::Dialect = match dialect {
         Dialect::Postgres => &PostgreSqlDialect {},
         Dialect::Sqlite => &SQLiteDialect {},
-        Dialect::Mysql(_) => &MySqlDialect {},
+        Dialect::Mysql(_) => &mysql,
     };
     let tokens = Tokenizer::new(lexer, input)
         .with_unescape(false)
@@ -297,11 +315,6 @@ pub(crate) fn format_document(
     selection: Range<usize>,
     dialect: Dialect,
 ) -> Result<Formatted, String> {
-    if let Dialect::Mysql(mode) = dialect
-        && (mode.no_backslash_escapes || mode.ansi_quotes)
-    {
-        return Err("Beautify is not yet available for this MySQL SQL mode.".into());
-    }
     if original.len() > INPUT_LIMIT {
         return Err("Document exceeds Beautify limit.".into());
     }
@@ -383,6 +396,24 @@ mod tests {
         assert!(formatted.text.ends_with("\nselect 9;"));
         assert_eq!(formatted.selection.start, start);
     }
+    #[test]
+    fn mysql_session_quote_modes_preserve_exact_literals_and_identifiers() {
+        for ansi_quotes in [false, true] {
+            for no_backslash_escapes in [false, true] {
+                let dialect = Dialect::Mysql(crate::sql::mysql::Mode { ansi_quotes, no_backslash_escapes });
+                let quoted = if no_backslash_escapes { "'ends in \\'" } else { "'escaped \\' quote'" };
+                let sql = format!("select {quoted}, \"two  words\", `back``tick`, b'101' from t where id=2; # keep  comment\n");
+                let result = format_document(sql.clone(), 0..0, dialect).unwrap();
+                assert!(result.text.contains(quoted));
+                assert!(result.text.contains("\"two  words\""));
+                assert!(result.text.contains("`back``tick`"));
+                assert_eq!(signature(&sql, dialect).unwrap(), signature(&result.text, dialect).unwrap());
+                let tokens = signature("select \"identifier\"", dialect).unwrap();
+                assert_eq!(matches!(&tokens[1].0, Token::Word(word) if word.quote_style == Some('"')), ansi_quotes);
+            }
+        }
+    }
+
     #[test]
     fn dialect_literals_comments_and_operators_never_silently_change() {
         for (dialect, sql) in [

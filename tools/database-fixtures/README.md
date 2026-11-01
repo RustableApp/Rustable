@@ -383,3 +383,18 @@ normal and ANSI_QUOTES/NO_BACKSLASH_ESCAPES modes, checking exact Unicode/NUL/
 quote/backslash text, binary bytes, integer extremes, NULL and DOUBLE values.
 Both engines pass, as does strict all-target Clippy. This does not enable the
 unfinished transactional editing executor.
+
+### Beautify under MySQL/MariaDB quote modes (2026-11-01)
+
+Beautify no longer rejects ANSI_QUOTES or NO_BACKSLASH_ESCAPES categorically.
+Its tokenizer adapter preserves MySQL token categories while applying the active
+session's identifier and string rules. Quoted spans remain opaque to whitespace
+formatting, with token signatures checked before and after, including selection
+boundaries. Six formatter tests pass (one manual throughput test ignored),
+including all four combinations of the two flags, backslashes before closing
+quotes, doubled backticks, double-quoted strings/identifiers and hash comments.
+
+Live SELECT comparisons on both disposable MySQL and MariaDB servers confirm
+identical results before/after Beautify for each mode combination. Strict
+all-target Clippy passes. This verifies those mode-sensitive expressions, not
+complete MySQL/MariaDB grammar support or every stored-program construct.

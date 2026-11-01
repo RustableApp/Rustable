@@ -174,4 +174,29 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_beautify_preserves_values_under_session_quote_modes() {
+        use ::mysql::{Conn, OptsBuilder, prelude::Queryable};
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = crate::connection::MysqlConfig { host:"127.0.0.1".into(), port,
+            user:"rustable".into(), password:"rustable-test-only".into(), database:"rustable_test".into(),
+            tls:false, ..Default::default() };
+        let mut conn = Conn::new(OptsBuilder::from(&config)).unwrap();
+        for ansi_quotes in [false, true] {
+            for no_backslash_escapes in [false, true] {
+                let modes = [if ansi_quotes { "ANSI_QUOTES" } else { "" }, if no_backslash_escapes { "NO_BACKSLASH_ESCAPES" } else { "" }].join(",");
+                conn.exec_drop("SET sql_mode=?", (modes.trim_matches(','),)).unwrap();
+                let literal = if no_backslash_escapes { "'ends in \\'" } else { "'escaped \\' quote'" };
+                let sql = format!("select {literal} as value, \"two  words\" from (select 42 as `two  words`) t where 1=1; # unchanged\n");
+                let dialect = crate::sql::Dialect::Mysql(crate::sql::mysql::Mode { ansi_quotes, no_backslash_escapes });
+                let formatted = crate::sql_format::format_document(sql.clone(), 0..0, dialect).unwrap();
+                let before: ::mysql::Row = conn.query_first(&sql).unwrap().unwrap();
+                let after: ::mysql::Row = conn.query_first(&formatted.text).unwrap().unwrap();
+                assert_eq!(before.unwrap(), after.unwrap(), "mode {modes}");
+            }
+        }
+    }
+
 }
