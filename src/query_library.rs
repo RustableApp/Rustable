@@ -1,5 +1,9 @@
 //! Named SQL files; directories are groups. Filesystem scans never run on the UI thread.
 use super::*;
+#[cfg(target_arch = "wasm32")]
+#[path = "browser_query_library.rs"]
+mod browser;
+
 #[derive(Clone)]
 pub(super) struct QueryFile { pub path: PathBuf, pub name: String, pub group: String }
 #[derive(PartialEq)]
@@ -21,8 +25,18 @@ pub(super) struct Library {
     focus_file: bool,
     group_operation: Option<mpsc::Receiver<GroupChange>>,
     error: Option<String>,
+    #[cfg(target_arch = "wasm32")]
+    save_dialog: Option<browser::SaveDraft>,
+    #[cfg(target_arch = "wasm32")]
+    document_operation: Option<mpsc::Receiver<Result<browser::Document, String>>>,
 }
 impl Library {
+    pub fn owns_keyboard(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        { self.save_dialog.is_some() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { false }
+    }
     pub fn invalidate(&mut self) { self.refreshed = None; self.receiver = None; }
     #[cfg(target_arch = "wasm32")]
     pub fn poll(&mut self, ctx: &egui::Context, root: PathBuf) {
@@ -140,7 +154,7 @@ fn change_group(root: &std::path::Path, rename: Option<(PathBuf, String)>) -> Re
 impl Rustable {
     #[cfg(target_arch = "wasm32")]
     fn start_query_group_operation(&mut self, ctx: &egui::Context, rename: Option<(PathBuf, String)>) {
-        if self.query_library.group_operation.is_some() { return; }
+        if self.query_library.group_operation.is_some() || self.query_library.document_operation.is_some() { return; }
         let root = self.query_directory();
         let (tx, rx) = mpsc::channel(); self.query_library.group_operation = Some(rx);
         let ctx = ctx.clone();
@@ -171,6 +185,8 @@ impl Rustable {
         });
     }
     pub(super) fn poll_query_groups(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.poll_browser_documents();
         let Some(result) = self.query_library.group_operation.as_ref().and_then(|rx| rx.try_recv().ok()) else { return; };
         self.query_library.group_operation = None;
         match result {
@@ -207,7 +223,7 @@ impl Rustable {
     pub(super) fn save_query_file(&mut self, ctx: &egui::Context, save_as: bool) {
         if self.pending.is_some() || self.query_library.group_operation.is_some() { return; }
         #[cfg(target_arch = "wasm32")]
-        { let _ = save_as; self.script_dialog(ctx, true); }
+        { self.save_browser_query(ctx, save_as); }
         #[cfg(not(target_arch = "wasm32"))]
         {
         let tab = &self.tabs[self.tab];
@@ -330,7 +346,12 @@ impl Rustable {
         if let Some(error) = &self.query_library.error { ui.colored_label(ui.visuals().error_fg_color, error); }
         if let Some(path) = chosen {
             if let Some(index) = self.tabs.iter().position(|tab| tab.open && tab.source_path.as_ref() == Some(&path)) { self.activate_query(index); }
-            else { self.dispatch(Command::OpenScript(path), Pending::Export); }
+            else {
+                #[cfg(target_arch = "wasm32")]
+                self.open_browser_query(ui.ctx(), path);
+                #[cfg(not(target_arch = "wasm32"))]
+                self.dispatch(Command::OpenScript(path), Pending::Export);
+            }
         }
     }
 }

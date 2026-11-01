@@ -1669,7 +1669,7 @@ impl Rustable {
     }
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
-        self.navigator.open || self.connections || self.review.is_some() || self.history
+        self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || self.history
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some() || self.alter_column.is_some()
             || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some()
@@ -3705,7 +3705,7 @@ impl Rustable {
                 rounded_action_buttons(ui);
                 ui.menu_button("File", |ui| {
                     if ui
-                        .add_enabled(self.pending.is_none(), egui::Button::new(if cfg!(target_arch = "wasm32") { "Download SQL" } else { "Save SQL" }))
+                        .add_enabled(self.pending.is_none(), egui::Button::new("Save SQL"))
                         .clicked()
                     {
                         self.save_query_file(ui.ctx(), false);
@@ -3718,12 +3718,16 @@ impl Rustable {
                         self.script_dialog(ui.ctx(), false);
                         ui.close();
                     }
-                    if !cfg!(target_arch = "wasm32") && ui
+                    if ui
                         .add_enabled(self.pending.is_none(), egui::Button::new("Save SQL As…"))
                         .clicked()
                     {
-                        self.script_dialog(ui.ctx(), true);
+                        self.save_query_file(ui.ctx(), true);
                         ui.close();
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    if ui.button("Download SQL copy").clicked() {
+                        self.script_dialog(ui.ctx(), true); ui.close();
                     }
                 });
                 let tab = &mut self.tabs[self.tab];
@@ -3734,7 +3738,7 @@ impl Rustable {
                     .clicked() {
                     tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), crate::sql::Dialect::for_engine(&self.engine));
                 }
-                if ui.button(if cfg!(target_arch = "wasm32") { "Download" } else { "Save" }).on_hover_text(if cfg!(target_arch = "wasm32") { "Download a SQL copy; the original file is not overwritten" } else { "Save named SQL query · Cmd/Ctrl+S" }).clicked() {
+                if ui.button("Save").on_hover_text("Save named SQL query · Cmd/Ctrl+S").clicked() {
                     self.save_query_file(ui.ctx(), false);
                 }
                 if self.pending.is_some() && ui.button("Cancel").clicked() {
@@ -5455,6 +5459,8 @@ impl eframe::App for Rustable {
         self.navigator_window(ctx);
         self.csv_preview_window(ctx);
         self.csv_import_review(ctx);
+        #[cfg(target_arch = "wasm32")]
+        self.browser_query_save_window(ctx);
         if ctx.input(|i| i.viewport().close_requested())
             && (!self.changes.is_empty()
                 || self.edit.is_some()

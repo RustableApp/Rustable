@@ -47,8 +47,13 @@ export function prepareChange(snapshot, request) {
 }
 function openLibrary() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open('rustable-query-library', 1);
-    request.onupgradeneeded = () => request.result.createObjectStore('entries', {keyPath: 'path'});
+    const request = indexedDB.open('rustable-query-library', 2);
+    request.onupgradeneeded = () => {
+      const store = request.result.objectStoreNames.contains('entries')
+        ? request.transaction.objectStore('entries')
+        : request.result.createObjectStore('entries', {keyPath: 'path'});
+      if (!store.indexNames.contains('kind')) store.createIndex('kind', 'kind');
+    };
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
     request.onblocked = () => reject(new Error('Close other demo tabs to upgrade query storage.'));
@@ -66,6 +71,16 @@ export async function library_request(json) {
       tx.oncomplete = () => resolve(JSON.stringify(result));
       tx.onabort = () => reject(failure || tx.error || new Error('Query storage transaction cancelled.'));
       tx.onerror = () => {}; // onabort owns the final failure.
+      if (request.op === 'list') {
+        // Sidebar refresh reads index keys only, never every SQL document body.
+        result = [];
+        const cursor = store.index('kind').openKeyCursor();
+        cursor.onsuccess = () => {
+          const row = cursor.result;
+          if (row) { result.push({path: row.primaryKey, kind: row.key}); row.continue(); }
+        };
+        return;
+      }
       const read = request.op === 'read' ? store.get(pathInside(request.path)) : store.getAll();
       read.onsuccess = () => {
         try {
