@@ -173,6 +173,68 @@ mod server_tests {
     use super::*;
     use ::mysql::{Conn, OptsBuilder, prelude::Queryable};
 
+    fn fixture_options() -> OptsBuilder {
+        let port: u16 = std::env::var("RUSTABLE_MYSQL_TEST_PORT")
+            .expect("set disposable server port").parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        OptsBuilder::default().ip_or_hostname(Some("127.0.0.1"))
+            .tcp_port(port).user(Some("rustable")).pass(Some("rustable-test-only"))
+            .db_name(Some("rustable_test")).prefer_socket(false)
+            .tcp_connect_timeout(Some(std::time::Duration::from_secs(2)))
+            .read_timeout(Some(std::time::Duration::from_secs(3)))
+            .write_timeout(Some(std::time::Duration::from_secs(3)))
+            .max_allowed_packet(Some(32 * 1024 * 1024))
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn cancelled_write_preserves_prior_transaction_and_timeout_is_unknown() {
+        use std::time::{Duration, Instant};
+        let options = fixture_options();
+        let mut conn = Conn::new(options.clone()).unwrap();
+        let mut control = Conn::new(options.clone()).unwrap();
+        conn.query_drop("CREATE TEMPORARY TABLE rustable_cancel_probe (value INT) ENGINE=InnoDB").unwrap();
+        conn.query_drop("INSERT INTO rustable_cancel_probe VALUES (7)").unwrap();
+        conn.query_drop("START TRANSACTION").unwrap();
+        conn.query_drop("UPDATE rustable_cancel_probe SET value=8").unwrap();
+        let id = conn.connection_id();
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
+        let cancellation = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            // Poll this user's own process, so KILL cannot run before the UPDATE.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let sql: Option<String> = control.exec_first(
+                    "SELECT INFO FROM information_schema.PROCESSLIST WHERE ID=?", (id,)).unwrap().flatten();
+                if sql.as_deref().is_some_and(|sql| sql.contains("SLEEP(10)")) { break; }
+                assert!(Instant::now() < deadline, "write did not start");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            control.query_drop(format!("KILL QUERY {id}")).unwrap();
+        });
+        let started = Instant::now();
+        start_tx.send(()).unwrap();
+        let result = conn.query_drop("UPDATE rustable_cancel_probe SET value=IF(SLEEP(10)=0,99,100)");
+        cancellation.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(matches!(result, Err(::mysql::Error::MySqlError(ref error)) if error.code == 1317), "{result:?}");
+        assert_eq!(conn.transaction_status(), None);
+        conn.ping().unwrap();
+        assert_eq!(conn.transaction_status(), Some(true));
+        assert_eq!(conn.query_first::<i64, _>("SELECT value FROM rustable_cancel_probe").unwrap(), Some(8));
+        conn.query_drop("ROLLBACK").unwrap();
+        assert_eq!(conn.query_first::<i64, _>("SELECT value FROM rustable_cancel_probe").unwrap(), Some(7));
+        assert_eq!(conn.transaction_status(), Some(false));
+
+        let mut stalled = Conn::new(options.read_timeout(Some(Duration::from_millis(100)))).unwrap();
+        let started = Instant::now();
+        assert!(stalled.query_drop("SELECT SLEEP(1)").is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(stalled.transaction_status(), None);
+        // A timed-out stream must be discarded, not blindly reused for a write.
+        drop(stalled);
+    }
+
     /// Run separately for the disposable MySQL and MariaDB compose services.
     #[test]
     #[ignore = "requires disposable server: RUSTABLE_MYSQL_TEST_PORT=43316 or 43317"]

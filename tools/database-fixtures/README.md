@@ -58,3 +58,13 @@ deadlines and cancellation remain required before exposing connections in UI.
 Live checks on both fixture engines exercise 10,000 rows, a deliberately small
 byte budget, 130 result sets, a later-statement error, and successful subsequent
 queries on the same connection.
+
+Cancellation contract (included in `sql::mysql::server_tests`): a separate control
+connection waits until the target UPDATE is visible in this user's process list,
+then sends KILL QUERY. Both MySQL and MariaDB return error 1317, leave earlier
+uncommitted edits intact, and report an active transaction after ping. Explicit
+ROLLBACK restores the committed value. This differs from SQLite's interrupted
+write rollback behavior and must not be hidden by a generic cancellation path.
+A 100ms read-timeout test verifies unknown status and discards the connection;
+never retry an uncertain write automatically or reuse an unsynchronized stream.
+These checks passed independently on both fixture engines on 2026-11-01.
