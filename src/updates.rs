@@ -9,7 +9,7 @@ mod macos {
     use std::{cell::RefCell, rc::Rc};
 
     struct State {
-        updater: SparkleUpdater,
+        updater: Rc<SparkleUpdater>,
         restart: Rc<RefCell<Option<RelaunchContinuation>>>,
         check_requested: bool,
     }
@@ -38,24 +38,31 @@ mod macos {
         };
         match SparkleUpdater::new(main_thread, config) {
             Ok(Some(updater)) => STATE.with(|slot| *slot.borrow_mut() = Some(State {
-                updater, restart, check_requested: false,
+                updater: Rc::new(updater), restart, check_requested: false,
             })),
             Ok(None) => {},
             Err(error) => eprintln!("Automatic updates could not start: {error}"),
         }
     }
     pub fn available() -> bool { STATE.with(|slot| slot.borrow().is_some()) }
-    pub fn can_check() -> bool { STATE.with(|slot| slot.borrow().as_ref().is_some_and(|state| state.updater.can_check_for_updates().unwrap_or(false))) }
+    pub fn can_check() -> bool {
+        let updater = STATE.with(|slot| slot.borrow().as_ref().map(|state| state.updater.clone()));
+        updater.is_some_and(|updater| updater.can_check_for_updates().unwrap_or(false))
+    }
     pub fn request_check() {
         STATE.with(|slot| { if let Some(state) = slot.borrow_mut().as_mut() { state.check_requested = true; } });
     }
     pub fn poll() {
-        STATE.with(|slot| {
-            if let Some(state) = slot.borrow_mut().as_mut()
-                && std::mem::take(&mut state.check_requested)
-                && state.updater.can_check_for_updates().unwrap_or(false)
-            { let _ = state.updater.check_for_updates(); }
+        // Native calls may synchronously invoke AppKit menu/delegate callbacks.
+        // Release the state borrow before calling Sparkle, retaining its lifetime.
+        let updater = STATE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let state = slot.as_mut()?;
+            std::mem::take(&mut state.check_requested).then(|| state.updater.clone())
         });
+        if let Some(updater) = updater
+            && updater.can_check_for_updates().unwrap_or(false)
+        { let _ = updater.check_for_updates(); }
     }
     pub fn restart_pending() -> bool {
         STATE.with(|slot| slot.borrow().as_ref().is_some_and(|state| state.restart.borrow().is_some()))

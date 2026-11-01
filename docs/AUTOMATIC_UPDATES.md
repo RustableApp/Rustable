@@ -15,7 +15,8 @@ the public updater. Unconfigured release bundles do not start update checks.
 
 Rustable postpones Sparkle's requested relaunch while any window has pending work,
 staged edits or an explicit SQL transaction. It saves all SQL drafts/preferences
-and flushes storage before releasing the continuation. Existing AppKit termination
+and waits for checked atomic disk persistence before releasing the continuation.
+Save failures keep the app open with a retry action. Existing AppKit termination
 guards remain active for other quit paths. End-to-end signed installation and
 relaunch, including failure and unsaved-work cases, remain mandatory release gates.
 

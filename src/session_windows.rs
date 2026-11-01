@@ -42,6 +42,7 @@ pub struct SessionWindows {
     quitting: bool,
     native_menu_installed: bool,
     migrate_launcher_size: bool,
+    update_save_error: Option<String>,
 }
 impl SessionWindows {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -54,6 +55,7 @@ impl SessionWindows {
             launcher_hidden: false,
             quitting: false,
             native_menu_installed: false,
+            update_save_error: None,
             migrate_launcher_size: cc.storage.is_none_or(|storage| {
                 storage.get_string(LAUNCHER_SIZE_MIGRATION).as_deref() != Some("done")
             }),
@@ -210,12 +212,23 @@ impl eframe::App for SessionWindows {
                 ui.label("Rustable will save your SQL drafts and restart to install the update when ready.");
             });
         }
-        if crate::updates::restart_pending() && !blocked {
+        if let Some(error) = self.update_save_error.clone() {
+            egui::Window::new("Update restart postponed").collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.label("Could not save your SQL drafts and settings. Rustable will stay open.");
+                ui.label(error);
+                if ui.button("Retry saving").clicked() { self.update_save_error = None; }
+            });
+        }
+        if crate::updates::restart_pending() && !blocked && self.update_save_error.is_none() {
             // Persist all windows' drafts/preferences before releasing Sparkle's restart.
             if let Some(storage) = frame.storage_mut() {
                 self.save(storage);
-                storage.flush();
-                crate::updates::resume_restart();
+                match storage.flush_and_wait() {
+                    Ok(()) => crate::updates::resume_restart(),
+                    Err(error) => self.update_save_error = Some(error.to_string()),
+                }
+            } else {
+                self.update_save_error = Some("Persistent storage is unavailable.".into());
             }
         }
     }

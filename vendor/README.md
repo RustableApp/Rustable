@@ -84,3 +84,19 @@ before any rows are published. Changed shapes discard the speculative result
 and retry through the fresh sequential path. This fast path is disabled inside
 explicit transactions and while transaction status is unknown. It does not open
 a second session or cache displayed metadata across refreshes.
+
+## eframe checked persistence
+
+`eframe 0.33.3` retains its upstream MIT/Apache licenses. The additive
+`Storage::flush_and_wait` method defaults to an unsupported error. Native
+FileStorage joins any earlier writer, writes the latest snapshot to a same-directory
+temporary file, syncs it, atomically replaces the state file, and syncs the parent
+on Unix. Errors reach the caller; success never means only that a thread started.
+Rustable uses this barrier before releasing Sparkle's deferred restart. Normal
+periodic autosaves retain upstream behavior. tempfile provides atomic replacement.
+
+Regression checks:
+
+```sh
+mise exec -- cargo test --manifest-path vendor/eframe/Cargo.toml --no-default-features --features persistence,glow,x11,wayland,default_fonts checked_persistence_tests
+```
