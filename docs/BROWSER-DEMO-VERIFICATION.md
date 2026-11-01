@@ -79,3 +79,19 @@ size despite normal surrounding HTML. This did not reproduce with a narrow
 iframe at normal viewport scaling, so no compensating app zoom was introduced.
 Actual mobile-device verification remains outstanding. Narrow table controls
 wrap into multiple rows and still need layout polish.
+
+### Embedded keyboard and manual cancellation (2026-11-01)
+
+In the actual landing-page iframe, clicking the first customer's name and
+pressing Tab selected its email; Shift+Tab then Down selected the second
+customer's name. The inspector followed that row (id 2, Noah Williams).
+
+Explicit write cancellation passed using the fixture
+`tools/browser/tests/fixtures/sqlite-manual-cancel.sql`. An initial attempt
+reached the two-second deadline before the click; this was not counted as
+manual cancellation. On the second run, the toolbar cancel button interrupted
+the recursive UPDATE after 13.8ms, cleared the open-transaction indicator,
+and a subsequent SELECT returned the committed baseline 7 (not the earlier
+uncommitted update to 8). The connection remained usable. These observations
+are for the in-app browser; only that browser engine is currently exposed by
+the available browser-control inventory.
