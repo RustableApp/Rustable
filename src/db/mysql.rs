@@ -300,7 +300,27 @@ impl MysqlDriver {
     }
     fn table_select(&mut self, request: &Browse) -> Result<(Object, String, Vec<Value>), String> {
         let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
-        let object = self.catalog_objects(Some(&request.table))?.into_iter().next().ok_or("Table no longer exists")?;
+        let mut object = self.catalog_objects(Some(&request.table))?.into_iter().next()
+            .unwrap_or_else(|| Object { schema: Some(schema.clone()), name: request.table.clone(),
+                display_name: None, metadata_error: None, kind: "table".into(), columns: Vec::new(), ddl: String::new() });
+        // Temporary tables are absent from MySQL's catalog and MariaDB exposes
+        // them without COLUMNS rows. Ask the current session for their columns.
+        // SHOW also reports missing/inaccessible tables without inventing metadata.
+        if object.columns.is_empty() {
+            let rows: Vec<::mysql::Row> = self.with_connection(|conn| conn.query(
+                format!("SHOW FULL COLUMNS FROM {}.{}", quote(&schema), quote(&request.table))))?;
+            for row in rows {
+                let extra = row.get::<String, _>("Extra").ok_or("Missing column attributes")?;
+                object.columns.push(Column {
+                    name: row.get("Field").ok_or("Missing column name")?,
+                    data_type: row.get("Type").ok_or("Missing column type")?,
+                    not_null: row.get::<String, _>("Null").as_deref() == Some("NO"),
+                    default: row.get::<Option<String>, _>("Default").flatten().unwrap_or_default(),
+                    pk: row.get::<String, _>("Key").as_deref() == Some("PRI"),
+                    generated: extra.contains("VIRTUAL GENERATED") || extra.contains("STORED GENERATED") || extra.contains("PERSISTENT"),
+                });
+            }
+        }
         // SELECT * omits invisible columns, including possible primary keys.
         // Project the catalog order explicitly so values and editing metadata
         // stay aligned, and full-table exports match the table browser.
@@ -524,6 +544,27 @@ mod tests {
         assert!(error.contains("host") || error.contains("Windows"), "must reject SSH configuration before any database connection: {error}");
     }
 
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_browse_session_temporary_table() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, database: "rustable_test".into(),
+            user: "rustable".into(), password: "rustable-test-only".into(), tls: false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        let cancel = AtomicBool::new(false);
+        let setup = driver.execute("CREATE TEMPORARY TABLE `temporary``browse` (id INT PRIMARY KEY, label VARCHAR(40), doubled INT GENERATED ALWAYS AS (id*2) STORED); INSERT INTO `temporary``browse` (id,label) VALUES (1,'first'),(2,'second');", false, &cancel);
+        assert!(setup.error.is_none(), "{:?}", setup.error);
+        let data = driver.browse(&Browse { table: "temporary`browse".into(), sort: Some(("id".into(), true)), ..Default::default() }).unwrap();
+        assert_eq!(data.grid.rows.len(), 2);
+        assert_eq!(data.grid.rows[0][0], Value::Integer(2));
+        assert_eq!(data.grid.rows[0][2], Value::Integer(4));
+        assert!(data.columns[0].pk);
+        assert!(data.columns[2].generated);
+        assert!(data.indexes.iter().any(|index| index.name == "PRIMARY"));
+        assert!(driver.browse(&Browse { table: "missing_temporary_browse".into(), ..Default::default() }).is_err());
+        assert_eq!(driver.transaction_state(), TransactionState::Idle);
+    }
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_result_timing_includes_server_execution() {

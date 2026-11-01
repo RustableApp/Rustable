@@ -1,6 +1,7 @@
 # Driver capability and transaction audit
 
-Audited 2026-10-31 against the current source. “Implemented” below means the
+Initial SQLite/PostgreSQL audit: 2026-10-31. Subsequent driver work is recorded
+in the dated evidence ledger below. “Implemented” below means the
 operation exists in the adapter and has the stated restrictions; it does not
 establish native acceptance, server-version compatibility, or complete TablePlus
 parity. The verification ledger below distinguishes newly run checks from source
@@ -10,7 +11,7 @@ inspection. Shared UI acceptance remains in [the parity requirements](TABLEPLUS_
 
 | Operation | SQLite | PostgreSQL | Source / limits |
 | --- | --- | --- | --- |
-| Saved connection | Existing local file; in-memory demo | Server, database, user, password, TLS and optional SSH | `src/connection_profiles.rs::ConnectionKind`; only these two engine variants exist. MySQL/MariaDB, Redis and other engines are not implemented. |
+| Saved connection | Existing local file; in-memory demo | Server, database, user, password, TLS and optional SSH | `src/connection_profiles.rs::ConnectionKind`; SQLite and PostgreSQL are the established adapters. Experimental MySQL/MariaDB adapters now implement connections, SQL, browsing and export; GUI editing/import/administration remain gated. Redis is not implemented. |
 | Session reuse | One owned connection per worker | One owned client per worker | `src/db.rs::Driver`, adapter structs. Independent windows own independent sessions. |
 | SQL editor execution | Engine-prepared statements; multiple results | Split statements executed sequentially; multiple results | `sqlite.rs::script`, `postgres.rs::execute`; at most 128 statements per run. Earlier autocommitted statements survive a later error. |
 | Explicit transactions across editor runs | Implemented: BEGIN/savepoint state persists until explicit finish or an engine-driven rollback | Implemented: BEGIN persists until COMMIT/ROLLBACK or connection teardown | Native acceptance remains open; see transaction table below. |
@@ -526,3 +527,23 @@ is needed. The unmodified font and OFL license are under assets/fonts. Native
 font coverage tests and strict all-target Clippy pass. This does not implement
 color emoji or combined emoji sequence shaping, and this font change has not yet
 been browser-rendered or deployed.
+
+### Native MariaDB acceptance and temporary-table browsing (2026-11-01)
+
+The native acceptance app connected to the disposable MariaDB TLS fixture with
+Verify Full and its fixture CA; Test reported TLS verified. Separate editor runs
+retained connection ID 3767 and an explicit transaction: an update changed 7 to 9,
+then ROLLBACK restored 7 and cleared the transaction indicator.
+
+Opening that session's temporary table exposed a real browse failure: MariaDB
+listed it in TABLES but returned no COLUMNS rows. The browse/export projection now
+falls back to session-local SHOW FULL COLUMNS when catalog columns are absent
+(including MySQL, where the table itself is absent). Missing or inaccessible tables
+still return the server error. Ordinary catalog-backed tables incur no extra read.
+
+`live_browse_session_temporary_table` passed independently on MySQL (43316) and
+MariaDB (43317): quoted table name, generated output, PK/index metadata, descending
+sort, missing-table error and idle-session preservation. The updated binary has
+not yet received native acceptance. Temporary tables shadowing persistent tables
+remain a separate metadata-resolution gap; this fallback does not resolve that
+case, and reviewed GUI editing remains disabled.
