@@ -56,6 +56,11 @@ fn application_icon() -> eframe::egui::IconData {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result {
+    // Winit builds About/Hide/Quit labels from NSProcessInfo, not the window
+    // title or bundle display name. Set this before it creates the native menu.
+    #[cfg(target_os = "macos")]
+    objc2_foundation::NSProcessInfo::processInfo()
+        .setProcessName(&objc2_foundation::NSString::from_str("Rustable"));
     #[cfg(feature = "qa")]
     if std::env::var_os("RUSTABLE_UI_PREVIEW").is_some() {
         return eframe::run_native("Rustable UI Preview", eframe::NativeOptions {

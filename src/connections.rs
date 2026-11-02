@@ -38,6 +38,7 @@ pub(super) struct Manager {
     credential_latest: std::collections::HashMap<ProfileId, u64>,
     credential_delete_retry: std::collections::HashSet<ProfileId>,
     password_revision: u64,
+    saved_password_revision: Option<u64>,
 }
 #[derive(Clone, Copy)]
 enum CredentialKind {
@@ -174,6 +175,7 @@ impl Manager {
         self.generation = self.generation.wrapping_add(1);
         self.password.clear();
         self.password_revision = self.password_revision.wrapping_add(1);
+        self.saved_password_revision = Some(self.password_revision);
         let load = profile.remember_password && profile.id.0 != 0;
         let id = profile.id;
         self.draft = Some(profile);
@@ -204,7 +206,8 @@ impl Manager {
     fn dirty(&self, profiles: &crate::connection_profiles::ConnectionProfiles) -> bool {
         self.draft
             .as_ref()
-            .is_some_and(|draft| profiles.profile(draft.id) != Some(draft))
+            .is_some_and(|draft| profiles.profile(draft.id) != Some(draft)
+                || self.saved_password_revision != Some(self.password_revision))
     }
 }
 
@@ -434,6 +437,7 @@ impl Rustable {
                         Ok(Some(password)) => {
                             manager.password = password;
                             manager.password_revision = manager.password_revision.wrapping_add(1);
+                            manager.saved_password_revision = Some(manager.password_revision);
                         }
                         Ok(None) => manager.error = Some(
                             "Saved password was not found. Enter it again to use this connection."
@@ -468,6 +472,7 @@ impl Rustable {
                                 && pending.generation == manager.generation
                             {
                                 draft.remember_password = false;
+                                manager.saved_password_revision = None;
                             }
                             manager.error = Some(format!(
                                 "Password remains session-only; the secure store could not save it: {error}"
@@ -555,7 +560,26 @@ impl Rustable {
                 ui.visuals_mut().widgets.inactive.corner_radius = egui::CornerRadius::same(8);
                 ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(8);
                 ui.visuals_mut().widgets.active.corner_radius = egui::CornerRadius::same(8);
+                    if let Some(id) = self.connection_search_navigation(ctx) {
+                        action = Some(Action::Select(id));
+                        keyboard_selection = Some(id);
+                    }
+                    if keyboard_selection.is_none()
+                        && ctx.memory(|m| m.has_focus(egui::Id::new("connection-search")))
+                        && !egui::Popup::is_any_open(ctx)
+                        && ctx.input_mut(|input| input.modifiers.is_none()
+                            && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+                        let manager = &self.connection_manager;
+                        keyboard_connect = manager.draft.as_ref().is_some_and(|draft| {
+                            self.prefs.saved_connections.matching_profiles(&manager.search).contains(&draft.id)
+                                && (!manager.search.trim().is_empty() || !manager.collapsed_groups.contains(&draft.group))
+                        });
+                    }
+                let show_toolbar = can_return || cfg!(any(target_arch = "wasm32", feature = "qa"));
+                let show_header = show_toolbar || self.connection_manager.import_notice.is_some()
+                    || self.error.is_some() || self.connection_manager.error.is_some();
                 if let Some(notice) = &self.connection_manager.import_notice { ui.label(notice); }
+                if show_toolbar {
                 ui.horizontal(|ui| {
                     if can_return && ui.button("Back to database").clicked() {
                         self.connections = false;
@@ -576,22 +600,8 @@ impl Rustable {
                         self.redis_demo_active = true;
                         self.connections = false;
                     }
-                    if let Some(id) = self.connection_search_navigation(ctx) {
-                        action = Some(Action::Select(id));
-                        keyboard_selection = Some(id);
-                    }
-                    if keyboard_selection.is_none()
-                        && ctx.memory(|m| m.has_focus(egui::Id::new("connection-search")))
-                        && !egui::Popup::is_any_open(ctx)
-                        && ctx.input_mut(|input| input.modifiers.is_none()
-                            && input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
-                        let manager = &self.connection_manager;
-                        keyboard_connect = manager.draft.as_ref().is_some_and(|draft| {
-                            self.prefs.saved_connections.matching_profiles(&manager.search).contains(&draft.id)
-                                && (!manager.search.trim().is_empty() || !manager.collapsed_groups.contains(&draft.group))
-                        });
-                    }
                 });
+                }
                 if let Some(error) = self.error.clone() {
                     ui.horizontal_wrapped(|ui| {
                         ui.colored_label(ui.visuals().error_fg_color, error);
@@ -601,7 +611,7 @@ impl Rustable {
                 if let Some(error) = &self.connection_manager.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
-                ui.separator();
+                if show_header { ui.separator(); }
                 ui.horizontal_top(|ui| {
                     let list_width = if self.connection_manager.draft.is_some() { (ui.available_width() * 0.33).clamp(240.0, 320.0) } else { ui.available_width() };
                     ui.allocate_ui_with_layout(egui::vec2(list_width, ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -904,6 +914,8 @@ impl Rustable {
                     if let Some(message) = &self.connection_manager.probe_message {
                         ui.add(egui::Label::new(RichText::new(message).small()).truncate()).on_hover_text(message);
                     }
+                    let has_changes = self.prefs.saved_connections.profile(draft.id) != Some(draft)
+                        || self.connection_manager.saved_password_revision != Some(self.connection_manager.password_revision);
                     let valid = draft.validate().is_ok() && ports_valid;
                     if !ports_valid { ui.colored_label(ui.visuals().error_fg_color, "Port must be between 1 and 65535."); }
                     let password_loading = self.connection_manager.credential_pending.iter().any(|pending| pending.generation == self.connection_manager.generation && matches!(pending.kind, CredentialKind::Read(revision) if revision == self.connection_manager.password_revision));
@@ -922,7 +934,7 @@ impl Rustable {
                         if self.connection_manager.probe.is_some() {
                             if ui.button("Cancel test").clicked() { cancel_test = true; }
                         } else if ui.add_enabled(valid && !password_loading, egui::Button::new("Test")).clicked() { test = true; }
-                        if ui.add_enabled(valid && !password_loading, egui::Button::new("Save")).clicked() { action = Some(Action::Save(false)); }
+                        if ui.add_enabled(valid && !password_loading && has_changes, egui::Button::new("Save")).clicked() { action = Some(Action::Save(false)); }
                         });
                     });
                     });
@@ -1157,6 +1169,7 @@ impl Rustable {
                     self.prefs.saved_connections.profile(profile.id).cloned();
                 self.profiles_changed();
                 self.connection_manager.error = None;
+                self.connection_manager.saved_password_revision = Some(self.connection_manager.password_revision);
                 self.connection_manager.saved_feedback = self.connection_manager.draft.clone().map(|saved| (saved, self.connection_manager.password_revision));
                 if matches!(profile.connection, ConnectionKind::Postgres(_) | ConnectionKind::Mysql(_) | ConnectionKind::MariaDb(_) | ConnectionKind::Redis(_)) {
                     if self.connection_manager.credential_delete_retry.contains(&profile.id) {
@@ -1510,11 +1523,17 @@ mod tests {
         let mut app = Rustable::with_launcher_preferences(&ctx, Preferences::default());
         app.connection_manager.select(Profile::draft("Saved feedback".into(), ConnectionKind::SQLite { path: PathBuf::from("/tmp/feedback.sqlite") }));
         app.connection_action(Action::Save(false)).unwrap();
+        assert!(!app.connection_manager.dirty(&app.prefs.saved_connections));
         let (saved, revision) = app.connection_manager.saved_feedback.as_ref().unwrap();
         assert_eq!(Some(saved), app.connection_manager.draft.as_ref());
         assert_eq!(*revision, app.connection_manager.password_revision);
         assert!(app.prefs.saved_connections.profile(saved.id).is_some());
+        app.connection_manager.password_revision += 1;
+        assert!(app.connection_manager.dirty(&app.prefs.saved_connections));
+        app.connection_action(Action::Save(false)).unwrap();
+        assert!(!app.connection_manager.dirty(&app.prefs.saved_connections));
         app.connection_manager.draft.as_mut().unwrap().name = "Unsaved change".into();
+        assert!(app.connection_manager.dirty(&app.prefs.saved_connections));
         assert_ne!(app.connection_manager.saved_feedback.as_ref().map(|(saved, _)| saved), app.connection_manager.draft.as_ref());
     }
 
