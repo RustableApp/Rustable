@@ -443,7 +443,7 @@ impl Session {
                         let Value::Array(v) = s.value else {
                             return Ok(Value::Nil);
                         };
-                        Ok(v.chunks_exact(2)
+                        Ok(v.as_chunks::<2>().0.iter()
                             .find(|v| matches!(&v[0], Value::BulkString(k) if k == &a[2]))
                             .map_or(Value::Nil, |v| v[1].clone()))
                     }
