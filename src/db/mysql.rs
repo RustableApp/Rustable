@@ -437,6 +437,14 @@ impl MysqlDriver {
 }
 
 impl Driver for MysqlDriver {
+    fn definition(&mut self, name: &str) -> Result<String, String> {
+        let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
+        let sql = format!("SHOW CREATE TABLE {}.{}", quote(&schema), quote(name));
+        let row: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(sql))?;
+        row.and_then(|row| row.get::<String, _>(1))
+            .ok_or_else(|| "No definition was returned by the server".into())
+    }
+
     fn set_cancellation(&mut self, cancel: Arc<AtomicBool>) { self.cancel = cancel; }
     fn engine_name(&self) -> &'static str { self.engine }
     fn sql_dialect(&self) -> crate::sql::Dialect { crate::sql::Dialect::Mysql(self.mode) }
@@ -635,6 +643,23 @@ impl Driver for MysqlDriver {
 mod tests {
     use super::*;
     use bincode::Options;
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB QA server"]
+    fn ddl_preview_reads_server_definition() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, user: "rustable".into(), password: "rustable-test-only".into(), database: "rustable_test".into(), tls: false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        driver.conn().unwrap().query_drop("CREATE TEMPORARY TABLE `ddl``preview` (id INT PRIMARY KEY, name VARCHAR(30) DEFAULT 'hello')").unwrap();
+        let ddl = driver.definition("ddl`preview").unwrap();
+        assert!(ddl.contains("CREATE TEMPORARY TABLE `ddl``preview`"));
+        assert!(ddl.contains("PRIMARY KEY"));
+        assert!(ddl.contains("DEFAULT 'hello'"));
+        driver.conn().unwrap().query_drop("ALTER TABLE `ddl``preview` ADD COLUMN fresh BOOLEAN").unwrap();
+        assert!(driver.definition("ddl`preview").unwrap().contains("`fresh`"));
+        assert!(driver.definition("missing_ddl_preview").is_err());
+    }
+
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_review_literals_match_bound_values_in_all_sql_modes() {

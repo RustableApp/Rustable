@@ -494,7 +494,7 @@ impl Rustable {
                                                 let text = common
                                                     .map(|v| db::preview(v, 4096))
                                                     .unwrap_or_else(|| "Multiple values".into());
-                                                let response = inspector_value_preview(ui, &text);
+                                                let response = inspector_value_preview(ui, &text, matches!(common, Some(Value::Null)));
                                                 if response.clicked() && constant_enabled {
                                                     start = Some(column);
                                                 }

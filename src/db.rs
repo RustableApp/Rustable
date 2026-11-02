@@ -80,6 +80,11 @@ impl TransactionState {
 /// A session owns one driver on its worker thread; only owned results cross threads.
 trait Driver: Send {
     fn set_cancellation(&mut self, _cancel: Arc<AtomicBool>) {}
+    fn definition(&mut self, name: &str) -> Result<String, String> {
+        self.objects()?.into_iter().find(|object| object.name == name)
+            .map(|object| object.ddl).filter(|ddl| !ddl.trim().is_empty())
+            .ok_or_else(|| "No definition is available for this object".into())
+    }
     fn databases(&mut self) -> Result<Vec<String>, String> { Ok(Vec::new()) }
     fn transaction_state(&mut self) -> TransactionState { TransactionState::Idle }
     fn engine_name(&self) -> &'static str;
@@ -261,6 +266,7 @@ impl Browse {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum Command {
+    Definition(String),
     ListDatabases,
     RefreshSchema,
     SelectSchema(String),
@@ -322,6 +328,7 @@ impl Command {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum Payload {
+    Definition { name: String, sql: String },
     Databases(Vec<String>),
     Schema {
         objects: Vec<Object>,
@@ -672,6 +679,7 @@ fn handle(
             }
             Ok(Payload::ImportTarget(object))
         }
+        Command::Definition(name) => driver.definition(&name).map(|sql| Payload::Definition { name, sql }),
         Command::ListDatabases => driver.databases().map(Payload::Databases),
         Command::RefreshSchema => {
             let objects = driver.objects()?;

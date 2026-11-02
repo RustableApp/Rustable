@@ -945,7 +945,7 @@ fn inspector_field(ui: &mut egui::Ui, name: &str, kind: &str, value: &str) {
                             if crate::app::clipboard_button(ui).clicked() {
                                 ui.ctx().copy_text(value.to_owned());
                             }
-                            crate::app::inspector_value_preview(ui, value).on_hover_text(value);
+                            crate::app::inspector_value_preview(ui, value, false).on_hover_text(value);
                         });
                     });
             },

@@ -172,6 +172,15 @@ impl PostgresDriver {
 }
 
 impl Driver for PostgresDriver {
+    fn definition(&mut self, name: &str) -> Result<String, String> {
+        self.check_tunnel()?;
+        let _watch = self.watch();
+        let row = self.client.query_opt(include_str!("postgres/definition.sql"), &[&name]).map_err(error)?
+            .ok_or("The relation no longer exists")?;
+        let definition: Option<String> = row.get(0);
+        definition.ok_or_else(|| "DDL preview is not available for inherited, partitioned, or foreign tables yet. Use pg_dump for their complete definition.".into())
+    }
+
     fn databases(&mut self) -> Result<Vec<String>, String> {
         self.check_tunnel()?;
         if self.transaction_state().blocks_replacement() {
@@ -925,6 +934,31 @@ fn check_statement(sql: &str, safe: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires disposable PostgreSQL on port 54329"]
+    fn ddl_preview_reads_live_catalog() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+        let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig {
+            host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
+            user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+        }, Arc::new(AtomicBool::new(false))).unwrap();
+        driver.client.batch_execute("BEGIN; CREATE SCHEMA rustable_ddl_qa; CREATE TABLE rustable_ddl_qa.example(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, label text NOT NULL DEFAULT 'hello', calculated integer GENERATED ALWAYS AS (id+1) STORED, CONSTRAINT positive CHECK (id>0)); CREATE INDEX label_idx ON rustable_ddl_qa.example(label); CREATE VIEW rustable_ddl_qa.visible AS SELECT label FROM rustable_ddl_qa.example").unwrap();
+        let ddl = driver.definition("rustable_ddl_qa.example").unwrap();
+        for expected in ["CREATE TABLE rustable_ddl_qa.example", "GENERATED ALWAYS AS IDENTITY", "NOT NULL", "DEFAULT 'hello'", "GENERATED ALWAYS AS", "STORED", "PRIMARY KEY", "CONSTRAINT positive CHECK", "CREATE INDEX label_idx"] {
+            assert!(ddl.contains(expected), "Missing {expected}: {ddl}");
+        }
+        let view = driver.definition("rustable_ddl_qa.visible").unwrap();
+        assert!(view.contains("CREATE VIEW rustable_ddl_qa.visible AS"));
+        assert!(view.ends_with(';'));
+        driver.client.batch_execute("ALTER TABLE rustable_ddl_qa.example ADD COLUMN fresh boolean").unwrap();
+        assert!(driver.definition("rustable_ddl_qa.example").unwrap().contains("fresh boolean"));
+        assert!(driver.definition("rustable_ddl_qa.missing").is_err());
+        // The preview should itself parse as DDL for a regular table.
+        driver.client.batch_execute("DROP SCHEMA rustable_ddl_qa CASCADE; CREATE SCHEMA rustable_ddl_qa").unwrap();
+        driver.client.batch_execute(&ddl).unwrap();
+        driver.client.batch_execute("ROLLBACK").unwrap();
+    }
+
     #[test]
     fn postgres_boundaries_preserve_dollar_quotes_and_nested_comments() {
         let sql = "SELECT $$a;b$$; /* outer /* inner ; */ still */ SELECT E'a\\\';b'; SELECT $tag$日本;$tag$;";

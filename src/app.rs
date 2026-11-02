@@ -424,6 +424,7 @@ pub struct Rustable {
     next_table_tab_id: u64,
     selected_index: Option<usize>,
     table: Arc<Grid>,
+    table_loaded: bool,
     tabs: Vec<QueryTab>,
     closed_tabs: Vec<QueryTab>,
     window_recovery: Vec<QueryTab>,
@@ -459,6 +460,7 @@ pub struct Rustable {
     #[cfg(target_arch = "wasm32")]
     browser_export: std::cell::RefCell<Option<crate::browser_jobs::Handle>>,
     navigator: navigator::Navigator,
+    ddl_preview: Option<(String, String)>,
     activity: std::collections::VecDeque<String>,
     last_operation_ms: Option<f64>,
     sidebar_section: usize,
@@ -912,6 +914,7 @@ impl Rustable {
             next_table_tab_id: 0,
             selected_index: None,
             table: Arc::default(),
+            table_loaded: false,
             tabs,
             closed_tabs,
             window_recovery,
@@ -947,6 +950,7 @@ impl Rustable {
             #[cfg(target_arch = "wasm32")]
             browser_export: Default::default(),
             navigator: navigator::Navigator::new(initial.as_ref()),
+            ddl_preview: None,
             activity: Default::default(),
             last_operation_ms: None,
             sidebar_section: 0,
@@ -1128,6 +1132,7 @@ impl Rustable {
                     self.language.invalidate();
                     self.safe = false;
                     self.table = Arc::default();
+                    self.table_loaded = false;
                     self.columns.clear();
                     self.indexes.clear();
                     self.triggers.clear();
@@ -1168,6 +1173,7 @@ impl Rustable {
                         grid.elapsed.as_secs_f64() * 1000.0
                     );
                     self.table = Arc::new(grid);
+                    self.table_loaded = true;
                     self.columns = columns;
                     self.indexes = indexes;
                     self.triggers = triggers;
@@ -1186,6 +1192,7 @@ impl Rustable {
                             .map(|c| c.name.clone())
                             .unwrap_or_default();
                     }
+                    self.cache_table_result();
                 }
                 Ok(Payload::Query {
                     dialect,
@@ -1298,6 +1305,9 @@ impl Rustable {
                     }
                     self.query_library.invalidate();
                     self.status = format!("Saved SQL: {}", path.display())
+                }
+                Ok(Payload::Definition { name, sql }) => {
+                    self.ddl_preview = Some((name, sql));
                 }
                 Ok(Payload::Schema { objects, schemas }) => {
                     if matches!(self.engine.as_str(), "MySQL" | "MariaDB") { self.connected_database = schemas.selected.clone(); }
@@ -1413,7 +1423,7 @@ impl Rustable {
             return;
         }
         self.prepare_table(name);
-        self.refresh();
+        if !self.table_loaded { self.refresh(); }
     }
 
     fn prepare_table(&mut self, name: String) {
@@ -1428,6 +1438,15 @@ impl Rustable {
     }
 
     fn prepare_new_table(&mut self, name: String) {
+        self.table_loaded = false;
+        self.table = Arc::default();
+        self.columns.clear();
+        self.indexes.clear();
+        self.triggers.clear();
+        self.foreign_keys.clear();
+        self.selected = None;
+        self.row_selection.clear();
+        self.selected_index = None;
         self.active_table_tab = None;
         self.filter_rules.clear();
         self.filter_rules_original.clear();
@@ -1507,6 +1526,7 @@ impl Rustable {
             return;
         }
         self.table = Arc::default();
+        self.table_loaded = false;
         self.columns.clear();
         self.indexes.clear();
         self.triggers.clear();
@@ -1858,7 +1878,7 @@ impl Rustable {
     }
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
-        self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || self.history
+        self.ddl_preview.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || self.history
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some() || self.alter_column.is_some()
             || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some()
@@ -1866,7 +1886,7 @@ impl Rustable {
 
     fn workspace_shortcuts(&mut self, ctx: &egui::Context) {
         // Import windows own the keyboard, including their first visible frame.
-        if self.csv_preview.is_some() || self.csv_review.is_some() {
+        if self.ddl_preview.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() {
             return;
         }
         if self.review.is_some() {
@@ -2824,7 +2844,7 @@ impl Rustable {
                                                 start_edit = draft;
                                             }
                                         } else {
-                                            inspector_value_preview(ui, text.as_ref()).on_hover_text(text.as_ref());
+                                            inspector_value_preview(ui, text.as_ref(), matches!(value, Value::Null)).on_hover_text(text.as_ref());
                                         }
                                 });
                                     });
@@ -3442,9 +3462,7 @@ impl Rustable {
         if !self.finish_cell_edit() { return; }
         let (query, index) = visible[target];
         if query { self.activate_query(index); }
-        else if Some(self.table_tabs[index].id) == self.active_table_tab {
-            self.view = View::Data; self.row_selection.clear(); self.selected = None;
-        } else { self.activate_table_tab_id(self.table_tabs[index].id); }
+        else { self.activate_table_tab_id(self.table_tabs[index].id); }
     }
 
     fn activate_query(&mut self, index: usize) {
@@ -3452,6 +3470,7 @@ impl Rustable {
         if index >= self.tabs.len() || !self.finish_cell_edit() {
             return;
         }
+        self.remember_table_tab();
         if self.view != View::Query || self.tab != index {
             self.row_selection.clear();
             self.selected = None;
@@ -4399,14 +4418,14 @@ impl Rustable {
             "grid-column-sizing",
             &self.browse.table,
             self.view == View::Query,
-            self.tab,
+            if self.view == View::Query { self.tabs[self.tab].id } else { self.active_table_tab.unwrap_or(0) },
             &grid.columns,
         ));
         let restored_widths_id = ui.make_persistent_id((
             "restored-grid-widths",
             &width_scope,
             &grid.columns,
-            self.tab,
+            if self.view == View::Query { self.tabs[self.tab].id } else { self.active_table_tab.unwrap_or(0) },
         ));
         let previous_widths = ui
             .ctx()
@@ -4440,14 +4459,14 @@ impl Rustable {
                 "data-horizontal",
                 &self.browse.table,
                 self.view == View::Query,
-                self.tab,
+                if self.view == View::Query { self.tabs[self.tab].id } else { self.active_table_tab.unwrap_or(0) },
             ))
             .show(ui, |ui| {
                 let width = content_width.max(ui.available_width());
                 ui.set_min_width(width);
                 let table_salt = (
                     "data", &width_scope, &grid.columns, &self.browse.table,
-                    self.view == View::Query, self.tab,
+                    self.view == View::Query, if self.view == View::Query { self.tabs[self.tab].id } else { self.active_table_tab.unwrap_or(0) },
                 );
                 let table_state_id = ui.id().with(egui::Id::new(table_salt));
                 let resize_intent_id = table_state_id.with("user-resized-columns");
@@ -5026,7 +5045,7 @@ impl Rustable {
         }
         egui::ScrollArea::horizontal().show(ui, |ui| {
             TableBuilder::new(ui)
-                .id_salt(("indexes", &self.browse.table))
+                .id_salt(("indexes", self.active_table_tab, &self.browse.table))
                 .striped(true)
                 .resizable(true)
                 .sense(egui::Sense::click())
@@ -5073,26 +5092,47 @@ impl Rustable {
         });
     }
 
+    fn ddl_window(&mut self, ctx: &egui::Context) {
+        let Some((name, sql)) = self.ddl_preview.as_ref() else { return; };
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("table-ddl"))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(240.0, 760.0));
+                ui.horizontal(|ui| {
+                    ui.strong("Table definition");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close = ui.button("Close").clicked();
+                        if clipboard_button(ui).clicked() { ui.ctx().copy_text(sql.clone()); }
+                    });
+                });
+                ui.add(egui::Label::new(RichText::new(name).weak()).truncate());
+                ui.separator();
+                egui::ScrollArea::both().max_height((ctx.content_rect().height() - 160.0).max(100.0))
+                    .show(ui, |ui| { ui.add(egui::Label::new(RichText::new(sql).monospace()).selectable(true)); });
+            });
+        if close || modal.should_close() { self.ddl_preview = None; }
+    }
+
     fn structure(&mut self, ui: &mut egui::Ui) {
         ui.style_mut().interaction.selectable_labels = false;
         let schema_editable = self.supports_schema_changes();
-        ui.horizontal(|ui| {
-            ui.strong(self.current_table_name())
-                .on_hover_text(&self.browse.table);
-            ui.add(
-                TextEdit::singleline(&mut self.structure_search).hint_text("Search for column…"),
-            );
-            ui.menu_button("DDL", |ui| {
-                if let Some(object) = self.objects.iter().find(|o| o.name == self.browse.table) {
-                    if clipboard_button(ui).clicked() {
-                        ui.ctx().copy_text(object.ddl.clone());
-                    }
-                    egui::ScrollArea::both().max_height(300.0).show(ui, |ui| {
-                        ui.code(&object.ddl);
+        egui::Frame::new().fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(10, 7)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add_enabled(self.pending.is_none(), egui::Button::new("Show DDL")
+                            .min_size(egui::vec2(82.0, 26.0)).corner_radius(7.0))
+                            .on_hover_text("View the database definition").clicked() {
+                            self.dispatch(Command::Definition(self.browse.table.clone()), Pending::Export);
+                        }
+                        let width = ui.available_width();
+                        ui.allocate_ui_with_layout(egui::vec2(width, 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            sidebar_search(ui, &mut self.structure_search, "Search for column…");
+                        });
                     });
-                }
+                });
             });
-        });
         let mut set_nullability = None;
         let mut start_rename = None;
         let mut finish_rename = false;
@@ -5107,7 +5147,7 @@ impl Rustable {
             .collect();
         egui::ScrollArea::horizontal().show(ui, |ui| {
             TableBuilder::new(ui)
-                .id_salt(("structure-grid", &self.browse.table))
+                .id_salt(("structure-grid", self.active_table_tab, &self.browse.table))
                 .striped(false)
                 .auto_shrink([false, false])
                 .min_scrolled_height(0.0)
@@ -5891,6 +5931,7 @@ impl Rustable {
         }
         self.windows(ctx);
         self.navigator_window(ctx);
+        self.ddl_window(ctx);
         self.csv_preview_window(ctx);
         self.csv_import_review(ctx);
         #[cfg(target_arch = "wasm32")]
@@ -6700,9 +6741,9 @@ pub(crate) fn compact_inspector_spacing(ui: &mut egui::Ui) {
     ui.spacing_mut().interact_size.y = 14.0;
 }
 
-pub(crate) fn inspector_value_preview(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let label = if text.is_empty() {
-        RichText::new("EMPTY")
+pub(crate) fn inspector_value_preview(ui: &mut egui::Ui, text: &str, is_null: bool) -> egui::Response {
+    let label = if is_null || text.is_empty() {
+        RichText::new(if is_null { "NULL" } else { "EMPTY" })
             .monospace()
             .color(ui.visuals().weak_text_color())
     } else {
@@ -6989,7 +7030,7 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
     };
     let response = ui.add(
         TextEdit::singleline(&mut draft.text)
-            .hint_text(if draft.kind == 5 { "DEFAULT" } else if draft.kind == 0 { "NULL" } else { "" })
+            .hint_text(RichText::new(if draft.kind == 5 { "DEFAULT" } else if draft.kind == 0 { "NULL" } else { "" }).color(ui.visuals().weak_text_color()))
             .frame(!draft.inspector)
             .margin(if draft.inspector { egui::Margin::ZERO } else { egui::Margin::symmetric(4, 2) })
             .vertical_align(egui::Align::Center)
@@ -7171,6 +7212,25 @@ mod interaction_tests {
         })
     }
     #[test]
+    fn ddl_viewer_owns_shortcuts_and_dismisses_with_escape() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.ddl_preview = Some(("example".into(), "CREATE TABLE example(id INTEGER);".into()));
+        assert!(app.dialog_owns_workspace_shortcuts());
+        for events in [vec![], vec![egui::Event::Key {
+            key: egui::Key::Escape, physical_key: None, pressed: true,
+            repeat: false, modifiers: egui::Modifiers::NONE,
+        }]] {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0))),
+                events, ..Default::default()
+            }, |ctx| app.ddl_window(ctx));
+        }
+        assert!(app.ddl_preview.is_none());
+        assert!(app.pending.is_none());
+    }
+
+    #[test]
     fn connection_activity_covers_height_and_stays_inside_rounded_bar() {
         let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(700.0, 27.0));
         let first = connection_activity_blocks(rect, 2.0);
@@ -7241,7 +7301,7 @@ mod interaction_tests {
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.set_width(300.0);
-                        let response = inspector_value_preview(ui, "");
+                        let response = inspector_value_preview(ui, "", false);
                         rect = response.rect;
                         clicked = response.clicked();
                     });
@@ -11121,6 +11181,7 @@ mod bracket_tab_navigation_tests {
         let mut app = Rustable::with_launcher_preferences(&ctx, Preferences::default());
         app.connections = false;
         app.browse.table = "table".into();
+        app.table_loaded = true; // This fixture represents an already loaded table tab.
         app.view = View::Data;
         app.tabs = vec![
             QueryTab::new("SELECT 1".into()),

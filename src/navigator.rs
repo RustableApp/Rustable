@@ -129,7 +129,7 @@ impl Rustable {
                 if search.changed() { self.navigator.selected = 0; }
                 ui.add_space(10.0);
                 if !databases_only { ui.separator(); ui.add_space(5.0); }
-                let entries: Vec<_> = entries.iter().filter(|entry| matches_query(&format!("{} {}", entry.label, entry.detail), &self.navigator.query)).collect();
+                let entries = ranked_entries(&entries, &self.navigator.query);
                 self.navigator.selected = self.navigator.selected.min(entries.len().saturating_sub(1));
                 let down = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
                 let up = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
@@ -239,9 +239,102 @@ fn paint_navigation_icon(painter: &egui::Painter, center: egui::Pos2, destinatio
     };
     crate::icons::paint(painter, center, name, 20.0, ink);
 }
-fn matches_query(text: &str, query: &str) -> bool {
-    let text = text.to_lowercase();
-    query.to_lowercase().split_whitespace().all(|word| text.contains(word))
+// Lower tuples sort first. Metadata matches always follow name-only matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MatchRank {
+    metadata_words: usize,
+    worst_tier: u8,
+    total_tier: usize,
+    penalty: i64,
+    length: usize,
+}
+
+struct SearchText {
+    chars: Vec<char>,
+    boundaries: Vec<bool>,
+}
+impl SearchText {
+    fn new(text: &str) -> Self {
+        let original: Vec<_> = text.chars().collect();
+        let mut chars = Vec::new();
+        let mut boundaries = Vec::new();
+        for (i, ch) in original.iter().copied().enumerate() {
+            let boundary = i == 0 || !original[i - 1].is_alphanumeric()
+                || (ch.is_uppercase() && (original[i - 1].is_lowercase()
+                    || original.get(i + 1).is_some_and(|next| next.is_lowercase())));
+            for (offset, lower) in ch.to_lowercase().enumerate() {
+                chars.push(lower);
+                boundaries.push(boundary && offset == 0);
+            }
+        }
+        Self { chars, boundaries }
+    }
+
+    fn rank(&self, query: &[char]) -> Option<(u8, i64)> {
+        if query.is_empty() || query.len() > self.chars.len() { return None; }
+        if self.chars == query { return Some((0, 0)); }
+        if self.chars.starts_with(query) { return Some((1, 0)); }
+        // Prefer a word-boundary occurrence over an earlier inside-word hit.
+        if let Some(tier) = self.chars.windows(query.len()).enumerate()
+            .filter(|(_, window)| *window == query)
+            .map(|(i, _)| if self.boundaries[i] { 2 } else { 3 }).min() {
+            return Some((tier, 0));
+        }
+        // Ordered subsequences, scored with a linear pass per query character.
+        // Reward word initials and contiguous runs, penalize skipped characters.
+        // Keeping every possible endpoint avoids greedy abbreviation mismatches.
+        const NONE: i64 = i64::MIN / 4;
+        let mut previous = vec![NONE; self.chars.len()];
+        for (qi, wanted) in query.iter().enumerate() {
+            let mut current = vec![NONE; self.chars.len()];
+            let mut best_gap = NONE;
+            for (i, ch) in self.chars.iter().enumerate() {
+                if i > 0 && previous[i - 1] != NONE {
+                    best_gap = best_gap.max(previous[i - 1] + (i - 1) as i64);
+                }
+                if ch != wanted { continue; }
+                let bonus = 1 + if self.boundaries[i] { 12 } else { 0 };
+                if qi == 0 {
+                    current[i] = bonus - i as i64;
+                } else {
+                    let gap = if best_gap == NONE { NONE } else { best_gap - i as i64 + 1 };
+                    let contiguous = if i > 0 && previous[i - 1] != NONE { previous[i - 1] + 8 } else { NONE };
+                    let best = gap.max(contiguous);
+                    if best != NONE { current[i] = best + bonus; }
+                }
+            }
+            previous = current;
+        }
+        previous.into_iter().max().filter(|score| *score != NONE).map(|score| (4, -score))
+    }
+}
+
+fn ranked_entries<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() { return entries.iter().collect(); }
+    let words: Vec<Vec<char>> = query.split_whitespace().map(|word| word.chars().collect()).collect();
+    let phrase: Vec<char> = query.chars().collect();
+    let mut ranked: Vec<_> = entries.iter().filter_map(|entry| {
+        let label = SearchText::new(&entry.label);
+        let detail = SearchText::new(&entry.detail);
+        let mut rank = MatchRank { metadata_words: 0, worst_tier: 0, total_tier: 0, penalty: 0, length: label.chars.len() };
+        for word in &words {
+            let (tier, penalty) = if let Some(found) = label.rank(word) { found }
+                else { rank.metadata_words += 1; detail.rank(word)? };
+            rank.worst_tier = rank.worst_tier.max(tier);
+            rank.total_tier += tier as usize;
+            rank.penalty += penalty;
+        }
+        if rank.metadata_words == 0 && let Some((tier @ 0..=1, _)) = label.rank(&phrase) {
+            rank.worst_tier = tier;
+            rank.total_tier = tier as usize;
+            rank.penalty = 0;
+        }
+        Some((rank, entry))
+    }).collect();
+    // Stable sorting retains catalog order for equally relevant results.
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked.into_iter().map(|(_, entry)| entry).collect()
 }
 #[cfg(test)]
 mod tests {
@@ -291,12 +384,44 @@ mod tests {
         assert!(!app.navigator.open);
     }
 
-    #[test]
-    fn search_matches_names_and_kinds_without_case_or_word_order_constraints() {
-        assert!(matches_query("Address table public", "public addr"));
-        assert!(matches_query("Address table public", "ADDRESS"));
-        assert!(!matches_query("Address table public", "private addr"));
+    fn entry(label: &str, detail: &str) -> Entry {
+        Entry { label: label.into(), detail: detail.into(), destination: Destination::Object(label.into()) }
     }
+    #[test]
+    fn ranking_prefers_exact_prefix_boundary_substring_then_abbreviation() {
+        let entries = vec![entry("campaign_store_property_values", "table"), entry("bookstore", "table"),
+            entry("stores", "table"), entry("store_locations", "table"), entry("store", "table"),
+            entry("s_t_o_r_e", "table"), entry("other", "store")];
+        let names: Vec<_> = ranked_entries(&entries, "STORE").into_iter().map(|entry| entry.label.as_str()).collect();
+        assert_eq!(names, ["store", "stores", "store_locations", "campaign_store_property_values", "bookstore", "s_t_o_r_e", "other"]);
+    }
+    #[test]
+    fn abbreviations_reward_initials_and_contiguous_runs() {
+        let entries = vec![entry("catsoupvalue", ""), entry("campaign_store_property_values", ""), entry("CustomerStorePropertyValues", "")];
+        let matches = ranked_entries(&entries, "cspv");
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches.last().unwrap().label, "catsoupvalue");
+        let entries = vec![entry("axxbxxc", ""), entry("abxc", ""), entry("a_b_c", "")];
+        assert_eq!(ranked_entries(&entries, "abc").last().unwrap().label, "axxbxxc");
+        assert!(ranked_entries(&entries, "cba").is_empty());
+    }
+    #[test]
+    fn search_matches_metadata_unicode_and_words_in_any_order() {
+        let entries = vec![entry("Address", "table public"), entry("Événements", "table")];
+        assert_eq!(ranked_entries(&entries, "public addr")[0].label, "Address");
+        assert_eq!(ranked_entries(&entries, "ADDRESS")[0].label, "Address");
+        assert!(ranked_entries(&entries, "private addr").is_empty());
+        assert_eq!(ranked_entries(&entries, "ÉVÉ")[0].label, "Événements");
+    }
+    #[test]
+    fn empty_queries_and_ties_keep_original_order() {
+        let entries = vec![entry("stores", "z_schema"), entry("stores", "a_schema"), entry("abc", "")];
+        assert_eq!(ranked_entries(&entries, "  ")[0].detail, "z_schema");
+        let matches = ranked_entries(&entries, "store");
+        assert_eq!(matches[0].detail, "z_schema");
+        assert_eq!(matches[1].detail, "a_schema");
+    }
+
 }
 
 #[cfg(test)]

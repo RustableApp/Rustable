@@ -9,10 +9,24 @@ pub(super) struct TableTab {
     filters: Vec<db::filters::Filter>,
     originals: Vec<Option<db::filters::Filter>>,
     filters_visible: bool,
+    snapshot: Option<Arc<TableSnapshot>>,
+    view: View,
+    selected: Option<usize>,
+    selection: row_selection::RowSelection,
+    selected_column: Option<usize>,
+    selected_index: Option<usize>,
+    structure_search: String,
+}
+struct TableSnapshot {
+    grid: Arc<Grid>,
+    columns: Vec<Column>,
+    indexes: Vec<db::Index>,
+    triggers: Vec<Object>,
+    foreign_keys: Vec<db::foreign_keys::ForeignKey>,
 }
 impl Rustable {
     pub(super) fn remember_table_tab(&mut self) {
-        if self.browse.table.is_empty() {
+        if self.browse.table.is_empty() || self.view == View::Query {
             return;
         }
         let edited = self
@@ -30,6 +44,17 @@ impl Rustable {
             self.next_table_tab_id
         });
         self.active_table_tab = Some(id);
+        // Grid storage is shared, not copied on every frame. Metadata is only
+        // snapshotted when a database reply replaces the current grid.
+        let snapshot = if self.table_loaded {
+            existing.and_then(|i| self.table_tabs[i].snapshot.as_ref())
+                .filter(|snapshot| Arc::ptr_eq(&snapshot.grid, &self.table)).cloned()
+                .or_else(|| Some(Arc::new(TableSnapshot {
+                    grid: self.table.clone(), columns: self.columns.clone(),
+                    indexes: self.indexes.clone(), triggers: self.triggers.clone(),
+                    foreign_keys: self.foreign_keys.clone(),
+                })))
+        } else { None };
         let tab = TableTab {
             id,
             browse: self.browse.clone(),
@@ -46,11 +71,29 @@ impl Rustable {
                 self.browse.filters.iter().cloned().map(Some).collect()
             },
             filters_visible: self.filters_visible,
+            snapshot,
+            view: self.view,
+            selected: self.selected,
+            selection: self.row_selection.clone(),
+            selected_column: self.selected_column,
+            selected_index: self.selected_index,
+            structure_search: self.structure_search.clone(),
         };
         if let Some(i) = existing {
             self.table_tabs[i] = tab;
         } else {
             self.table_tabs.push(tab);
+        }
+    }
+    pub(super) fn cache_table_result(&mut self) {
+        if let Some(tab) = self.table_tabs.iter_mut().find(|tab| Some(tab.id) == self.active_table_tab) {
+            tab.snapshot = Some(Arc::new(TableSnapshot {
+                grid: self.table.clone(), columns: self.columns.clone(),
+                indexes: self.indexes.clone(), triggers: self.triggers.clone(),
+                foreign_keys: self.foreign_keys.clone(),
+            }));
+            tab.selected = self.selected;
+            tab.selection = self.row_selection.clone();
         }
     }
     pub(super) fn keep_table_tab(&mut self, name: &str) {
@@ -80,11 +123,7 @@ impl Rustable {
             return;
         }
         self.remember_table_tab();
-        if self.active_table_tab == Some(id) {
-            self.view = View::Data;
-            return;
-        }
-        if self.restore_table_tab_id(id) {
+        if self.restore_table_tab_id(id) && !self.table_loaded {
             self.refresh();
         }
     }
@@ -99,9 +138,27 @@ impl Rustable {
         self.filter_rules = tab.filters;
         self.filter_rules_original = tab.originals;
         self.filters_visible = tab.filters_visible;
-        self.view = View::Data;
-        self.selected = None;
-        self.row_selection.clear();
+        self.view = tab.view;
+        self.selected = tab.selected;
+        self.row_selection = tab.selection;
+        self.selected_column = tab.selected_column;
+        self.selected_index = tab.selected_index;
+        self.structure_search = tab.structure_search;
+        self.saved_selection = None;
+        self.table_loaded = tab.snapshot.is_some();
+        if let Some(snapshot) = tab.snapshot {
+            self.table = snapshot.grid.clone();
+            self.columns = snapshot.columns.clone();
+            self.indexes = snapshot.indexes.clone();
+            self.triggers = snapshot.triggers.clone();
+            self.foreign_keys = snapshot.foreign_keys.clone();
+        } else {
+            self.table = Arc::default();
+            self.columns.clear();
+            self.indexes.clear();
+            self.triggers.clear();
+            self.foreign_keys.clear();
+        }
         true
     }
     #[cfg(test)]
@@ -142,13 +199,14 @@ impl Rustable {
         self.active_table_tab = None;
         self.browse = Browse::default();
         self.table = Arc::default();
+        self.table_loaded = false;
         self.foreign_keys.clear();
         self.selected_column = None;
         self.selected = None;
         self.row_selection.clear();
         if let Some(next) = self.table_tabs.last().map(|t| t.id) {
             self.restore_table_tab_id(next);
-            self.refresh();
+            if !self.table_loaded { self.refresh(); }
             if query_active {
                 self.view = View::Query;
             }
@@ -175,6 +233,59 @@ mod tests {
             None,
         )
     }
+    #[test]
+    fn switching_loaded_tabs_restores_rows_selection_and_view_without_querying() {
+        let mut app = app();
+        app.prepare_table("first".into());
+        app.table = Arc::new(Grid { columns: vec!["id".into()], rows: vec![vec![Value::Integer(42)]], ..Default::default() });
+        app.table_loaded = true;
+        app.selected = Some(0);
+        app.row_selection.rows.insert(0);
+        app.view = View::Structure;
+        app.structure_search = "id".into();
+        app.keep_table_tab("first");
+        let first = app.active_table_tab.unwrap();
+        let first_grid = app.table.clone();
+        app.prepare_table("second".into());
+        assert!(!app.table_loaded);
+        assert!(app.table.rows.is_empty());
+        app.table = Arc::new(Grid { columns: vec!["id".into()], rows: vec![vec![Value::Integer(99)]], ..Default::default() });
+        app.table_loaded = true;
+        app.keep_table_tab("second");
+        let second = app.active_table_tab.unwrap();
+        app.activate_table_tab_id(first);
+        assert!(app.pending.is_none());
+        assert!(Arc::ptr_eq(&app.table, &first_grid));
+        assert_eq!(app.selected, Some(0));
+        assert!(app.row_selection.rows.contains(&0));
+        assert!(app.view == View::Structure);
+        assert_eq!(app.structure_search, "id");
+        app.activate_query(0);
+        app.remember_table_tab(); // Rendering a query must not overwrite the table selection.
+        app.activate_table_tab_id(first);
+        assert_eq!(app.selected, Some(0));
+        assert!(app.pending.is_none());
+        app.close_table_tab_id(first);
+        assert_eq!(app.active_table_tab, Some(second));
+        assert_eq!(app.table.rows[0][0], Value::Integer(99));
+        assert!(app.pending.is_none());
+        app.refresh();
+        assert!(matches!(app.pending, Some(Pending::Table)));
+    }
+
+    #[test]
+    fn sidebar_reopening_loaded_empty_table_does_not_reload() {
+        let mut app = app();
+        app.prepare_table("empty".into());
+        app.table_loaded = true;
+        app.keep_table_tab("empty");
+        app.prepare_table("other".into());
+        app.open_table("empty".into());
+        assert!(app.table_loaded);
+        assert!(app.table.rows.is_empty());
+        assert!(app.pending.is_none());
+    }
+
     #[test]
     fn preview_replaces_but_kept_tabs_preserve_filters_and_page() {
         let mut app = app();

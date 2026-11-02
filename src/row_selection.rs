@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct RowSelection {
     pub rows: BTreeSet<usize>,
     anchor: Option<usize>,

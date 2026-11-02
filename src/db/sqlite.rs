@@ -1624,6 +1624,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ddl_preview_returns_live_definition_and_missing_object_error() {
+        let mut driver = SqliteDriver::open(None, Arc::new(AtomicBool::new(false))).unwrap();
+        driver.connection.execute_batch("CREATE TABLE ddl_example(id INTEGER PRIMARY KEY, name TEXT DEFAULT 'NULL')").unwrap();
+        assert!(driver.definition("ddl_example").unwrap().contains("name TEXT DEFAULT 'NULL'"));
+        driver.connection.execute_batch("ALTER TABLE ddl_example ADD COLUMN fresh TEXT").unwrap();
+        assert!(driver.definition("ddl_example").unwrap().contains("fresh TEXT"));
+        assert!(driver.definition("missing").is_err());
+    }
+
+    #[test]
     fn database_with_unresolved_view_opens_and_recovers_after_repair() {
         let path = std::env::temp_dir().join(format!(
             "rustable-broken-view-{}.sqlite",
