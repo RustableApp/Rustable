@@ -67,7 +67,26 @@ jobs:
       - run: python scripts/package-release.py
       - name: Sign and notarize macOS; sign update feed
         if: runner.os == 'macOS'
-        run: python scripts/sign-macos-release.py
+        run: |
+          python - <<'PYTHON'
+          import runpy
+          import subprocess
+          import time
+
+          original_run = subprocess.run
+          def run_with_stapler_retry(args, *positional, **kwargs):
+              # Apple's ticket service intermittently returns stapler error 68.
+              # Retry only that tool/status; never bypass final validation.
+              attempts = 3 if tuple(args[:2]) == ('xcrun', 'stapler') else 1
+              for attempt in range(attempts):
+                  result = original_run(args, *positional, **kwargs)
+                  if result.returncode != 68 or attempt + 1 == attempts:
+                      return result
+                  print('Apple ticket request failed; retrying in 15 seconds.', flush=True)
+                  time.sleep(15)
+          subprocess.run = run_with_stapler_retry
+          runpy.run_path('scripts/sign-macos-release.py', run_name='__main__')
+          PYTHON
         env:
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}

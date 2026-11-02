@@ -62,3 +62,9 @@ If an infrastructure failure affects only macOS, manually dispatch Signed releas
 with the original tag and `platform: macos-15`. This builds/signs only macOS and
 leaves draft creation to the release operator, who combines only artifacts from
 the exact same source tag. Do not rebuild successful Windows/Linux/WASM jobs.
+
+The signing workflow retries `xcrun stapler` exit status 68 up to three times,
+with 15 seconds between attempts, to tolerate transient Apple ticket-service
+failures. Other signing/notarization failures stop immediately; final ticket
+validation remains required. Recovery dispatches can use the current workflow
+while checking out the original immutable release tag for all app artifacts.
