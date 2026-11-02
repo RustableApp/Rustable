@@ -1,3 +1,12 @@
 # Keep release tooling and benchmarks out of the application's language breakdown.
 scripts/*.py linguist-detectable=false
 tools/postgres-language-server/benchmark_protocol.py linguist-detectable=false
+
+# The language bar describes application code, excluding web glue and packaging.
+*.js linguist-detectable=false
+*.sh linguist-detectable=false
+*.html linguist-detectable=false
+Dockerfile linguist-detectable=false
+**/Dockerfile linguist-detectable=false
+vendor/** linguist-vendored
+src/fixtures/** linguist-generated
