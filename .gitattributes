@@ -4,6 +4,8 @@ tools/postgres-language-server/benchmark_protocol.py linguist-detectable=false
 
 # The language bar describes application code, excluding web glue and packaging.
 *.js linguist-detectable=false
+*.mjs linguist-detectable=false
+*.cjs linguist-detectable=false
 *.sh linguist-detectable=false
 *.html linguist-detectable=false
 Dockerfile linguist-detectable=false
