@@ -167,7 +167,7 @@ impl Tunnel {
     pub fn local_port(&self) -> u16 {
         self.local_port
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn local_host(&self) -> &'static str {
         "127.0.0.1"
     }

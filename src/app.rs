@@ -139,6 +139,13 @@ impl QueryDocument {
     }
 }
 
+// Preserve the first editor per connection/database, including an intentionally
+// empty scratchpad so another tab cannot silently take its place.
+fn single_scratchpads(documents: Vec<QueryDocument>) -> Vec<QueryDocument> {
+    let mut seen = std::collections::HashSet::new();
+    documents.into_iter().filter(|document| seen.insert(document.scope.clone())).collect()
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum Appearance {
     #[default]
@@ -614,35 +621,29 @@ impl Rustable {
             || (self.rename_inline && self.rename.is_some())
             || self.pending.is_some()
     }
-    pub(crate) fn recovery_documents(&self) -> Vec<QueryDocument> {
-        self.tabs
-            .iter()
-            .chain(self.closed_tabs.iter())
-            .chain(self.window_recovery.iter())
-            .filter(|tab| !tab.sql.trim().is_empty() || tab.source_path.is_some())
-            .map(|tab| {
-                let mut document = QueryDocument::capture(tab);
-                document.scope = self.draft_scope.clone().or(document.scope);
-                document.closed = true;
-                document
-            })
-            .collect()
+    // The oldest editor is the connection's persistent scratchpad, even when
+    // closed. Other tabs and the reopen stack are only retained in memory.
+    fn scratchpad(&self) -> Option<&QueryTab> {
+        self.tabs.iter().chain(&self.closed_tabs).min_by_key(|tab| tab.id)
     }
-    pub(crate) fn archive_window(&mut self, mut child: Self) {
-        for mut tab in child.tabs.drain(..).chain(child.closed_tabs.drain(..)) {
-            tab.draft_scope = child.draft_scope.clone().or(tab.draft_scope);
-            tab.open = false;
-            tab.grid = Arc::default();
-            tab.results.clear();
-            tab.chart = Default::default();
-            tab.formatter = Default::default();
-            tab.pins.clear();
-            tab.selected_pin = None;
-            if !tab.sql.trim().is_empty() || tab.source_path.is_some() {
-                self.window_recovery.push(tab);
+    pub(crate) fn recovery_documents(&self) -> Vec<QueryDocument> {
+        let mut documents: Vec<_> = self.window_recovery.iter().map(QueryDocument::capture).collect();
+        if let Some(tab) = self.scratchpad() {
+            let mut document = QueryDocument::capture(tab);
+            document.scope = self.draft_scope.clone().or(document.scope);
+            document.closed = true;
+            // A dormant placeholder must not replace a not-yet-opened draft.
+            if document.recoverable() || !documents.iter().any(|saved| saved.scope == document.scope) {
+                documents.insert(0, document);
             }
         }
-        self.window_recovery.append(&mut child.window_recovery);
+        single_scratchpads(documents)
+    }
+    pub(crate) fn archive_window(&mut self, mut child: Self) {
+        for document in child.recovery_documents() {
+            self.window_recovery.retain(|tab| tab.draft_scope != document.scope);
+            self.window_recovery.push(document.restore());
+        }
         self.merge_window_preferences(&mut child);
     }
     pub(crate) fn publish_shared_preferences(&mut self) -> bool {
@@ -763,19 +764,11 @@ impl Rustable {
         extra: Vec<QueryDocument>,
     ) {
         self.prefs.queries.clear();
-        self.prefs.documents = self.tabs.iter().map(QueryDocument::capture).collect();
-        self.prefs.closed_documents = self
-            .closed_tabs
-            .iter()
-            .map(QueryDocument::capture)
-            .collect();
-        self.prefs.window_documents = self
-            .window_recovery
-            .iter()
-            .map(QueryDocument::capture)
-            .chain(extra)
-            .filter(QueryDocument::recoverable)
-            .collect();
+        self.prefs.documents = self.scratchpad().map(QueryDocument::capture).into_iter().collect();
+        self.prefs.closed_documents.clear();
+        self.prefs.window_documents = single_scratchpads(
+            extra.into_iter().chain(self.window_recovery.iter().map(QueryDocument::capture)).collect()
+        );
         eframe::set_value(storage, "workspace", &self.prefs);
         self.prefs.documents.clear();
         self.prefs.closed_documents.clear();
@@ -860,6 +853,13 @@ impl Rustable {
         initial: Option<Command>,
         identity: Option<ProfileIdentity>,
     ) -> Self {
+        prefs.documents.truncate(1);
+        if prefs.documents.is_empty() {
+            prefs.documents = std::mem::take(&mut prefs.closed_documents).into_iter().take(1).collect();
+        }
+        prefs.closed_documents.clear();
+        prefs.queries.truncate(1);
+        prefs.window_documents = single_scratchpads(std::mem::take(&mut prefs.window_documents));
         connections::migrate_recent(&mut prefs);
         if prefs.query_history.is_empty() {
             prefs.query_history = prefs.history.iter().map(|sql| query_history::Entry { sql: sql.clone(), timestamp: None }).collect();
@@ -1092,15 +1092,15 @@ impl Rustable {
                     self.review = None;
                     self.status = "Changes saved".into();
                     match objects {
-                        Ok(objects) => {
+                        Some(Ok(objects)) => {
                             self.objects = objects;
                             self.language.invalidate();
                             self.refresh();
                         }
-                        Err(error) => {
+                        None => self.refresh(),
+                        Some(Err(error)) => {
                             self.objects.clear();
-                            self.error =
-                                Some(format!("Changes saved, but schema refresh failed: {error}"));
+                            self.error = Some(format!("Changes saved, but schema refresh failed: {error}"));
                         }
                     }
                 }
@@ -1891,7 +1891,7 @@ impl Rustable {
     }
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
-        self.ddl_preview.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || self.history
+        self.ddl_preview.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some() || self.alter_column.is_some()
             || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some()
@@ -1900,6 +1900,12 @@ impl Rustable {
     fn workspace_shortcuts(&mut self, ctx: &egui::Context) {
         // Import windows own the keyboard, including their first visible frame.
         if self.ddl_preview.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() {
+            return;
+        }
+        if matches!(self.pending, Some(Pending::Plan(_))) {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.worker.cancel();
+            }
             return;
         }
         if self.review.is_some() {
@@ -2920,6 +2926,9 @@ impl Rustable {
             let tab_width = workspace_tab_width(ui.available_width(), tab_count, ui.spacing().item_spacing.x);
             egui::ScrollArea::horizontal()
                 .id_salt("workspace-tabs")
+                // Never animate a scrollbar into the strip: its height moves
+                // the entire workspace below it when tabs barely overflow.
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let table_tabs = self.table_tabs.clone();
@@ -3574,14 +3583,20 @@ impl Rustable {
             }
         }
         self.tabs = retained;
-        if self.closed_tabs.len() > 20 {
-            self.closed_tabs.drain(..self.closed_tabs.len() - 20);
-        }
+        self.trim_closed_tabs();
         self.tabs.push(QueryTab::new(String::new()));
         self.tab = self.tabs.len() - 1;
         self.show_query();
         self.row_selection.clear();
         self.selected = None;
+    }
+
+    fn trim_closed_tabs(&mut self) {
+        let scratchpad = self.scratchpad().map(|tab| tab.id);
+        while self.closed_tabs.len() > 20 {
+            let index = self.closed_tabs.iter().position(|tab| Some(tab.id) != scratchpad).unwrap();
+            self.closed_tabs.remove(index);
+        }
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -3607,6 +3622,7 @@ impl Rustable {
             self.view = View::Data;
         } else {
             let mut tab = self.tabs.remove(index);
+            tab.open = false;
             tab.grid = Arc::default();
             tab.results.clear();
             tab.chart = Default::default();
@@ -3614,9 +3630,7 @@ impl Rustable {
             tab.pins.clear();
             tab.selected_pin = None;
             self.closed_tabs.push(tab);
-            if self.closed_tabs.len() > 20 {
-                self.closed_tabs.remove(0);
-            }
+            self.trim_closed_tabs();
             if index < self.tab {
                 self.tab -= 1;
             }
@@ -4029,6 +4043,7 @@ impl Rustable {
             ui.add_space(8.0);
             egui::ScrollArea::horizontal()
                 .id_salt("result-tabs")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let tab = &mut self.tabs[self.tab];
@@ -5804,6 +5819,17 @@ impl Rustable {
                 self.add_column = Some(draft);
             }
         }
+        if self.review.is_none() && matches!(self.pending, Some(Pending::Plan(_))) {
+            egui::Window::new("Review changes").id(egui::Id::new((ctx.viewport_id(), "Review changes")))
+                .default_width(720.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Preparing changes for review…");
+                    });
+                    if ui.button("Cancel preparation").clicked() { self.worker.cancel(); }
+                });
+        }
         if let Some(plan) = &self.review {
             let schema_plan = self.engine == "PostgreSQL"
                 && plan
@@ -5851,9 +5877,12 @@ impl Rustable {
                             egui::Button::new("Save changes · ⌘S / ⌘Enter"),
                         )
                         .clicked();
-                    if matches!(self.pending, Some(Pending::Apply))
-                        && ui.button("Cancel save").clicked() {
-                        self.worker.cancel();
+                    if matches!(self.pending, Some(Pending::Apply)) {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Saving changes…");
+                            if ui.button("Cancel save").clicked() { self.worker.cancel(); }
+                        });
                     }
                     edit_changes = ui.add_enabled(self.pending.is_none(), egui::Button::new("Back to editing")).clicked();
                 });
@@ -9976,6 +10005,21 @@ mod review_recovery_tests {
         }
     }
     #[test]
+    fn pending_review_shows_preparation_feedback_before_database_reply() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = Some(Pending::Plan(false));
+        app.review = None;
+        let mut output = None;
+        for _ in 0..2 {
+            output = Some(ctx.run(egui::RawInput::default(), |ctx| app.windows(ctx)));
+        }
+        let shapes = output.unwrap().shapes;
+        assert!(shapes.iter().any(|s| text_rect(&s.shape, "Preparing changes for review…").is_some()));
+        assert!(shapes.iter().any(|s| text_rect(&s.shape, "Cancel preparation").is_some()));
+    }
+
+    #[test]
     fn applying_review_exposes_its_own_cancel_action() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
@@ -10072,7 +10116,7 @@ mod tab_lifecycle_tests {
     }
 
     #[test]
-    fn session_roundtrip_keeps_dirty_baseline_and_reopenable_documents() {
+    fn session_roundtrip_keeps_only_first_editor_and_its_dirty_baseline() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
         app.pending = None;
@@ -10103,8 +10147,10 @@ mod tab_lifecycle_tests {
             )
             .is_err()
         );
+        assert_eq!(restored.tabs.len(), 1);
+        assert!(restored.closed_tabs.is_empty());
         restored.reopen_tab();
-        assert_eq!(restored.tabs[restored.tab].sql, "SELECT 'closed';");
+        assert_eq!(restored.tabs[restored.tab].sql, "SELECT 2;");
     }
 
     #[test]
@@ -10133,6 +10179,44 @@ mod tab_lifecycle_tests {
         assert_eq!(recovered.sql, "SELECT 'unsaved';");
         assert_eq!(recovered.saved_sql.as_deref().unwrap(), "SELECT 'saved';");
         assert!(restored.closed_tabs.is_empty());
+    }
+
+    #[test]
+    fn closed_first_editor_remains_scratchpad_when_other_tabs_are_active() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
+        app.tabs = vec![QueryTab::new("SELECT 'first';".into()), QueryTab::new("SELECT 'temporary';".into())];
+        app.close_tab(0);
+        for _ in 0..25 {
+            app.new_tab();
+            app.close_tab(app.tab);
+        }
+        let documents = app.recovery_documents();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].sql, "SELECT 'first';");
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let prefs = eframe::get_value(&storage, "workspace").unwrap();
+        let mut restored = Rustable::with_preferences(&ctx, prefs);
+        restored.open_sql();
+        assert_eq!(restored.tabs.len(), 1);
+        assert_eq!(restored.tabs[0].sql, "SELECT 'first';");
+    }
+
+    #[test]
+    fn empty_first_editor_does_not_promote_a_temporary_tab() {
+        let mut app = Rustable::with_preferences(&egui::Context::default(), Preferences::default());
+        app.tabs = vec![QueryTab::new(String::new()), QueryTab::new("SELECT 'temporary';".into())];
+        let documents = app.recovery_documents();
+        assert_eq!(documents.len(), 1);
+        assert!(documents[0].sql.is_empty());
+        let mut storage = MemoryStorage::default();
+        eframe::App::save(&mut app, &mut storage);
+        let prefs: Preferences = eframe::get_value(&storage, "workspace").unwrap();
+        assert_eq!(prefs.documents.len(), 1);
+        assert!(prefs.documents[0].sql.is_empty());
+        assert!(prefs.closed_documents.is_empty());
     }
 
     #[test]
@@ -10359,7 +10443,7 @@ mod close_workspace_keyboard_tests {
         assert!(command_w(&ctx, &mut app));
         let recovered = app.recovery_documents();
         assert!(recovered.iter().any(|document| document.sql == "SELECT 1;"));
-        assert!(recovered.iter().any(|document| document.sql == "SELECT 2;"));
+        assert_eq!(recovered.len(), 1);
     }
 
     #[test]
@@ -10669,29 +10753,25 @@ mod session_window_tests {
     use super::*;
     use crate::session_windows::{WindowConnection, WindowRequest};
     #[test]
-    fn recovery_omits_blank_scratch_tabs_but_preserves_empty_file_edits() {
+    fn recovery_keeps_only_first_editor_including_empty_file_edits() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_launcher_preferences(&ctx, Preferences::default());
-        app.tabs = vec![QueryTab::new(String::new()), QueryTab::new("  \n".into()), QueryTab::new("SELECT 42;".into())];
         let mut file = QueryTab::new(String::new());
         file.saved(PathBuf::from("/tmp/recovery-empty-file.sql"), "SELECT 1;".into());
-        app.tabs.push(file);
+        app.tabs = vec![file, QueryTab::new("SELECT 42;".into())];
         let documents = app.recovery_documents();
-        assert_eq!(documents.len(), 2);
-        assert_eq!(documents[1].saved_sql.as_deref(), Some("SELECT 1;"));
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].saved_sql.as_deref(), Some("SELECT 1;"));
         let mut storage = Storage::default();
         let mut root = Rustable::with_launcher_preferences(&ctx, Preferences::default());
-        let mut legacy = documents;
-        legacy.push(QueryDocument::default());
-        root.save_with_window_documents(&mut storage, legacy);
+        root.save_with_window_documents(&mut storage, documents);
         let mut prefs: Preferences = eframe::get_value(&storage, "workspace").unwrap();
-        assert_eq!(prefs.window_documents.len(), 2);
-        prefs.window_documents.push(QueryDocument::default()); // Older app snapshots.
+        // Migrate older snapshots containing several editors for the same connection.
+        prefs.window_documents.push(QueryDocument { sql: "SELECT 99;".into(), ..Default::default() });
         let restored = Rustable::with_launcher_preferences(&ctx, prefs);
-        assert_eq!(restored.window_recovery.len(), 2);
-        assert_eq!(restored.window_recovery[0].sql, "SELECT 42;");
-        assert_eq!(restored.window_recovery[1].source_path.as_deref(), Some(std::path::Path::new("/tmp/recovery-empty-file.sql")));
-        assert!(restored.window_recovery[1].dirty);
+        assert_eq!(restored.window_recovery.len(), 1);
+        assert!(restored.window_recovery[0].sql.is_empty());
+        assert!(restored.window_recovery[0].dirty);
         assert!(restored.pending.is_none());
     }
 
@@ -10906,7 +10986,8 @@ mod session_window_tests {
         let mut recovered = restarted.new_window(&ctx, request(42));
         wait(&mut recovered);
         recovered.open_sql();
-        assert_eq!(recovered.tabs[1].sql, "SELECT 'second'");
+        assert_eq!(recovered.tabs.len(), 1);
+        assert_eq!(recovered.tabs[0].sql, "SELECT 'unsent'");
         root.archive_window(child);
         let mut storage = Storage::default();
         root.save_with_window_documents(&mut storage, vec![]);
@@ -10918,9 +10999,8 @@ mod session_window_tests {
         wait(&mut child);
         assert!(!child.tabs.iter().any(|tab| tab.open));
         child.open_sql();
-        assert_eq!(child.tabs.len(), 2);
+        assert_eq!(child.tabs.len(), 1);
         assert_eq!(child.tabs[0].sql, "SELECT 'unsent'");
-        assert_eq!(child.tabs[1].sql, "SELECT 'second'");
         assert!(child.tabs.iter().all(|tab| tab.results.is_empty()));
     }
 

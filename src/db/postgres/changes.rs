@@ -86,10 +86,18 @@ fn metadata(client: &mut impl GenericClient, input: &str, data: bool) -> Result<
     if data && !columns.iter().any(|c| c.pk) {
         return Err("PostgreSQL visual editing requires a primary key".into());
     }
-    let constraints=client.query("SELECT pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE conrelid=$1 ORDER BY oid",&[&oid]).map_err(error)?.into_iter().map(|r|r.get::<_,String>(0)).collect::<Vec<_>>();
-    let triggers=client.query("SELECT pg_catalog.pg_get_triggerdef(t.oid),pg_catalog.pg_get_functiondef(t.tgfoid) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=$1 AND NOT t.tgisinternal ORDER BY t.oid",&[&oid]).map_err(error)?.into_iter().map(|r|(r.get::<_,String>(0),r.get::<_,String>(1))).collect::<Vec<_>>();
+    // Fetch independent catalog details together: each separate query costs a
+    // network round trip, especially noticeable over SSH.
+    let details = client.query_one(
+        "SELECT ARRAY(SELECT pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE conrelid=$1 ORDER BY oid), ARRAY(SELECT pg_catalog.pg_get_triggerdef(t.oid) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=$1 AND NOT t.tgisinternal ORDER BY t.oid), ARRAY(SELECT pg_catalog.pg_get_functiondef(t.tgfoid) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=$1 AND NOT t.tgisinternal ORDER BY t.oid), ARRAY(SELECT pg_catalog.pg_get_indexdef(indexrelid) FROM pg_catalog.pg_index WHERE indrelid=$1 ORDER BY indexrelid)",
+        &[&oid],
+    ).map_err(error)?;
+    let constraints: Vec<String> = details.get(0);
+    let trigger_definitions: Vec<String> = details.get(1);
+    let trigger_functions: Vec<String> = details.get(2);
+    let triggers = trigger_definitions.into_iter().zip(trigger_functions).collect::<Vec<_>>();
+    let indexes: Vec<String> = details.get(3);
     let types = type_fingerprints(client, oid)?;
-    let indexes=client.query("SELECT pg_catalog.pg_get_indexdef(indexrelid) FROM pg_catalog.pg_index WHERE indrelid=$1 ORDER BY indexrelid",&[&oid]).map_err(error)?.into_iter().map(|r|r.get::<_,String>(0)).collect::<Vec<_>>();
     let fingerprint =
         serde_json::to_string(&(oid, signatures, constraints, triggers, types, indexes))
             .map_err(|e| e.to_string())?;
@@ -418,10 +426,11 @@ pub(super) fn apply(driver: &mut PostgresDriver, plan: &ChangePlan) -> Result<()
     let mut schemas = plan.schemas.iter().collect::<Vec<_>>();
     schemas.sort_by(|a, b| a.0.cmp(&b.0));
     for (table, expected) in schemas {
-        let current = metadata(&mut tx, table, !schema_plan)?;
+        // Plan keys already contain fully qualified, quoted table names.
+        // Lock first, then read the fingerprint once under that lock.
         tx.batch_execute(&format!(
             "LOCK TABLE {} IN {} MODE",
-            current.name,
+            table,
             if schema_plan {
                 "ACCESS EXCLUSIVE"
             } else {

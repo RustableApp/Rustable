@@ -55,3 +55,13 @@ event ID. Sentry groups reports by panic source location when available.
 Run `cargo test --lib crash_log` for local tests. The ignored
 `sentry_setup_delivery` test sends a clearly labelled synthetic event to the
 real project; run it only when intentionally verifying live ingestion.
+
+## SQL scratchpad recovery
+
+Each connection/database retains only its first SQL editor as a soft-saved
+scratchpad. Closing that tab, closing the connection, or restarting does not
+remove its SQL; reopen it with SQL or Cmd+E. Extra SQL tabs and their reopen
+history are temporary for the current connection session. Save additional
+scripts to files to keep them. Recovery never executes SQL and retains file
+baselines for conflict detection. Older multi-tab snapshots restore only their
+first editor per connection/database.

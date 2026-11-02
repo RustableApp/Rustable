@@ -1,6 +1,6 @@
 [package]
 name = "rustable"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2024"
 description = "A responsive native database workspace built with Rust and egui"
 license = "MIT"

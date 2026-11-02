@@ -348,7 +348,7 @@ pub enum Payload {
     CsvPreview(#[cfg_attr(not(target_arch = "wasm32"), serde(with = "unavailable_transport"))] csv_preview::Preview),
     Planned(ChangePlan),
     Applied {
-        objects: Result<Vec<Object>, String>,
+        objects: Option<Result<Vec<Object>, String>>,
     },
     Connected {
         dialect: crate::sql::Dialect,
@@ -703,7 +703,8 @@ fn handle(
             // a retryable save failure: repeating it could duplicate mutations.
             cancel.store(false, Ordering::Relaxed);
             Ok(Payload::Applied {
-                objects: driver.objects(),
+                objects: plan.statements.iter().any(|statement| statement.expected_rows.is_none())
+                    .then(|| driver.objects()),
             })
         }
         #[cfg(any(test, target_arch = "wasm32"))]
@@ -1106,8 +1107,26 @@ mod worker_tests {
             unreachable!()
         }
         fn apply(&mut self, _: &ChangePlan) -> Result<(), String> {
-            unreachable!()
+            Ok(())
         }
+    }
+
+    #[test]
+    fn data_saves_skip_catalog_but_structure_saves_refresh_it() {
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut driver: Option<Box<dyn Driver>> = Some(Box::new(CatalogCounter(reads.clone())));
+        let cancel = Arc::new(AtomicBool::new(false));
+        for expected_rows in [Some(1), None] {
+            let plan = ChangePlan {
+                statements: vec![PlannedStatement { sql: String::new(), parameters: vec![], expected_rows }],
+                ..Default::default()
+            };
+            let Payload::Applied { objects } = handle(&mut driver, Command::Apply(plan), &cancel).unwrap() else {
+                panic!("expected applied changes");
+            };
+            assert_eq!(objects.is_some(), expected_rows.is_none());
+        }
+        assert_eq!(reads.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1315,7 +1334,7 @@ mod worker_tests {
         let Payload::Applied { objects } = receive(&worker).unwrap() else {
             panic!("expected committed result")
         };
-        let objects = objects.unwrap();
+        let objects = objects.unwrap().unwrap();
         assert!(
             objects
                 .iter()
