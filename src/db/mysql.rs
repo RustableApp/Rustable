@@ -590,7 +590,16 @@ impl Driver for MysqlDriver {
         grid.set_browse_total(request.offset, None);
         let (indexes, triggers) = if object.kind == "view" { (Vec::new(), Vec::new()) }
             else { self.table_metadata_with_definition(&schema, &object.name, (!object.ddl.is_empty()).then_some(object.ddl.as_str()))? };
-        Ok(TableData { sql, parameters, grid, columns: object.columns, indexes, triggers })
+        let links: Vec<(String, String, String, String, String)> = self.with_connection(|conn| conn.exec(
+            "SELECT CONSTRAINT_NAME, REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, COLUMN_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION", (&schema, &request.table)))?;
+        let mut foreign_keys: Vec<foreign_keys::ForeignKey> = Vec::new();
+        for (name, schema, table, source, target) in links {
+            if foreign_keys.last().is_none_or(|key| key.name != name) {
+                foreign_keys.push(foreign_keys::ForeignKey { name, schema: Some(schema), table, columns: vec![], referenced_columns: vec![] });
+            }
+            let key = foreign_keys.last_mut().unwrap(); key.columns.push(source); key.referenced_columns.push(target);
+        }
+        Ok(TableData { sql, parameters, grid, columns: object.columns, indexes, triggers, foreign_keys })
     }
     fn plan(&mut self, changes: &[Change]) -> Result<ChangePlan, String> {
         self.require_idle()?;
@@ -1790,5 +1799,26 @@ mod error_message_tests {
         assert_eq!(error_message(&error), "ERROR 1062 (23000): Duplicate entry '日本' for key 'PRIMARY'");
         let transport = ::mysql::Error::from(std::io::Error::new(std::io::ErrorKind::TimedOut, "fixture timeout"));
         assert_eq!(error_message(&transport), transport.to_string());
+    }
+}
+
+#[cfg(test)]
+mod foreign_key_navigation_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB QA server"]
+    fn live_composite_foreign_key_navigation() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316,43317].contains(&port));
+        let config = MysqlConfig { host:"127.0.0.1".into(),port,user:"rustable".into(),password:"rustable-test-only".into(),database:"rustable_test".into(),tls:false,..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        for sql in ["DROP TABLE IF EXISTS fk_nav_child","DROP TABLE IF EXISTS fk_nav_parent","CREATE TABLE fk_nav_parent(tenant VARCHAR(20),id INT,PRIMARY KEY(tenant,id)) ENGINE=InnoDB","CREATE TABLE fk_nav_child(a VARCHAR(20),b INT,FOREIGN KEY(a,b) REFERENCES fk_nav_parent(tenant,id)) ENGINE=InnoDB","INSERT INTO fk_nav_parent VALUES('a',3),('b',3)","INSERT INTO fk_nav_child VALUES('a',3)"] { driver.conn().unwrap().query_drop(sql).unwrap(); }
+        let source = driver.browse(&Browse { table:"fk_nav_child".into(),..Default::default() }).unwrap();
+        assert_eq!(source.foreign_keys.len(),1);
+        let key = &source.foreign_keys[0];
+        let filters = key.filters(&source.grid.columns,&source.grid.rows[0]).unwrap();
+        let target = driver.browse(&Browse { table:key.table.clone(),filters,..Default::default() }).unwrap();
+        assert_eq!(target.grid.rows.len(),1); assert_eq!(target.grid.rows[0][0],Value::Text("a".into()));
+        driver.conn().unwrap().query_drop("DROP TABLE fk_nav_child").unwrap(); driver.conn().unwrap().query_drop("DROP TABLE fk_nav_parent").unwrap();
     }
 }

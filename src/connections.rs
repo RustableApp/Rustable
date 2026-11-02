@@ -6,8 +6,18 @@ use crate::connection_profiles::{
 };
 use crate::credential_store::{Operation as CredentialOperation, Worker as CredentialWorker};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListSelection {
+    Profile(ProfileId),
+    Group(Option<GroupId>),
+}
+
 #[derive(Default)]
 pub(super) struct Manager {
+    selection: Option<ListSelection>,
+    #[cfg(not(target_arch = "wasm32"))]
+    tableplus_import: Option<crate::tableplus_import::Dialog>,
+    import_notice: Option<String>,
     draft: Option<Profile>,
     new_connection: Option<crate::icons::DatabaseEngine>,
     password: String,
@@ -61,6 +71,7 @@ impl Manager {
         if !already_selected {
             self.select(profile.clone());
         }
+        self.selection = Some(ListSelection::Profile(id));
         self.search.clear();
         self.collapsed_groups.remove(&profile.group);
         self.scroll_to_profile = Some(id);
@@ -158,6 +169,7 @@ impl Manager {
     }
 
     fn select(&mut self, profile: Profile) {
+        self.selection = Some(ListSelection::Profile(profile.id));
         self.invalidate_probe();
         self.generation = self.generation.wrapping_add(1);
         self.password.clear();
@@ -499,6 +511,25 @@ impl Rustable {
         if !self.connection_manager.credential_pending.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(mut dialog) = self.connection_manager.tableplus_import.take() {
+            match dialog.show(ctx, &self.prefs.saved_connections) {
+                Some(crate::tableplus_import::Decision::Cancel) => {}
+                Some(crate::tableplus_import::Decision::Import) => {
+                    match dialog.apply(&mut self.prefs.saved_connections) {
+                        Ok((credentials, count)) => {
+                            self.profiles_changed();
+                            self.connection_manager.import_notice = Some(format!("Imported {count} connections. Review their settings before connecting."));
+                            for (id, password) in credentials {
+                                self.connection_manager.queue_credential(id, CredentialOperation::Write(password.to_string()));
+                            }
+                        }
+                        Err(error) => self.connection_manager.error = Some(error),
+                    }
+                }
+                None => self.connection_manager.tableplus_import = Some(dialog),
+            }
+        }
         self.connection_manager.poll_probe();
         ctx.data_mut(|data| {
             data.insert_temp(
@@ -524,17 +555,12 @@ impl Rustable {
                 ui.visuals_mut().widgets.inactive.corner_radius = egui::CornerRadius::same(8);
                 ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(8);
                 ui.visuals_mut().widgets.active.corner_radius = egui::CornerRadius::same(8);
+                if let Some(notice) = &self.connection_manager.import_notice { ui.label(notice); }
                 ui.horizontal(|ui| {
                     if can_return && ui.button("Back to database").clicked() {
                         self.connections = false;
                     }
-                    if ui.add(crate::icons::widget("plus")).on_hover_text("New connection").clicked() {
-                        if self.connection_manager.dirty(&self.prefs.saved_connections) {
-                            self.connection_manager.error = Some("Save or discard the connection form before adding another.".into());
-                        } else {
-                            self.connection_manager.new_connection = Some(crate::icons::DatabaseEngine::Postgres);
-                        }
-                    }
+                    #[cfg(any(target_arch = "wasm32", feature = "qa"))]
                     if ui.add_enabled(self.pending.is_none(), egui::Button::new("Studio demo")).clicked() {
                         #[cfg(not(target_arch = "wasm32"))]
                         self.window_requests.push(crate::session_windows::WindowRequest { title: "Studio demo".into(), recover_sql: false, identity: None, connection: crate::session_windows::WindowConnection::Demo });
@@ -550,7 +576,6 @@ impl Rustable {
                         self.redis_demo_active = true;
                         self.connections = false;
                     }
-                    if ui.button("New group").clicked() { action = Some(Action::AddGroup); }
                     if let Some(id) = self.connection_search_navigation(ctx) {
                         action = Some(Action::Select(id));
                         keyboard_selection = Some(id);
@@ -566,7 +591,6 @@ impl Rustable {
                                 && (!manager.search.trim().is_empty() || !manager.collapsed_groups.contains(&draft.group))
                         });
                     }
-                    connection_search(ui, &mut self.connection_manager.search);
                 });
                 if let Some(error) = self.error.clone() {
                     ui.horizontal_wrapped(|ui| {
@@ -580,14 +604,15 @@ impl Rustable {
                 ui.separator();
                 ui.horizontal_top(|ui| {
                     let list_width = if self.connection_manager.draft.is_some() { (ui.available_width() * 0.33).clamp(240.0, 320.0) } else { ui.available_width() };
-                    ui.allocate_ui_with_layout(egui::vec2(list_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(list_width, ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
                     // Reserve the split even when filtering leaves no rows to fill it.
                     ui.set_width(list_width);
-                    ui.set_min_height(400.0);
+                    connection_search(ui, &mut self.connection_manager.search);
+                    ui.add_space(6.0);
                     let filtering = !self.connection_manager.search.trim().is_empty();
                     let visible: std::collections::HashSet<_> = self.prefs.saved_connections.matching_profiles(&self.connection_manager.search).into_iter().collect();
                     if filtering { ui.small("Clear search to reorder connections or groups."); }
-                    egui::ScrollArea::vertical().id_salt("saved-connection-list").max_height((ctx.content_rect().height() - 110.0).max(200.0)).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("saved-connection-list").auto_shrink([false, false]).max_height((ui.available_height() - 44.0).max(0.0)).show(ui, |ui| {
                         let groups: Vec<_> = std::iter::once((None, "Ungrouped".to_owned()))
                             .chain(self.prefs.saved_connections.groups.iter().map(|group| (Some(group.id), group.name.clone()))).collect();
                         if visible.is_empty() && filtering { ui.weak("No matching connections."); }
@@ -603,9 +628,15 @@ impl Rustable {
                             let collapsed = self.connection_manager.collapsed_groups.contains(&group_id) && !filtering;
 
                             let editing = self.connection_manager.rename_group.as_ref().is_some_and(|(id, _)| Some(*id) == group_id);
-                            let frame = egui::Frame::new().inner_margin(egui::Margin { left: 24, right: 4, top: 7, bottom: 5 });
+                            let group_selected = self.connection_manager.selection == Some(ListSelection::Group(group_id));
+                            let frame = egui::Frame::new()
+                                .fill(if group_selected { ui.visuals().selection.bg_fill } else { Color32::TRANSPARENT })
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin { left: 48, right: 8, top: 8, bottom: 8 });
                             let header = frame.show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
+                                let foreground = connection_title_color(ui, group_selected);
+                                ui.visuals_mut().override_text_color = Some(foreground);
                                 if editing {
                                     let (id, value) = self.connection_manager.rename_group.as_mut().unwrap();
                                     let response = ui.add(TextEdit::singleline(value).id(egui::Id::new(("rename-connection-group", id.0))).desired_width(ui.available_width()));
@@ -626,8 +657,8 @@ impl Rustable {
                                     }
                                     response
                                 } else if let Some(id) = group_id.filter(|_| !filtering) {
-                                    ui.dnd_drag_source(egui::Id::new(("connection-group", id.0)), Drag::Group(id), |ui| ui.strong(&name)).response
-                                } else { ui.strong(&name) }
+                                    ui.dnd_drag_source(egui::Id::new(("connection-group", id.0)), Drag::Group(id), |ui| ui.label(RichText::new(&name).font(egui::FontId::new(14.0, egui::TextStyle::Heading.resolve(ui.style()).family)))).response
+                                } else { ui.label(RichText::new(&name).font(egui::FontId::new(14.0, egui::TextStyle::Heading.resolve(ui.style()).family))) }
 
                             });
                             if header.response.contains_pointer() && egui::DragAndDrop::has_payload_of_type::<Drag>(ui.ctx()) {
@@ -641,10 +672,16 @@ impl Rustable {
                                 }
                             }
                             crate::icons::paint(ui.painter(), egui::pos2(header.response.rect.left() + 10.0, header.response.rect.center().y), if collapsed { "chevron-right" } else { "chevron-down" }, 14.0, ui.visuals().weak_text_color());
+                            crate::icons::paint(ui.painter(), egui::pos2(header.response.rect.left() + 32.0, header.response.rect.center().y), "folder", 20.0, if group_selected { ui.visuals().selection.stroke.color } else { ui.visuals().weak_text_color() });
                             if !editing {
                             let heading_response = header.inner.interact(egui::Sense::click()) | header.response.interact(egui::Sense::click());
-                            if heading_response.clicked() {
+                            if heading_response.clicked() || heading_response.secondary_clicked() {
                                 heading_response.request_focus();
+                                self.connection_manager.selection = Some(ListSelection::Group(group_id));
+                            }
+                            let disclosure_clicked = heading_response.clicked() && heading_response.interact_pointer_pos()
+                                .is_some_and(|pos| pos.x < header.response.rect.left() + 22.0);
+                            if !filtering && (disclosure_clicked || heading_response.double_clicked()) {
                                 if collapsed { self.connection_manager.collapsed_groups.remove(&group_id); } else { self.connection_manager.collapsed_groups.insert(group_id); }
                             }
                             if let Some(id) = group_id {
@@ -661,13 +698,22 @@ impl Rustable {
                             }
                             }
                             if collapsed { continue; }
+                            egui::Frame::new()
+                                .inner_margin(egui::Margin { left: 24, right: 0, top: 0, bottom: 0 })
+                                .show(ui, |ui| {
                             for (index, profile) in self.prefs.saved_connections.in_group(group_id).enumerate() {
                                 if !visible.contains(&profile.id) { continue; }
-                                let selected = self.connection_manager.draft.as_ref().is_some_and(|draft| draft.id == profile.id);
+                                let selected = self.connection_manager.selection
+                                    .or_else(|| self.connection_manager.draft.as_ref().map(|draft| ListSelection::Profile(draft.id)))
+                                    == Some(ListSelection::Profile(profile.id));
                                 let render_row = |ui: &mut egui::Ui| connection_row(ui, profile, selected);
                                 let response = if filtering { ui.scope(render_row) } else { ui.dnd_drag_source(egui::Id::new(("saved-connection", profile.id.0)), Drag::Profile(profile.id), render_row) };
                                 let row_response = response.response.interact(egui::Sense::click()) | response.inner.clone();
                                 if response.inner.clicked() || row_response.clicked() { row_response.request_focus(); action = Some(Action::Select(profile.id)); }
+                                if row_response.secondary_clicked() {
+                                    row_response.request_focus();
+                                    self.connection_manager.selection = Some(ListSelection::Profile(profile.id));
+                                }
                                 if !filtering && let Some(dropped) = response.response.dnd_release_payload::<Drag>()
                                     && let Drag::Profile(id) = *dropped {
                                     let after = ui.input(|input| input.pointer.interact_pos()).is_some_and(|pos| pos.y > response.response.rect.center().y);
@@ -704,8 +750,27 @@ impl Rustable {
                                     if ui.button("Remove saved connection").clicked() { action = Some(Action::Delete(profile.id)); ui.close(); }
                                 });
                             }
+                            });
                             ui.add_space(6.0);
                         }
+                    });
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                    if ui.add(crate::icons::widget("plus")).on_hover_text("New connection").clicked() {
+                        if self.connection_manager.dirty(&self.prefs.saved_connections) {
+                            self.connection_manager.error = Some("Save or discard the connection form before adding another.".into());
+                        } else {
+                            self.connection_manager.new_connection = Some(crate::icons::DatabaseEngine::Postgres);
+                        }
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    ui.menu_button("Import…", |ui| {
+                        if ui.button("From TablePlus…").clicked() {
+                            self.connection_manager.tableplus_import = Some(crate::tableplus_import::Dialog::pick(ctx.clone()));
+                            ui.close();
+                        }
+                    });
+                    if ui.button("New group").clicked() { action = Some(Action::AddGroup); }
                     });
                     });
                     if self.connection_manager.draft.is_none() { return; }
@@ -996,6 +1061,7 @@ impl Rustable {
                     .as_ref()
                     .is_some_and(|draft| draft.id == id)
                 {
+                    self.connection_manager.selection = Some(ListSelection::Profile(id));
                     return Ok(());
                 }
                 if self.connection_manager.dirty(&self.prefs.saved_connections) {
@@ -1092,6 +1158,7 @@ impl Rustable {
                         .saved_connections
                         .update_profile(profile.clone())?;
                 }
+                self.connection_manager.selection = Some(ListSelection::Profile(profile.id));
                 self.connection_manager.draft =
                     self.prefs.saved_connections.profile(profile.id).cloned();
                 self.profiles_changed();
@@ -1153,6 +1220,9 @@ impl Rustable {
                         .queue_credential(id, CredentialOperation::Delete);
                 }
                 self.profiles_changed();
+                if self.connection_manager.selection == Some(ListSelection::Profile(id)) {
+                    self.connection_manager.selection = None;
+                }
                 if self
                     .connection_manager
                     .draft
@@ -1171,6 +1241,7 @@ impl Rustable {
                 }
                 let id = self.prefs.saved_connections.add_group(name.clone())?;
                 self.connection_manager.search.clear();
+                self.connection_manager.selection = Some(ListSelection::Group(Some(id)));
                 self.connection_manager.rename_group = Some((id, name));
                 self.connection_manager.focus_group_name = true;
             }
@@ -1180,6 +1251,9 @@ impl Rustable {
             }
             Action::DeleteGroup(id) => {
                 self.prefs.saved_connections.remove_group(id)?;
+                if self.connection_manager.selection == Some(ListSelection::Group(Some(id))) {
+                    self.connection_manager.selection = None;
+                }
                 if let Some(draft) = &mut self.connection_manager.draft
                     && draft.group == Some(id)
                 {
@@ -1257,6 +1331,16 @@ fn network_endpoint(host: &str, database: &str, ssh: Option<&SshOptions>) -> Str
     if database.is_empty() { endpoint } else { format!("{endpoint} · {database}") }
 }
 
+fn connection_title_color(ui: &egui::Ui, selected: bool) -> Color32 {
+    if selected {
+        ui.visuals().selection.stroke.color
+    } else if ui.visuals().dark_mode {
+        Color32::from_gray(238)
+    } else {
+        ui.visuals().text_color()
+    }
+}
+
 fn connection_row(ui: &mut egui::Ui, profile: &Profile, selected: bool) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 55.0), egui::Sense::click());
@@ -1290,14 +1374,10 @@ fn connection_row(ui: &mut egui::Ui, profile: &Profile, selected: bool) -> egui:
     crate::icons::paint(ui.painter(), center, "database", 24.0, color);
     let left = rect.left() + 47.0;
     let width = (rect.right() - left - 8.0).max(1.0);
-    let foreground = if selected {
-        ui.visuals().selection.stroke.color
-    } else {
-        ui.visuals().text_color()
-    };
+    let foreground = connection_title_color(ui, selected);
     let title = ui.painter().layout_no_wrap(
         profile.name.clone(),
-        egui::FontId::proportional(14.0),
+        egui::FontId::new(14.0, egui::TextStyle::Button.resolve(ui.style()).family),
         foreground,
     );
     let painter = ui.painter().with_clip_rect(egui::Rect::from_min_max(
@@ -1329,6 +1409,8 @@ fn connection_row(ui: &mut egui::Ui, profile: &Profile, selected: bool) -> egui:
         egui::FontId::proportional(12.0),
         if selected {
             foreground.gamma_multiply(0.8)
+        } else if ui.visuals().dark_mode {
+            Color32::from_gray(166)
         } else {
             ui.visuals().weak_text_color()
         },
@@ -1358,6 +1440,7 @@ fn connection_search(ui: &mut egui::Ui, text: &mut String) {
                     [editor_width, 20.0],
                     TextEdit::singleline(text)
                         .id(egui::Id::new("connection-search"))
+                        .vertical_align(egui::Align::Center)
                         .frame(false)
                         .margin(egui::Margin::ZERO)
                         .hint_text("Search connections…")
@@ -2202,6 +2285,8 @@ mod tests {
             let output = manager_frame(&ctx, &mut app, vec![]);
             let row = painted_text(&output, "Menu profile").unwrap();
             manager_click(&ctx, &mut app, row, egui::PointerButton::Secondary);
+            let original_id = app.prefs.saved_connections.profiles[0].id;
+            assert_eq!(app.connection_manager.selection, Some(ListSelection::Profile(original_id)));
             let output = manager_frame(&ctx, &mut app, vec![]);
             let duplicate = painted_text(&output, "Duplicate")
                 .expect("secondary row click must expose Duplicate");
@@ -2213,7 +2298,11 @@ mod tests {
             );
             let output = manager_frame(&ctx, &mut app, vec![]);
             let header = painted_text(&output, "Menu group").unwrap();
+            manager_click(&ctx, &mut app, header, egui::PointerButton::Primary);
+            assert_eq!(app.connection_manager.selection, Some(ListSelection::Group(Some(group))));
+            assert!(!app.connection_manager.collapsed_groups.contains(&Some(group)));
             manager_click(&ctx, &mut app, header, egui::PointerButton::Secondary);
+            assert_eq!(app.connection_manager.selection, Some(ListSelection::Group(Some(group))));
             let output = manager_frame(&ctx, &mut app, vec![]);
             let rename = painted_text(&output, "Rename group")
                 .expect("secondary header click must expose Rename group");
@@ -2423,7 +2512,10 @@ mod tests {
         ] {
             app.connection_manager.search = search;
             for _ in 0..20 {
-                let _ = manager_frame(&ctx, &mut app, vec![]);
+                let output = manager_frame(&ctx, &mut app, vec![]);
+                let footer = painted_text(&output, "New group").expect("connection controls visible");
+                assert!(footer.y > 840.0 && footer.y < 900.0,
+                    "connection controls should stay at the bottom: {footer:?}");
                 let width = ctx
                     .data(|data| {
                         data.get_temp::<egui::Rect>(egui::Id::new("connection-manager-geometry"))

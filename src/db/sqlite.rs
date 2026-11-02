@@ -677,7 +677,21 @@ fn browse_table_after(
     let indexes = indexes(conn, &browse.table)?;
     let triggers = conn.prepare("SELECT name,type,sql FROM sqlite_schema WHERE type='trigger' AND tbl_name=?1 ORDER BY name")?
         .query_map([&browse.table],|r| Ok(Object { schema:None, display_name:None, metadata_error: None, columns: vec![], name:r.get(0)?,kind:r.get(1)?,ddl:r.get(2)? }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut foreign_keys: Vec<foreign_keys::ForeignKey> = Vec::new();
+    let mut statement = conn.prepare(r#"SELECT id, seq, "table", "from", "to" FROM pragma_foreign_key_list(?1) ORDER BY id, seq"#)?;
+    let links = statement.query_map([&browse.table], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, seq, table, source, target) in links {
+        let target = if let Some(target) = target { target } else {
+            conn.query_row("SELECT name FROM pragma_table_info(?1) WHERE pk=?2", rusqlite::params![&table, seq + 1], |r| r.get(0))?
+        };
+        let name = id.to_string();
+        if foreign_keys.last().is_none_or(|key| key.name != name) {
+            foreign_keys.push(foreign_keys::ForeignKey { name, table, schema: None, columns: vec![], referenced_columns: vec![] });
+        }
+        let key = foreign_keys.last_mut().unwrap(); key.columns.push(source); key.referenced_columns.push(target);
+    }
     Ok(TableData {
+        foreign_keys,
         sql,
         parameters: params,
         grid,
@@ -3664,5 +3678,22 @@ mod json_export_tests {
         driver.export_table(&path, &browse, &cancel, ExportFormat::Json).unwrap();
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(), serde_json::json!([]));
         assert_eq!(directory.path().read_dir().unwrap().count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod foreign_key_navigation_tests {
+    use super::*;
+    #[test]
+    fn discovers_composite_and_implicit_primary_key_targets() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE parent(tenant TEXT, id INTEGER, PRIMARY KEY(tenant,id)); CREATE TABLE child(a TEXT,b INTEGER, FOREIGN KEY(a,b) REFERENCES parent); INSERT INTO parent VALUES('a',3),('b',3); INSERT INTO child VALUES('a',3);").unwrap();
+        let source = browse_table(&conn, &Browse { table:"child".into(), ..Default::default() }).unwrap();
+        assert_eq!(source.foreign_keys.len(),1);
+        let key = &source.foreign_keys[0];
+        assert_eq!(key.referenced_columns,vec!["tenant","id"]);
+        let filters = key.filters(&source.grid.columns,&source.grid.rows[0]).unwrap();
+        let target = browse_table(&conn,&Browse { table:key.table.clone(), filters, ..Default::default() }).unwrap();
+        assert_eq!(target.grid.rows,vec![vec![Value::Text("a".into()),Value::Integer(3)]]);
     }
 }

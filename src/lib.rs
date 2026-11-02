@@ -12,6 +12,8 @@ mod completion;
 mod connection;
 mod connection_probe;
 mod connection_profiles;
+#[cfg(not(target_arch = "wasm32"))]
+mod tableplus_import;
 mod credential_store;
 mod db;
 mod editor;

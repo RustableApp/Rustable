@@ -420,6 +420,7 @@ fn legacy_browse(driver: &mut PostgresDriver, request: &Browse) -> Result<TableD
         })
         .collect();
     Ok(TableData {
+        foreign_keys: vec![],
         sql,
         parameters,
         grid,

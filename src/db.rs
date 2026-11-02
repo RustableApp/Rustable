@@ -1,6 +1,7 @@
 //! All database and file work happens on a single owner thread, never in a frame.
 mod csv;
 pub mod filters;
+pub mod foreign_keys;
 mod json;
 mod row_export;
 #[cfg(not(target_arch = "wasm32"))]
@@ -206,6 +207,7 @@ struct TableData {
     columns: Vec<Column>,
     indexes: Vec<Index>,
     triggers: Vec<Object>,
+    foreign_keys: Vec<foreign_keys::ForeignKey>,
 }
 
 impl From<TableData> for Payload {
@@ -217,6 +219,7 @@ impl From<TableData> for Payload {
             columns: table.columns,
             indexes: table.indexes,
             triggers: table.triggers,
+            foreign_keys: table.foreign_keys,
         }
     }
 }
@@ -361,6 +364,7 @@ pub enum Payload {
         columns: Vec<Column>,
         indexes: Vec<Index>,
         triggers: Vec<Object>,
+        foreign_keys: Vec<foreign_keys::ForeignKey>,
     },
     Exported(PathBuf),
     #[cfg(target_arch = "wasm32")]

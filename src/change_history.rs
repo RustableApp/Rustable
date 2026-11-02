@@ -50,6 +50,7 @@ impl ChangeHistory {
 
 impl Rustable {
     pub(super) fn record_changes(&mut self) {
+        self.keep_table_tab(&self.browse.table.clone());
         self.change_history.record(&self.changes);
         self.review = None;
         self.review_sql.clear();

@@ -1,4 +1,4 @@
-//! Keep egui's compact default faces, adding system Unicode coverage last.
+//! Inter UI faces, unchanged monospace, and shared Unicode/emoji fallbacks.
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
@@ -36,6 +36,14 @@ fn fallback() -> Option<Arc<FontData>> {
 
 fn definitions(font: Option<Arc<FontData>>) -> FontDefinitions {
     let mut definitions = FontDefinitions::default();
+    for (name, bytes) in [
+        ("Inter-Regular", include_bytes!("../assets/fonts/Inter-Regular.ttf").as_slice()),
+        ("Inter-Medium", include_bytes!("../assets/fonts/Inter-Medium.ttf").as_slice()),
+        ("Inter-SemiBold", include_bytes!("../assets/fonts/Inter-SemiBold.ttf").as_slice()),
+    ] {
+        definitions.font_data.insert(name.into(), Arc::new(FontData::from_static(bytes)));
+    }
+    definitions.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "Inter-Regular".into());
     let emoji = "noto-emoji-fallback";
     definitions.font_data.insert(emoji.into(), Arc::new(FontData::from_static(
         include_bytes!("../assets/fonts/NotoEmoji.ttf"),
@@ -48,12 +56,33 @@ fn definitions(font: Option<Arc<FontData>>) -> FontDefinitions {
         fonts.push(emoji.into());
         if font.is_some() { fonts.push(FALLBACK.into()); }
     }
+    for name in ["Inter-Medium", "Inter-SemiBold"] {
+        let mut chain = definitions.families[&FontFamily::Proportional].clone();
+        chain[0] = name.into();
+        definitions.families.insert(FontFamily::Name(name.into()), chain);
+    }
     definitions
+}
+
+fn install_styles(ctx: &egui::Context) {
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        let mut style = (*ctx.style_of(theme)).clone();
+        for (text_style, family) in [
+            (egui::TextStyle::Button, "Inter-Medium"),
+            (egui::TextStyle::Heading, "Inter-SemiBold"),
+        ] {
+            if let Some(font) = style.text_styles.get_mut(&text_style) {
+                font.family = FontFamily::Name(family.into());
+            }
+        }
+        ctx.set_style_of(theme, style);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(definitions(None));
+    install_styles(ctx);
     let ctx = ctx.clone();
     // Font file I/O happens once off the render thread. Glyphs are rasterized on demand.
     std::thread::spawn(move || {
@@ -73,13 +102,17 @@ mod tests {
         let definitions = definitions(Some(Arc::new(font)));
         let defaults = FontDefinitions::default();
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            assert_eq!(definitions.families[&family][0], defaults.families[&family][0]);
+            assert_eq!(definitions.families[&family][0], if family == FontFamily::Proportional { "Inter-Regular" } else { &defaults.families[&family][0] });
         }
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                for font in [egui::FontId::monospace(16.0), egui::FontId::proportional(16.0)] {
+                for font in [
+                    egui::FontId::monospace(16.0), egui::FontId::proportional(16.0),
+                    egui::FontId::new(16.0, FontFamily::Name("Inter-Medium".into())),
+                    egui::FontId::new(16.0, FontFamily::Name("Inter-SemiBold".into())),
+                ] {
                     ui.fonts_mut(|fonts| assert!(fonts.has_glyphs(&font, "日本語かなカナ中文한국어🦀")));
                     ui.label(egui::RichText::new("日本語かなカナ中文한국어🦀").font(font));
                 }
@@ -94,7 +127,7 @@ mod tests {
         let definitions = definitions(None);
         let defaults = FontDefinitions::default();
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            assert_eq!(definitions.families[&family][0], defaults.families[&family][0]);
+            assert_eq!(definitions.families[&family][0], if family == FontFamily::Proportional { "Inter-Regular" } else { &defaults.families[&family][0] });
         }
         let ctx = egui::Context::default();
         ctx.set_fonts(definitions);
@@ -119,7 +152,7 @@ mod tests {
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             assert_eq!(
                 definitions.families[&family][0],
-                defaults.families[&family][0]
+                if family == FontFamily::Proportional { "Inter-Regular" } else { &defaults.families[&family][0] }
             );
         }
         let ctx = egui::Context::default();
@@ -147,6 +180,7 @@ pub fn install(ctx: &egui::Context) {
         async fn load_cjk_font() -> Result<JsValue, JsValue>;
     }
     ctx.set_fonts(definitions(None));
+    install_styles(ctx);
     let ctx = ctx.clone();
     wasm_bindgen_futures::spawn_local(async move {
         // The adapter verifies the packaged asset's exact size and SHA-256 before

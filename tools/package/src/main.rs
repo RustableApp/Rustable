@@ -199,6 +199,11 @@ fn font_notices(root: &Path, destination: &Path) -> Result<()> {
     for name in ["NotoEmoji-OFL.txt", "README.md"] {
         fs::copy(root.join("assets/fonts").join(name), target.join(name))?;
     }
+    let inter = destination.join("Inter");
+    fs::create_dir_all(&inter)?;
+    for name in ["Inter-OFL.txt", "README.md"] {
+        fs::copy(root.join("assets/fonts").join(name), inter.join(name))?;
+    }
     Ok(())
 }
 fn icon_notices(root: &Path, destination: &Path) -> Result<()> {
@@ -368,6 +373,7 @@ mod tests {
             assert_eq!(fs::read(destination.join("NotoEmoji").join(name)).unwrap(), fs::read(root.join("assets/fonts").join(name)).unwrap());
         }
         assert!(!destination.join("NotoEmoji/NotoEmoji.ttf").exists());
+        assert_eq!(fs::read(destination.join("Inter/Inter-OFL.txt")).unwrap(), fs::read(root.join("assets/fonts/Inter-OFL.txt")).unwrap());
         fs::remove_dir_all(destination).unwrap();
     }
 

@@ -776,14 +776,17 @@ impl Workspace {
         use egui_extras::{Column, TableBuilder};
         let mut inspect = None;
         let mut delete = None;
+        crate::app::with_grid_scrollbars(ui, |ui| {
         TableBuilder::new(ui)
+            .wheel_before_layout(true)
+            .min_scrolled_height(0.0)
             .id_salt(("redis-key-grid", self.database))
             .striped(false)
             .resizable(true)
             .auto_shrink([false, false])
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::exact(34.0))
+            .column(Column::exact(38.0))
             .column(Column::initial(200.0).at_least(90.0).clip(true))
             .column(Column::remainder().at_least(120.0).clip(true))
             .column(Column::initial(85.0).clip(true))
@@ -802,11 +805,14 @@ impl Workspace {
                 body.rows(22.0, self.keys.len(), |mut row| {
                     let index = row.index();
                     let key = &self.keys[index];
-                    row.set_selected(self.selected_key.as_ref() == Some(key));
+                    // Match the SQL grid: no hover fill, and an unselected row-number gutter.
+                    row.set_hovered(false);
+                    row.set_selected(false);
                     let metadata = self.rows.get(key);
                     row.col(|ui| {
-                        ui.weak((index + 1).to_string());
+                        crate::app::paint_row_number(ui, &(index + 1).to_string());
                     });
+                    row.set_selected(self.selected_key.as_ref() == Some(key));
                     row.col(|ui| {
                         ui.add(
                             egui::Label::new(egui::RichText::new(display_key(key)).monospace())
@@ -865,6 +871,7 @@ impl Workspace {
                     });
                 });
             });
+        });
         if let Some(key) = inspect {
             self.inspector_visible = true;
             self.send(Job::Inspect(key));

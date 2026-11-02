@@ -7,6 +7,7 @@ const LAUNCHER_SIZE_MIGRATION: &str = "native-launcher-size-v1";
 pub const LAUNCHER_SIZE: egui::Vec2 = egui::vec2(960.0, 860.0);
 
 pub enum WindowConnection {
+    #[cfg(any(feature = "qa", test))]
     Demo,
     Sqlite(PathBuf),
     Postgres(Box<PostgresConfig>),

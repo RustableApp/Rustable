@@ -1799,3 +1799,26 @@ mod memory_tests;
 
 #[cfg(test)]
 mod transport_tests;
+
+#[cfg(test)]
+mod foreign_key_navigation_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires opted-in disposable PostgreSQL QA server on port 54329"]
+    fn live_composite_foreign_key_navigation() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+        let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig { host:"127.0.0.1".into(),port:54329,database:"rustable_qa".into(),user:"postgres".into(),password:"rustable_qa_only".into(),tls:false,ssh:None },Arc::new(AtomicBool::new(false))).unwrap();
+        driver.client.batch_execute("CREATE TEMP TABLE fk_nav_parent(tenant TEXT,id INT,PRIMARY KEY(tenant,id)); CREATE TEMP TABLE fk_nav_child(a TEXT,b INT,FOREIGN KEY(a,b) REFERENCES fk_nav_parent(tenant,id)); INSERT INTO fk_nav_parent VALUES('a',3),('b',3); INSERT INTO fk_nav_child VALUES('a',3)").unwrap();
+        for _ in 0..2 {
+            let source = driver.browse(&Browse { table:"fk_nav_child".into(),..Default::default() }).unwrap();
+            assert_eq!(source.foreign_keys.len(),1);
+            let key = &source.foreign_keys[0];
+            assert_eq!(key.referenced_columns,vec!["tenant","id"]);
+            let filters = key.filters(&source.grid.columns,&source.grid.rows[0]).unwrap();
+            let table = format!("{}.{}",quote(key.schema.as_ref().unwrap()),quote(&key.table));
+            let target = driver.browse(&Browse { table,filters,..Default::default() }).unwrap();
+            assert_eq!(target.grid.rows.len(),1);
+            assert_eq!(target.grid.rows[0][0],Value::Text("a".into()));
+        }
+    }
+}

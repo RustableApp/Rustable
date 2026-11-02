@@ -41,7 +41,7 @@ impl Rustable {
         }
         let mut chosen = None;
         egui::ScrollArea::vertical().id_salt("query-history").show(ui, |ui| {
-            if groups.is_empty() { ui.weak(if search.is_empty() { "Executed queries appear here." } else { "No matching queries" }); }
+            if groups.is_empty() { ui.weak(if search.is_empty() { "Queries you run appear here." } else { "No matching queries" }); }
             for (date, entries) in groups {
                 egui::CollapsingHeader::new(RichText::new(&date).monospace().size(13.0)).id_salt(("history-date", &date)).default_open(true).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
@@ -72,6 +72,33 @@ impl Rustable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn browsing_stays_in_activity_and_only_explicit_queries_enter_history() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.worker.rx = receiver;
+        let generated = "SELECT * FROM customers LIMIT 100";
+        for _ in 0..2 {
+            app.pending = Some(Pending::Table);
+            sender.send(Ok(Payload::Table {
+                sql: generated.into(), parameters: vec![], grid: Grid::default(),
+                columns: vec![], indexes: vec![], triggers: vec![], foreign_keys: vec![],
+            })).unwrap();
+            app.poll();
+        }
+        assert!(app.prefs.query_history.is_empty());
+        assert!(app.prefs.history.is_empty());
+        assert!(app.activity.iter().any(|entry| entry.contains(generated)));
+
+        // The same SQL belongs in history when explicitly run from the editor.
+        app.show_query();
+        app.tabs[app.tab].sql = generated.into();
+        app.run_query(true);
+        assert_eq!(app.prefs.query_history.len(), 1);
+        assert_eq!(app.prefs.query_history[0].sql, generated);
+    }
+
     #[test]
     fn legacy_history_does_not_invent_dates_and_repeated_executions_remain() {
         let ctx = egui::Context::default();

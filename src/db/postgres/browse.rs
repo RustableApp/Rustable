@@ -38,7 +38,15 @@ SELECT r.nspname,r.relname,
  FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ci ON ci.oid=i.indexrelid
  WHERE i.indrelid=r.oid),'[]'::json)::text,
  COALESCE((SELECT pg_catalog.json_agg(pg_catalog.json_build_array(t.tgname,pg_catalog.pg_get_triggerdef(t.oid)) ORDER BY t.tgname)
- FROM pg_catalog.pg_trigger t WHERE t.tgrelid=r.oid AND NOT t.tgisinternal),'[]'::json)::text
+ FROM pg_catalog.pg_trigger t WHERE t.tgrelid=r.oid AND NOT t.tgisinternal),'[]'::json)::text,
+ COALESCE((SELECT pg_catalog.json_agg(pg_catalog.json_build_object(
+ 'name', con.conname, 'schema', ns.nspname, 'table', target.relname,
+ 'columns', ARRAY(SELECT a.attname FROM unnest(con.conkey) WITH ORDINALITY k(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=con.conrelid AND a.attnum=k.num ORDER BY k.ord),
+ 'referenced_columns', ARRAY(SELECT a.attname FROM unnest(con.confkey) WITH ORDINALITY k(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=con.confrelid AND a.attnum=k.num ORDER BY k.ord)
+ ) ORDER BY con.conname)
+ FROM pg_catalog.pg_constraint con JOIN pg_catalog.pg_class target ON target.oid=con.confrelid
+ JOIN pg_catalog.pg_namespace ns ON ns.oid=target.relnamespace
+ WHERE con.conrelid=r.oid AND con.contype='f'),'[]'::json)::text
 FROM relation r
 "#;
 
@@ -108,7 +116,9 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
     if let Some(column) = &request.filter_column {
         if !columns.iter().any(|c| &c.name == column) {
             if pipelined {
-                driver.browse_catalog.retain(|(name, _)| name != &request.table);
+                driver
+                    .browse_catalog
+                    .retain(|(name, _)| name != &request.table);
                 return browse(driver, request);
             }
             return Err("Filter column no longer exists".into());
@@ -120,8 +130,19 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         parameters.push(Value::Text(request.filter.clone()));
         values.push((&request.filter, Type::TEXT));
     }
-    let predicate = crate::db::filters::predicate(&request.filters, &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), crate::sql::Dialect::Postgres)?;
-    if !predicate.is_empty() { sql.push_str(if request.filter_column.is_some() { " AND " } else { " WHERE " }); sql.push_str(&predicate); }
+    let predicate = crate::db::filters::predicate(
+        &request.filters,
+        &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        crate::sql::Dialect::Postgres,
+    )?;
+    if !predicate.is_empty() {
+        sql.push_str(if request.filter_column.is_some() {
+            " AND "
+        } else {
+            " WHERE "
+        });
+        sql.push_str(&predicate);
+    }
     if let Some((column, descending)) = request.sort.clone().or_else(|| {
         columns
             .iter()
@@ -130,7 +151,9 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
     }) {
         if !columns.iter().any(|c| c.name == column) {
             if pipelined {
-                driver.browse_catalog.retain(|(name, _)| name != &request.table);
+                driver
+                    .browse_catalog
+                    .retain(|(name, _)| name != &request.table);
                 return browse(driver, request);
             }
             return Err("Sort column no longer exists".into());
@@ -169,7 +192,10 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
             .all(|index| fresh.get::<_, &str>(index) == row.get::<_, &str>(index));
         if !same_shape {
             drop(rows);
-            driver.browse_catalog.retain(|(name, _)| name != &request.table);
+
+            driver
+                .browse_catalog
+                .retain(|(name, _)| name != &request.table);
             let mut result = browse(driver, request)?;
             result.grid.elapsed = started.elapsed();
             return Ok(result);
@@ -223,13 +249,19 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
             columns: Vec::new(),
         })
         .collect();
-    driver.browse_catalog.retain(|(name, _)| name != &request.table);
+
+    driver
+        .browse_catalog
+        .retain(|(name, _)| name != &request.table);
+    let foreign_keys = serde_json::from_str(row.get(6))
+        .map_err(|e| format!("Invalid foreign key metadata: {e}"))?;
     driver.browse_catalog.push((request.table.clone(), row));
     if driver.browse_catalog.len() > 16 {
         driver.browse_catalog.remove(0);
     }
     grid.elapsed = started.elapsed();
     Ok(TableData {
+        foreign_keys,
         sql,
         parameters,
         grid,
@@ -296,20 +328,50 @@ mod tests {
         assert!(initial.columns[0].pk);
         assert!(initial.columns[1].default.contains("hello"));
         // Visiting another table must retain the first table's validated hint.
-        driver.client.batch_execute("CREATE TEMP TABLE browse_other(id integer); INSERT INTO browse_other VALUES (42)").unwrap();
-        let other = Browse { table: "browse_other".into(), ..Default::default() };
-        assert_eq!(driver.browse(&other).unwrap().grid.rows, [vec![Value::Integer(42)]]);
+        driver
+            .client
+            .batch_execute(
+                "CREATE TEMP TABLE browse_other(id integer); INSERT INTO browse_other VALUES (42)",
+            )
+            .unwrap();
+        let other = Browse {
+            table: "browse_other".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            driver.browse(&other).unwrap().grid.rows,
+            [vec![Value::Integer(42)]]
+        );
         assert_eq!(driver.browse_catalog.len(), 2);
-        assert_eq!(driver.browse(&request).unwrap().grid.rows, initial.grid.rows);
+        assert_eq!(
+            driver.browse(&request).unwrap().grid.rows,
+            initial.grid.rows
+        );
         // Exercise bounded LRU eviction without retaining any table data.
         for index in 0..17 {
             let table = format!("browse_lru_{index}");
-            driver.client.batch_execute(&format!("CREATE TEMP TABLE {table}(id integer)")).unwrap();
-            driver.browse(&Browse { table, ..Default::default() }).unwrap();
+            driver
+                .client
+                .batch_execute(&format!("CREATE TEMP TABLE {table}(id integer)"))
+                .unwrap();
+            driver
+                .browse(&Browse {
+                    table,
+                    ..Default::default()
+                })
+                .unwrap();
         }
         assert_eq!(driver.browse_catalog.len(), 16);
-        assert!(!driver.browse_catalog.iter().any(|(name, _)| name == "browse_refresh"));
-        assert_eq!(driver.browse(&request).unwrap().grid.rows, initial.grid.rows);
+        assert!(
+            !driver
+                .browse_catalog
+                .iter()
+                .any(|(name, _)| name == "browse_refresh")
+        );
+        assert_eq!(
+            driver.browse(&request).unwrap().grid.rows,
+            initial.grid.rows
+        );
 
         driver.client.batch_execute("ALTER TABLE browse_refresh ADD COLUMN extra bigint DEFAULT 7; DROP INDEX browse_expression; DROP TRIGGER browse_touch ON browse_refresh").unwrap();
         let refreshed = driver.browse(&request).unwrap();
@@ -386,7 +448,9 @@ mod tests {
         .unwrap();
         driver
             .client
-            .batch_execute("CREATE TEMP VIEW browse_cancel AS SELECT 1 AS id, pg_sleep(1)::text AS delay")
+            .batch_execute(
+                "CREATE TEMP VIEW browse_cancel AS SELECT 1 AS id, pg_sleep(1)::text AS delay",
+            )
             .unwrap();
         let request = Browse {
             table: "browse_cancel".into(),

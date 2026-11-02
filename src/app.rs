@@ -3,6 +3,8 @@ use web_time::Instant;
 mod query_library;
 #[path = "query_history.rs"]
 mod query_history;
+#[path = "table_tabs.rs"]
+mod table_tabs;
 #[path = "navigator.rs"]
 pub(crate) mod navigator;
 #[path = "bulk_rows.rs"]
@@ -207,6 +209,13 @@ impl QueryTab {
         self.saved_sql = Some(Arc::new(sql));
         self.refresh_dirty();
     }
+    // Keep an internal slot for editor state without opening a workspace tab.
+    fn dormant() -> Self {
+        let mut tab = Self::new(String::new());
+        tab.open = false;
+        tab
+    }
+
     fn new(sql: String) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
@@ -409,6 +418,10 @@ pub struct Rustable {
     columns: Vec<Column>,
     indexes: Vec<db::Index>,
     triggers: Vec<Object>,
+    foreign_keys: Vec<db::foreign_keys::ForeignKey>,
+    table_tabs: Vec<table_tabs::TableTab>,
+    active_table_tab: Option<u64>,
+    next_table_tab_id: u64,
     selected_index: Option<usize>,
     table: Arc<Grid>,
     tabs: Vec<QueryTab>,
@@ -685,10 +698,6 @@ impl Rustable {
             pane_sizes: self.prefs.pane_sizes,
             page_size: self.prefs.page_size,
             connections_migrated: true,
-            documents: vec![QueryDocument {
-                sql: String::new(),
-                ..Default::default()
-            }],
             ..Default::default()
         };
         if let crate::session_windows::WindowConnection::Redis { settings, password } = request.connection {
@@ -707,6 +716,7 @@ impl Rustable {
         }
         let command = match request.connection {
             crate::session_windows::WindowConnection::Redis { .. } => unreachable!(),
+            #[cfg(any(feature = "qa", test))]
             crate::session_windows::WindowConnection::Demo => Command::Open(None),
             crate::session_windows::WindowConnection::Sqlite(path) => Command::Open(Some(path)),
             crate::session_windows::WindowConnection::Mysql(config) => Command::OpenMysql(*config),
@@ -815,7 +825,7 @@ impl Rustable {
                 app.window_recovery.push(tab);
             }
         }
-        app.tabs.push(QueryTab::new(String::new()));
+        app.tabs.push(QueryTab::dormant());
         app.connections = true;
         app.label = "Not connected".into();
         app
@@ -846,10 +856,8 @@ impl Rustable {
                 .into_iter()
                 .map(QueryDocument::restore)
                 .collect()
-        } else if prefs.queries.is_empty() && initial.is_none() {
-            vec![QueryTab::new(String::new())]
         } else if prefs.queries.is_empty() {
-            vec![QueryTab::new("-- Run current: Cmd/Ctrl+Enter. Run all: Cmd/Ctrl+Shift+Enter.\nSELECT plan, COUNT(*) AS customers,\n       ROUND(SUM(lifetime_value), 2) AS revenue\nFROM customers\nGROUP BY plan\nORDER BY revenue DESC;\n\nSELECT * FROM customers LIMIT 100;".into())]
+            vec![QueryTab::dormant()]
         } else {
             std::mem::take(&mut prefs.queries)
                 .into_iter()
@@ -898,6 +906,10 @@ impl Rustable {
             columns: vec![],
             indexes: vec![],
             triggers: vec![],
+            foreign_keys: vec![],
+            table_tabs: vec![],
+            active_table_tab: None,
+            next_table_tab_id: 0,
             selected_index: None,
             table: Arc::default(),
             tabs,
@@ -1020,7 +1032,7 @@ impl Rustable {
             }) = &result
             {
                 let statement = bounded_log_text(&crate::review_sql::readable_dialect(sql, parameters, crate::sql::Dialect::for_engine(&self.engine)));
-                self.record_query_history(statement.clone());
+                // Generated browsing SQL belongs in Activity, not user query history.
                 self.log_activity(statement);
             }
             let pending = self.pending.take();
@@ -1121,6 +1133,9 @@ impl Rustable {
                     self.triggers.clear();
                     self.selected_index = None;
                     self.browse = Browse::default();
+                    self.table_tabs.clear();
+                    self.active_table_tab = None;
+                    self.foreign_keys.clear();
                     for tab in &mut self.tabs {
                         tab.grid = Arc::default();
                         tab.results.clear();
@@ -1145,6 +1160,7 @@ impl Rustable {
                     columns,
                     indexes,
                     triggers,
+                    foreign_keys,
                 }) => {
                     self.status = format!(
                         "{} rows loaded in {:.1} ms",
@@ -1155,6 +1171,7 @@ impl Rustable {
                     self.columns = columns;
                     self.indexes = indexes;
                     self.triggers = triggers;
+                    self.foreign_keys = foreign_keys;
                     self.row_selection.clear();
                     self.selected = self.saved_selection.take().and_then(|(table, keys)| {
                         if table != self.browse.table {
@@ -1395,6 +1412,26 @@ impl Rustable {
         if !self.finish_cell_edit() {
             return;
         }
+        self.prepare_table(name);
+        self.refresh();
+    }
+
+    fn prepare_table(&mut self, name: String) {
+        self.remember_table_tab();
+        if self.restore_table_tab(&name) { return; }
+        // Reuse one preview for ordinary table browsing, never discard other
+        // relationship previews as a side effect.
+        let replace = self.table_tabs.iter().find(|tab| Some(tab.id) == self.active_table_tab && !tab.kept)
+            .or_else(|| self.table_tabs.iter().rev().find(|tab| !tab.kept)).map(|tab| tab.id);
+        if let Some(id) = replace { self.table_tabs.retain(|tab| tab.id != id); }
+        self.prepare_new_table(name);
+    }
+
+    fn prepare_new_table(&mut self, name: String) {
+        self.active_table_tab = None;
+        self.filter_rules.clear();
+        self.filter_rules_original.clear();
+        self.filters_visible = false;
         self.focus_page_grid = false;
         self.table_display_name = self
             .objects
@@ -1412,6 +1449,29 @@ impl Rustable {
         };
         self.filter.clear();
         self.view = View::Data;
+        self.remember_table_tab();
+    }
+
+    fn follow_foreign_key(&mut self, key: &db::foreign_keys::ForeignKey, columns: &[String], row: &[Value]) {
+        if self.pending.is_some() || !self.finish_cell_edit() { return; }
+        let Some(filters) = key.filters(columns, row) else { return; };
+        let dialect = crate::sql::Dialect::for_engine(&self.engine);
+        if matches!(dialect, crate::sql::Dialect::Mysql(_)) && key.schema.as_ref() != self.schemas.selected.as_ref() {
+            self.error = Some("This relationship points to another database. Open that database before following it.".into());
+            return;
+        }
+        let name = if matches!(dialect, crate::sql::Dialect::Postgres) {
+            let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+            key.schema.as_ref().map_or_else(|| quote(&key.table), |schema| format!("{}.{}", quote(schema), quote(&key.table)))
+        } else { key.table.clone() };
+        // Configure the target before dispatch: never issue an unfiltered first load.
+        self.remember_table_tab();
+        self.prepare_new_table(name);
+        self.browse.filters = filters.clone();
+        self.filter_rules_table = self.browse.table.clone();
+        self.filter_rules = filters.clone();
+        self.filter_rules_original = filters.into_iter().map(Some).collect();
+        self.filters_visible = true;
         self.refresh();
     }
 
@@ -1450,6 +1510,7 @@ impl Rustable {
         self.columns.clear();
         self.indexes.clear();
         self.triggers.clear();
+        self.foreign_keys.clear();
         self.selected_index = None;
         self.selected_column = None;
         self.row_selection.clear();
@@ -2373,7 +2434,7 @@ impl Rustable {
                 if ctx.content_rect().width() < 720.0 {
                     ui.horizontal(|ui| {
                         if ui.selectable_label(self.compact_panel == 1, "Items").clicked() { self.compact_panel = if self.compact_panel == 1 { 0 } else { 1 }; }
-                        if ui.button("SQL").clicked() { self.compact_panel = 0; self.show_query(); self.tabs[self.tab].focus_editor = true; }
+                        if ui.button("SQL").on_hover_text("New SQL editor").clicked() { self.compact_panel = 0; self.new_tab(); }
                         if ui.selectable_label(self.compact_panel == 2, "Inspector").clicked() { self.compact_panel = if self.compact_panel == 2 { 0 } else { 2 }; }
                         ui.menu_button("More", |ui| {
                             if ui.button("Find anything").clicked() { self.open_navigator(false); ui.close(); }
@@ -2403,11 +2464,10 @@ impl Rustable {
                         .on_hover_text("Browse databases · Cmd/Ctrl+K · Find anything: Cmd/Ctrl+P")
                         .clicked() { self.open_navigator(true); }
                     if toolbar_action(ui, 2, self.view == View::Query)
-                        .on_hover_text("Open query editor")
+                        .on_hover_text("New SQL editor")
                         .clicked()
                     {
-                        self.show_query();
-                        self.tabs[self.tab].focus_editor = true;
+                        self.new_tab();
                     }
                     });
                     self.connection_status(ui);
@@ -2584,7 +2644,9 @@ impl Rustable {
                             } else {
                                 response
                             };
-                            if primary_pressed(&response) {
+                            if same_target_double_click(&response, egui::Id::new(("sidebar-table", &object.name)))
+                                && let Some(tab) = self.table_tabs.iter_mut().find(|tab| Some(tab.id) == self.active_table_tab && tab.browse.table == object.name) { tab.kept = true; }
+                            if primary_pressed(&response) && (self.browse.table != object.name || self.view == View::Query) {
                                 open = Some(object.name.clone());
                             }
                         });
@@ -2752,11 +2814,17 @@ impl Rustable {
                                         }
                                         if self.edit.as_ref().is_some_and(|e| e.inspector && e.table == self.browse.table && e.column == *name && e.row == *row) {
                                             finish |= inline_value(ui, &mut self.edit);
-                                        } else {
-                                            let response = inspector_value_preview(ui, text.as_ref()).on_hover_text(text.as_ref());
-                                            if response.clicked() && writable {
-                                                start_edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: self.browse.table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text: if matches!(value,Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: true, inspector: true });
+                                        } else if writable {
+                                            // Render the real input before focus, using the same ID as
+                                            // the retained draft so the first click places the caret.
+                                            let mut draft = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: self.browse.table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: false, inspector: true });
+                                            let id = cell_edit_id(ui, draft.as_ref().unwrap());
+                                            inline_value(ui, &mut draft);
+                                            if ui.memory(|memory| memory.has_focus(id)) || draft.as_ref().is_some_and(|draft| draft.bulk_changed) {
+                                                start_edit = draft;
                                             }
+                                        } else {
+                                            inspector_value_preview(ui, text.as_ref()).on_hover_text(text.as_ref());
                                         }
                                 });
                                     });
@@ -2796,6 +2864,7 @@ impl Rustable {
     }
 
     fn workspace(&mut self, ctx: &egui::Context) {
+        self.remember_table_tab();
         let schema_editable = self.supports_schema_changes();
         let dialog_open = self.dialog_owns_workspace_shortcuts();
         if self.view != View::Data || dialog_open { self.focus_page_grid = false; }
@@ -2803,7 +2872,7 @@ impl Rustable {
             if dialog_open { ui.disable(); }
             self.activity_panel(ui);
             let mut close = None;
-            let active = (self.view == View::Query, self.tabs[self.tab].id);
+            let active = (self.view == View::Query, if self.view == View::Query { self.tabs[self.tab].id } else { self.active_table_tab.unwrap_or(0) });
             let visible_tab_id = egui::Id::new((ctx.viewport_id(), "visible-workspace-tab"));
             let reveal_active = ui.ctx().data_mut(|data| {
                 let id = visible_tab_id;
@@ -2814,30 +2883,23 @@ impl Rustable {
             let tab_fill = if ui.visuals().dark_mode { Color32::from_rgb(48, 48, 48) } else { Color32::from_rgb(226, 228, 231) };
             egui::Frame::new().fill(tab_fill).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            let tab_count = self.tabs.iter().filter(|tab| tab.open).count() + usize::from(!self.browse.table.is_empty());
+            let tab_count = self.tabs.iter().filter(|tab| tab.open).count() + self.table_tabs.len();
             let tab_width = workspace_tab_width(ui.available_width(), tab_count, ui.spacing().item_spacing.x);
             egui::ScrollArea::horizontal()
                 .id_salt("workspace-tabs")
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        if !self.browse.table.is_empty() {
-                            let (response, closed) = workspace_tab(
-                                ui,
-                                tab_width,
-                                self.current_table_name(),
-                                self.view != View::Query,
-                                true,
-                            );
-                            let response = response.on_hover_text(&self.browse.table);
-                            if reveal_active && self.view != View::Query {
-                                ui.scroll_to_rect(response.rect, None);
-                            }
+                        let table_tabs = self.table_tabs.clone();
+                        for table in table_tabs {
+                            let active = self.view != View::Query && self.active_table_tab == Some(table.id);
+                            let (response, closed) = workspace_tab(ui, tab_width, &table.title, active, self.pending.is_none(), !table.kept);
+                            if reveal_active && active { ui.scroll_to_rect(response.rect, None); }
                             if closed || response.clicked_by(egui::PointerButton::Middle) {
-                                self.close_table_tab();
+                                self.close_table_tab_id(table.id);
+                            } else if same_target_double_click(&response, egui::Id::new(("table-tab", table.id))) {
+                                if let Some(tab) = self.table_tabs.iter_mut().find(|tab| tab.id == table.id) { tab.kept = true; }
                             } else if response.clicked() {
-                                self.view = View::Data;
-                                self.row_selection.clear();
-                                self.selected = None;
+                                self.activate_table_tab_id(table.id);
                             }
                         }
                         for index in 0..self.tabs.len() {
@@ -2850,6 +2912,7 @@ impl Rustable {
                                 &format!("{}{}", if self.tabs[index].dirty { "• " } else { "" }, self.tabs[index].source_name.clone().unwrap_or_else(|| format!("SQL Query {}", index + 1))),
                                 self.view == View::Query && self.tab == index,
                                 self.pending.is_none(),
+                                false,
                             );
                             if reveal_active && self.view == View::Query && self.tab == index {
                                 ui.scroll_to_rect(response.rect, None);
@@ -3363,40 +3426,25 @@ impl Rustable {
     }
 
     fn navigate_workspace_tab(&mut self, next: bool) {
-        // Mirror the rendered order: the table, then all open SQL tabs.
-        // The retained closed last editor is deliberately excluded.
-        let mut visible = Vec::new();
-        if !self.browse.table.is_empty() {
-            visible.push(None);
-        }
-        visible.extend(
-            self.tabs
-                .iter()
-                .enumerate()
-                .filter(|(_, tab)| tab.open)
-                .map(|(index, _)| Some(index)),
-        );
-        if visible.len() < 2 {
-            return;
-        }
-        let active = (self.view == View::Query).then_some(self.tab);
-        let target = match visible.iter().position(|tab| *tab == active) {
-            Some(index) if next => (index + 1) % visible.len(),
-            Some(index) => (index + visible.len() - 1) % visible.len(),
+        self.remember_table_tab();
+        // Table workspaces precede SQL editors, matching the visible strip.
+        let mut visible: Vec<(bool, usize)> = (0..self.table_tabs.len()).map(|i| (false, i)).collect();
+        visible.extend(self.tabs.iter().enumerate().filter(|(_, tab)| tab.open).map(|(i, _)| (true, i)));
+        if visible.len() < 2 { return; }
+        let active = if self.view == View::Query { Some((true, self.tab)) }
+            else { self.table_tabs.iter().position(|tab| Some(tab.id) == self.active_table_tab).map(|i| (false, i)) };
+        let target = match active.and_then(|active| visible.iter().position(|tab| *tab == active)) {
+            Some(i) if next => (i + 1) % visible.len(),
+            Some(i) => (i + visible.len() - 1) % visible.len(),
             None if next => 0,
             None => visible.len() - 1,
         };
-        if !self.finish_cell_edit() {
-            return;
-        }
-        match visible[target] {
-            Some(index) => self.activate_query(index),
-            None => {
-                self.view = View::Data;
-                self.row_selection.clear();
-                self.selected = None;
-            }
-        }
+        if !self.finish_cell_edit() { return; }
+        let (query, index) = visible[target];
+        if query { self.activate_query(index); }
+        else if Some(self.table_tabs[index].id) == self.active_table_tab {
+            self.view = View::Data; self.row_selection.clear(); self.selected = None;
+        } else { self.activate_table_tab_id(self.table_tabs[index].id); }
     }
 
     fn activate_query(&mut self, index: usize) {
@@ -3432,22 +3480,8 @@ impl Rustable {
     }
 
     fn close_table_tab(&mut self) {
-        if self.pending.is_some() || !self.finish_cell_edit() {
-            return;
-        }
-        let closes_active = self.view != View::Query;
-        self.browse = Browse::default();
-        self.table = Arc::default();
-        self.selected_column = None;
-        if closes_active {
-            self.selected = None;
-            self.row_selection.clear();
-            if self.tabs.iter().any(|tab| tab.open) {
-                self.show_query();
-            } else {
-                self.view = View::Data;
-            }
-        }
+        self.remember_table_tab();
+        if let Some(id) = self.active_table_tab { self.close_table_tab_id(id); }
     }
 
     fn new_tab(&mut self) {
@@ -3467,7 +3501,9 @@ impl Rustable {
             tab.formatter = Default::default();
             tab.pins.clear();
             tab.selected_pin = None;
-                self.closed_tabs.push(tab);
+                if !tab.sql.trim().is_empty() || tab.source_path.is_some() {
+                    self.closed_tabs.push(tab);
+                }
             }
         }
         self.tabs = retained;
@@ -3529,7 +3565,9 @@ impl Rustable {
     }
 
     fn reopen_tab(&mut self) {
-        if self.tabs.len() == 1 && !self.tabs[0].open {
+        if self.tabs.len() == 1 && !self.tabs[0].open
+            && (!self.tabs[0].sql.trim().is_empty() || self.tabs[0].source_path.is_some()
+                || (self.closed_tabs.is_empty() && self.window_recovery.is_empty())) {
             self.show_query();
             return;
         }
@@ -3795,6 +3833,8 @@ impl Rustable {
         ui.add_space(4.0);
         if !self.language.diagnostics.is_empty() {
             let message = &self.language.diagnostics[0].message;
+            ui.horizontal(|ui| {
+            ui.add_space(8.0);
             ui.label(
                 RichText::new(format!(
                     "{} · {} diagnostic{}",
@@ -3817,10 +3857,12 @@ impl Rustable {
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
+            });
         }
         let current = crate::editor::line_index(ui.ctx(), &self.tabs[self.tab].sql);
         let (line, column) = current.line_column(active_caret);
         ui.horizontal(|ui| {
+            ui.add_space(8.0);
             ui.label(
                 RichText::new(format!("Line {line}, column {column}"))
                     .size(11.0)
@@ -4012,47 +4054,75 @@ impl Rustable {
         let mut insert = None;
         let mut clear = false;
         let mut apply_all = false;
-        egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
+        egui::Frame::new().fill(ui.visuals().faint_bg_color).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+            // Keep every filter control on the same compact, rounded baseline.
+            const CONTROL_HEIGHT: f32 = 22.0;
+            for style in [egui::TextStyle::Body, egui::TextStyle::Button, egui::TextStyle::Small] {
+                if let Some(font) = ui.style_mut().text_styles.get_mut(&style) { font.size *= 0.8; }
+            }
+            ui.spacing_mut().icon_width = 14.0;
+            ui.spacing_mut().icon_width_inner = 8.0;
+            ui.spacing_mut().icon_spacing = 3.0;
+            ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+            ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
+            ui.spacing_mut().item_spacing = egui::vec2(5.0, 4.0);
+            ui.visuals_mut().widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+            ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(6);
+            ui.visuals_mut().widgets.active.corner_radius = egui::CornerRadius::same(6);
+            ui.visuals_mut().widgets.open.corner_radius = egui::CornerRadius::same(6);
             ui.add_enabled_ui(self.pending.is_none(), |ui| {
                 for (index, rule) in self.filter_rules.iter_mut().enumerate() {
                     ui.push_id(index, |ui| ui.horizontal(|ui| {
                         ui.checkbox(&mut rule.enabled, "");
-                        egui::ComboBox::from_id_salt("column").width(130.0).selected_text(&rule.column).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("column").width(104.0).selected_text(&rule.column).show_ui(ui, |ui| {
                             for column in &self.columns { ui.selectable_value(&mut rule.column, column.name.clone(), &column.name); }
                             ui.separator();
                             ui.selectable_value(&mut rule.column, "Raw SQL".into(), "Raw SQL");
                         });
                         if rule.column != "Raw SQL" {
-                            egui::ComboBox::from_id_salt("operator").width(100.0).selected_text(&rule.operator).show_ui(ui, |ui| {
+                            egui::ComboBox::from_id_salt("operator").width(80.0).selected_text(&rule.operator).show_ui(ui, |ui| {
                                 for op in db::filters::OPERATORS { ui.selectable_value(&mut rule.operator, (*op).into(), *op); }
                             });
                         }
                         let no_value = rule.column != "Raw SQL" && rule.operator.starts_with("IS ");
-                        let width = (ui.available_width() - 125.0).max(60.0);
-                        let response = ui.add_enabled(!no_value, TextEdit::singleline(&mut rule.value).id(if index == 0 { egui::Id::new("table-filter-value") } else { egui::Id::new(("table-filter-value", index)) }).desired_width(width).hint_text(if rule.operator.ends_with("IN") { "[1, 2] or [\"a\", \"b\"]" } else if rule.column == "Raw SQL" { "SQL condition…" } else { "Value…" }));
+                        let width = (ui.available_width() - (12.0 + 54.0 + 2.0 * CONTROL_HEIGHT + 3.0 * ui.spacing().item_spacing.x)).max(60.0);
+                        let response = ui.add_enabled(!no_value, TextEdit::singleline(&mut rule.value).min_size(egui::vec2(0.0, CONTROL_HEIGHT)).vertical_align(egui::Align::Center).margin(egui::vec2(6.0, 2.0)).id(if index == 0 { egui::Id::new("table-filter-value") } else { egui::Id::new(("table-filter-value", index)) }).desired_width(width).hint_text(if rule.operator.ends_with("IN") { "[1, 2] or [\"a\", \"b\"]" } else if rule.column == "Raw SQL" { "SQL condition…" } else { "Value…" }));
                         if self.focus_filter { response.request_focus(); self.focus_filter = false; }
-                        if ui.button("Apply").on_hover_text("Apply this condition; other applied conditions stay unchanged").clicked() || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) { apply = Some(index); }
-                        if ui.add_sized([24.0, 24.0], egui::Button::new("−")).on_hover_text("Remove condition (removing the last condition turns filtering off)").clicked() { remove = Some(index); }
-                        if ui.add_sized([24.0, 24.0], egui::Button::new("+")).on_hover_text("Add condition").clicked() { insert = Some(index + 1); }
+                        if ui.add_sized([54.0, CONTROL_HEIGHT], egui::Button::new("Apply")).on_hover_text("Apply this condition; other applied conditions stay unchanged").clicked() || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) { apply = Some(index); }
+                        if ui.add_sized([CONTROL_HEIGHT, CONTROL_HEIGHT], egui::Button::new("−")).on_hover_text("Remove condition (removing the last condition turns filtering off)").clicked() { remove = Some(index); }
+                        if ui.add_sized([CONTROL_HEIGHT, CONTROL_HEIGHT], egui::Button::new("+")).on_hover_text("Add condition").clicked() { insert = Some(index + 1); }
                     }));
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("SQL").on_hover_text("Copy the draft WHERE clause").clicked() {
+                    let feedback_id = ui.id().with("filter-sql-copied-until");
+                    let now = ui.input(|i| i.time);
+                    let until = ui.ctx().data(|data| data.get_temp::<f64>(feedback_id)).unwrap_or(0.0);
+                    let copied = now < until;
+                    let icon = if copied { egui::include_image!("../assets/icons/lucide/check.svg") } else { egui::include_image!("../assets/icons/lucide/clipboard.svg") };
+                    let button = egui::Button::image_and_text(egui::Image::new(icon).fit_to_exact_size(egui::vec2(12.0, 12.0)).tint(ui.visuals().text_color()), if copied { "Copied" } else { "Copy SQL" });
+                    if copied { ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(until - now)); }
+                    if ui.add_sized([84.0, CONTROL_HEIGHT], button).on_hover_text("Copy the draft WHERE clause").clicked() {
                         let dialect = self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine));
                         match db::filters::predicate(&self.filter_rules, &self.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), dialect) {
-                            Ok(sql) => ui.ctx().copy_text(if sql.is_empty() { String::new() } else { format!("WHERE {sql}") }),
+                            Ok(sql) => {
+                                ui.ctx().copy_text(if sql.is_empty() { String::new() } else { format!("WHERE {sql}") });
+                                ui.ctx().data_mut(|data| data.insert_temp(feedback_id, now + 1.5));
+                            },
                             Err(error) => self.error = Some(error),
                         }
                     }
                     #[cfg(not(target_arch = "wasm32"))]
+                    ui.scope(|ui| {
+                    ui.spacing_mut().interact_size.x = 61.0;
                     ui.menu_button("Export", |ui| {
                         if ui.add_enabled(self.supports_table_export(), egui::Button::new("Applied filters as CSV…")).clicked() { self.export_table_dialog(ui.ctx(), db::ExportFormat::Csv); ui.close(); }
                         if ui.add_enabled(self.supports_table_export(), egui::Button::new("Applied filters as JSON…")).clicked() { self.export_table_dialog(ui.ctx(), db::ExportFormat::Json); ui.close(); }
                     });
+                    });
                     ui.label(RichText::new("Match all enabled conditions").small().color(MUTED));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        apply_all = ui.button("Apply All").clicked();
-                        clear = ui.button("Clear").clicked();
+                        apply_all = ui.add_sized([76.0, CONTROL_HEIGHT], egui::Button::new("Apply All")).clicked();
+                        clear = ui.add_sized([54.0, CONTROL_HEIGHT], egui::Button::new("Clear")).clicked();
                     });
                 });
             });
@@ -4251,6 +4321,8 @@ impl Rustable {
         let mut bulk_delete = None;
         let mut menu_action = None;
         let mut quick_filter = None;
+        let mut follow_relation = None;
+        let numeric_columns: Vec<bool> = grid.columns.iter().map(|name| self.view == View::Data && self.columns.iter().any(|column| column.name == *name && numeric_column_type(&column.data_type))).collect();
         let menu_can_insert = self.can_insert();
         #[cfg(not(target_arch = "wasm32"))]
         let menu_can_import = self.supports_csv_import() && self.pending.is_none();
@@ -4586,14 +4658,30 @@ impl Rustable {
                                         }
                                         return;
                                     }
+                                    let numeric = matches!(value, Value::Integer(_) | Value::Real(_)) || numeric_columns[column];
                                     let text = db::preview(value, 180);
                                     let color = if deleting || staged.is_some() { ui.visuals().text_color() } else if row_selected { ui.visuals().selection.stroke.color } else { match value {
                                         Value::Null | Value::Blob(_) => MUTED,
-                                        Value::Integer(_) | Value::Real(_) => ui.visuals().hyperlink_color,
+                                        Value::Integer(_) | Value::Real(_) => ui.visuals().text_color(),
                                         _ if text == "Active" || text == "Paid" => GREEN,
                                         _ => ui.visuals().text_color(),
                                     }};
-                                    paint_grid_text(ui, text.as_ref(), color, fit_columns);
+                                    let relationship = (self.view == View::Data).then(|| self.foreign_keys.iter().find(|key| key.columns.contains(&grid.columns[column]))).flatten();
+                                    if let Some(key) = relationship {
+                                        let rect = ui.max_rect();
+                                        let arrow = egui::Rect::from_center_size(egui::pos2(rect.right() - 8.0, rect.center().y), egui::vec2(16.0, rect.height()));
+                                        let available = key.can_follow(&grid.columns, &grid.rows[index]) && !deleting && staged.is_none() && self.pending.is_none();
+                                        let response = ui.interact(arrow, ui.id().with("follow-foreign-key"), if available { egui::Sense::click() } else { egui::Sense::hover() });
+                                        // Reserve the arrow's space so long values never paint underneath it.
+                                        let text_rect = egui::Rect::from_min_max(rect.min, egui::pos2(arrow.left() - 3.0, rect.bottom()));
+                                        ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| { ui.set_clip_rect(ui.clip_rect().intersect(text_rect)); paint_grid_text_aligned(ui, text.as_ref(), color, fit_columns, numeric); });
+                                        let arrow_color = if available && row_selected { ui.visuals().selection.stroke.color } else if available && response.hovered() { ui.visuals().hyperlink_color } else { ui.visuals().weak_text_color() };
+                                        crate::icons::paint(ui.painter(), arrow.center(), "arrow-right", 12.0, arrow_color);
+                                        if response.clicked() { follow_relation = Some((key.clone(), grid.rows[index].clone())); }
+                                        response.on_hover_text(if available { format!("Open {} · {}", key.table, key.referenced_columns.join(", ")) } else { "No saved related value to follow".into() });
+                                    } else {
+                                        paint_grid_text_aligned(ui, text.as_ref(), color, fit_columns, numeric);
+                                    }
                                 });
                                 let response = if self.view == View::Data && self.columns.get(column).is_some_and(|c| c.generated) {
                                     response.on_hover_text("Generated by the database · read-only")
@@ -4678,7 +4766,7 @@ impl Rustable {
                                 let cell_press = primary_pressed(&response);
                                 if cell_press { self.row_selection.cell_column = column; }
                                 released |= response.clicked();
-                                if (response.double_clicked() || (start_edit_key && active_cell))
+                                if (same_target_double_click(&response, egui::Id::new(("grid-cell", &self.browse.table, self.view == View::Query, self.tabs[self.tab].id, Arc::as_ptr(&grid) as usize, index, column))) || (start_edit_key && active_cell))
                                     && editable
                                     && !deleting
                                     && !self.columns.get(column).is_some_and(|c| c.generated)
@@ -4738,6 +4826,10 @@ impl Rustable {
             if self.row_delete_shortcut(&grid_focus.ctx, grid_focus.has_focus()) {
                 bulk_delete = Some(true);
             }
+        }
+        if let Some((key, row)) = follow_relation {
+            self.follow_foreign_key(&key, &grid.columns, &row);
+            return;
         }
         if let Some(rule) = quick_filter {
             let mut rules = self.browse.filters.clone();
@@ -5093,7 +5185,7 @@ impl Rustable {
                             }
                             ui.label(text);
                         });
-                        if response.double_clicked()
+                        if same_target_double_click(&response, egui::Id::new(("structure-name", &self.browse.table, index)))
                             && schema_editable
                             && !self.safe
                             && self.pending.is_none()
@@ -5281,6 +5373,7 @@ impl Rustable {
     }
 
     fn finish_cell_edit(&mut self) -> bool {
+        if let Some(name) = self.edit.as_ref().map(|edit| edit.table.clone()) { self.keep_table_tab(&name); }
         if !self.finish_inline_rename() {
             return false;
         }
@@ -6257,12 +6350,25 @@ fn workspace_tab_width(available: f32, count: usize, spacing: f32) -> f32 {
     ((available - 24.0 - spacing * count as f32) / count.max(1) as f32).max(72.0)
 }
 
+/// egui's click count is pointer-wide; require a matching semantic target too.
+fn same_target_double_click(response: &egui::Response, target: egui::Id) -> bool {
+    if !response.clicked_by(egui::PointerButton::Primary) { return false; }
+    let key = egui::Id::new((response.ctx.viewport_id(), "last-workspace-click-target"));
+    let previous = response.ctx.data_mut(|data| {
+        let previous = data.get_temp::<egui::Id>(key);
+        data.insert_temp(key, target);
+        previous
+    });
+    response.double_clicked() && previous == Some(target)
+}
+
 fn workspace_tab(
     ui: &mut egui::Ui,
     width: f32,
     title: &str,
     selected: bool,
     closable: bool,
+    preview: bool,
 ) -> (egui::Response, bool) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::click());
     let dark = ui.visuals().dark_mode;
@@ -6282,9 +6388,10 @@ fn workspace_tab(
     );
     let mut job = egui::text::LayoutJob::simple_singleline(
         title.to_owned(),
-        egui::FontId::proportional(12.0),
+        egui::FontId::new(12.0, if selected { egui::TextStyle::Button.resolve(ui.style()).family } else { egui::FontFamily::Proportional }),
         ui.visuals().text_color(),
     );
+    for section in &mut job.sections { section.format.italics = preview; }
     job.wrap.max_width = text_rect.width();
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
@@ -6623,7 +6730,7 @@ pub(crate) fn inspector_value_preview(ui: &mut egui::Ui, text: &str) -> egui::Re
 /// Background only: blank space never acquires row IDs, values or click targets.
 /// Keep visible grid scroll handles steady during row selection and keyboard
 /// navigation. Restore the caller's style so inspectors/editors retain their own.
-fn with_grid_scrollbars(ui: &mut egui::Ui, render: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn with_grid_scrollbars(ui: &mut egui::Ui, render: impl FnOnce(&mut egui::Ui)) {
     let previous = ui.spacing().scroll;
     let mut scroll = previous;
     scroll.floating_width = scroll.bar_width;
@@ -6760,7 +6867,7 @@ pub(crate) fn paint_grid_backdrop(ui: &egui::Ui, widths: &[f32]) {
     }
 }
 
-fn paint_row_number(ui: &mut egui::Ui, number: &str) {
+pub(crate) fn paint_row_number(ui: &mut egui::Ui, number: &str) {
     ui.painter().text(
         ui.max_rect().right_center() - egui::vec2(3.0, 0.0),
         egui::Align2::RIGHT_CENTER,
@@ -6793,7 +6900,17 @@ pub(crate) fn paint_grid_corner(ui: &mut egui::Ui) {
 
 // TableRow already owns the cell's interaction response. Painting the text
 // directly avoids registering a second clickable widget for every visible cell.
+#[cfg(test)]
 fn paint_grid_text(ui: &mut egui::Ui, text: &str, color: Color32, fit: bool) {
+    paint_grid_text_aligned(ui, text, color, fit, false);
+}
+
+fn numeric_column_type(data_type: &str) -> bool {
+    let base = data_type.split(['(', ' ']).next().unwrap_or("").to_ascii_lowercase();
+    matches!(base.as_str(), "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "int2" | "int4" | "int8" | "real" | "float" | "float4" | "float8" | "double" | "decimal" | "numeric" | "number" | "serial" | "bigserial" | "smallserial" | "money")
+}
+
+fn paint_grid_text_aligned(ui: &mut egui::Ui, text: &str, color: Color32, fit: bool, numeric: bool) {
     let mut job = egui::text::LayoutJob::simple_singleline(
         text.to_owned(), egui::FontId::monospace(12.0), color,
     );
@@ -6804,8 +6921,10 @@ fn paint_grid_text(ui: &mut egui::Ui, text: &str, color: Color32, fit: bool) {
         job.wrap.break_anywhere = true;
     }
     let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    let right = ui.max_rect().right();
     let (_, rect) = ui.allocate_space(galley.size());
-    ui.painter().galley(rect.min, galley, color);
+    let pos = if numeric && !fit { egui::pos2((right - galley.size().x - 3.0).max(rect.left()), rect.top()) } else { rect.min };
+    ui.painter().galley(pos, galley, color);
 }
 
 fn paint_cell_background(ui: &egui::Ui, table_clip: egui::Rect, fill: Color32) {
@@ -6837,18 +6956,22 @@ fn pending_fill(ui: &egui::Ui) -> Color32 {
     }
 }
 
+fn cell_edit_id(ui: &egui::Ui, draft: &CellEdit) -> egui::Id {
+    if draft.inspector {
+        // Virtualized and active-editor scroll layouts have different UI IDs.
+        // Keep the input identity stable when focus switches between them.
+        egui::Id::new((ui.ctx().viewport_id(), "inspector-cell-edit", &draft.table, &draft.column, draft.insert_id))
+    } else {
+        ui.make_persistent_id(("cell-edit", &draft.table, &draft.column, draft.inspector, draft.insert_id))
+    }
+}
+
 // Keep the same draft while focus moves; Escape cancels only this draft.
 fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
     let Some(draft) = edit.as_mut() else {
         return false;
     };
-    let id = ui.make_persistent_id((
-        "cell-edit",
-        &draft.table,
-        &draft.column,
-        draft.inspector,
-        draft.insert_id,
-    ));
+    let id = cell_edit_id(ui, draft);
     // Capture navigation before TextEdit/egui's focus traversal consumes Tab.
     // Event modifiers, rather than the frame's final modifier state, define direction.
     let advance = if ui.memory(|m| m.has_focus(id)) {
@@ -6866,7 +6989,10 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
     };
     let response = ui.add(
         TextEdit::singleline(&mut draft.text)
-            .hint_text(if draft.kind == 5 { "DEFAULT" } else { "" })
+            .hint_text(if draft.kind == 5 { "DEFAULT" } else if draft.kind == 0 { "NULL" } else { "" })
+            .frame(!draft.inspector)
+            .margin(if draft.inspector { egui::Margin::ZERO } else { egui::Margin::symmetric(4, 2) })
+            .vertical_align(egui::Align::Center)
             .id(id)
             .font(egui::TextStyle::Monospace)
             .background_color(Color32::TRANSPARENT)
@@ -9130,6 +9256,43 @@ mod workspace_layout_tests {
     }
 
     #[test]
+    fn inspector_input_accepts_typing_on_first_focus_and_stages_on_exit() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
+        app.safe = false;
+        app.engine = "SQLite".into();
+        app.inspector = true;
+        app.view = View::Data;
+        app.browse.table = "people".into();
+        app.objects = vec![Object { name: "people".into(), kind: "table".into(), schema: None, display_name: None, metadata_error: None, columns: vec![], ddl: String::new() }];
+        app.columns = vec![Column { name: "name".into(), data_type: "text".into(), not_null: false, default: String::new(), pk: true, generated: false }];
+        app.table = Arc::new(Grid { columns: vec!["name".into()], rows: vec![vec![Value::Text("Alice".into())]], ..Default::default() });
+        app.selected = Some(0);
+        let frame = |app: &mut Rustable, events| ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 600.0))), events, ..Default::default()
+        }, |ctx| app.inspector(ctx));
+        fn text_pos(shape: &egui::Shape) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == "Alice" => Some(text.pos + egui::vec2(2.0, 6.0)),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(text_pos),
+                _ => None,
+            }
+        }
+        frame(&mut app, vec![]);
+        let output = frame(&mut app, vec![]);
+        let pos = output.shapes.iter().find_map(|shape| text_pos(&shape.shape)).unwrap();
+        for pressed in [true, false] {
+            frame(&mut app, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }]);
+        }
+        frame(&mut app, vec![egui::Event::Text("Z".into())]);
+        assert_eq!(app.edit.as_ref().unwrap().text, "ZAlice");
+        assert!(app.changes.is_empty());
+        assert!(app.finish_cell_edit());
+        assert!(matches!(&app.changes[0], Change::Cell { value: Value::Text(value), .. } if value == "ZAlice"));
+    }
+
+    #[test]
     fn inspector_fields_stay_compact_in_a_tall_window() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
@@ -9872,6 +10035,21 @@ mod tab_lifecycle_tests {
     }
 
     #[test]
+    fn fresh_workspace_has_no_sql_tab_until_requested() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        assert!(app.tabs.iter().all(|tab| !tab.open));
+        assert!(app.tabs[0].sql.is_empty());
+        app.new_tab();
+        assert_eq!(app.tabs.iter().filter(|tab| tab.open).count(), 1);
+        assert!(app.closed_tabs.is_empty());
+        app.new_tab();
+        assert_eq!(app.tabs.iter().filter(|tab| tab.open).count(), 2);
+        let launcher = Rustable::with_launcher_preferences(&ctx, Preferences::default());
+        assert!(launcher.tabs.iter().all(|tab| !tab.open));
+    }
+
+    #[test]
     fn script_save_snapshot_and_reopen_preserve_unsaved_edits() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
@@ -10611,6 +10789,7 @@ mod session_window_tests {
                 .any(|object| object.name == "customers")
         );
         assert_ne!(root.tabs[0].id, child.tabs[0].id);
+        assert!(child.tabs.iter().all(|tab| !tab.open));
         child.tabs[0].saved("/tmp/window-query.sql".into(), "SELECT 1;".into());
         child.tabs[0].sql = "SELECT 'recover this';".into();
         child.tabs[0].refresh_dirty();
@@ -10971,6 +11150,7 @@ mod bracket_tab_navigation_tests {
         assert!(app.view == View::Data);
         assert!(!app.tabs[1].open);
         app.browse.table.clear();
+        app.table_tabs.clear();
         app.view = View::Query;
         app.tab = 0;
         app.navigate_workspace_tab(false);
@@ -11732,5 +11912,41 @@ mod mysql_editor_mode_tests {
         app.tabs[0].cursor = caret..caret;
         app.run_query(false);
         assert_eq!(app.prefs.history.first().map(String::as_str), Some("SELECT 2;"));
+    }
+}
+
+#[cfg(test)]
+mod double_click_target_tests {
+    use super::*;
+    #[test]
+    fn rapid_clicks_across_adjacent_cells_do_not_edit() {
+        check_clicks(101.0, false);
+    }
+    #[test]
+    fn rapid_clicks_on_same_cell_start_edit() {
+        check_clicks(99.0, true);
+    }
+    fn check_clicks(second_x: f32, expected: bool) {
+        let ctx = egui::Context::default();
+        let mut confirmed = false;
+        let mut pointer_double = false;
+        let mut frame = |time: f64, x: f32, pressed: bool| {
+            let pos = egui::pos2(x,20.0);
+            let _ = ctx.run(egui::RawInput { time:Some(time), screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(300.0,100.0))), events:vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton { pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default() }],..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    for index in 0..2 {
+                        let rect = egui::Rect::from_min_max(egui::pos2(index as f32*100.0,0.0),egui::pos2((index+1) as f32*100.0,50.0));
+                        let response = ui.interact(rect,egui::Id::new(index),egui::Sense::click());
+                        pointer_double |= response.double_clicked();
+                        confirmed |= same_target_double_click(&response,egui::Id::new(("cell",index)));
+                    }
+                });
+            });
+        };
+        frame(0.0,99.0,false); frame(0.1,99.0,true); frame(0.12,99.0,false);
+        frame(0.2,second_x,true); frame(0.22,second_x,false);
+        drop(frame);
+        assert!(pointer_double,"fixture should reproduce the global double-click");
+        assert_eq!(confirmed, expected, "only two clicks on the same cell count as a double-click");
     }
 }

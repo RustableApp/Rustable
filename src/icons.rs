@@ -4,6 +4,7 @@ pub const TOOLBAR_BUTTON: egui::Vec2 = egui::vec2(37.0, 24.0);
 pub const fn toolbar_group_width(count: usize) -> f32 { count as f32 * TOOLBAR_BUTTON.x + 4.0 }
 pub fn paint(painter: &egui::Painter, center: egui::Pos2, name: &str, size: f32, color: egui::Color32) {
     let (uri, bytes): (&str, &'static [u8]) = match name {
+        "arrow-right" => ("bytes://lucide/arrow-right.svg", include_bytes!("../assets/icons/lucide/arrow-right.svg")),
         "clipboard" => ("bytes://lucide/clipboard.svg", include_bytes!("../assets/icons/lucide/clipboard.svg")),
         "check" => ("bytes://lucide/check.svg", include_bytes!("../assets/icons/lucide/check.svg")),
         "chevron-down" => ("bytes://lucide/chevron-down.svg", include_bytes!("../assets/icons/lucide/chevron-down.svg")),

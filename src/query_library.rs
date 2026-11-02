@@ -550,9 +550,9 @@ mod tests {
         }
         app.query_library.rename_group = None;
         app.query_library.rename_file = None;
-        let tabs = app.tabs.len();
+        let tabs = app.tabs.iter().filter(|tab| tab.open).count();
         let _ = ctx.run(egui::RawInput { events: vec![egui::Event::Key { key: egui::Key::T, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }], ..Default::default() }, |ctx| app.workspace_shortcuts(ctx));
-        assert_eq!(app.tabs.len(), tabs + 1, "workspace shortcuts resume when renaming ends");
+        assert_eq!(app.tabs.iter().filter(|tab| tab.open).count(), tabs + 1, "workspace shortcuts resume when renaming ends");
     }
 
     #[test]

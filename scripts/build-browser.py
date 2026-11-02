@@ -43,6 +43,10 @@ with tempfile.TemporaryDirectory(prefix='.rustable-demo-', dir=destination.paren
     font_notices.mkdir()
     for name in ['NotoEmoji-OFL.txt', 'README.md']:
         shutil.copy2(root/'assets/fonts'/name,font_notices/name)
+    inter_notices=licenses/'Inter'
+    inter_notices.mkdir(exist_ok=True)
+    for name in ['Inter-OFL.txt', 'README.md']:
+        shutil.copy2(root/'assets/fonts'/name,inter_notices/name)
     icon_notices=licenses/'Lucide'
     icon_notices.mkdir()
     for name in ['LICENSE', 'README.md']:
@@ -51,7 +55,8 @@ with tempfile.TemporaryDirectory(prefix='.rustable-demo-', dir=destination.paren
     database_notices.mkdir()
     for name in ['LICENSE', 'README.md']:
         shutil.copy2(root/'assets/icons/databases'/name, database_notices/name)
-    index=['Devicon database icons: MIT (see Devicon/LICENSE)',
+    index=['Inter: OFL-1.1 (see Inter/Inter-OFL.txt)',
+           'Devicon database icons: MIT (see Devicon/LICENSE)',
            'Noto Emoji: OFL-1.1 (see NotoEmoji/NotoEmoji-OFL.txt)',
            'Lucide: ISC and MIT (see Lucide/LICENSE)']
     (out/'fonts').mkdir()

@@ -3357,9 +3357,11 @@ dependencies = [
 
 [[package]]
 name = "rustable"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
+ "aes",
  "bincode",
+ "cbc",
  "chrono",
  "csv",
  "eframe",
@@ -3377,6 +3379,7 @@ dependencies = [
  "redis",
  "regex",
  "rfd",
+ "ring",
  "rusqlite",
  "same-file",
  "serde",
@@ -3390,6 +3393,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+ "zeroize",
 ]
 
 [[package]]
