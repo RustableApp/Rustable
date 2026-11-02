@@ -32,4 +32,4 @@ credential indexing, unsupported settings, encrypted authentication, wrong passw
 tampering, truncation and size limits. `src/fixtures/tablepro-v1.tablepro` is a synthetic
 export independently generated with Apple CryptoKit/CommonCrypto (passphrase
 `fixture-only`, fixed salt 32 × 0x07 and nonce 12 × 0x08); it contains dummy settings only. A user-generated sample export has not yet
-been supplied. This importer is subsequent work and is not part of v0.4.2.
+been supplied. Included in v0.4.3.
