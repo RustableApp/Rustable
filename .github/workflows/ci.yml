@@ -1,5 +1,18 @@
 name: Build and test
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.cargo/**'
+      - 'Cargo.*'
+      - 'mise.toml'
+      - 'build.rs'
+      - 'src/**'
+      - 'assets/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'tools/**'
   pull_request:
   workflow_dispatch:
 permissions:
@@ -20,13 +33,48 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: native-${{ runner.os }}-${{ runner.arch }}
+          cmd-format: mise exec -- {0}
+          workspaces: |
+            . -> target
+            tools/package -> target
+          cache-bin: false
+      - name: Identify language-server toolchain
+        id: lsp-toolchain
+        shell: bash
+        run: echo "version=$(mise exec -- rustc --version | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+      # Exact matches only: the packaging helper reuses existing server binaries.
+      # Registry sources are needed to generate the bundled license notices.
+      - name: Cache pinned language servers and license sources
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          key: lsp-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.lsp-toolchain.outputs.version }}-${{ hashFiles('tools/postgres-language-server/src/**', 'tools/postgres-language-server/Cargo.*', 'tools/package/src/**', 'tools/package/Cargo.*', 'mise.toml') }}
+          path: |
+            target/lsp-tools/bin
+            target/pg-language-server/release/rustable-postgres-language-server
+            target/pg-language-server/release/rustable-postgres-language-server.exe
+            ~/.cargo/registry/src
       - name: Linux development libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev clang libclang-dev
       - run: mise exec -- cargo test --locked
       - run: mise exec -- cargo clippy --locked --all-targets -- -D warnings
       - run: mise exec -- cargo test --locked --manifest-path tools/package/Cargo.toml
-      - run: mise exec -- cargo build --locked --release
+      - name: Warm bundled language servers on main
+        if: github.ref == 'refs/heads/main'
+        run: mise run build-lsps
+      - name: Prepare release updater dependencies
+        if: runner.os == 'macOS' && github.ref == 'refs/heads/main'
+        run: python scripts/prepare-sparkle.py
+      - name: Warm macOS release dependencies
+        if: runner.os == 'macOS' && github.ref == 'refs/heads/main'
+        run: SPARKLE_FRAMEWORK_PATH="$PWD/target/sparkle" mise exec -- cargo build --locked --release --features sparkle-updater
+      - name: Build native app
+        if: runner.os != 'macOS' || github.ref != 'refs/heads/main'
+        run: mise exec -- cargo build --locked --release
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: development-binary-${{ runner.os }}-${{ runner.arch }}
@@ -35,3 +83,35 @@ jobs:
             target/release/rustable.exe
           if-no-files-found: error
           retention-days: 7
+  browser:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+      - name: Cache browser dependencies and wasm-bindgen
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: browser
+          cmd-format: mise exec -- {0}
+          workspaces: tools/browser -> target
+          cache-all-crates: true
+      - name: Install WASM tooling
+        run: |
+          mise exec -- rustup target add wasm32-unknown-unknown
+          mise exec -- rustup component add llvm-tools
+          mise exec -- cargo install wasm-bindgen-cli --version 0.2.130 --locked
+      - name: Build matching release demo
+        run: |
+          python scripts/build-browser.py --output target/release-demo/demo
+          mkdir -p dist
+          tar -czf dist/Rustable-wasm-demo.tar.gz -C target/release-demo demo
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: development-browser
+          path: dist/Rustable-wasm-demo.tar.gz
+          if-no-files-found: error
+          retention-days: 14

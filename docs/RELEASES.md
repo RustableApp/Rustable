@@ -2,13 +2,33 @@
 
 GitHub Actions has three separate workflows:
 
-- Build and test: macOS, Windows, Linux, on pull requests or manual dispatch.
+- Build and test: macOS, Windows, Linux, on pull requests, build-related pushes to main, or manual dispatch. Main also builds the browser demo and warms release dependencies.
 - Package candidates: manually requested complete app/LSP/license bundles, retained as CI artifacts. macOS candidates are explicitly unsigned.
 - Signed release: an existing vX.Y.Z tag matching Cargo.toml. Builds every platform, signs and notarizes macOS, generates its signed Sparkle feed, and creates a GitHub draft only after all platform jobs succeed.
 
 Current stable release: [v0.4.5](RELEASE-0.4.5-VERIFICATION.md), including its matching deployed WASM demo.
 
 The first release, v0.1.0, is published. See [its verification record](RELEASE-0.1.0-VERIFICATION.md) for build provenance and validation limits. Windows SSH transport uses Unix control sockets and needs a Windows implementation before parity can be claimed. Intel macOS, native Windows/Linux acceptance, and end-to-end Sparkle old-to-new installation remain followup verification gates for full platform parity. Windows ZIP and Linux tar.gz are portable packages, not OS installers or automatic-update implementations.
+
+## Build caches
+
+Native CI, candidate packaging, and releases share Rust dependency caches keyed
+by platform and compiler. Main builds the updater-enabled macOS variant so its
+release dependencies are warm too. Browser builds separately cache their Rust
+dependencies and pinned wasm-bindgen CLI.
+
+Pinned language-server executables use an exact cache key covering platform,
+compiler, server sources/lockfile, and packaging tool sources. Never add a loose
+restore prefix: the packaging helper trusts an existing PostgreSQL server binary.
+This cache also preserves Cargo registry sources required for license generation.
+App binaries are rebuilt from the requested source; signing and notarization
+still run for each release.
+
+Let the main build finish before tagging when practical. GitHub allows tag jobs
+to restore default-branch caches, but not caches from a different tag. The first
+run or a compiler/server dependency change can still be cold. Cache eviction is
+safe and only costs build time. Documentation-only pushes do not warm caches;
+use a manual Build and test dispatch on main if needed.
 
 ## Signing
 

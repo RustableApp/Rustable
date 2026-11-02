@@ -37,6 +37,30 @@ jobs:
         shell: bash
         run: cp packaging-tooling/scripts/package-release.py scripts/package-release.py
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: native-${{ runner.os }}-${{ runner.arch }}
+          cmd-format: mise exec -- {0}
+          workspaces: |
+            . -> target
+            tools/package -> target
+          cache-bin: false
+      - name: Identify language-server toolchain
+        id: lsp-toolchain
+        shell: bash
+        run: echo "version=$(mise exec -- rustc --version | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+      # Exact matches only: the packaging helper reuses existing server binaries.
+      # Registry sources are needed to generate the bundled license notices.
+      - name: Cache pinned language servers and license sources
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          key: lsp-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.lsp-toolchain.outputs.version }}-${{ hashFiles('tools/postgres-language-server/src/**', 'tools/postgres-language-server/Cargo.*', 'tools/package/src/**', 'tools/package/Cargo.*', 'mise.toml') }}
+          path: |
+            target/lsp-tools/bin
+            target/pg-language-server/release/rustable-postgres-language-server
+            target/pg-language-server/release/rustable-postgres-language-server.exe
+            ~/.cargo/registry/src
       - name: Linux development libraries
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev clang libclang-dev
