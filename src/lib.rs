@@ -14,6 +14,8 @@ mod connection_probe;
 mod connection_profiles;
 #[cfg(not(target_arch = "wasm32"))]
 mod tableplus_import;
+#[cfg(not(target_arch = "wasm32"))]
+mod tablepro_import;
 mod credential_store;
 mod db;
 mod editor;

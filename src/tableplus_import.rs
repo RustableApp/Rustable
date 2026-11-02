@@ -282,7 +282,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Candidate>, String> {
     }
     Ok(out)
 }
-fn convert(v: &Value, warnings: &mut Vec<String>) -> Result<ConnectionKind, String> {
+pub(super) fn convert(v: &Value, warnings: &mut Vec<String>) -> Result<ConnectionKind, String> {
     let driver = text(v, "Driver").to_ascii_lowercase();
     if !matches!(
         driver.as_str(),
@@ -456,6 +456,7 @@ pub fn apply(
 
 /// File IO and password derivation stay off the rendering thread.
 pub struct Dialog {
+    tablepro: bool,
     pending: Option<std::sync::mpsc::Receiver<Result<Option<Loaded>, String>>>,
     locked: Option<Zeroizing<Vec<u8>>>,
     password: Zeroizing<String>,
@@ -469,19 +470,21 @@ pub enum Decision {
     Import,
 }
 impl Dialog {
-    pub fn pick(ctx: egui::Context) -> Self {
+    pub fn pick(ctx: egui::Context) -> Self { Self::pick_source(ctx, false) }
+    pub fn pick_source(ctx: egui::Context, tablepro: bool) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = rfd::FileDialog::new()
-                .set_title("Import TablePlus connections")
-                .add_filter("TablePlus export", &["tableplusconnection", "json"])
+                .set_title(if tablepro { "Import TablePro connections" } else { "Import TablePlus connections" })
+                .add_filter("Connection export", if tablepro { &["tablepro", "json"] } else { &["tableplusconnection", "json"] })
                 .pick_file()
-                .map(|path| read(&path))
+                .map(|path| if tablepro { crate::tablepro_import::read(&path) } else { read(&path) })
                 .transpose();
             let _ = tx.send(result);
             ctx.request_repaint();
         });
         Self {
+            tablepro,
             pending: Some(rx),
             locked: None,
             password: Zeroizing::new(String::new()),
@@ -520,7 +523,7 @@ impl Dialog {
         let mut decision = None;
         egui::Modal::new(egui::Id::new("tableplus-import")).show(ctx, |ui| {
             ui.set_width(600.0_f32.min(ctx.content_rect().width() - 48.0));
-            ui.heading("Import from TablePlus");
+            ui.heading(if self.tablepro { "Import from TablePro" } else { "Import from TablePlus" });
             if let Some(error) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
@@ -545,9 +548,10 @@ impl Dialog {
                     let (tx, rx) = std::sync::mpsc::channel();
                     self.pending = Some(rx);
                     let ctx = ctx.clone();
+                    let tablepro = self.tablepro;
                     std::thread::spawn(move || {
                         let _ = tx.send(
-                            unlock(&bytes, &password).map(|rows| Some(Loaded::Preview(rows))),
+                            (if tablepro { crate::tablepro_import::unlock(&bytes, &password) } else { unlock(&bytes, &password) }).map(|rows| Some(Loaded::Preview(rows))),
                         );
                         ctx.request_repaint();
                     });
@@ -759,6 +763,7 @@ mod tests {
         let ctx = egui::Context::default();
         let store = ConnectionProfiles::default();
         let mut dialog = Dialog {
+            tablepro: false,
             pending: None,
             locked: None,
             password: Zeroizing::new(String::new()),

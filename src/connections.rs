@@ -775,6 +775,10 @@ impl Rustable {
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     ui.menu_button("Import…", |ui| {
+                        if ui.button("From TablePro…").clicked() {
+                            self.connection_manager.tableplus_import = Some(crate::tableplus_import::Dialog::pick_source(ctx.clone(), true));
+                            ui.close();
+                        }
                         if ui.button("From TablePlus…").clicked() {
                             self.connection_manager.tableplus_import = Some(crate::tableplus_import::Dialog::pick(ctx.clone()));
                             ui.close();
