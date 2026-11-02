@@ -285,8 +285,8 @@ fn form_section(ui: &mut egui::Ui, title: &str) {
 
 fn form_row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 20.0;
-        ui.allocate_ui_with_layout(egui::vec2(132.0, 28.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        ui.allocate_ui_with_layout(egui::vec2(104.0, 28.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add(egui::Label::new(RichText::new(label).weak()).wrap_mode(egui::TextWrapMode::Extend));
         });
         ui.scope(|ui| {
@@ -612,8 +612,50 @@ impl Rustable {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if show_header { ui.separator(); }
+                if self.prefs.saved_connections.profiles.is_empty()
+                    && self.prefs.saved_connections.groups.is_empty()
+                    && self.connection_manager.draft.is_none() {
+                    ui.add_space((ui.available_height() * 0.16).clamp(24.0, 120.0));
+                    ui.vertical_centered(|ui| {
+                        ui.heading("Welcome to Rustable");
+                        ui.add_space(8.0);
+                        ui.weak("Choose a database to create your first connection.");
+                        ui.add_space(24.0);
+                        let width = 572.0_f32.min(ui.available_width());
+                        ui.allocate_ui_with_layout(egui::vec2(width, 110.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 8.0;
+                                for engine in crate::icons::DatabaseEngine::ALL {
+                                    if engine.tile(ui, false).clicked() {
+                                        use crate::icons::DatabaseEngine;
+                                        action = Some(match engine {
+                                            DatabaseEngine::Postgres => Action::New(true),
+                                            DatabaseEngine::Sqlite => Action::New(false),
+                                            DatabaseEngine::Mysql => Action::NewMysql(false),
+                                            DatabaseEngine::MariaDb => Action::NewMysql(true),
+                                            DatabaseEngine::Redis => Action::NewRedis,
+                                        });
+                                    }
+                                }
+                            });
+                        });
+                        ui.add_space(24.0);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        ui.menu_button("Import existing connections…", |ui| {
+                            if ui.button("From TablePro…").clicked() {
+                                self.connection_manager.tableplus_import = Some(crate::tableplus_import::Dialog::pick_source(ctx.clone(), true)); ui.close();
+                            }
+                            if ui.button("From TablePlus…").clicked() {
+                                self.connection_manager.tableplus_import = Some(crate::tableplus_import::Dialog::pick(ctx.clone())); ui.close();
+                            }
+                        });
+                        ui.add_space(8.0);
+                        if ui.button("New group").clicked() { action = Some(Action::AddGroup); }
+                    });
+                    return;
+                }
                 ui.horizontal_top(|ui| {
-                    let list_width = if self.connection_manager.draft.is_some() { (ui.available_width() * 0.33).clamp(240.0, 320.0) } else { ui.available_width() };
+                    let list_width = (ui.available_width() * 0.33).clamp(240.0, 320.0);
                     ui.allocate_ui_with_layout(egui::vec2(list_width, ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
                     // Reserve the split even when filtering leaves no rows to fill it.
                     ui.set_width(list_width);
@@ -633,6 +675,7 @@ impl Rustable {
                             ui.add_space(12.0);
                         }
                         for (group_index, (group_id, name)) in groups.into_iter().enumerate() {
+                            if group_id.is_none() && !self.prefs.saved_connections.in_group(None).any(|_| true) { continue; }
                             if filtering && !name.to_lowercase().contains(&self.connection_manager.search.trim().to_lowercase())
                                 && !self.prefs.saved_connections.in_group(group_id).any(|profile| visible.contains(&profile.id)) { continue; }
                             let collapsed = self.connection_manager.collapsed_groups.contains(&group_id) && !filtering;
@@ -766,7 +809,7 @@ impl Rustable {
                     });
                     ui.separator();
                     ui.horizontal_wrapped(|ui| {
-                    if ui.add(crate::icons::widget("plus")).on_hover_text("New connection").clicked() {
+                    if ui.button("+ New").on_hover_text("New connection").clicked() {
                         if self.connection_manager.dirty(&self.prefs.saved_connections) {
                             self.connection_manager.error = Some("Save or discard the connection form before adding another.".into());
                         } else {
@@ -787,13 +830,19 @@ impl Rustable {
                     if ui.button("New group").clicked() { action = Some(Action::AddGroup); }
                     });
                     });
-                    if self.connection_manager.draft.is_none() { return; }
                     ui.separator();
-                    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), (ctx.content_rect().height() - 120.0).clamp(220.0, 900.0)), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {
                     let Some(draft) = &mut self.connection_manager.draft else {
-                        ui.weak("Choose a saved connection or add one.");
-                        ui.add_space(12.0);
-                        ui.weak("Drag connections onto group headings to organize them. Drag within a group to reorder.");
+                        ui.add_space((ui.available_height() * 0.25).min(160.0));
+                        ui.vertical_centered(|ui| {
+                            ui.heading("Select a connection");
+                            ui.add_space(8.0);
+                            ui.weak("Choose a connection on the left to view its settings.");
+                            ui.add_space(16.0);
+                            if ui.button("New connection").clicked() {
+                                self.connection_manager.new_connection = Some(crate::icons::DatabaseEngine::Postgres);
+                            }
+                        });
                         return;
                     };
                     ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
@@ -802,7 +851,7 @@ impl Rustable {
                     ui.spacing_mut().interact_size.y = 28.0;
                     ui.visuals_mut().widgets.inactive.corner_radius = egui::CornerRadius::same(6);
                     ui.visuals_mut().widgets.hovered.corner_radius = egui::CornerRadius::same(6);
-                    let form_height = (ctx.content_rect().height() - 160.0).clamp(180.0, 850.0);
+                    let form_height = (ui.available_height() - 86.0).max(120.0);
                     let form = egui::ScrollArea::vertical().id_salt("connection-form").max_height(form_height).auto_shrink([false, true]).show(ui, |ui| {
                         let title = match draft.connection { ConnectionKind::SQLite { .. } => "SQLite Connection", ConnectionKind::Postgres(_) => "PostgreSQL Connection", ConnectionKind::Mysql(_) => "MySQL Connection", ConnectionKind::MariaDb(_) => "MariaDB Connection", ConnectionKind::Redis(_) => "Redis Connection" };
                         ui.horizontal(|ui| {
@@ -1482,26 +1531,37 @@ fn ssh_form(ui: &mut egui::Ui, options: &mut Option<SshOptions>, generation: u64
     if let Some(ssh) = options {
         form_section(ui, "SSH gateway");
         form_text(ui, "Host", &mut ssh.host, false, Some(ProbeField::SshHost));
+        let mut use_config = !ssh.ignore_config;
+        form_row(ui, "Settings", |ui| {
+            if form_checkbox(ui, &mut use_config, "Use SSH config").changed() {
+                ssh.ignore_config = !use_config;
+            }
+        });
+        let port_id = egui::Id::new(("ssh-optional-port", generation));
+        let mut port = ui.data(|data| data.get_temp::<String>(port_id))
+            .unwrap_or_else(|| if ssh.port == 0 { String::new() } else { ssh.port.to_string() });
         status_row(ui, "Port", Some(ProbeField::SshPort), |ui| {
-            let mut inherit = ssh.port == 0;
-            if form_checkbox(ui, &mut inherit, "Use SSH config").changed() { ssh.port = if inherit { 0 } else { 22 }; }
+            ui.add_sized([120.0, 28.0], TextEdit::singleline(&mut port)
+                .hint_text(if use_config { "From config" } else { "22" }));
         });
-        if ssh.port != 0 { ports_valid &= form_port(ui, &mut ssh.port, ProbeField::SshPort, generation); }
+        if port.trim().is_empty() { ssh.port = 0; }
+        else if let Ok(value) = port.parse::<u16>() && value != 0 { ssh.port = value; }
+        else { ports_valid = false; }
+        ui.data_mut(|data| data.insert_temp(port_id, port));
         form_text(ui, "User", &mut ssh.user, false, Some(ProbeField::SshUser));
-        status_row(ui, "Identity", Some(ProbeField::SshIdentity), |ui| {
-            let mut use_agent = ssh.identity_file.is_none();
-            if form_checkbox(ui, &mut use_agent, "Use config / SSH agent").changed() {
-                if use_agent { ssh.identity_file = None; } else { *pick = Some(true); }
-            }
-        });
+            status_row(ui, "Key", Some(ProbeField::SshIdentity), |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Choose key…").clicked() { *pick = Some(true); }
+                    if let Some(path) = &ssh.identity_file {
+                        ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
+                        if ui.small_button("Clear").clicked() { ssh.identity_file = None; }
+                    } else { ui.weak(if use_config { "SSH agent / configured keys" } else { "SSH agent / default keys" }); }
+                });
+            });
         form_row(ui, "", |ui| {
-            if ui.button("Choose key…").clicked() { *pick = Some(true); }
-            if let Some(path) = &ssh.identity_file {
-                ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
-            }
-        });
-        form_row(ui, "", |ui| {
-            ui.add(egui::Label::new(RichText::new("Host aliases, blank user and automatic port use ~/.ssh/config. Keys are tried alongside your configured identities. The gateway must already be trusted.").weak().small()).wrap());
+            ui.add(egui::Label::new(RichText::new(if use_config {
+                "Blank fields use SSH config defaults. Values entered here override them."
+            } else { "Blank fields use the default port, local username and SSH agent." }).weak().small()).wrap());
         });
     }
     ports_valid
@@ -1978,6 +2038,22 @@ mod tests {
         }
     }
     #[test]
+    fn first_launch_offers_engines_without_an_empty_connection_list() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.connections = true;
+        manager_frame(&ctx, &mut app, vec![]);
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        assert!(painted_text(&output, "Welcome to Rustable").is_some());
+        assert!(painted_text(&output, "Ungrouped").is_none());
+        let sqlite = painted_text(&output, "SQLite").unwrap();
+        manager_click(&ctx, &mut app, sqlite, egui::PointerButton::Primary);
+        assert!(matches!(app.connection_manager.draft.as_ref().unwrap().connection, ConnectionKind::SQLite { .. }));
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        assert!(painted_text(&output, "Welcome to Rustable").is_none());
+    }
+
+    #[test]
     fn new_group_is_created_and_named_inline() {
         let ctx = egui::Context::default();
         let mut app = app();
@@ -2372,7 +2448,7 @@ mod tests {
     }
 
     #[test]
-    fn expanded_ssh_fits_large_screen_and_agent_checkbox_tracks_key_choice() {
+    fn expanded_ssh_fits_and_config_toggle_preserves_overrides() {
         let ctx = egui::Context::default();
         let mut app = app();
         app.connection_action(Action::New(true)).unwrap();
@@ -2404,7 +2480,7 @@ mod tests {
             content.y <= rect.height() + 1.0,
             "expanded form needs scroll: {content:?} {rect:?}"
         );
-        assert!(painted_text(&output.unwrap(), "Use config / SSH agent").is_some());
+        assert!(painted_text(&output.unwrap(), "Use SSH config").is_some());
         let generation = app.connection_manager.generation;
         // Only a completed picker changes authentication. No callback on cancel leaves it intact.
         app.connection_manager
@@ -2419,14 +2495,22 @@ mod tests {
             Some(PathBuf::from("/tmp/test-key"))
         );
         let output = manager_frame(&ctx, &mut app, vec![]);
-        let checkbox = painted_text(&output, "Use config / SSH agent").unwrap();
+        let checkbox = painted_text(&output, "Use SSH config").unwrap();
         manager_click(&ctx, &mut app, checkbox, egui::PointerButton::Primary);
         let ConnectionKind::Postgres(config) =
             &app.connection_manager.draft.as_ref().unwrap().connection
         else {
             panic!()
         };
-        assert!(config.ssh.as_ref().unwrap().identity_file.is_none());
+        assert_eq!(config.ssh.as_ref().unwrap().identity_file, Some(PathBuf::from("/tmp/test-key")));
+        assert!(config.ssh.as_ref().unwrap().ignore_config);
+        assert_eq!(config.ssh.as_ref().unwrap().port, 0);
+        assert!(config.ssh.as_ref().unwrap().user.is_empty());
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        let checkbox = painted_text(&output, "Use SSH config").unwrap();
+        manager_click(&ctx, &mut app, checkbox, egui::PointerButton::Primary);
+        let ConnectionKind::Postgres(config) = &app.connection_manager.draft.as_ref().unwrap().connection else { panic!() };
+        assert_eq!(config.ssh.as_ref().unwrap().identity_file, Some(PathBuf::from("/tmp/test-key")));
     }
 
     #[test]

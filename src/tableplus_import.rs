@@ -312,7 +312,7 @@ pub(super) fn convert(v: &Value, warnings: &mut Vec<String>) -> Result<Connectio
             );
         }
         warnings.push("SSH passwords/private keys are not imported. Configure an SSH agent or select your key after import; the gateway must already be trusted.".into());
-        Some(SshOptions {
+        Some(SshOptions { ignore_config: false,
             host: text(v, "ServerAddress"),
             port: port(v, "ServerPort", 22)?,
             user: text(v, "ServerUser"),

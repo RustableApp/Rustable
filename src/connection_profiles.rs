@@ -16,6 +16,8 @@ pub struct Group {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SshOptions {
+    #[serde(default)]
+    pub ignore_config: bool,
     pub host: String,
     /// Zero inherits OpenSSH configuration; existing nonzero ports remain overrides.
     pub port: u16,
@@ -62,7 +64,7 @@ impl PostgresProfile {
                 user: ssh.user.clone(),
                 identity_file: ssh.identity_file.clone(),
                 known_hosts_file: None,
-                config_file: None,
+                config_file: ssh.ignore_config.then(|| PathBuf::from("/dev/null")),
                 remote_host: self.host.clone(),
                 remote_port: self.port,
             }),
@@ -77,7 +79,7 @@ impl From<&crate::connection::PostgresConfig> for PostgresProfile {
             database: config.database.clone(),
             user: config.user.clone(),
             tls: config.tls,
-            ssh: config.ssh.as_ref().map(|ssh| SshOptions {
+            ssh: config.ssh.as_ref().map(|ssh| SshOptions { ignore_config: ssh.config_file.as_deref() == Some(std::path::Path::new("/dev/null")),
                 host: ssh.host.clone(),
                 port: ssh.port,
                 user: ssh.user.clone(),
@@ -109,7 +111,7 @@ impl From<&crate::connection::MysqlConfig> for MysqlProfile {
     fn from(config: &crate::connection::MysqlConfig) -> Self {
         Self { host: config.host.clone(), port: config.port, database: config.database.clone(),
             user: config.user.clone(), tls: config.tls, root_certificate: config.root_certificate.clone(),
-            ssh: config.ssh.as_ref().map(|ssh| SshOptions { host:ssh.host.clone(),port:ssh.port,user:ssh.user.clone(),identity_file:ssh.identity_file.clone() }),
+            ssh: config.ssh.as_ref().map(|ssh| SshOptions { ignore_config: ssh.config_file.as_deref() == Some(std::path::Path::new("/dev/null")), host:ssh.host.clone(),port:ssh.port,user:ssh.user.clone(),identity_file:ssh.identity_file.clone() }),
             connect_timeout: config.connect_timeout, read_timeout: config.read_timeout }
     }
 }
@@ -117,7 +119,7 @@ impl MysqlProfile {
     pub fn with_password(&self, password: String) -> crate::connection::MysqlConfig {
         crate::connection::MysqlConfig { host: self.host.clone(), port: self.port, database: self.database.clone(),
             user: self.user.clone(), password, tls: self.tls, root_certificate: self.root_certificate.clone(),
-            ssh: self.ssh.as_ref().map(|ssh| crate::ssh_tunnel::Config { host:ssh.host.clone(),port:ssh.port,user:ssh.user.clone(),identity_file:ssh.identity_file.clone(),known_hosts_file:None,config_file:None,remote_host:self.host.clone(),remote_port:self.port }),
+            ssh: self.ssh.as_ref().map(|ssh| crate::ssh_tunnel::Config { host:ssh.host.clone(),port:ssh.port,user:ssh.user.clone(),identity_file:ssh.identity_file.clone(),known_hosts_file:None,config_file:ssh.ignore_config.then(|| PathBuf::from("/dev/null")),remote_host:self.host.clone(),remote_port:self.port }),
             connect_timeout: self.connect_timeout, read_timeout: self.read_timeout }
     }
     pub fn validate(&self) -> Result<(), String> {
@@ -518,6 +520,24 @@ mod tests {
     }
 
     #[test]
+    fn ssh_config_defaults_allow_explicit_overrides_and_can_be_disabled() {
+        let mut profile = PostgresProfile { ssh: Some(SshOptions {
+            host: "gateway-alias".into(), user: "override-user".into(), port: 2222,
+            identity_file: Some("/tmp/override-key".into()), ..Default::default()
+        }), ..Default::default() };
+        let config = profile.with_password(String::new()).ssh.unwrap();
+        assert!(config.config_file.is_none());
+        assert_eq!(config.port, 2222);
+        assert_eq!(config.user, "override-user");
+        profile.ssh.as_mut().unwrap().ignore_config = true;
+        let config = profile.with_password(String::new()).ssh.unwrap();
+        assert_eq!(config.config_file, Some(PathBuf::from("/dev/null")));
+        assert_eq!(config.identity_file, Some(PathBuf::from("/tmp/override-key")));
+        let old: SshOptions = serde_json::from_str(r#"{"host":"alias","port":0,"user":"","identity_file":null}"#).unwrap();
+        assert!(!old.ignore_config);
+    }
+
+    #[test]
     fn redis_profile_roundtrips_with_settings_and_no_embedded_password() {
         let profile = Profile::draft("Redis".into(), ConnectionKind::Redis(crate::redis_settings::Settings {
             host: "cache.example.test".into(), database: 3, username: "app".into(),
@@ -550,7 +570,7 @@ mod tests {
         assert_eq!(legacy.user, "old-user");
         let mut profile = draft("Inherited SSH");
         if let ConnectionKind::Postgres(config) = &mut profile.connection {
-            config.ssh = Some(SshOptions {
+            config.ssh = Some(SshOptions { ignore_config: false,
                 host: "alias".into(),
                 ..Default::default()
             });
@@ -576,7 +596,7 @@ mod tests {
             config.database = "warehouse".into();
             config.user = "analyst".into();
             config.port = 6432;
-            config.ssh = Some(SshOptions {
+            config.ssh = Some(SshOptions { ignore_config: false,
                 host: "gateway.example.test".into(),
                 user: "ssh-user".into(),
                 ..Default::default()
@@ -627,7 +647,7 @@ mod tests {
         original.environment = "Production".into();
         original.color = [120, 30, 40];
         if let ConnectionKind::Postgres(config) = &mut original.connection {
-            config.ssh = Some(SshOptions {
+            config.ssh = Some(SshOptions { ignore_config: false,
                 host: "gateway.test".into(),
                 user: "operator".into(),
                 identity_file: Some("/keys/qa".into()),
@@ -744,7 +764,7 @@ mod tests {
     #[test]
     fn saved_profiles_cannot_capture_session_passwords_or_private_key_bytes() {
         let config = PostgresProfile {
-            ssh: Some(SshOptions {
+            ssh: Some(SshOptions { ignore_config: false,
                 host: "bastion.test".into(),
                 user: "alice".into(),
                 identity_file: Some("/keys/example".into()),
@@ -818,7 +838,7 @@ mod mysql_profile_tests {
     #[test]
     fn mysql_ssh_profile_restores_destination_without_credentials() {
         let profile = MysqlProfile { host:"db.internal".into(),port:3307,
-            ssh:Some(SshOptions { host:"gateway".into(),user:"ssh-user".into(),identity_file:Some("/keys/client".into()),..Default::default() }),..Default::default() };
+            ssh:Some(SshOptions { ignore_config: false, host:"gateway".into(),user:"ssh-user".into(),identity_file:Some("/keys/client".into()),..Default::default() }),..Default::default() };
         let config = profile.with_password("SESSION_SECRET".into());
         let ssh = config.ssh.as_ref().unwrap();
         assert_eq!((&ssh.remote_host,ssh.remote_port),(&profile.host,3307));
@@ -838,7 +858,7 @@ mod mysql_profile_tests {
     fn mysql_gateway_search_finds_profiles_without_matching_private_key_paths() {
         let mut model = ConnectionProfiles::default();
         let config = MysqlProfile { host:"db.internal".into(),database:"warehouse".into(),
-            ssh:Some(SshOptions { host:"gateway.example.test".into(),user:"jump-user".into(),port:2222,
+            ssh:Some(SshOptions { ignore_config: false, host:"gateway.example.test".into(),user:"jump-user".into(),port:2222,
                 identity_file:Some("/private/key-sentinel".into()) }),..Default::default() };
         let mysql = model.add_profile(Profile::draft("Orders".into(),ConnectionKind::Mysql(config.clone()))).unwrap();
         let maria = model.add_profile(Profile::draft("Reporting".into(),ConnectionKind::MariaDb(config))).unwrap();

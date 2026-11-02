@@ -23,7 +23,7 @@ const ERROR_LIMIT: usize = 16 * 1024;
 
 /// Native OpenSSH configuration supplies aliases, jump hosts and authentication.
 /// An explicit key is added before configured identities; it is not exclusive.
-/// Encrypted keys must already be unlocked in the agent; no passwords are stored.
+/// Encrypted keys use the agent or an ephemeral GUI passphrase prompt.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub host: String,
@@ -72,6 +72,17 @@ impl Tunnel {
             .map_err(|e| format!("Reserve SSH forwarding port: {e}"))?;
         let local_port = reserved.local_addr().map_err(|e| e.to_string())?.port();
         let mut command = command(config, &control);
+        #[cfg(unix)]
+        let prompt = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+            let socket = directory.path().join("askpass");
+            let bridge = crate::ssh_prompt::Bridge::start(&socket, &config.host)?;
+            command.env("SSH_ASKPASS", std::env::current_exe().map_err(|e| e.to_string())?)
+                .env("SSH_ASKPASS_REQUIRE", "force").env("RUSTABLE_SSH_PROMPT_SOCKET", socket)
+                .env("DISPLAY", "rustable:0");
+            bridge
+        };
         // OpenSSH cannot inherit this listener. If another process takes the
         // released port, ExitOnForwardFailure aborts startup rather than returning
         // a tunnel pointed at the wrong listener.
@@ -105,8 +116,16 @@ impl Tunnel {
             stderr,
             stderr_thread: Some(stderr_thread),
         };
+        #[cfg(unix)]
+        let mut started = Instant::now();
+        #[cfg(not(unix))]
         let started = Instant::now();
         loop {
+            #[cfg(unix)]
+            {
+                if prompt.cancelled() { return Err("SSH key unlock cancelled".into()); }
+                if prompt.waiting.load(Ordering::Relaxed) { started = Instant::now(); }
+            }
             if cancel.load(Ordering::Relaxed) {
                 return Err("SSH connection cancelled".into());
             }
@@ -270,7 +289,7 @@ fn command(config: &Config, control: &Path) -> Command {
         "-o",
         "StrictHostKeyChecking=yes",
         "-o",
-        "BatchMode=yes",
+        "BatchMode=no",
         "-o",
         "PasswordAuthentication=no",
         "-o",
@@ -652,7 +671,7 @@ mod tests {
             .collect();
         for arg in [
             "StrictHostKeyChecking=yes",
-            "BatchMode=yes",
+            "BatchMode=no",
             "ExitOnForwardFailure=yes",
             "ControlPersist=no",
             "ForwardAgent=no",

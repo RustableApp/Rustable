@@ -20,9 +20,23 @@ pub struct WindowRequest {
     pub title: String,
     pub connection: WindowConnection,
 }
+impl WindowRequest {
+    pub(crate) fn draft_scope(&self) -> Option<String> {
+        let id = self.identity.as_ref()?.id.0;
+        let database = match &self.connection {
+            WindowConnection::Postgres(config) => config.database.clone(),
+            WindowConnection::Mysql(config) => config.database.clone(),
+            WindowConnection::Sqlite(path) => path.to_string_lossy().into_owned(),
+            _ => String::new(),
+        };
+        Some(format!("{id}:{database}"))
+    }
+}
 struct SessionWindow {
     id: egui::ViewportId,
     title: String,
+    size_key: Option<String>,
+    size: [f32; 2],
     request: Option<WindowRequest>,
     app: Option<Box<Rustable>>,
     parked: Vec<Box<Rustable>>,
@@ -50,6 +64,8 @@ impl SessionWindow {
 }
 
 pub struct SessionWindows {
+    #[cfg(not(target_arch = "wasm32"))]
+    crash_prompt: Option<crate::crash_log::CrashPrompt>,
     root: Rustable,
     windows: Vec<SessionWindow>,
     next_id: u64,
@@ -58,12 +74,16 @@ pub struct SessionWindows {
     native_menu_installed: bool,
     migrate_launcher_size: bool,
     update_save_error: Option<String>,
+    window_sizes: std::collections::HashMap<String, [f32; 2]>,
 }
 impl SessionWindows {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::scroll_response::install(&cc.egui_ctx);
         crate::updates::initialize(&cc.egui_ctx);
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            crash_prompt: crate::crash_log::CrashPrompt::load(),
+            window_sizes: cc.storage.and_then(|storage| eframe::get_value(storage, "connection-window-sizes")).unwrap_or_default(),
             root: Rustable::new(cc),
             windows: Vec::new(),
             next_id: 1,
@@ -85,6 +105,8 @@ impl SessionWindows {
             opened = Some(id);
             self.windows.push(SessionWindow {
                 id,
+                size: request.draft_scope().and_then(|key| self.window_sizes.get(&key).copied()).unwrap_or([1280.0, 820.0]),
+                size_key: request.draft_scope(),
                 title: request.title.clone(),
                 request: Some(request),
                 app: None,
@@ -124,6 +146,11 @@ impl eframe::App for SessionWindows {
         crate::updates::poll();
         let mut quit_requested = consume_quit(ctx) || crate::native_menu::take_requested();
         quit_requested |= self.root.render_launcher(ctx);
+        if !self.launcher_hidden { crate::ssh_prompt::show(ctx); }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.crash_prompt.as_mut().is_some_and(|prompt| prompt.show(ctx)) {
+            self.crash_prompt = None;
+        }
         let mut shared_changed = self.root.publish_shared_preferences();
         let opened_window = self.collect_requests();
         let had_windows = !self.windows.is_empty();
@@ -132,13 +159,18 @@ impl eframe::App for SessionWindows {
         for window in &mut self.windows {
             ctx.show_viewport_immediate(window.id, egui::ViewportBuilder::default()
                 .with_title(format!("{} — Rustable", window.title))
-                .with_inner_size([1280.0, 820.0]).with_min_inner_size([960.0, 640.0]), |child_ctx, class| {
+                .with_inner_size(window.size).with_min_inner_size([960.0, 640.0]), |child_ctx, class| {
                 if class == egui::ViewportClass::Embedded {
                     // Native desktop backends support immediate viewports. Never draw
                     // a second full workspace over the root on an unsupported backend.
                     self.root.window_error("This renderer does not support native session windows.");
                     window.closed = true;
                     return;
+                }
+                if let Some(rect) = child_ctx.input(|input| input.viewport().inner_rect)
+                    && rect.width() >= 960.0 && rect.height() >= 640.0 {
+                    window.size = [rect.width(), rect.height()];
+                    if let Some(key) = &window.size_key { self.window_sizes.insert(key.clone(), window.size); }
                 }
                 for app in &mut window.parked {
                     app.poll();
@@ -204,6 +236,7 @@ impl eframe::App for SessionWindows {
                 self.root.sync_window_preferences(app);
                 if self.root.sync_window_profile(app) { child_ctx.request_repaint(); }
                 app.render_workspace_frame(child_ctx);
+                if self.launcher_hidden { crate::ssh_prompt::show(child_ctx); }
                 if app.has_connection() && window.title != app.active_connection_name() {
                     window.title = app.active_connection_name().to_owned();
                     child_ctx.request_repaint();
@@ -216,7 +249,7 @@ impl eframe::App for SessionWindows {
                 if child_ctx.input(|input| input.viewport().close_requested()) {
                     if app.close_blocked() || parked_blocked {
                         child_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                        app.window_error("Finish SQL transactions with COMMIT or ROLLBACK, save or discard pending database changes, and wait for work in every database workspace before closing. SQL drafts are recovered in Connections.");
+                        app.window_error("Finish SQL transactions with COMMIT or ROLLBACK, save or discard pending database changes, and wait for work in every database workspace before closing. SQL drafts are retained for the next time you open the SQL editor.");
                     } else { window.closed = true; }
                 }
                 let connected = app.has_connection();
@@ -236,7 +269,12 @@ impl eframe::App for SessionWindows {
             if let Some(app) = window.app.take() { self.root.archive_window(*app); }
             for app in window.parked.drain(..) { self.root.archive_window(*app); }
         }
+        let closed_window = self.windows.iter().any(|window| window.closed);
         self.windows.retain(|window| !window.closed);
+        if closed_window && let Some(storage) = frame.storage_mut() {
+            self.save(storage);
+            storage.flush();
+        }
         let blocked_window = self.windows.iter().position(|window| {
             window.request.is_some() || window.app.as_ref().is_some_and(|app| app.close_blocked()) || window.parked.iter().any(|app| app.close_blocked())
         });
@@ -247,7 +285,7 @@ impl eframe::App for SessionWindows {
                 if let Some(index) = blocked_window {
                     let window = &mut self.windows[index];
                     if let Some(app) = &mut window.app {
-                        app.window_error("Finish SQL transactions with COMMIT or ROLLBACK, save or discard pending database edits, and wait for running work before quitting. SQL drafts will be recovered in Connections.");
+                        app.window_error("Finish SQL transactions with COMMIT or ROLLBACK, save or discard pending database edits, and wait for running work before quitting. SQL drafts will be retained for the next time you open the SQL editor.");
                     }
                     ctx.send_viewport_cmd_to(window.id, egui::ViewportCommand::Focus);
                     ctx.request_repaint_of(window.id);
@@ -310,7 +348,10 @@ impl eframe::App for SessionWindows {
             }
         }
     }
+    fn auto_save_interval(&self) -> std::time::Duration { std::time::Duration::from_secs(5) }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, "connection-window-sizes", &self.window_sizes);
         if !self.migrate_launcher_size {
             storage.set_string(LAUNCHER_SIZE_MIGRATION, "done".into());
         }
@@ -359,6 +400,8 @@ mod launcher_tests {
         let mut window = SessionWindow {
             id: egui::ViewportId::from_hash_of("test-session"),
             title: "Test".into(),
+            size_key: None,
+            size: [1280.0, 820.0],
             request: None,
             app: None,
             parked: Vec::new(),

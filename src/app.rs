@@ -58,7 +58,7 @@ impl Default for ConnectionStyle {
 /// Stable saved-profile identity for a live session. Endpoint strings are not IDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProfileIdentity {
-    id: crate::connection_profiles::ProfileId,
+    pub(crate) id: crate::connection_profiles::ProfileId,
     name: String,
     environment: String,
     color: [u8; 3],
@@ -103,6 +103,7 @@ struct Preferences {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct QueryDocument {
+    scope: Option<String>,
     sql: String,
     path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +116,7 @@ impl QueryDocument {
     }
     fn capture(tab: &QueryTab) -> Self {
         Self {
+            scope: tab.draft_scope.clone(),
             sql: tab.sql.clone(),
             path: tab.source_path.clone(),
             saved_sql: tab
@@ -127,6 +129,7 @@ impl QueryDocument {
     }
     fn restore(self) -> QueryTab {
         let mut tab = QueryTab::new(self.sql);
+        tab.draft_scope = self.scope;
         if let Some(path) = self.path {
             let baseline = self.saved_sql.unwrap_or_else(|| tab.sql.clone());
             tab.saved(path, baseline);
@@ -164,6 +167,7 @@ impl Appearance {
 enum ResultView { #[default] Data, Message, Chart }
 
 struct QueryTab {
+    draft_scope: Option<String>,
     completion: crate::completion::Completion,
     open: bool,
     id: u64,
@@ -219,6 +223,7 @@ impl QueryTab {
     fn new(sql: String) -> Self {
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            draft_scope: None,
             completion: Default::default(),
             open: true,
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -390,6 +395,7 @@ impl ColumnDraft {
 
 pub struct Rustable {
     child_window: bool,
+    draft_scope: Option<String>,
     recover_next_window: bool,
     show_recovered_on_connect: bool,
     shared_preferences_revision: u64,
@@ -616,6 +622,7 @@ impl Rustable {
             .filter(|tab| !tab.sql.trim().is_empty() || tab.source_path.is_some())
             .map(|tab| {
                 let mut document = QueryDocument::capture(tab);
+                document.scope = self.draft_scope.clone().or(document.scope);
                 document.closed = true;
                 document
             })
@@ -623,6 +630,7 @@ impl Rustable {
     }
     pub(crate) fn archive_window(&mut self, mut child: Self) {
         for mut tab in child.tabs.drain(..).chain(child.closed_tabs.drain(..)) {
+            tab.draft_scope = child.draft_scope.clone().or(tab.draft_scope);
             tab.open = false;
             tab.grid = Arc::default();
             tab.results.clear();
@@ -636,10 +644,6 @@ impl Rustable {
         }
         self.window_recovery.append(&mut child.window_recovery);
         self.merge_window_preferences(&mut child);
-        self.error = Some(format!(
-            "SQL drafts from {} are available in Connections. Select recovery before opening a connection; nothing is executed automatically.",
-            child.label
-        ));
     }
     pub(crate) fn publish_shared_preferences(&mut self) -> bool {
         if !std::mem::take(&mut self.shared_preferences_dirty) {
@@ -688,6 +692,7 @@ impl Rustable {
         ctx: &egui::Context,
         request: crate::session_windows::WindowRequest,
     ) -> Self {
+        let scope = request.draft_scope();
         let prefs = Preferences {
             appearance: self.prefs.appearance,
             favorites: self.prefs.favorites.clone(),
@@ -727,6 +732,13 @@ impl Rustable {
             }
         };
         let mut app = Self::with_initial_connection(ctx, prefs, command, request.identity);
+        app.draft_scope = scope.clone();
+        if scope.is_some() {
+            let (matching, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.window_recovery)
+                .into_iter().partition(|tab| tab.draft_scope == scope);
+            app.window_recovery = matching;
+            self.window_recovery = others;
+        }
         if request.recover_sql && !self.window_recovery.is_empty() {
             app.tabs = std::mem::take(&mut self.window_recovery);
             for tab in &mut app.tabs {
@@ -880,6 +892,7 @@ impl Rustable {
         let (files_tx, files_rx) = mpsc::channel();
         let mut app = Self {
             child_window: false,
+            draft_scope: None,
             recover_next_window: false,
             show_recovered_on_connect: false,
             shared_preferences_revision: 0,
@@ -1992,7 +2005,7 @@ impl Rustable {
             self.duplicate_selected();
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)) {
-            self.show_query();
+            if !self.closed_tabs.is_empty() { self.reopen_tab(); } else { self.show_query(); }
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
             self.close_active_tab_or_window(ctx);
@@ -2454,7 +2467,7 @@ impl Rustable {
                 if ctx.content_rect().width() < 720.0 {
                     ui.horizontal(|ui| {
                         if ui.selectable_label(self.compact_panel == 1, "Items").clicked() { self.compact_panel = if self.compact_panel == 1 { 0 } else { 1 }; }
-                        if ui.button("SQL").on_hover_text("New SQL editor").clicked() { self.compact_panel = 0; self.new_tab(); }
+                        if ui.button("SQL").on_hover_text("Open SQL editor").clicked() { self.compact_panel = 0; self.open_sql(); }
                         if ui.selectable_label(self.compact_panel == 2, "Inspector").clicked() { self.compact_panel = if self.compact_panel == 2 { 0 } else { 2 }; }
                         ui.menu_button("More", |ui| {
                             if ui.button("Find anything").clicked() { self.open_navigator(false); ui.close(); }
@@ -2484,10 +2497,10 @@ impl Rustable {
                         .on_hover_text("Browse databases · Cmd/Ctrl+K · Find anything: Cmd/Ctrl+P")
                         .clicked() { self.open_navigator(true); }
                     if toolbar_action(ui, 2, self.view == View::Query)
-                        .on_hover_text("New SQL editor")
+                        .on_hover_text("Open SQL editor")
                         .clicked()
                     {
-                        self.new_tab();
+                        self.open_sql();
                     }
                     });
                     self.connection_status(ui);
@@ -3230,24 +3243,42 @@ impl Rustable {
                 return;
             }
             if self.view == View::Triggers {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.triggers.is_empty() {
-                        ui.label("No visible triggers for this table.");
-                    }
-                    for trigger in &self.triggers {
-                        ui.horizontal(|ui| {
-                            ui.strong(&trigger.name);
-                            if trigger.metadata_error.is_none() && clipboard_button(ui).clicked() {
-                                ui.ctx().copy_text(trigger.ddl.clone());
-                            }
-                        });
-                        if let Some(error) = &trigger.metadata_error {
-                            ui.label("Trigger definition unavailable").on_hover_text(error);
-                        } else {
-                            ui.code(&trigger.ddl);
+                egui::ScrollArea::vertical().id_salt(("trigger-list", self.active_table_tab))
+                    .auto_shrink([false, false]).show(ui, |ui| {
+                    egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        if self.triggers.is_empty() {
+                            ui.weak("No triggers for this table.");
                         }
-                        ui.separator();
-                    }
+                        for trigger in &self.triggers {
+                            egui::Frame::new().fill(ui.visuals().faint_bg_color)
+                                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                                .corner_radius(8).inner_margin(12).show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if trigger.metadata_error.is_none() && clipboard_button(ui).clicked() {
+                                            ui.ctx().copy_text(trigger.ddl.clone());
+                                        }
+                                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                            schema_cell(ui, RichText::new(&trigger.name).strong());
+                                        });
+                                    });
+                                });
+                                ui.separator();
+                                if let Some(error) = &trigger.metadata_error {
+                                    ui.weak("Trigger definition unavailable").on_hover_text(error);
+                                } else {
+                                    egui::ScrollArea::both().id_salt(("trigger-definition", &trigger.name))
+                                        .max_height(240.0).show(ui, |ui| {
+                                        ui.add(egui::Label::new(RichText::new(&trigger.ddl).monospace())
+                                            .wrap_mode(egui::TextWrapMode::Extend).selectable(true));
+                                    });
+                                }
+                            });
+                            ui.add_space(10.0);
+                        }
+                    });
                 });
                 return;
             }
@@ -3391,7 +3422,24 @@ impl Rustable {
         });
     }
 
+    fn open_sql(&mut self) {
+        if !self.tabs.iter().any(|tab| tab.open) { self.show_query(); }
+        else if !self.closed_tabs.is_empty() { self.reopen_tab(); }
+        else { self.new_tab(); }
+    }
+
     fn show_query(&mut self) {
+        if !self.tabs.iter().any(|tab| tab.open) {
+            if !self.window_recovery.is_empty() {
+                self.tabs = std::mem::take(&mut self.window_recovery);
+                for tab in &mut self.tabs { tab.open = true; }
+                self.tab = 0;
+            } else if self.tabs[self.tab].sql.is_empty() && self.tabs[self.tab].source_path.is_none()
+                && let Some(tab) = self.closed_tabs.pop() {
+                self.tabs = vec![tab];
+                self.tab = 0;
+            }
+        }
         self.activate_query(self.tab);
     }
 
@@ -5025,19 +5073,23 @@ impl Rustable {
     fn index_view(&mut self, ui: &mut egui::Ui) {
         ui.style_mut().interaction.selectable_labels = false;
         let schema_editable = self.supports_schema_changes();
+        egui::Frame::new().fill(ui.visuals().panel_fill)
+            .inner_margin(egui::Margin::symmetric(10, 7)).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.strong(self.current_table_name()).on_hover_text(&self.browse.table);
-            if ui.add_enabled(schema_editable && !self.safe && self.pending.is_none() && !self.columns.is_empty(),egui::Button::new("+ Index")).clicked() {
+            ui.spacing_mut().interact_size.y = 26.0;
+            ui.label(RichText::new(format!("{} indexes", self.indexes.len())).weak());
+            if ui.add_enabled(schema_editable && !self.safe && self.pending.is_none() && !self.columns.is_empty(),egui::Button::new("+ Index").min_size(egui::vec2(78.0, 26.0)).corner_radius(7)).clicked() {
                 let first = self.columns[0].name.clone();
                 self.index_draft = Some(IndexDraft {table:self.browse.table.clone(),name:format!("{}_{}_idx",self.current_table_name(),first),available_columns:self.columns.iter().map(|c|c.name.clone()).collect(),keys:vec![(first,false)],unique:false});
             }
             if let Some(index) = self.selected_index.and_then(|i|self.indexes.get(i)) {
                 let staged = self.changes.iter().any(|c|matches!(c,Change::DropIndex {table,name} if table == &self.browse.table && name == &index.name));
-                if ui.add_enabled(schema_editable && !self.safe && self.pending.is_none() && index.origin == "c" && !staged,egui::Button::new("− Index")).on_hover_text("Stage index removal; review with Cmd+S").clicked() {
+                if ui.add_enabled(schema_editable && !self.safe && self.pending.is_none() && index.origin == "c" && !staged,egui::Button::new("− Index").min_size(egui::vec2(78.0, 26.0)).corner_radius(7)).on_hover_text("Stage index removal; review with Cmd+S").clicked() {
                     self.changes.push(Change::DropIndex {table:self.browse.table.clone(),name:index.name.clone()}); self.record_changes(); self.review=None;
                 }
                 if staged {ui.label(RichText::new("Removal staged").color(Color32::from_rgb(210,150,50)));}
             }
+        });
         });
         if self.indexes.is_empty() {
             ui.label(if self.engine == "SQLite" { "This table has no separate indexes. SQLite rowid primary keys do not create a separate index." } else { "This table has no indexes." });
@@ -5048,14 +5100,17 @@ impl Rustable {
                 .id_salt(("indexes", self.active_table_tab, &self.browse.table))
                 .striped(true)
                 .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .sense(egui::Sense::click())
-                .column(TableColumn::initial(240.0))
-                .column(TableColumn::initial(260.0))
-                .columns(TableColumn::initial(100.0), 3)
+                .column(TableColumn::initial(240.0).at_least(80.0).clip(true))
+                .column(TableColumn::initial(260.0).at_least(80.0).clip(true))
+                .column(TableColumn::initial(76.0).at_least(60.0).clip(true))
+                .column(TableColumn::initial(120.0).at_least(80.0).clip(true))
+                .column(TableColumn::initial(76.0).at_least(60.0).clip(true))
                 .header(25.0, |mut row| {
                     for title in ["Name", "Columns", "Unique", "Origin", "Partial"] {
                         row.col(|ui| {
-                            paint_column_header(ui, title, None);
+                            schema_cell(ui, RichText::new(title).strong());
                         });
                     }
                 })
@@ -5066,20 +5121,20 @@ impl Rustable {
                         row.set_hovered(false);
                         row.set_selected(self.selected_index == Some(i));
                         row.col(|ui| {
-                            ui.monospace(&index.name);
+                            schema_cell(ui, RichText::new(&index.name).monospace());
                         });
                         row.col(|ui| {
-                            ui.monospace(index.columns.join(", "));
+                            schema_cell(ui, RichText::new(index.columns.join(", ")).monospace());
                         });
                         row.col(|ui| {
                             ui.label(if index.unique { "YES" } else { "NO" });
                         });
                         row.col(|ui| {
-                            ui.label(match index.origin.as_str() {
+                            schema_cell(ui, RichText::new(match index.origin.as_str() {
                                 "pk" => "Primary key",
                                 "u" => "Constraint",
                                 _ => "Index",
-                            });
+                            }));
                         });
                         row.col(|ui| {
                             ui.label(if index.partial { "YES" } else { "NO" });
@@ -5152,14 +5207,19 @@ impl Rustable {
                 .auto_shrink([false, false])
                 .min_scrolled_height(0.0)
                 .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .sense(egui::Sense::click())
-                .column(TableColumn::exact(38.0))
-                .columns(TableColumn::initial(150.0), 5)
+                .column(TableColumn::exact(38.0).clip(true))
+                .column(TableColumn::initial(200.0).at_least(80.0).clip(true))
+                .column(TableColumn::initial(200.0).at_least(80.0).clip(true))
+                .column(TableColumn::initial(90.0).at_least(70.0).clip(true))
+                .column(TableColumn::initial(240.0).at_least(80.0).clip(true))
+                .column(TableColumn::initial(130.0).at_least(80.0).clip(true))
                 .header(25.0, |mut row| {
                     row.col(paint_grid_corner);
                     for title in ["Column name", "Data type", "Nullable", "Default", "Key"] {
                         row.col(|ui| {
-                            paint_column_header(ui, title, None);
+                            schema_cell(ui, RichText::new(title).strong());
                         });
                     }
                 })
@@ -5223,7 +5283,7 @@ impl Rustable {
                             if pending_name.is_some() {
                                 text = text.color(Color32::from_rgb(210, 150, 50));
                             }
-                            ui.label(text);
+                            schema_cell(ui, text);
                         });
                         if same_target_double_click(&response, egui::Id::new(("structure-name", &self.browse.table, index)))
                             && schema_editable
@@ -5251,7 +5311,7 @@ impl Rustable {
                             if changed && preview.data_type != column.data_type {
                                 text = text.color(Color32::from_rgb(210, 150, 50));
                             }
-                            ui.label(text);
+                            schema_cell(ui, text);
                         });
                         row.col(|ui| {
                             if preview.not_null != column.not_null {
@@ -5298,16 +5358,16 @@ impl Rustable {
                             if preview.default != column.default {
                                 text = text.color(Color32::from_rgb(210, 150, 50));
                             }
-                            ui.label(text);
+                            schema_cell(ui, text);
                         });
                         row.col(|ui| {
-                            ui.label(if column.pk {
+                            schema_cell(ui, RichText::new(if column.pk {
                                 "PRIMARY KEY"
                             } else if column.generated {
                                 "GENERATED"
                             } else {
                                 ""
-                            });
+                            }));
                         });
                         if primary_pressed(&row.response()) {
                             self.selected_column = Some(index);
@@ -6784,6 +6844,12 @@ pub(crate) fn with_grid_scrollbars(ui: &mut egui::Ui, render: impl FnOnce(&mut e
     ui.spacing_mut().scroll = scroll;
     render(ui);
     ui.spacing_mut().scroll = previous;
+}
+
+/// Metadata stays on one line; the complete value remains available on hover.
+fn schema_cell(ui: &mut egui::Ui, text: RichText) -> egui::Response {
+    let full = text.text().to_owned();
+    ui.add(egui::Label::new(text).truncate()).on_hover_text(full)
 }
 
 pub(crate) fn paint_column_header(ui: &mut egui::Ui, name: &str, direction: Option<bool>) -> egui::Response {
@@ -10806,6 +10872,58 @@ mod session_window_tests {
         assert!(prefs.favorites.is_empty());
         assert_eq!(prefs.history[0], "SELECT 'latest'");
     }
+    #[test]
+    fn sql_button_recovers_closed_drafts_and_creates_new_when_none_closed() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_launcher_preferences(&ctx, Preferences::default());
+        app.tabs = vec![QueryTab::new("SELECT 1".into())];
+        app.close_tab(0);
+        app.open_sql();
+        assert_eq!(app.tabs[app.tab].sql, "SELECT 1");
+        app.open_sql();
+        assert_eq!(app.tabs.len(), 2);
+        app.close_tab(0);
+        app.open_sql();
+        assert_eq!(app.tabs[app.tab].sql, "SELECT 1");
+    }
+
+    #[test]
+    fn scoped_drafts_survive_reconnect_and_storage_without_running() {
+        let ctx = egui::Context::default();
+        let mut root = Rustable::with_launcher_preferences(&ctx, Preferences::default());
+        let request = |id| WindowRequest {
+            recover_sql: false,
+            identity: Some(ProfileIdentity { id: crate::connection_profiles::ProfileId(id), name: "Test".into(), environment: "Local".into(), color: [0; 3] }),
+            title: "Test".into(), connection: WindowConnection::Demo,
+        };
+        let mut child = root.new_window(&ctx, request(42));
+        wait(&mut child);
+        child.tabs = vec![QueryTab::new("SELECT 'unsent'".into()), QueryTab::new("SELECT 'second'".into())];
+        let mut live_storage = Storage::default();
+        root.save_with_window_documents(&mut live_storage, child.recovery_documents());
+        let live_prefs = eframe::get_value(&live_storage, "workspace").unwrap();
+        let mut restarted = Rustable::with_launcher_preferences(&ctx, live_prefs);
+        let mut recovered = restarted.new_window(&ctx, request(42));
+        wait(&mut recovered);
+        recovered.open_sql();
+        assert_eq!(recovered.tabs[1].sql, "SELECT 'second'");
+        root.archive_window(child);
+        let mut storage = Storage::default();
+        root.save_with_window_documents(&mut storage, vec![]);
+        let prefs = eframe::get_value(&storage, "workspace").unwrap();
+        let mut root = Rustable::with_launcher_preferences(&ctx, prefs);
+        let other = root.new_window(&ctx, request(43));
+        assert!(other.window_recovery.is_empty());
+        let mut child = root.new_window(&ctx, request(42));
+        wait(&mut child);
+        assert!(!child.tabs.iter().any(|tab| tab.open));
+        child.open_sql();
+        assert_eq!(child.tabs.len(), 2);
+        assert_eq!(child.tabs[0].sql, "SELECT 'unsent'");
+        assert_eq!(child.tabs[1].sql, "SELECT 'second'");
+        assert!(child.tabs.iter().all(|tab| tab.results.is_empty()));
+    }
+
     #[test]
     fn windows_have_independent_connections_and_recover_drafts_without_profile_overwrite() {
         let ctx = egui::Context::default();

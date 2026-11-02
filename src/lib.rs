@@ -17,6 +17,8 @@ mod tableplus_import;
 #[cfg(not(target_arch = "wasm32"))]
 mod tablepro_import;
 mod credential_store;
+#[cfg(not(target_arch = "wasm32"))]
+mod crash_log;
 mod db;
 mod editor;
 mod editor_language;
@@ -46,18 +48,25 @@ mod sql_format;
 mod sql_language_server;
 mod sqlite_language_server;
 mod ssh_tunnel;
+mod ssh_prompt;
+pub use ssh_prompt::helper as ssh_askpass_helper;
 mod updates;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn application_icon() -> eframe::egui::IconData {
     // eframe sets the macOS Dock icon at runtime, overriding the bundle icon.
     // Always supply our artwork, including when launched through cargo run.
-    eframe::icon_data::from_png_bytes(include_bytes!("../assets/rustable-logo-1024.png"))
+    #[cfg(target_os = "macos")]
+    let bytes = include_bytes!("../assets/rustable-macos-1024.png").as_slice();
+    #[cfg(not(target_os = "macos"))]
+    let bytes = include_bytes!("../assets/rustable-logo-1024.png").as_slice();
+    eframe::icon_data::from_png_bytes(bytes)
         .expect("embedded Rustable application icon must be a valid PNG")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result {
+    crash_log::install();
     // Winit builds About/Hide/Quit labels from NSProcessInfo, not the window
     // title or bundle display name. Set this before it creates the native menu.
     #[cfg(target_os = "macos")]

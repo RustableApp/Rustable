@@ -1,6 +1,6 @@
 [package]
 name = "rustable"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 description = "A responsive native database workspace built with Rust and egui"
 license = "MIT"
@@ -39,6 +39,7 @@ tokio = { version = "1.54.1", features = ["rt", "time"] }
 tokio-postgres = "0.7.18"
 mysql = { version = "28.0.4", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
 redis = { version = "1.8.1", default-features = false, features = ["tls-native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }
