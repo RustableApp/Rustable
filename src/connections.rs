@@ -475,7 +475,7 @@ impl Rustable {
                         } else {
                             manager.credential_delete_retry.insert(pending.id);
                             manager.error = Some(format!(
-                                "The secure store could not remove the saved password: {error}. Save again with Remember password off to retry."
+                                "The secure store could not remove the saved password: {error}. The credential may still remain in the system credential store."
                             ));
                         }
                     } else if matches!(pending.kind, CredentialKind::Delete) {
@@ -830,7 +830,6 @@ impl Rustable {
                                 status_row(ui, "Database", Some(ProbeField::Database), |ui| { ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut config.database).range(0..=u32::MAX)); });
                                 form_text(ui, "User", &mut config.username, false, Some(ProbeField::User));
                                 if form_text(ui, "Password", &mut self.connection_manager.password, true, Some(ProbeField::Password)) { self.connection_manager.password_revision = self.connection_manager.password_revision.wrapping_add(1); }
-                                form_row(ui, "", |ui| { form_checkbox(ui, &mut draft.remember_password, "Remember password"); });
                                 status_row(ui, "TLS", Some(ProbeField::Tls), |ui| { form_checkbox(ui, &mut config.tls, "Verify certificate and hostname"); });
                                 let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
                                 if form_text(ui, "CA file", &mut ca, false, Some(ProbeField::Tls)) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
@@ -851,7 +850,6 @@ impl Rustable {
                                 form_text(ui, "Database", &mut config.database, false, Some(ProbeField::Database));
                                 form_text(ui, "User", &mut config.user, false, Some(ProbeField::User));
                                 if form_text(ui, "Password", &mut self.connection_manager.password, true, Some(ProbeField::Password)) { self.connection_manager.password_revision = self.connection_manager.password_revision.wrapping_add(1); }
-                                form_row(ui, "", |ui| { form_checkbox(ui, &mut draft.remember_password, "Remember password"); });
                                 status_row(ui, "TLS", Some(ProbeField::Tls), |ui| {
                                     egui::ComboBox::from_id_salt("mysql-tls").selected_text(if config.tls { "Verify full" } else { "Disabled" }).show_ui(ui, |ui| {
                                         ui.selectable_value(&mut config.tls, true, "Verify full");
@@ -886,7 +884,6 @@ impl Rustable {
                                 form_text(ui, "Database", &mut config.database, false, Some(ProbeField::Database));
                                 form_text(ui, "User", &mut config.user, false, Some(ProbeField::User));
                                 if form_text(ui, "Password", &mut self.connection_manager.password, true, Some(ProbeField::Password)) { self.connection_manager.password_revision = self.connection_manager.password_revision.wrapping_add(1); }
-                                form_row(ui, "", |ui| { form_checkbox(ui, &mut draft.remember_password, "Remember password").on_hover_text("Save in the system credential store when you Save or Open. Turning this off and saving removes the stored password."); });
                                 form_section(ui, "Security");
                                 status_row(ui, "TLS", Some(ProbeField::Tls), |ui| {
                                     egui::ComboBox::from_id_salt("profile-tls").width(ui.available_width()).selected_text(if config.tls { "Verify full" } else { "Disabled" }).show_ui(ui, |ui| {
@@ -1146,11 +1143,8 @@ impl Rustable {
                     .draft
                     .clone()
                     .ok_or("Choose a connection first.")?;
-                let was_remembered = self
-                    .prefs
-                    .saved_connections
-                    .profile(profile.id)
-                    .is_some_and(|profile| profile.remember_password);
+                // This persisted flag tracks secure-store lookup, not a user preference.
+                profile.remember_password = !matches!(profile.connection, ConnectionKind::SQLite { .. });
                 if profile.id.0 == 0 {
                     profile.id = self.prefs.saved_connections.add_profile(profile.clone())?;
                 } else {
@@ -1165,20 +1159,13 @@ impl Rustable {
                 self.connection_manager.error = None;
                 self.connection_manager.saved_feedback = self.connection_manager.draft.clone().map(|saved| (saved, self.connection_manager.password_revision));
                 if matches!(profile.connection, ConnectionKind::Postgres(_) | ConnectionKind::Mysql(_) | ConnectionKind::MariaDb(_) | ConnectionKind::Redis(_)) {
-                    if profile.remember_password {
-                        self.connection_manager.queue_credential(
-                            profile.id,
-                            CredentialOperation::Write(self.connection_manager.password.clone()),
-                        );
-                    } else if was_remembered
-                        || self
-                            .connection_manager
-                            .credential_delete_retry
-                            .contains(&profile.id)
-                    {
-                        self.connection_manager
-                            .queue_credential(profile.id, CredentialOperation::Delete);
+                    if self.connection_manager.credential_delete_retry.contains(&profile.id) {
+                        self.connection_manager.queue_credential(profile.id, CredentialOperation::Delete);
                     }
+                    self.connection_manager.queue_credential(
+                        profile.id,
+                        CredentialOperation::Write(self.connection_manager.password.clone()),
+                    );
                 }
             }
             Action::Discard => {
@@ -1668,8 +1655,8 @@ mod tests {
         }
     }
     #[test]
-    fn remembering_and_forgetting_password_uses_secure_worker_and_never_preferences() {
-        for action in [Action::New(true), Action::NewMysql(false), Action::NewMysql(true)] {
+    fn saving_automatically_remembers_and_updates_password_without_serializing_it() {
+        for action in [Action::New(true), Action::NewMysql(false), Action::NewMysql(true), Action::NewRedis] {
             let mut app = app();
             app.connection_action(action).unwrap();
             app.connection_manager.draft.as_mut().unwrap().name = "Secure profile".into();
@@ -1677,7 +1664,7 @@ mod tests {
                 .draft
                 .as_mut()
                 .unwrap()
-                .remember_password = true;
+                .remember_password = false;
             app.connection_manager.password = "CREDENTIAL_SECRET".into();
             app.connection_action(Action::Save(false)).unwrap();
             settle_credentials(&mut app);
@@ -1696,20 +1683,16 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .remember_password = false;
+            app.connection_manager.password = "UPDATED_SECRET".into();
             app.connection_action(Action::Save(false)).unwrap();
             settle_credentials(&mut app);
-            let mut remembered = app.prefs.saved_connections.profile(id).unwrap().clone();
-            remembered.remember_password = true; // Explicitly verify the former key was deleted.
+            let remembered = app.prefs.saved_connections.profile(id).unwrap().clone();
+            assert!(remembered.remember_password);
             app.connection_manager.select(remembered);
             settle_credentials(&mut app);
-            assert!(app.connection_manager.password.is_empty());
-            assert!(
-                app.connection_manager
-                    .error
-                    .as_deref()
-                    .unwrap()
-                    .contains("not found")
-            );
+            assert_eq!(app.connection_manager.password, "UPDATED_SECRET");
+            app.connection_action(Action::Delete(id)).unwrap();
+            settle_credentials(&mut app);
         }
     }
     struct LockedCredentials;
@@ -2331,7 +2314,8 @@ mod tests {
                 }, |ctx| app.connections_window(ctx)));
             }
             let output = output.unwrap();
-            for label in ["CA file", "Connect timeout", "Read timeout", "Remember password", "Test", "Connect"] {
+            assert!(painted_text(&output, "Remember password").is_none());
+            for label in ["CA file", "Connect timeout", "Read timeout", "Test", "Connect"] {
                 assert!(painted_text(&output, label).is_some(), "missing {label}");
             }
             let (content, rect) = ctx.data(|data| data.get_temp::<(egui::Vec2, egui::Rect)>(egui::Id::new("connection-form-geometry"))).unwrap();

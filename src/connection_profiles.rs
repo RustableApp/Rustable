@@ -190,6 +190,7 @@ pub struct Profile {
     pub environment: String,
     pub color: [u8; 3],
     pub connection: ConnectionKind,
+    /// Secure-store lookup marker, set automatically on Save/Connect.
     /// Lookup is keyed by this profile ID; no secret is serialized.
     #[serde(default)]
     pub remember_password: bool,
