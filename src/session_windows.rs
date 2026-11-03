@@ -158,7 +158,7 @@ impl eframe::App for SessionWindows {
         let mut manager_requested = false;
         for window in &mut self.windows {
             ctx.show_viewport_immediate(window.id, egui::ViewportBuilder::default()
-                .with_title(format!("{} — Rustable", window.title))
+                .with_title("Rustable")
                 .with_inner_size(window.size).with_min_inner_size([960.0, 640.0]), |child_ctx, class| {
                 if class == egui::ViewportClass::Embedded {
                     // Native desktop backends support immediate viewports. Never draw

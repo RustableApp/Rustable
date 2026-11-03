@@ -328,12 +328,12 @@ impl Rustable {
             });
         });
         ui.add_space(8.0);
-        let search = self.query_library.search.to_lowercase();
+        let search = crate::search::Query::new(&self.query_library.search);
         let mut chosen = None;
         let mut groups: std::collections::BTreeMap<&str, Vec<&QueryFile>> = Default::default();
-        for group in &self.query_library.groups { if group.to_lowercase().contains(&search) { groups.entry(group).or_default(); } }
-        for file in &self.query_library.files {
-            if format!("{} {}", file.group, file.name).to_lowercase().contains(&search) { groups.entry(&file.group).or_default().push(file); }
+        for group in &self.query_library.groups { if search.rank(group, "").is_some() { groups.entry(group).or_default(); } }
+        for file in search.ranked(&self.query_library.files, |file| (&file.name, &file.group)) {
+            groups.entry(&file.group).or_default().push(file);
         }
         egui::ScrollArea::vertical().id_salt("saved-query-library").show(ui, |ui| {
             if groups.is_empty() { ui.weak("Save a named query with ⌘S. Folders are groups."); }

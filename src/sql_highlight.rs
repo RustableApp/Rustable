@@ -1,6 +1,9 @@
 //! Cached SQL highlighting: tokenization runs only when text or appearance changes.
 use eframe::egui::{self, Color32, FontId, TextFormat, text::LayoutJob};
 
+pub const EDITOR_FONT_SIZE: f32 = 14.0;
+pub const EDITOR_LINE_HEIGHT: f32 = 18.0;
+
 #[derive(Default)]
 struct Highlighter;
 impl egui::cache::ComputerMut<(&str, bool), LayoutJob> for Highlighter {
@@ -37,8 +40,8 @@ fn layout_rows(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32, max_rows:
     });
     if editor {
         for section in &mut job.sections {
-            section.format.font_id = FontId::monospace(14.0);
-            section.format.line_height = Some(18.0);
+            section.format.font_id = FontId::monospace(EDITOR_FONT_SIZE);
+            section.format.line_height = Some(EDITOR_LINE_HEIGHT);
         }
     }
     job.wrap.max_width = width.max(1.0);

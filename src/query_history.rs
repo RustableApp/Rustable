@@ -32,9 +32,10 @@ impl Rustable {
             });
         ui.add_space(8.0);
         let search = self.history_search.to_lowercase();
+        let matcher = crate::search::Query::new(&search);
         let mut groups: Vec<DateGroup<'_>> = Vec::new();
         for (index, entry) in self.prefs.query_history.iter().enumerate() {
-            if !entry.sql.to_lowercase().contains(&search) { continue; }
+            if matcher.rank(&entry.sql, "").is_none() { continue; }
             let (date, time) = entry.labels();
             if groups.last().is_none_or(|(label, _)| label != &date) { groups.push((date, Vec::new())); }
             groups.last_mut().unwrap().1.push((index, entry, time));

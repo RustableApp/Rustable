@@ -7,6 +7,8 @@ mod query_history;
 mod table_tabs;
 #[path = "navigator.rs"]
 pub(crate) mod navigator;
+#[path = "query_monitor.rs"]
+mod query_monitor;
 #[path = "bulk_rows.rs"]
 mod bulk_rows;
 #[path = "change_history.rs"]
@@ -504,6 +506,7 @@ pub struct Rustable {
     #[cfg(target_arch = "wasm32")]
     browser_export: std::cell::RefCell<Option<crate::browser_jobs::Handle>>,
     navigator: navigator::Navigator,
+    query_monitor: query_monitor::QueryMonitor,
     ddl_preview: Option<(String, String)>,
     activity: std::collections::VecDeque<String>,
     last_operation_ms: Option<f64>,
@@ -994,6 +997,7 @@ impl Rustable {
             #[cfg(target_arch = "wasm32")]
             browser_export: Default::default(),
             navigator: navigator::Navigator::new(initial.as_ref()),
+            query_monitor: Default::default(),
             ddl_preview: None,
             activity: Default::default(),
             last_operation_ms: None,
@@ -1067,7 +1071,16 @@ impl Rustable {
             self.browser_export.borrow_mut().take();
             self.error = Some("Export timed out. No download was created.".into());
         }
-        while let Ok(result) = self.worker.rx.try_recv() {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(error) = self.worker.take_notice() { self.error = Some(error); }
+        loop {
+            let result = match self.worker.rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) if self.pending.is_some() =>
+                    Err("Database worker disconnected. The operation's outcome is unknown; reconnect and verify before retrying writes.".into()),
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            };
             let elapsed = self.started.elapsed().as_secs_f64() * 1000.0;
             self.last_operation_ms = Some(elapsed);
             match &result {
@@ -1930,7 +1943,7 @@ impl Rustable {
     }
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
-        self.ddl_preview.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
+        self.query_monitor.open || self.ddl_preview.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some() || self.alter_column.is_some()
             || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some()
@@ -2499,7 +2512,7 @@ impl Rustable {
                 .on_hover_text("Cancel database operation")
                 .clicked()
         {
-            self.worker.cancel();
+            self.request_query_cancel(ui.ctx());
         }
     }
 
@@ -2524,7 +2537,7 @@ impl Rustable {
                                 }
                             }
                         });
-                        if self.pending.is_some() && ui.button("Cancel").clicked() { self.worker.cancel(); }
+                        if self.pending.is_some() && ui.button("Cancel").clicked() { self.request_query_cancel(ctx); }
                     });
                     return;
                 }
@@ -2662,7 +2675,7 @@ impl Rustable {
                 }
                 sidebar_search(ui, &mut self.search, "Search for item…");
                 ui.add_space(4.0);
-                let filter = self.search.to_lowercase();
+                let filter = crate::search::Query::new(&self.search);
                 let changed_tables: std::collections::HashSet<&str> =
                     self.changes.iter().map(Change::table).collect();
                 let mut open = None;
@@ -2673,11 +2686,9 @@ impl Rustable {
                 let mut rows = Vec::with_capacity(self.objects.len() + 2);
                 for (kind, title) in [("table", "Tables"), ("view", "Views")] {
                     rows.push(CatalogRow::Heading(title, self.objects.iter().filter(|o| o.kind == kind).count()));
-                    rows.extend(self.objects.iter().filter(|o| {
-                        o.kind == kind && (filter.is_empty() || o.display_name().to_lowercase().contains(&filter))
-                    }).map(CatalogRow::Object));
+                    rows.extend(filter.ranked(self.objects.iter().filter(|o| o.kind == kind), |o| (o.display_name(), "")).into_iter().map(CatalogRow::Object));
                 }
-                egui::ScrollArea::vertical().show_rows(ui, 22.0, rows.len(), |ui, range| {
+                egui::ScrollArea::vertical().id_salt(("object-list", &self.search)).show_rows(ui, 22.0, rows.len(), |ui, range| {
                     for row in &rows[range] {
                         let object = match row {
                             CatalogRow::Heading(title, count) => {
@@ -2811,9 +2822,8 @@ impl Rustable {
                     if self.view == View::Data && row_is_deleted(&self.changes, &self.browse.table, row) { ui.colored_label(Color32::from_rgb(220, 90, 90), "Pending deletion · restore from the table toolbar"); }
                     ui.add_space(2.0);
                     compact_inspector_spacing(ui);
-                    let visible: Vec<usize> = grid.columns.iter().enumerate()
-                        .filter(|(_, name)| search.is_empty() || name.to_lowercase().contains(&search))
-                        .map(|(index, _)| index).collect();
+                    let visible: Vec<usize> = crate::search::Query::new(&search).ranked(grid.columns.iter().enumerate(), |(_, name)| (name.as_str(), ""))
+                        .into_iter().map(|(index, _)| index).collect();
                     // Keep an active editor alive when scrolled out of view. Ordinary
                     // inspection only constructs the fields in the visible viewport.
                     let editing = self.edit.as_ref().is_some_and(|edit| edit.inspector);
@@ -2917,9 +2927,9 @@ impl Rustable {
                         }
                     };
                     if editing {
-                        egui::ScrollArea::vertical().show(ui, |ui| render_fields(ui, 0..visible.len()));
+                        egui::ScrollArea::vertical().id_salt(("field-list", &search)).show(ui, |ui| render_fields(ui, 0..visible.len()));
                     } else {
-                        egui::ScrollArea::vertical().show_rows(ui, 44.0, visible.len(), render_fields);
+                        egui::ScrollArea::vertical().id_salt(("field-list", &search)).show_rows(ui, 44.0, visible.len(), render_fields);
                     }
                 } else {
                     let empty = ui.available_rect_before_wrap();
@@ -3973,7 +3983,7 @@ impl Rustable {
                 let tab = &mut self.tabs[self.tab];
                 if ui.add_enabled(!tab.formatter.busy() && !tab.sql.trim().is_empty(),
                     crate::icons::shortcut_button(if tab.formatter.busy() { "Formatting…" } else { "Beautify" }, false, "I", None))
-                    .on_hover_text("Format selection, or the whole SQL document. Undo with Cmd/Ctrl+Z.")
+                    .on_hover_text("Format selection, or the current query. Undo with Cmd/Ctrl+Z.")
                     .clicked() {
                     tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
                 }
@@ -3981,7 +3991,7 @@ impl Rustable {
                     self.save_query_file(ui.ctx(), false);
                 }
                 if self.pending.is_some() && ui.button("Cancel").clicked() {
-                    self.worker.cancel();
+                    self.request_query_cancel(ui.ctx());
                 }
                 ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
@@ -4373,7 +4383,7 @@ impl Rustable {
                 self.view == View::Query,
                 self.tab,
             )),
-            egui::Sense::focusable_noninteractive(),
+            egui::Sense::click(),
         );
         if self.view == View::Query {
             self.tabs[self.tab].result_grid_focus = Some(grid_focus.id);
@@ -4923,10 +4933,19 @@ impl Rustable {
                 }
             });
         });
+        // The empty portion of the grid still owns table keyboard shortcuts.
+        // Child cells and inputs win hit testing, so this does not steal editing focus.
+        if grid_focus.clicked() && self.edit.is_none()
+            && !self.dialog_owns_workspace_shortcuts()
+            && !egui::Popup::is_any_open(ui.ctx())
+        {
+            grid_focus.request_focus();
+        }
         self.page_grid_shortcut(&grid_focus);
+        let focused_row = self.row_selection.focused.filter(|i| *i < grid.rows.len()).unwrap_or(0);
+        self.select_all_rows_shortcut(&grid_focus.ctx, grid_focus.has_focus().then_some(focused_row));
         if let Some(index) = self.row_selection.focused.filter(|i| *i < grid.rows.len()) {
             self.navigate_rows_shortcut(&grid_focus, index);
-            self.select_all_rows_shortcut(&grid_focus.ctx, grid_focus.has_focus().then_some(index));
             self.copy_rows_shortcut(&grid_focus.ctx, grid_focus.has_focus());
             if self.row_delete_shortcut(&grid_focus.ctx, grid_focus.has_focus()) {
                 bulk_delete = Some(true);
@@ -5247,13 +5266,9 @@ impl Rustable {
         let mut finish_rename = false;
         let mut cancel_rename = false;
         let search = self.structure_search.to_lowercase();
-        let visible: Vec<usize> = self
-            .columns
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.name.to_lowercase().contains(&search))
-            .map(|(i, _)| i)
-            .collect();
+        let visible: Vec<usize> = crate::search::Query::new(&search)
+            .ranked(self.columns.iter().enumerate(), |(_, column)| (&column.name, ""))
+            .into_iter().map(|(index, _)| index).collect();
         egui::ScrollArea::horizontal().show(ui, |ui| {
             TableBuilder::new(ui)
                 .id_salt(("structure-grid", self.active_table_tab, &self.browse.table))
@@ -6078,6 +6093,7 @@ impl Rustable {
         }
         self.windows(ctx);
         self.navigator_window(ctx);
+        self.query_monitor_window(ctx);
         self.ddl_window(ctx);
         self.csv_preview_window(ctx);
         self.csv_import_review(ctx);
@@ -9121,9 +9137,15 @@ fn cell_edit_from_slot(
         return None;
     }
     let limit = (grid.rows.len() * width) as isize;
-    let filter = field_search.to_lowercase();
+    let visible = crate::search::Query::new(if source.inspector { field_search } else { "" }).ranked(grid.columns.iter().enumerate(), |(_, name)| (name.as_str(), ""));
+    let mut inspector_position = visible.iter().position(|(index, _)| *index == slot as usize % width).map_or(if source.advance > 0 { -1 } else { visible.len() as isize }, |index| index as isize);
     loop {
-        slot += isize::from(source.advance.signum());
+        if source.inspector {
+            inspector_position += isize::from(source.advance.signum());
+            if inspector_position < 0 { return None; }
+            let column = visible.get(inspector_position as usize)?.0;
+            slot = (slot / width as isize) * width as isize + column as isize;
+        } else { slot += isize::from(source.advance.signum()); }
         if slot < 0 || slot >= limit {
             return None;
         }
@@ -9133,9 +9155,6 @@ fn cell_edit_from_slot(
         let name = &grid.columns[column_index];
         if source.inspector && *row != source.row {
             return None;
-        }
-        if source.inspector && !name.to_lowercase().contains(&filter) {
-            continue;
         }
         if row_is_deleted(changes, &source.table, row) {
             continue;
@@ -11912,6 +11931,44 @@ mod result_pin_tests {
         assert!(!app.tabs[0].result_search.open);
     }
     #[test]
+    fn select_all_results_after_clicking_empty_grid_space() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.connections = false;
+        app.show_query();
+        app.tabs[0].focus_editor = false;
+        app.tabs[0].grid = Arc::new(Grid {
+            columns: vec!["answer".into()],
+            rows: (0..3).map(|n| vec![Value::Integer(n)]).collect(),
+            ..Default::default()
+        });
+        let frame = |app: &mut Rustable, events| {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                events, ..Default::default()
+            }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+        };
+        frame(&mut app, vec![]);
+        for already_selected in [false, true] {
+            app.row_selection.clear();
+            if already_selected { app.selected = app.row_selection.click(1, false, false, Some(0)); }
+            ctx.memory_mut(|memory| memory.surrender_focus(app.tabs[0].result_grid_focus.unwrap()));
+            let pos = egui::pos2(200.0, 250.0);
+            for pressed in [true, false] {
+                frame(&mut app, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                    pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+                }]);
+            }
+            assert!(ctx.memory(|memory| memory.has_focus(app.tabs[0].result_grid_focus.unwrap())));
+            frame(&mut app, vec![egui::Event::Key {
+                key: egui::Key::A, physical_key: None, pressed: true, repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }]);
+            assert_eq!(app.row_selection.rows.len(), 3);
+        }
+    }
+
+    #[test]
     fn find_shortcuts_follow_result_grid_and_search_focus() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
@@ -12366,6 +12423,22 @@ mod mysql_editor_mode_tests {
         assert_eq!(observer.query_first::<String,_>("SELECT label FROM ui_edit_probe").unwrap().as_deref(), Some("external edit"));
         assert_eq!(app.worker.transaction_state(), db::TransactionState::Idle);
         observer.query_drop("DROP TABLE ui_edit_probe").unwrap();
+    }
+
+    #[test]
+    fn stopped_worker_clears_pending_operation() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.worker.rx = receiver;
+        drop(sender);
+        app.pending = Some(Pending::Table);
+        app.poll();
+        assert!(app.pending.is_none());
+        assert_eq!(app.status, "Operation failed");
+        assert!(app.error.as_ref().unwrap().contains("outcome is unknown"));
+        app.poll();
+        assert!(app.pending.is_none());
     }
 
     #[test]

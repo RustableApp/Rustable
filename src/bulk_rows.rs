@@ -50,7 +50,9 @@ impl Rustable {
 
     pub(super) fn select_all_rows_shortcut(&mut self, ctx: &egui::Context, focused: Option<usize>) {
         let Some(focused) = focused else { return };
-        if self.row_shortcuts_blocked() || !matches!(self.view, View::Data | View::Query) {
+        if self.edit.is_some() || self.dialog_owns_workspace_shortcuts() || self.rename.is_some()
+            || egui::Popup::is_any_open(ctx) || !matches!(self.view, View::Data | View::Query)
+        {
             return;
         }
         let count = self.grid().rows.len();
@@ -391,13 +393,10 @@ impl Rustable {
         let mut constant = None;
         let mut finish = false;
         egui::ScrollArea::vertical()
-            .id_salt("bulk-inspector")
+            .id_salt(("bulk-inspector", search))
             .show(ui, |ui| {
                 compact_inspector_spacing(ui);
-                for (column, name) in grid.columns.iter().enumerate() {
-                    if !name.to_lowercase().contains(search) {
-                        continue;
-                    }
+                for (column, name) in crate::search::Query::new(search).ranked(grid.columns.iter().enumerate(), |(_, name)| (name.as_str(), "")) {
                     let (common, pending, values_writable) = summaries[column];
                     ui.horizontal(|ui| {
                         ui.label(
@@ -626,13 +625,14 @@ impl Rustable {
             return;
         }
         let indices: Vec<_> = self.row_selection.rows.iter().copied().collect();
-        let search = self.field_search.to_lowercase();
-        let mut next = column as isize + direction.signum() as isize;
-        while next >= 0 && (next as usize) < self.columns.len() {
-            let index = next as usize;
-            if self.columns[index].name.to_lowercase().contains(&search)
-                && self.bulk_field_writable(&indices, index)
-            {
+        let visible = crate::search::Query::new(&self.field_search)
+            .ranked(self.columns.iter().enumerate(), |(_, column)| (&column.name, ""));
+        let position = visible.iter().position(|(index, _)| *index == column)
+            .map_or(if direction > 0 { -1 } else { visible.len() as isize }, |index| index as isize);
+        let mut next = position + direction.signum() as isize;
+        while next >= 0 && (next as usize) < visible.len() {
+            let index = visible[next as usize].0;
+            if self.bulk_field_writable(&indices, index) {
                 self.start_bulk_edit(index);
                 return;
             }

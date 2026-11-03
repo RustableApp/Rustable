@@ -18,6 +18,7 @@ use std::{error::Error, time::Instant};
 
 pub(super) struct PostgresDriver {
     client: Client,
+    config: crate::connection::PostgresConfig,
     cancel: Arc<AtomicBool>,
     tls: Option<MakeTlsConnector>,
     tunnel: Option<crate::ssh_tunnel::Tunnel>,
@@ -56,6 +57,7 @@ impl PostgresDriver {
         .map_err(error)?;
         Ok(Self {
             client,
+            config: config.clone(),
             cancel,
             tls,
             tunnel,
@@ -172,6 +174,10 @@ impl PostgresDriver {
 }
 
 impl Driver for PostgresDriver {
+    fn postgres_control(&self) -> Option<PostgresControl> {
+        Some(PostgresControl { config: self.config.clone(), forwarded_port: self.tunnel.as_ref().map(|t| t.local_port()) })
+    }
+
     fn definition(&mut self, name: &str) -> Result<String, String> {
         self.check_tunnel()?;
         let _watch = self.watch();
@@ -336,6 +342,14 @@ impl Driver for PostgresDriver {
                 }
             }
         }
+        // Typed streaming owns a temporary prepared statement. Drain its Close
+        // response before exposing transaction state to the UI or the next run.
+        if self.client.transaction_status().is_none()
+            && let Err(failure) = self.client.check_connection()
+            && report.error.is_none()
+        {
+            report.error = Some(format!("Connection lost while finishing query: {}. Verify the outcome before retrying writes.", error(failure)));
+        }
         report.elapsed = started.elapsed();
         report
     }
@@ -394,6 +408,10 @@ pub(crate) fn async_client_config(
         .user(&config.user)
         .password(&config.password)
         .application_name("Rustable")
+        .options("-c statement_timeout=0 -c lock_timeout=0")
+        .keepalives_idle(Duration::from_secs(15))
+        .keepalives_interval(Duration::from_secs(5))
+        .keepalives_retries(3)
         .connect_timeout(Duration::from_secs(10));
     if forwarded_port.is_some() {
         // hostaddr selects the loopback transport; host remains the remote
@@ -439,18 +457,24 @@ impl CancelWatch {
     ) -> Self {
         let done = Arc::new(AtomicBool::new(false));
         let stopped = done.clone();
+        let progress = super::progress::current();
         let thread = std::thread::spawn(move || {
             while !stopped.load(Ordering::Acquire) {
                 if cancel.load(Ordering::Relaxed) {
-                    match tls {
-                        Some(tls) => {
-                            let _ = token.cancel_query_with_timeout(tls, CANCEL_REQUEST_TIMEOUT);
-                        }
-                        None => {
-                            let _ = token.cancel_query_with_timeout(NoTls, CANCEL_REQUEST_TIMEOUT);
+                    let result = match &tls {
+                        Some(tls) => token.cancel_query_with_timeout(tls.clone(), CANCEL_REQUEST_TIMEOUT),
+                        None => token.cancel_query_with_timeout(NoTls, CANCEL_REQUEST_TIMEOUT),
+                    };
+                    match result {
+                        Ok(true) => break,
+                        result => {
+                            let error = match result { Err(error) => error.to_string(), _ => "request timed out".into() };
+                            if let Some(progress) = &progress {
+                                progress.notify(format!("Could not send cancellation: {error}. The query may still be running. Retry cancellation or inspect running queries."));
+                            }
+                            cancel.store(false, Ordering::Relaxed);
                         }
                     }
-                    break;
                 }
                 std::thread::park_timeout(Duration::from_millis(20));
             }
@@ -1238,6 +1262,15 @@ mod live_tests {
                 .get(0);
             assert_eq!(count, 0, "query executed despite failed prefix");
         }
+        let mut rows = driver.client.query_typed_raw_with_prefix(
+            "SELECT count(*) FROM pipeline_qa",
+            std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
+            &["INSERT INTO pipeline_qa VALUES (9)"],
+        ).unwrap();
+        assert_eq!(rows.next().unwrap().unwrap().get::<_, i64>(0), 1, "prefix must execute exactly once");
+        assert!(rows.next().unwrap().is_none());
+        drop(rows);
+        driver.client.batch_execute("DELETE FROM pipeline_qa").unwrap();
         let request_cancel = cancel.clone();
         let canceller = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
@@ -1263,7 +1296,7 @@ mod live_tests {
 
     #[test]
     #[ignore = "requires opted-in disposable PostgreSQL QA server on port 54329"]
-    fn editor_single_exchange_query_preserves_headers_safety_and_recovery() {
+    fn editor_query_preserves_headers_safety_and_recovery() {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
         let cancel = Arc::new(AtomicBool::new(false));
         let mut driver = PostgresDriver::open(
@@ -1861,5 +1894,61 @@ mod foreign_key_navigation_tests {
             assert_eq!(target.grid.rows.len(),1);
             assert_eq!(target.grid.rows[0][0],Value::Text("a".into()));
         }
+    }
+}
+
+#[cfg(test)]
+mod query_lifetime_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires opted-in disposable PostgreSQL on port 54329"]
+    fn queries_have_no_default_statement_or_lock_deadline() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+        let config = crate::connection::PostgresConfig {
+            host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
+            user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut driver = PostgresDriver::open(&config, cancel.clone()).unwrap();
+        for setting in ["statement_timeout", "lock_timeout"] {
+            let row = driver.client.query_one("SELECT current_setting($1)", &[&setting]).unwrap();
+            assert_eq!(row.get::<_, String>(0), "0");
+        }
+        let trigger = cancel.clone();
+        let cancellation = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            trigger.store(true, Ordering::Relaxed);
+        });
+        let report = driver.execute("SELECT pg_sleep(15)", false, &cancel);
+        cancellation.join().unwrap();
+        assert!(report.error.as_ref().is_some_and(|e| e.contains("cancel")), "{:?}", report.error);
+        cancel.store(false, Ordering::Relaxed);
+        assert!(driver.execute("SELECT 1", false, &cancel).error.is_none());
+    }
+}
+
+#[cfg(test)]
+mod custom_type_stream_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires opted-in disposable PostgreSQL on port 54329"]
+    fn uncached_custom_type_with_large_rows_does_not_stall() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+        let config = crate::connection::PostgresConfig {
+            host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
+            user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut driver = PostgresDriver::open(&config, cancel.clone()).unwrap();
+        driver.client.batch_execute("CREATE TYPE pg_temp.stream_state AS ENUM ('active'); CREATE TEMP TABLE stream_stores AS SELECT i, 'active'::pg_temp.stream_state AS state, repeat('x',100000) AS payload, NULL::text AS col FROM generate_series(1,20) i;").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = driver.execute("SELECT * FROM stream_stores WHERE col IS NULL LIMIT 20", true, &cancel);
+            let _ = tx.send(result);
+        });
+        let report = rx.recv_timeout(Duration::from_secs(5)).expect("custom-type result stream stalled");
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.grids[0].rows.len(), 20);
+        worker.join().unwrap();
     }
 }

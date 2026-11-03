@@ -28,6 +28,7 @@ mod icons;
 mod native_menu;
 mod pane_sizes;
 mod result_chart;
+mod search;
 mod result_pins;
 mod result_search;
 mod review_sql;
@@ -93,7 +94,7 @@ pub fn run_native() -> eframe::Result {
         eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
                 .with_icon(application_icon())
-                .with_title("Connections — Rustable")
+                .with_title("Rustable")
                 .with_inner_size(session_windows::LAUNCHER_SIZE)
                 .with_min_inner_size([760.0, 560.0]),
             vsync: true,

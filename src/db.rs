@@ -19,7 +19,7 @@ pub enum ExportFormat { Csv, Json }
 pub mod csv_import;
 pub mod csv_preview;
 #[cfg(not(target_arch = "wasm32"))]
-mod postgres;
+pub(crate) mod postgres;
 pub mod progress;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use postgres::async_client_config as probe_client_config;
@@ -79,6 +79,9 @@ impl TransactionState {
 
 /// A session owns one driver on its worker thread; only owned results cross threads.
 trait Driver: Send {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn postgres_control(&self) -> Option<PostgresControl> { None }
+
     fn set_cancellation(&mut self, _cancel: Arc<AtomicBool>) {}
     fn definition(&mut self, name: &str) -> Result<String, String> {
         self.objects()?.into_iter().find(|object| object.name == name)
@@ -381,12 +384,20 @@ pub enum Payload {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub(crate) struct PostgresControl {
+    pub config: crate::connection::PostgresConfig,
+    pub forwarded_port: Option<u16>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Worker {
     tx: SyncSender<Command>,
     pub rx: Receiver<Result<Payload, String>>,
     cancel: Arc<AtomicBool>,
     progress: Arc<progress::Progress>,
     transaction: Arc<AtomicU8>,
+    control: Arc<std::sync::Mutex<Option<PostgresControl>>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -401,6 +412,8 @@ impl Worker {
         let telemetry = progress.clone();
         let transaction = Arc::new(AtomicU8::new(TransactionState::Idle as u8));
         let transaction_status = transaction.clone();
+        let control = Arc::new(std::sync::Mutex::new(None));
+        let control_status = control.clone();
         std::thread::Builder::new()
             .name("rustable-database".into())
             .spawn(move || {
@@ -408,6 +421,7 @@ impl Worker {
                 while let Ok(command) = commands.recv() {
                     let operation = telemetry.begin();
                     let result = handle(&mut connection, command, &stop);
+                    *control_status.lock().unwrap() = connection.as_ref().and_then(|driver| driver.postgres_control());
                     transaction_status.store(connection.as_mut().map_or(TransactionState::Idle,
                         |driver| driver.transaction_state()) as u8, Ordering::Release);
                     drop(operation);
@@ -424,8 +438,12 @@ impl Worker {
             cancel,
             progress,
             transaction,
+            control,
         }
     }
+
+    pub(crate) fn postgres_control(&self) -> Option<PostgresControl> { self.control.lock().unwrap().clone() }
+    pub(crate) fn take_notice(&self) -> Option<String> { self.progress.take_notice() }
 
     pub fn transaction_state(&self) -> TransactionState {
         match self.transaction.load(Ordering::Acquire) {

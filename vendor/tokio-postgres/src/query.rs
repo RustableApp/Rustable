@@ -81,67 +81,90 @@ where
     P: BorrowToSql,
     I: IntoIterator<Item = (P, Type)>,
 {
-    let buf = {
+    // Resolve result types before Execute. Looking up an unknown OID while
+    // Execute's rows fill the bounded response channel deadlocks the connection:
+    // the lookup response is queued behind rows nobody is consuming yet.
+    static NEXT_TYPED_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let name = format!("rt{}", NEXT_TYPED_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let (buf, execution_buf) = {
         let params = params.into_iter().collect::<Vec<_>>();
-        let param_oids = params.iter().map(|(_, t)| t.oid()).collect::<Vec<_>>();
-
-        client.with_buf(|buf| {
-            // A single Sync boundary is essential: any prefix failure makes
-            // PostgreSQL skip the remaining commands, including the query.
-            for command in prefix {
-                frontend::parse("", command, std::iter::empty(), buf).map_err(Error::parse)?;
-                encode_bind_raw("", std::iter::empty::<(&dyn crate::types::ToSql, Type)>(), "", buf)?;
-                frontend::execute("", 0, buf).map_err(Error::encode)?;
-            }
-            frontend::parse("", query, param_oids, buf).map_err(Error::parse)?;
-            encode_bind_raw("", params, "", buf)?;
-            frontend::describe(b'S', "", buf).map_err(Error::encode)?;
+        let buf = client.with_buf(|buf| {
+            // Only these idempotent session safeguards need to govern Parse too.
+            // Arbitrary caller-supplied prefix commands must execute exactly once.
+            let parse_safeguards = prefix.iter().copied().filter(|command| matches!(*command,
+                "SET LOCAL standard_conforming_strings = on" | "SET LOCAL transaction_read_only = on"
+            )).collect::<Vec<_>>();
+            encode_prefix(&parse_safeguards, buf)?;
+            frontend::parse(&name, query, params.iter().map(|(_, t)| t.oid()), buf).map_err(Error::parse)?;
+            frontend::describe(b'S', &name, buf).map_err(Error::encode)?;
+            frontend::sync(buf);
+            Ok(buf.split().freeze())
+        })?;
+        let execution_buf = client.with_buf(|buf| {
+            encode_prefix(prefix, buf)?;
+            encode_bind_raw(&name, params, "", buf)?;
             frontend::execute("", 0, buf).map_err(Error::encode)?;
             frontend::sync(buf);
-
             Ok(buf.split().freeze())
-        })?
+        })?;
+        (buf, execution_buf)
     };
-
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
-
-    let mut prefix_remaining = prefix.len();
+    let mut prefix_remaining = prefix.iter().filter(|command| matches!(**command,
+        "SET LOCAL standard_conforming_strings = on" | "SET LOCAL transaction_read_only = on"
+    )).count();
+    let mut columns = vec![];
     loop {
         match responses.next().await? {
             Message::ParseComplete | Message::BindComplete | Message::ParameterDescription(_) => {}
-            Message::CommandComplete(_) if prefix_remaining > 0 => {
-                prefix_remaining -= 1;
-            }
-            Message::NoData if prefix_remaining == 0 => {
-                return Ok(RowStream {
-                    statement: Statement::unnamed(vec![], vec![]),
-                    responses,
-                    rows_affected: None,
-                });
-            }
-            Message::RowDescription(row_description) if prefix_remaining == 0 => {
-                let mut columns: Vec<Column> = vec![];
-                let mut it = row_description.fields();
-                while let Some(field) = it.next().map_err(Error::parse)? {
-                    let type_ = get_type(client, field.type_oid()).await?;
-                    let column = Column {
-                        name: field.name().to_string(),
-                        table_oid: Some(field.table_oid()).filter(|n| *n != 0),
-                        column_id: Some(field.column_id()).filter(|n| *n != 0),
-                        type_modifier: field.type_modifier(),
-                        r#type: type_,
-                    };
-                    columns.push(column);
+            Message::CommandComplete(_) if prefix_remaining > 0 => { prefix_remaining -= 1; }
+            Message::NoData if prefix_remaining == 0 => {}
+            Message::RowDescription(description) if prefix_remaining == 0 => {
+                let mut fields = description.fields();
+                while let Some(field) = fields.next().map_err(Error::parse)? {
+                    columns.push((field.name().to_owned(), field.table_oid(), field.column_id(), field.type_modifier(), field.type_oid()));
                 }
-                return Ok(RowStream {
-                    statement: Statement::unnamed(vec![], columns),
-                    responses,
-                    rows_affected: None,
-                });
             }
+            Message::ReadyForQuery(_) if prefix_remaining == 0 => break,
             _ => return Err(Error::unexpected_message()),
         }
     }
+    // Keep ownership even if resolving a type fails so the named statement closes.
+    let _prepared = Statement::new(client, name, vec![], vec![]);
+    let mut resolved = Vec::with_capacity(columns.len());
+    for (name, table_oid, column_id, type_modifier, oid) in columns {
+        resolved.push(Column {
+            name, table_oid: Some(table_oid).filter(|n| *n != 0),
+            column_id: Some(column_id).filter(|n| *n != 0), type_modifier,
+            r#type: get_type(client, oid).await?,
+        });
+    }
+    // SET LOCAL from description expires at Sync; execution repeats safeguards.
+    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(execution_buf)))?;
+    let mut prefix_remaining = prefix.len();
+    loop {
+        match responses.next().await? {
+            Message::ParseComplete => {}
+            Message::CommandComplete(_) if prefix_remaining > 0 => { prefix_remaining -= 1; }
+            Message::BindComplete if prefix_remaining > 0 => {}
+            Message::BindComplete => break,
+            _ => return Err(Error::unexpected_message()),
+        }
+    }
+    // The portal owns execution now; dropping the prepared handle queues Close
+    // after this request. RowStream only needs the resolved column metadata.
+    Ok(RowStream {
+        statement: Statement::unnamed(vec![], resolved), responses, rows_affected: None,
+    })
+}
+
+fn encode_prefix(prefix: &[&str], buf: &mut BytesMut) -> Result<(), Error> {
+    for command in prefix {
+        frontend::parse("", command, std::iter::empty(), buf).map_err(Error::parse)?;
+        encode_bind_raw("", std::iter::empty::<(&dyn crate::types::ToSql, Type)>(), "", buf)?;
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+    }
+    Ok(())
 }
 
 pub async fn execute_typed<P, I>(

@@ -17,10 +17,16 @@ Local changes:
   RLS error, zero partial writes and connection reuse after rejection.
 
 - `tokio-postgres/src/query.rs`: `RowStream::columns()` exposes existing
-  statement metadata. `query_typed_with_prefix` encodes non-row-returning
-  prefix commands before the typed query, all within one Sync group, then
-  consumes their command completions before returning the query stream.
-  Existing `query_typed` delegates with an empty prefix.
+  statement metadata. Typed queries describe a named statement and resolve its
+  types before executing it. Resolving an uncached custom type after Execute
+  deadlocked when unread rows filled the bounded response channel and blocked
+  the type lookup response. This adds a description round trip, retains bounded
+  streaming, and does not execute the user's SQL twice. The live
+  `uncached_custom_type_with_large_rows_does_not_stall` regression reproduces
+  the original hang with 20 enum-bearing rows containing large text values.
+  `query_typed_with_prefix` executes prefixes with Bind/Execute in one Sync
+  group so setup failure skips execution. Rustable's two idempotent SET LOCAL
+  safeguards also run during description; arbitrary prefixes run only once.
 - `tokio-postgres/src/client.rs`: additive `query_typed_raw_with_prefix` and
   `transaction_status` APIs; tracks outstanding requests alongside status.
 - `tokio-postgres/src/codec.rs`: reads the terminal ReadyForQuery status from
@@ -39,8 +45,8 @@ Local changes:
   two seconds so cancellation-thread cleanup cannot hang in TLS negotiation.
 
 Rustable pipelines SET LOCAL standard_conforming_strings (and, in Safe mode,
-SET LOCAL transaction_read_only) with the parameter-free editor query in one
-exchange. Each is a separate Parse/Bind/Execute operation, with a single Sync
+SET LOCAL transaction_read_only) with execution of the parameter-free editor query in one
+exchange, following the separate description/type-resolution exchange. Each is a separate Parse/Bind/Execute operation, with a single Sync
 after the final query. PostgreSQL's extended-protocol error handling skips the
 remaining operations until Sync if any setup command fails. This is essential:
 concurrently sending separate setup/query requests, each with its own Sync,

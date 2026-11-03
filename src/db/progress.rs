@@ -26,6 +26,7 @@ pub(super) struct Progress {
     active: AtomicBool,
     rows: AtomicU64,
     decoded_bytes: AtomicU64,
+    notice: std::sync::Mutex<Option<String>>,
 }
 impl Default for Progress {
     fn default() -> Self {
@@ -36,17 +37,22 @@ impl Default for Progress {
             active: AtomicBool::new(false),
             rows: AtomicU64::new(0),
             decoded_bytes: AtomicU64::new(0),
+            notice: Default::default(),
         }
     }
 }
 thread_local! {
     static CURRENT: RefCell<Option<Arc<Progress>>> = const { RefCell::new(None) };
 }
+pub(super) fn current() -> Option<Arc<Progress>> { CURRENT.with(|current| current.borrow().clone()) }
 impl Progress {
+    pub(super) fn take_notice(&self) -> Option<String> { self.notice.lock().unwrap().take() }
+    pub(super) fn notify(&self, message: String) { *self.notice.lock().unwrap() = Some(message); }
     fn now(&self) -> u64 {
         self.origin.elapsed().as_micros().min(u64::MAX as u128) as u64
     }
     pub(super) fn begin(self: &Arc<Self>) -> Operation {
+        self.notice.lock().unwrap().take();
         self.active.store(false, Ordering::Release);
         self.rows.store(0, Ordering::Relaxed);
         self.decoded_bytes.store(0, Ordering::Relaxed);

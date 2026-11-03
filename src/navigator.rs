@@ -172,7 +172,7 @@ impl Rustable {
                     Action::Refresh => { self.navigator.requested = false; self.dispatch(Command::RefreshSchema, Pending::Export); }
                     Action::Connections => { self.manager_requested = true; }
                     Action::Databases => self.open_navigator(true),
-                    Action::Cancel => self.worker.cancel(),
+                    Action::Cancel => self.request_query_cancel(ctx),
                     Action::OpenSql => self.script_dialog(ctx, false),
                     Action::ImportCsv => self.preview_csv_dialog(ctx),
                     Action::NewQuery => { self.tabs.push(QueryTab::new(String::new())); self.activate_query(self.tabs.len() - 1); }
@@ -239,102 +239,8 @@ fn paint_navigation_icon(painter: &egui::Painter, center: egui::Pos2, destinatio
     };
     crate::icons::paint(painter, center, name, 20.0, ink);
 }
-// Lower tuples sort first. Metadata matches always follow name-only matches.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct MatchRank {
-    metadata_words: usize,
-    worst_tier: u8,
-    total_tier: usize,
-    penalty: i64,
-    length: usize,
-}
-
-struct SearchText {
-    chars: Vec<char>,
-    boundaries: Vec<bool>,
-}
-impl SearchText {
-    fn new(text: &str) -> Self {
-        let original: Vec<_> = text.chars().collect();
-        let mut chars = Vec::new();
-        let mut boundaries = Vec::new();
-        for (i, ch) in original.iter().copied().enumerate() {
-            let boundary = i == 0 || !original[i - 1].is_alphanumeric()
-                || (ch.is_uppercase() && (original[i - 1].is_lowercase()
-                    || original.get(i + 1).is_some_and(|next| next.is_lowercase())));
-            for (offset, lower) in ch.to_lowercase().enumerate() {
-                chars.push(lower);
-                boundaries.push(boundary && offset == 0);
-            }
-        }
-        Self { chars, boundaries }
-    }
-
-    fn rank(&self, query: &[char]) -> Option<(u8, i64)> {
-        if query.is_empty() || query.len() > self.chars.len() { return None; }
-        if self.chars == query { return Some((0, 0)); }
-        if self.chars.starts_with(query) { return Some((1, 0)); }
-        // Prefer a word-boundary occurrence over an earlier inside-word hit.
-        if let Some(tier) = self.chars.windows(query.len()).enumerate()
-            .filter(|(_, window)| *window == query)
-            .map(|(i, _)| if self.boundaries[i] { 2 } else { 3 }).min() {
-            return Some((tier, 0));
-        }
-        // Ordered subsequences, scored with a linear pass per query character.
-        // Reward word initials and contiguous runs, penalize skipped characters.
-        // Keeping every possible endpoint avoids greedy abbreviation mismatches.
-        const NONE: i64 = i64::MIN / 4;
-        let mut previous = vec![NONE; self.chars.len()];
-        for (qi, wanted) in query.iter().enumerate() {
-            let mut current = vec![NONE; self.chars.len()];
-            let mut best_gap = NONE;
-            for (i, ch) in self.chars.iter().enumerate() {
-                if i > 0 && previous[i - 1] != NONE {
-                    best_gap = best_gap.max(previous[i - 1] + (i - 1) as i64);
-                }
-                if ch != wanted { continue; }
-                let bonus = 1 + if self.boundaries[i] { 12 } else { 0 };
-                if qi == 0 {
-                    current[i] = bonus - i as i64;
-                } else {
-                    let gap = if best_gap == NONE { NONE } else { best_gap - i as i64 + 1 };
-                    let contiguous = if i > 0 && previous[i - 1] != NONE { previous[i - 1] + 8 } else { NONE };
-                    let best = gap.max(contiguous);
-                    if best != NONE { current[i] = best + bonus; }
-                }
-            }
-            previous = current;
-        }
-        previous.into_iter().max().filter(|score| *score != NONE).map(|score| (4, -score))
-    }
-}
-
 fn ranked_entries<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() { return entries.iter().collect(); }
-    let words: Vec<Vec<char>> = query.split_whitespace().map(|word| word.chars().collect()).collect();
-    let phrase: Vec<char> = query.chars().collect();
-    let mut ranked: Vec<_> = entries.iter().filter_map(|entry| {
-        let label = SearchText::new(&entry.label);
-        let detail = SearchText::new(&entry.detail);
-        let mut rank = MatchRank { metadata_words: 0, worst_tier: 0, total_tier: 0, penalty: 0, length: label.chars.len() };
-        for word in &words {
-            let (tier, penalty) = if let Some(found) = label.rank(word) { found }
-                else { rank.metadata_words += 1; detail.rank(word)? };
-            rank.worst_tier = rank.worst_tier.max(tier);
-            rank.total_tier += tier as usize;
-            rank.penalty += penalty;
-        }
-        if rank.metadata_words == 0 && let Some((tier @ 0..=1, _)) = label.rank(&phrase) {
-            rank.worst_tier = tier;
-            rank.total_tier = tier as usize;
-            rank.penalty = 0;
-        }
-        Some((rank, entry))
-    }).collect();
-    // Stable sorting retains catalog order for equally relevant results.
-    ranked.sort_by_key(|(rank, _)| *rank);
-    ranked.into_iter().map(|(_, entry)| entry).collect()
+    crate::search::Query::new(query).ranked(entries, |entry| (&entry.label, &entry.detail))
 }
 #[cfg(test)]
 mod tests {

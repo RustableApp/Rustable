@@ -177,11 +177,17 @@ pub fn paint_line_numbers(
             } else {
                 ui.visuals().weak_text_color()
             };
-            painter.text(
-                egui::pos2(gutter.right() - 8.0, top + row.size.y / 2.0),
-                egui::Align2::RIGHT_CENTER,
-                line.to_string(),
-                FontId::monospace(14.0),
+            let mut job = egui::text::LayoutJob::simple(
+                line.to_string(), FontId::monospace(sql_highlight::EDITOR_FONT_SIZE), color, f32::INFINITY);
+            job.sections[0].format.line_height = Some(sql_highlight::EDITOR_LINE_HEIGHT);
+            let number = ui.fonts_mut(|fonts| fonts.layout_job(job));
+            // Centering an independently laid-out label rounds differently from
+            // the editor's explicit line height. Match its glyph baseline instead.
+            let baseline_offset = row.glyphs.first().zip(number.rows[0].glyphs.first())
+                .map_or(0.0, |(text, number)| text.pos.y - number.pos.y);
+            painter.galley(
+                egui::pos2(gutter.right() - 8.0 - number.size().x, top + baseline_offset),
+                number,
                 color,
             );
         }
@@ -230,6 +236,38 @@ mod line_tests {
             assert!(text.pos.y + text.galley.size().y <= number.clip_rect.bottom() + 0.5);
         }
     }
+    #[test]
+    fn line_numbers_share_editor_baselines_and_font_metrics() {
+        for scale in [1.0, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(scale);
+            let mut sql = "SELECT id,\n\n    customer_name\nFROM customers;".to_owned();
+            let mut baselines = Vec::new();
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let gutter = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(40.0, 300.0));
+                    let editor = egui::TextEdit::multiline(&mut sql).layouter(&mut editor_layout).show(ui);
+                    for row in &editor.galley.rows {
+                        baselines.push(row.glyphs.first().map(|glyph| (
+                            editor.galley_pos.y + row.pos.y + glyph.pos.y, glyph.font_height, glyph.line_height)));
+                    }
+                    paint_line_numbers(ui, gutter, &editor, 1);
+                });
+            });
+            for shape in output.shapes {
+                if let egui::Shape::Text(text) = shape.shape
+                    && let Ok(line) = text.galley.text().parse::<usize>()
+                    && let Some((baseline, font_height, line_height)) = baselines[line - 1] {
+                    let row = &text.galley.rows[0];
+                    let glyph = &row.glyphs[0];
+                    assert!((text.pos.y + row.pos.y + glyph.pos.y - baseline).abs() < 0.01, "scale {scale}, line {line}");
+                    assert_eq!(glyph.font_height, font_height);
+                    assert_eq!(glyph.line_height, line_height);
+                }
+            }
+        }
+    }
+
     #[test]
     fn logical_lines_handle_unicode_blank_lines_and_trailing_newline() {
         let lines = LineIndex::new("é🙂\n\nSELECT 1;\n");

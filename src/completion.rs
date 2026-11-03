@@ -102,8 +102,8 @@ impl Completion {
                 })
             })
             .collect();
-        // Borrow candidates and stop after the visible limit. Large catalogs
-        // should not allocate names or quoted SQL for every table on each key.
+        // Rank borrowed candidates before applying the visible limit, so a better
+        // match late in a large catalog cannot be hidden by earlier matches.
         let derived_columns = references.iter().filter(|(_, alias)| qualifier.as_ref().is_none_or(|q| q.eq_ignore_ascii_case(alias)))
             .filter_map(|(table, _)| projected.get(table)).flatten().map(|name| (name.as_str(), true, None));
         let columns = relevant.iter().flat_map(|object| object.columns.iter()
@@ -114,9 +114,10 @@ impl Completion {
         let schemas = objects.iter().take(if qualifier.is_none() { objects.len() } else { 0 })
             .filter_map(|object| object.schema.as_deref()).map(|schema| (schema, true, None));
         let keywords = KEYWORDS.iter().filter(|_| qualifier.is_none()).map(|word| (*word, false, None));
-        for (name, identifier, table) in derived_columns.chain(columns).chain(tables).chain(schemas).chain(keywords) {
-            if name.to_lowercase().starts_with(&prefix)
-                && (!name.eq_ignore_ascii_case(&prefix)
+        let query = crate::search::Query::new(&prefix);
+        let candidates = query.ranked(derived_columns.chain(columns).chain(tables).chain(schemas).chain(keywords), |candidate| (candidate.0, ""));
+        for (name, identifier, table) in candidates {
+            if (!name.eq_ignore_ascii_case(&prefix)
                     || (identifier && identifier_needs_quotes(name)))
                 && !self.items.iter().any(|item| item == name)
             {
@@ -267,31 +268,16 @@ impl Completion {
         }
         self.start = default_range.start;
         self.end = cursor;
-        // Some servers return broad/fuzzy catalog lists even for a keyword
-        // prefix. Keep exact-prefix local suggestions ahead of those results,
-        // then rank server prefix matches without changing their text edits.
-        let prefix = prefix.to_lowercase();
+        // Share palette relevance while retaining each validated server text edit.
+        let query = crate::search::Query::new(prefix);
         let mut merged = Vec::new();
-        if !prefix.is_empty() {
-            merged.extend(
-                self.items
-                    .iter()
-                    .filter(|item| item.to_lowercase().starts_with(&prefix))
-                    .cloned(),
-            );
-            accepted.sort_by_key(|item| !item.to_lowercase().starts_with(&prefix));
-        }
-        for item in accepted.into_iter().chain(self.items.iter().cloned()) {
-            if merged.len() >= 12 {
-                break;
-            }
-            if !merged.contains(&item) {
-                merged.push(item);
-            }
+        for item in query.ranked(accepted.into_iter().chain(self.items.iter().cloned()), |item| (item.as_str(), "")) {
+            if !merged.contains(&item) { merged.push(item); }
+            if merged.len() == 12 { break; }
         }
         self.items = merged;
         self.selected = 0;
-        self.open = true;
+        self.open = !self.items.is_empty();
     }
     pub fn menu(
         &mut self,
@@ -906,6 +892,23 @@ mod tests {
     }
 
     #[test]
+    fn local_fuzzy_ranking_scans_past_the_visible_limit_and_preserves_edits() {
+        let mut objects: Vec<_> = (0..30).map(|i| object(&format!("campaign_store_property_values_{i}"), &[])).collect();
+        objects.push(object("stores", &[]));
+        let mut completion = Completion::default();
+        let sql = "SELECT * FROM store";
+        completion.refresh(sql, sql.len(), &objects, &[], false, Dialect::Sqlite);
+        assert_eq!(completion.items[0], "stores");
+        assert_eq!(completion.items.len(), 12);
+        let sql = "SELECT * FROM cspv";
+        completion.refresh(sql, sql.len(), &objects, &[], false, Dialect::Sqlite);
+        assert_eq!(completion.items[0], "campaign_store_property_values_0");
+        let mut sql = sql.to_owned();
+        completion.apply(&mut sql, "campaign_store_property_values_0");
+        assert_eq!(sql, "SELECT * FROM campaign_store_property_values_0");
+    }
+
+    #[test]
     fn fuzzy_server_results_cannot_crowd_out_local_prefix_matches() {
         let mut completion = Completion::default();
         completion.refresh("SE", 2, &[], &[], false, Dialect::Sqlite);
@@ -915,7 +918,7 @@ mod tests {
         server
             .push(serde_json::json!({"label":"server_keyword", "insertText":"server_replacement"}));
         completion.receive_server("SE", 2, &server);
-        assert_eq!(&completion.items[..2], &["SELECT", "SET"]);
+        assert_eq!(&completion.items[..2], &["SET", "SELECT"]);
         assert_eq!(completion.items[2], "server_keyword");
         assert_eq!(completion.items.len(), 12);
         let mut sql = "SE".to_owned();

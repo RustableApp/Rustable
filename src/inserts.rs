@@ -275,15 +275,16 @@ impl Rustable {
 
     fn advance_insert_edit(&mut self, id: u64, column: &str, inspector: bool, direction: i8) {
         let ids = self.insert_ids();
-        let names: Vec<_> = self.columns.iter().map(|c| c.name.clone()).collect();
+        let names: Vec<_> = crate::search::Query::new(if inspector { &self.field_search } else { "" })
+            .ranked(self.columns.iter(), |column| (&column.name, ""))
+            .into_iter().map(|c| c.name.clone()).collect();
         let Some(row) = ids.iter().position(|item| *item == id) else {
             return;
         };
-        let Some(col) = names.iter().position(|name| name == column) else {
-            return;
-        };
-        let search = self.field_search.to_lowercase();
-        let mut position = (row * names.len() + col) as isize;
+        if names.is_empty() { return; }
+        let col = names.iter().position(|name| name == column)
+            .map_or(if direction > 0 { -1 } else { names.len() as isize }, |index| index as isize);
+        let mut position = (row * names.len()) as isize + col;
         loop {
             position += if direction < 0 { -1 } else { 1 };
             if position < 0 {
@@ -301,9 +302,7 @@ impl Rustable {
             }
             let name = &names[position as usize % names.len()];
             let next_id = ids[next_row];
-            if self.insert_field_writable(next_id, name)
-                && (!inspector || name.to_lowercase().contains(&search))
-            {
+            if self.insert_field_writable(next_id, name) {
                 self.row_selection.clear();
                 self.selected = Some(self.table.rows.len() + next_row);
                 self.start_insert_edit(next_id, name, inspector);
@@ -396,12 +395,9 @@ impl Rustable {
         ui.label(RichText::new("New row · pending save").color(Color32::from_rgb(210, 150, 50)));
         let columns = self.columns.clone();
         let search = self.field_search.to_lowercase();
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt(("insert-fields", &search)).show(ui, |ui| {
             compact_inspector_spacing(ui);
-            for column in columns {
-                if !column.name.to_lowercase().contains(&search) {
-                    continue;
-                }
+            for column in crate::search::Query::new(&search).ranked(columns, |column| (&column.name, "")) {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(&column.name)
