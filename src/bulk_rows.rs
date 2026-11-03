@@ -145,6 +145,10 @@ impl Rustable {
                         } else {
                             self.row_selection.cell_column.saturating_sub(1)
                         };
+                        if self.row_selection.cell_columns.is_some() {
+                            let column = self.row_selection.cell_column;
+                            self.row_selection.cell_columns = Some((column, column));
+                        }
                         self.row_selection.pending_focus = Some(focused);
                         self.row_selection.pending_cell_scroll = true;
                         moved = true;
@@ -185,7 +189,8 @@ impl Rustable {
                     .events
                     .retain(|event| !matches!(event, egui::Event::Copy));
             }
-            copy
+            let key = input.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
+            copy || key
         });
         if !copy {
             return;
@@ -202,20 +207,15 @@ impl Rustable {
             );
             return;
         }
-        match row_copy::format_rows(
+        let columns = self.row_selection.cell_columns.unwrap_or((0, grid.columns.len().saturating_sub(1)));
+        let text = row_copy::plain_cells(
             &grid.columns,
-            self.row_selection
-                .rows
-                .iter()
-                .map(|index| grid.rows[*index].as_slice()),
+            self.row_selection.rows.iter().map(|index| grid.rows[*index].as_slice()),
             &self.changes,
             (self.view == View::Data).then_some(self.browse.table.as_str()),
-            '\t',
-            false,
-        ) {
-            Ok(text) => ctx.copy_text(text),
-            Err(error) => self.error = Some(error),
-        }
+            columns,
+        );
+        match text { Ok(text) => ctx.copy_text(text), Err(error) => self.error = Some(error) }
     }
 
     pub(super) fn can_delete_rows(&self) -> bool {
@@ -824,6 +824,59 @@ mod tests {
                 .any(|change| matches!(change, Change::DeleteRow { .. }))
         );
         assert!(app.review.is_none());
+    }
+
+    #[test]
+    fn drag_cells_and_command_copy_use_plain_displayed_values() {
+        let mut app = app();
+        app.connections = false;
+        let table = Arc::make_mut(&mut app.table);
+        table.columns.extend(["a".into(), "b".into()]);
+        for (i, row) in table.rows.iter_mut().enumerate() {
+            row.extend([Value::Text(format!("start-{i}")), Value::Text(format!("end-{i}"))]);
+        }
+        let ctx = egui::Context::default();
+        let frame = |app: &mut Rustable, events| ctx.run(egui::RawInput {
+            events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+            ..Default::default()
+        }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+        fn position(shape: &egui::Shape, text: &str) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.job.text == text => Some(t.pos + t.galley.size() * 0.5),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| position(s, text)),
+                _ => None,
+            }
+        }
+        frame(&mut app, vec![]);
+        let output = frame(&mut app, vec![]);
+        let point = |text| output.shapes.iter().find_map(|s| position(&s.shape, text)).unwrap();
+        let start = point("end-2");
+        let end = point("start-0");
+        let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(&mut app, vec![egui::Event::PointerMoved(start), button(start, true)]);
+        frame(&mut app, vec![egui::Event::PointerMoved(end)]);
+        frame(&mut app, vec![button(end, false)]);
+        assert_eq!(app.row_selection.cell_columns, Some((1, 2)));
+        assert_eq!(app.row_selection.rows.iter().copied().collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert!(app.edit.is_none());
+        app.changes.push(Change::Cell { table: "t".into(), column: "a".into(), original: app.table.rows[0].clone(), value: Value::Text("a, \"quoted\"".into()) });
+        for event in [egui::Event::Copy, egui::Event::Key {
+            key: egui::Key::C, physical_key: None, pressed: true, repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }] {
+            let output = frame(&mut app, vec![event]);
+            assert!(matches!(&output.platform_output.commands[..], [egui::OutputCommand::CopyText(text)] if text == "a, \"quoted\"\tend-0\nstart-1\tend-1\nstart-2\tend-2"));
+        }
+        // Dragging the counter gutter selects every column, even if the
+        // pointer ends over a data cell. Copy follows that full-row range.
+        let gutter = point("1");
+        frame(&mut app, vec![egui::Event::PointerMoved(gutter), button(gutter, true)]);
+        frame(&mut app, vec![egui::Event::PointerMoved(start)]);
+        frame(&mut app, vec![button(start, false)]);
+        assert_eq!(app.row_selection.cell_columns, None);
+        assert_eq!(app.row_selection.rows.iter().copied().collect::<Vec<_>>(), vec![0, 1, 2]);
+        let output = frame(&mut app, vec![egui::Event::Copy]);
+        assert!(matches!(&output.platform_output.commands[..], [egui::OutputCommand::CopyText(text)] if text == "1\ta, \"quoted\"\tend-0\n2\tstart-1\tend-1\n3\tstart-2\tend-2"));
     }
 
     #[test]

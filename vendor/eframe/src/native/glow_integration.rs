@@ -888,7 +888,12 @@ fn change_gl_context(
 
         if let Some(current_gl_context) = current_gl_context {
             profiling::scope!("is_current");
-            if gl_surface.is_current(current_gl_context) {
+            // On macOS, Surface::is_current only checks the context's attached
+            // NSView. AppKit can clear/change the thread's current context while
+            // that attachment remains intact. Check thread currency as well,
+            // otherwise texture uploads can run without a GL context and abort.
+            // Short-circuit before the surface query when no context is current.
+            if current_gl_context.is_current() && gl_surface.is_current(current_gl_context) {
                 return; // Early-out to save a lot of time.
             }
         }

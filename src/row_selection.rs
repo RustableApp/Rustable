@@ -8,10 +8,14 @@ pub(super) struct RowSelection {
     pub focused: Option<usize>,
     pub cell_column: usize,
     pub pending_cell_scroll: bool,
+    pub cell_columns: Option<(usize, usize)>,
+    pub drag_anchor: Option<(usize, Option<usize>)>,
 }
 impl RowSelection {
     pub fn clear(&mut self) {
         self.rows.clear();
+        self.cell_columns = None;
+        self.drag_anchor = None;
         self.anchor = None;
         self.pending_focus = None;
         self.focused = None;
@@ -25,6 +29,8 @@ impl RowSelection {
         command: bool,
         previous: Option<usize>,
     ) -> Option<usize> {
+        self.cell_columns = None;
+        self.drag_anchor = None;
         self.focused = Some(index);
         if self.rows.is_empty()
             && let Some(previous) = previous
@@ -60,6 +66,8 @@ impl RowSelection {
     }
 
     pub fn select_all(&mut self, count: usize, focused: usize) -> Option<usize> {
+        self.cell_columns = None;
+        self.drag_anchor = None;
         self.focused = (focused < count).then_some(focused);
         self.rows = (0..count).collect();
         self.anchor = (focused < count).then_some(focused);
@@ -81,10 +89,21 @@ impl RowSelection {
         } else {
             focused.saturating_sub(1)
         };
+        let cell_columns = self.cell_columns;
         self.click(next, shift, false, Some(focused));
+        self.cell_columns = cell_columns.map(|_| (self.cell_column, self.cell_column));
         self.pending_focus = Some(next);
         self.pending_cell_scroll = true;
         Some(next)
+    }
+
+    pub fn drag_to(&mut self, row: usize, column: usize) -> Option<usize> {
+        let (anchor, anchor_column) = self.drag_anchor?;
+        self.rows = (anchor.min(row)..=anchor.max(row)).collect();
+        self.focused = Some(row);
+        self.cell_column = column;
+        self.cell_columns = anchor_column.map(|start| (start.min(column), start.max(column)));
+        (self.rows.len() == 1).then_some(row)
     }
 
     pub fn copy_indices(&self, clicked: usize) -> Vec<usize> {

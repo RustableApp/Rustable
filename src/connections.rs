@@ -283,7 +283,7 @@ fn form_section(ui: &mut egui::Ui, title: &str) {
     ui.add_space(3.0);
 }
 
-fn form_row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) {
+fn form_row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         ui.allocate_ui_with_layout(egui::vec2(104.0, 28.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -292,8 +292,8 @@ fn form_row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui))
         ui.scope(|ui| {
             ui.set_min_width(ui.available_width());
             content(ui);
-        });
-    });
+        }).response
+    }).inner
 }
 
 fn status_row(
@@ -302,7 +302,7 @@ fn status_row(
     field: Option<ProbeField>,
     content: impl FnOnce(&mut egui::Ui),
 ) {
-    let response = ui.scope(|ui| form_row(ui, label, content)).response;
+    let response = form_row(ui, label, content);
     let status = field.and_then(|field| {
         ui.ctx()
             .data(|data| {
@@ -323,15 +323,14 @@ fn status_row(
             FieldStatus::Success => (Color32::from_rgb(45, 170, 95), "check", "Verified".to_owned()),
             FieldStatus::Failed(message) => (ui.visuals().error_fg_color, "circle-alert", message),
         };
-        let mut rect = response.rect;
-        rect.min.x += 152.0;
+        let rect = response.rect;
         ui.painter().rect_stroke(
             rect.shrink(0.5),
             6.0,
             egui::Stroke::new(1.2_f32, color),
             egui::StrokeKind::Inside,
         );
-        crate::icons::paint(ui.painter(), egui::pos2(response.rect.left() + 142.0, response.rect.center().y), icon, 14.0, color);
+        crate::icons::paint(ui.painter(), egui::pos2(rect.left() - 6.0, rect.center().y), icon, 10.0, color);
         response.on_hover_text(tooltip);
     }
 }
@@ -1659,6 +1658,27 @@ mod tests {
         assert!(app.pending.is_none());
         app
     }
+    #[test]
+    fn probe_outline_tracks_input_frame_after_layout_changes() {
+        for width in [300.0, 700.0] {
+            let ctx = egui::Context::default();
+            ctx.data_mut(|data| data.insert_temp(egui::Id::new("connection-probe-status"), vec![(ProbeField::Host, FieldStatus::Success)]));
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.set_max_width(width);
+                    form_text(ui, "Host", &mut "localhost".to_owned(), false, Some(ProbeField::Host));
+                });
+            });
+            let rects: Vec<_> = output.shapes.iter().filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r) => Some(r), _ => None,
+            }).collect();
+            let outline = rects.iter().find(|r| r.stroke.color == Color32::from_rgb(45, 170, 95)).unwrap();
+            let input = rects.iter().find(|r| r.fill == ctx.style().visuals.extreme_bg_color).unwrap();
+            assert!((outline.rect.min - input.rect.shrink(0.5).min).length() < 1.0, "outline {:?}, input {:?}", outline.rect, input.rect);
+            assert!((outline.rect.max - input.rect.shrink(0.5).max).length() < 1.0);
+        }
+    }
+
     #[test]
     fn port_text_is_compact_left_aligned_and_invalid_input_is_retained() {
         let ctx = egui::Context::default();

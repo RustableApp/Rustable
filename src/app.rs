@@ -4534,7 +4534,7 @@ impl Rustable {
                 let table_state_id = ui.id().with(egui::Id::new(table_salt));
                 let resize_intent_id = table_state_id.with("user-resized-columns");
                 let resized_columns = ui.ctx().data_mut(|data| data.remove_temp::<Vec<usize>>(resize_intent_id).unwrap_or_default());
-                let mut active_cell_overlay = None;
+                let mut selection_overlays = Vec::new();
                 let mut horizontal_scroll_target = None;
                 let mut builder = TableBuilder::new(ui)
                     .wheel_before_layout(true)
@@ -4655,20 +4655,55 @@ impl Rustable {
                             if index < grid.rows.len()
                                 && (!self.edit.as_ref().is_some_and(|e| !e.bulk_rows.is_empty()) || self.finish_cell_edit())
                             {
+                                let mut clicked_column = None;
                                 let mut right = origin.x;
                                 for (column, width) in widths.iter().enumerate() {
                                     right += width + ui.spacing().item_spacing.x;
                                     if pos.x < right {
-                                        if column > 0 { self.row_selection.cell_column = column - 1; }
+                                        if column > 0 { self.row_selection.cell_column = column - 1; clicked_column = Some(column - 1); }
                                         break;
                                     }
                                 }
                                 self.selected = if secondary { self.row_selection.context_click(index) } else { self.row_selection.click(index, modifiers.shift, modifiers.command,
                                     self.selected.filter(|i| *i < grid.rows.len())) };
+                                if !secondary && !modifiers.shift && !modifiers.command {
+                                    self.row_selection.cell_columns = clicked_column.map(|c| (c, c));
+                                    self.row_selection.drag_anchor = Some((index, clicked_column));
+                                }
                                 if self.edit.is_none() { grid_focus.request_focus(); }
                             }
                         }
+                        if self.row_selection.drag_anchor.is_some() && self.edit.is_none()
+                            && ui.is_enabled() && !ui.is_sizing_pass()
+                            && let Some(pos) = ui.input(|i| i.pointer.interact_pos())
+                            && table_clip.contains(pos) && pos.y >= origin.y
+                            && ui.input(|i| i.pointer.primary_down() && i.pointer.is_decidedly_dragging())
+                        {
+                            let index = ((pos.y - origin.y) / pitch).floor() as usize;
+                            let mut right = origin.x;
+                            let mut column = 0;
+                            for (i, width) in widths.iter().enumerate() {
+                                right += width + ui.spacing().item_spacing.x;
+                                column = i.saturating_sub(1);
+                                if pos.x < right { break; }
+                            }
+                            if index < grid.rows.len() {
+                                self.selected = self.row_selection.drag_to(index, column);
+                                grid_focus.request_focus();
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                        if !ui.input(|i| i.pointer.primary_down()) {
+                            self.row_selection.drag_anchor = None;
+                        }
                         paint_grid_backdrop(body.ui_mut(), &widths);
+                        paint_grid_selected_rows(body.ui_mut(), &widths,
+                            self.row_selection.rows.iter().copied().chain(self.selected.filter(|index| !self.row_selection.rows.contains(index)))
+                                .filter(|index| *index < grid.rows.len()));
+                        selection_overlays = grid_selection_rects(body.ui_mut(), &widths,
+                            self.row_selection.cell_columns,
+                            self.row_selection.rows.iter().copied().filter(|index| *index < grid.rows.len()))
+                            .into_iter().map(|rect| (rect, table_clip)).collect();
                         body.rows(22.0, grid.rows.len() + insert_ids.len(), |mut row| {
                             let index = row.index();
                             if index >= grid.rows.len() {
@@ -4689,7 +4724,8 @@ impl Rustable {
                                             })
                                         .to_string());
                             });
-                            row.set_selected(row_selected);
+                            // Selection was painted across the entire viewport, including blank columns.
+                            row.set_selected(false);
                             let mut released = false;
                             for (column, original_value) in grid.rows[index].iter().enumerate() {
                                 let staged = if self.view == View::Data { self.changes.iter().find_map(|change| match change {
@@ -4724,13 +4760,10 @@ impl Rustable {
                                     } else if staged.is_some() {
                                         paint_cell_background(ui, table_clip, pending_fill(ui));
                                     }
-                                    if active_cell {
-                                        active_cell_overlay = Some((ui.max_rect().expand2(ui.spacing().item_spacing * 0.5), table_clip));
-                                        if self.row_selection.pending_cell_scroll {
-                                            horizontal_scroll_target = Some(ui.max_rect());
-                                            ui.scroll_to_rect(ui.max_rect(), None);
-                                            self.row_selection.pending_cell_scroll = false;
-                                        }
+                                    if active_cell && self.row_selection.pending_cell_scroll {
+                                        horizontal_scroll_target = Some(ui.max_rect());
+                                        ui.scroll_to_rect(ui.max_rect(), None);
+                                        self.row_selection.pending_cell_scroll = false;
                                     }
                                     if editing {
                                         finish |= inline_value(ui, &mut self.edit);
@@ -4886,7 +4919,7 @@ impl Rustable {
                 // The table's vertical ScrollArea consumes child scroll requests;
                 // also forward the target to the enclosing horizontal ScrollArea.
                 if let Some(rect) = horizontal_scroll_target { ui.scroll_to_rect(rect, None); }
-                if let Some((rect, clip)) = active_cell_overlay { paint_active_cell(ui, rect, clip); }
+                for (rect, clip) in selection_overlays { paint_active_cell(ui, rect, clip); }
                 // TableBuilder applies drag/Fit geometry after the body callback.
                 // Record the intent now, and capture only those columns' resulting
                 // widths in the next frame. Layout changes alone are never saved.
@@ -5110,55 +5143,60 @@ impl Rustable {
             ui.label(if self.engine == "SQLite" { "This table has no separate indexes. SQLite rowid primary keys do not create a separate index." } else { "This table has no indexes." });
             return;
         }
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            TableBuilder::new(ui)
-                .id_salt(("indexes", self.active_table_tab, &self.browse.table))
-                .striped(true)
-                .resizable(true)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .sense(egui::Sense::click())
-                .column(TableColumn::initial(240.0).at_least(80.0).clip(true))
-                .column(TableColumn::initial(260.0).at_least(80.0).clip(true))
-                .column(TableColumn::initial(76.0).at_least(60.0).clip(true))
-                .column(TableColumn::initial(120.0).at_least(80.0).clip(true))
-                .column(TableColumn::initial(76.0).at_least(60.0).clip(true))
-                .header(25.0, |mut row| {
-                    for title in ["Name", "Columns", "Unique", "Origin", "Partial"] {
-                        row.col(|ui| {
-                            schema_cell(ui, RichText::new(title).strong());
-                        });
-                    }
-                })
-                .body(|body| {
-                    body.rows(24.0, self.indexes.len(), |mut row| {
-                        let i = row.index();
-                        let index = &self.indexes[i];
-                        row.set_hovered(false);
-                        row.set_selected(self.selected_index == Some(i));
-                        row.col(|ui| {
-                            schema_cell(ui, RichText::new(&index.name).monospace());
-                        });
-                        row.col(|ui| {
-                            schema_cell(ui, RichText::new(index.columns.join(", ")).monospace());
-                        });
-                        row.col(|ui| {
-                            ui.label(if index.unique { "YES" } else { "NO" });
-                        });
-                        row.col(|ui| {
-                            schema_cell(ui, RichText::new(match index.origin.as_str() {
-                                "pk" => "Primary key",
-                                "u" => "Constraint",
-                                _ => "Index",
-                            }));
-                        });
-                        row.col(|ui| {
-                            ui.label(if index.partial { "YES" } else { "NO" });
-                        });
-                        if primary_pressed(&row.response()) {
-                            self.selected_index = Some(i);
+        ui.scope(|ui| {
+            // Overlay the scrollbar instead of reserving an empty rail beside short lists.
+            ui.spacing_mut().scroll.floating = true;
+            ui.spacing_mut().scroll.floating_allocated_width = 0.0;
+            egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+                TableBuilder::new(ui)
+                    .id_salt(("indexes", self.active_table_tab, &self.browse.table))
+                    .striped(true)
+                    .resizable(true)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .sense(egui::Sense::click())
+                    .column(TableColumn::initial(240.0).at_least(80.0).clip(true))
+                    .column(TableColumn::initial(260.0).at_least(80.0).clip(true))
+                    .column(TableColumn::initial(76.0).at_least(60.0).clip(true))
+                    .column(TableColumn::initial(120.0).at_least(80.0).clip(true))
+                    .column(TableColumn::remainder().at_least(76.0).clip(true))
+                    .header(25.0, |mut row| {
+                        for title in ["Name", "Columns", "Unique", "Origin", "Partial"] {
+                            row.col(|ui| {
+                                index_cell(ui, RichText::new(title).strong());
+                            });
                         }
+                    })
+                    .body(|body| {
+                        body.rows(24.0, self.indexes.len(), |mut row| {
+                            let i = row.index();
+                            let index = &self.indexes[i];
+                            row.set_hovered(false);
+                            row.set_selected(self.selected_index == Some(i));
+                            row.col(|ui| {
+                                index_cell(ui, RichText::new(&index.name).monospace());
+                            });
+                            row.col(|ui| {
+                                index_cell(ui, RichText::new(index.columns.join(", ")).monospace());
+                            });
+                            row.col(|ui| {
+                                index_cell(ui, RichText::new(if index.unique { "YES" } else { "NO" }));
+                            });
+                            row.col(|ui| {
+                                index_cell(ui, RichText::new(match index.origin.as_str() {
+                                    "pk" => "Primary key",
+                                    "u" => "Constraint",
+                                    _ => "Index",
+                                }));
+                            });
+                            row.col(|ui| {
+                                index_cell(ui, RichText::new(if index.partial { "YES" } else { "NO" }));
+                            });
+                            if primary_pressed(&row.response()) {
+                                self.selected_index = Some(i);
+                            }
+                        });
                     });
-                });
+            });
         });
     }
 
@@ -6875,6 +6913,13 @@ pub(crate) fn with_grid_scrollbars(ui: &mut egui::Ui, render: impl FnOnce(&mut e
     ui.spacing_mut().scroll = previous;
 }
 
+fn index_cell(ui: &mut egui::Ui, text: RichText) -> egui::Response {
+    let rect = ui.max_rect().shrink2(egui::vec2(8.0, 0.0));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        schema_cell(ui, text)
+    }).inner
+}
+
 /// Metadata stays on one line; the complete value remains available on hover.
 fn schema_cell(ui: &mut egui::Ui, text: RichText) -> egui::Response {
     let full = text.text().to_owned();
@@ -6999,6 +7044,50 @@ pub(crate) fn paint_grid_backdrop(ui: &egui::Ui, widths: &[f32]) {
                 [egui::pos2(x, clip.top()), egui::pos2(x, clip.bottom())],
                 stroke,
             );
+        }
+    }
+}
+
+// Rows arrive in selection order (BTreeSet). Separate runs must stay separate:
+// enclosing a gap would imply that copying includes unselected rows.
+fn grid_selection_rects(ui: &egui::Ui, widths: &[f32], columns: Option<(usize, usize)>, rows: impl Iterator<Item = usize>) -> Vec<egui::Rect> {
+    if widths.len() < 2 { return Vec::new(); }
+    let last = widths.len() - 2;
+    let (first, end) = columns.unwrap_or((0, last));
+    if first > end || first > last { return Vec::new(); }
+    let spacing = ui.spacing().item_spacing;
+    let origin = ui.cursor().min;
+    let edge = |column: usize| origin.x - spacing.x * 0.5
+        + widths[..column].iter().map(|width| width + spacing.x).sum::<f32>();
+    let left = edge(first + 1);
+    let right = edge(end.min(last) + 2);
+    let pitch = 22.0 + spacing.y;
+    let mut rects: Vec<egui::Rect> = Vec::new();
+    let mut previous = None;
+    for row in rows {
+        let top = origin.y + row as f32 * pitch - spacing.y * 0.5;
+        if previous.is_some_and(|previous| row == previous + 1) {
+            rects.last_mut().unwrap().max.y = top + pitch;
+        } else {
+            rects.push(egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, top + pitch)));
+        }
+        previous = Some(row);
+    }
+    rects
+}
+
+fn paint_grid_selected_rows(ui: &egui::Ui, widths: &[f32], rows: impl Iterator<Item = usize>) {
+    let clip = ui.clip_rect();
+    let spacing = ui.spacing().item_spacing;
+    let origin = ui.cursor().min;
+    let left = (origin.x + widths.first().copied().unwrap_or(0.0) + spacing.x * 0.5)
+        .clamp(clip.left(), clip.right());
+    let pitch = 22.0 + spacing.y;
+    for index in rows {
+        let y = origin.y + index as f32 * pitch - spacing.y * 0.5;
+        let rect = egui::Rect::from_min_max(egui::pos2(left, y), egui::pos2(clip.right(), y + pitch)).intersect(clip);
+        if rect.is_positive() {
+            ui.painter().rect_filled(rect, 0.0, ui.visuals().selection.bg_fill);
         }
     }
 }
@@ -7466,6 +7555,58 @@ mod interaction_tests {
                     1
                 }
             );
+        }
+    }
+
+    #[test]
+    fn selection_outline_matches_cell_range_and_separate_full_rows() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let widths = [38.0, 100.0, 160.0, 80.0];
+                let spacing = ui.spacing().item_spacing;
+                let origin = ui.cursor().min;
+                let cells = grid_selection_rects(ui, &widths, Some((1, 2)), [0, 1, 2].into_iter());
+                assert_eq!(cells.len(), 1);
+                assert_eq!(cells[0].left(), origin.x + 138.0 + spacing.x * 1.5);
+                assert_eq!(cells[0].width(), 240.0 + spacing.x * 2.0);
+                assert_eq!(cells[0].height(), (22.0 + spacing.y) * 3.0);
+                let rows = grid_selection_rects(ui, &widths, None, [0, 2, 3].into_iter());
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].left(), origin.x + 38.0 + spacing.x * 0.5);
+                assert_eq!(rows[0].right(), cells[0].right());
+                assert_eq!(rows[0].height(), 22.0 + spacing.y);
+                assert_eq!(rows[1].height(), (22.0 + spacing.y) * 2.0);
+            });
+        });
+    }
+
+    #[test]
+    fn row_highlight_fills_blank_space_and_clips_scrolled_rows() {
+        for offset in [0.0, 80.0] {
+            let ctx = egui::Context::default();
+            let clip = egui::Rect::from_min_size(egui::pos2(20.0, 30.0), egui::vec2(600.0, 100.0));
+            let mut color = Color32::TRANSPARENT;
+            let mut left = 0.0;
+            let output = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(clip.translate(egui::vec2(-offset, -10.0))), |ui| {
+                        ui.set_clip_rect(clip);
+                        color = ui.visuals().selection.bg_fill;
+                        left = (ui.cursor().left() + 40.0 + ui.spacing().item_spacing.x * 0.5).max(clip.left());
+                        paint_grid_selected_rows(ui, &[40.0, 100.0], [0, 2, 100].into_iter());
+                    });
+                });
+            });
+            let rects: Vec<_> = output.shapes.iter().filter_map(|s| match &s.shape {
+                egui::Shape::Rect(r) if r.fill == color => Some(r.rect), _ => None,
+            }).collect();
+            assert_eq!(rects.len(), 2);
+            for rect in rects {
+                assert_eq!(rect.left(), left);
+                assert_eq!(rect.right(), clip.right());
+                assert!(clip.contains_rect(rect));
+            }
         }
     }
 

@@ -501,3 +501,28 @@ mod format_tests {
         assert!(copy(Format::CsvHeaders, Some(1)).starts_with("body\n"));
     }
 }
+
+/// Clipboard text uses literal values, with no export quoting or headers.
+pub(super) fn plain_cells<'a>(
+    columns: &[String], rows: impl IntoIterator<Item = &'a [Value]>,
+    changes: &[Change], table: Option<&str>, range: (usize, usize),
+) -> Result<String, String> {
+    let mut output = String::new();
+    for (row_index, row) in rows.into_iter().enumerate() {
+        if row_index > 0 { output.push('\n'); }
+        for (field_index, (i, original)) in row.iter().enumerate()
+            .filter(|(i, _)| (range.0..=range.1).contains(i)).enumerate()
+        {
+            if field_index > 0 { output.push('\t'); }
+            let value = changes.iter().find_map(|change| match change {
+                Change::Cell { table: target, column, original: source, value }
+                    if table == Some(target.as_str()) && columns.get(i) == Some(column) && source == row => Some(value),
+                _ => None,
+            }).unwrap_or(original);
+            let text = super::db::clipboard_text(value);
+            check_size(output.len().saturating_add(text.len()))?;
+            output.push_str(&text);
+        }
+    }
+    Ok(output)
+}

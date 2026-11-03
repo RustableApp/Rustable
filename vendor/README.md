@@ -87,6 +87,27 @@ a second session or cache displayed metadata across refreshes.
 
 ## eframe checked persistence
 
+### Native OpenGL context recovery
+
+`src/native/glow_integration.rs`: the context-switch fast path now requires
+both `PossiblyCurrentGlContext::is_current()` and `Surface::is_current()`.
+In glutin 0.32.3's macOS backend the latter only compares the attached NSView;
+it does not establish that the context is current on the calling thread.
+An AppKit callback can leave the attachment intact while clearing/changing
+the thread's current context. Skipping the rebind then makes `glGenTextures`
+return zero, causing egui_glow's texture allocation unwrap to abort in a native
+callback. Both ordinary and immediate viewport painting use this helper.
+The Windows always-rebind workaround is unchanged.
+
+Run `mise exec -- cargo run --locked --example macos_gl_context_recovery` on
+macOS with a graphical session. It queues fresh textures, clears the actual
+CGL thread context before paint, and verifies four successful paint callbacks
+with a current context and no GL error. Before this patch it reproduces the
+exact egui_glow 0.33.3 painter.rs:514 panic and non-unwinding SIGABRT observed
+in Sentry RUSTABLE-2; after the patch it exits successfully. This establishes
+the missing-context failure and recovery, not the precise OS sleep/wake event
+that cleared the context on the affected machine.
+
 `eframe 0.33.3` retains its upstream MIT/Apache licenses. The additive
 `Storage::flush_and_wait` method defaults to an unsupported error. Native
 FileStorage joins any earlier writer, writes the latest snapshot to a same-directory
