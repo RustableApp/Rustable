@@ -36,6 +36,31 @@ use std::{
     sync::{Arc, mpsc},
 };
 
+// A non-modal notification: errors remain available until explicitly dismissed.
+fn error_toast(ctx: &egui::Context, error: &str, actions: impl FnOnce(&mut egui::Ui)) -> bool {
+    let mut dismissed = false;
+    egui::Area::new(egui::Id::new("error-notification"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -48.0])
+        .order(egui::Order::Foreground).movable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).inner_margin(14).corner_radius(8).show(ui, |ui| {
+                ui.set_width((ctx.content_rect().width() - 64.0).clamp(120.0, 420.0));
+                ui.horizontal(|ui| {
+                    ui.colored_label(ui.visuals().error_fg_color, "Unable to complete action");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        dismissed = ui.small_button("×").on_hover_text("Dismiss error").clicked();
+                    });
+                });
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() * 0.35).clamp(60.0, 220.0)).show(ui, |ui| {
+                    ui.add(egui::Label::new(error).wrap().selectable(true));
+                });
+                actions(ui);
+            });
+        });
+    dismissed
+}
+
 const BLUE: Color32 = Color32::from_rgb(50, 104, 224);
 const MUTED: Color32 = Color32::from_rgb(125, 137, 156);
 const GREEN: Color32 = Color32::from_rgb(40, 145, 110);
@@ -190,6 +215,8 @@ struct QueryTab {
     chart: crate::result_chart::Chart,
     formatter: crate::sql_format::Formatter,
     result_error: Option<String>,
+    execution_source: Option<(String, usize)>,
+    error_highlight: Option<std::ops::Range<usize>>,
     result_search: crate::result_search::Search,
     result_grid_focus: Option<egui::Id>,
     pins: crate::result_pins::Pins,
@@ -209,6 +236,8 @@ impl QueryTab {
         }
     }
     fn refresh_dirty(&mut self) {
+        self.error_highlight = None;
+        self.execution_source = None;
         self.dirty = self
             .saved_sql
             .as_ref()
@@ -246,6 +275,8 @@ impl QueryTab {
             chart: Default::default(),
             formatter: Default::default(),
             result_error: None,
+            execution_source: None,
+            error_highlight: None,
             result_search: Default::default(),
             result_grid_focus: None,
             pins: Default::default(),
@@ -1221,7 +1252,12 @@ impl Rustable {
                         report.elapsed.as_secs_f64() * 1000.0
                     );
                     if let Some(Pending::Query(index)) = pending {
-                        self.tabs[index].result_view = if report.grids.is_empty() && report.error.is_some() { ResultView::Message } else { ResultView::Data };
+                        self.tabs[index].result_view = if report.error.is_some() { ResultView::Message } else { ResultView::Data };
+                        let tab = &mut self.tabs[index];
+                        tab.error_highlight = tab.execution_source.take().and_then(|(source, base)| {
+                            (source == tab.sql && report.error.is_some()).then_some(())?;
+                            crate::editor::error_token_range(&source, base.checked_add(report.error_offset?)?)
+                        });
                         self.tabs[index].result_error = report.error.clone();
                         self.tabs[index].results = report.grids;
                         self.tabs[index].result_index = 0;
@@ -1569,6 +1605,7 @@ impl Rustable {
         ) else {
             return;
         };
+        let source_offset = range.start + tab.sql[range.clone()].len() - tab.sql[range.clone()].trim_start().len();
         let sql = match self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)) {
             crate::sql::Dialect::Mysql(mode) => match crate::sql::mysql::execution_text(&tab.sql, range, mode) {
                 Ok(sql) => sql,
@@ -1579,6 +1616,8 @@ impl Rustable {
         if sql.is_empty() {
             return;
         }
+        self.tabs[self.tab].error_highlight = None;
+        self.tabs[self.tab].execution_source = Some((self.tabs[self.tab].sql.clone(), source_offset));
         self.prefs.history.retain(|s| s != &sql);
         self.prefs.history.insert(0, sql.clone());
         self.prefs.history.truncate(100);
@@ -2555,7 +2594,11 @@ impl Rustable {
         let id = egui::Id::new((ctx.viewport_id(), if compact { "compact-sidebar" } else { "sidebar" }));
         crate::pane_sizes::restore(ctx, id, self.prefs.pane_sizes.sidebar, 220.0, 0);
         let width = ctx.available_rect().width();
+        let mut frame = egui::Frame::side_top_panel(&ctx.style());
+        // Match the gap below the section buttons (normal spacing plus 4 px).
+        frame.inner_margin.top = (ctx.style().spacing.item_spacing.y + 4.0).round() as i8;
         egui::SidePanel::left(id)
+            .frame(frame)
             .resizable(!compact)
             .default_width(if compact { width } else { 220.0 })
             .width_range(if compact { width..=width } else { 160.0..=360.0 })
@@ -2976,28 +3019,6 @@ impl Rustable {
             if let Some(index) = close {
                 self.close_tab(index);
             }
-            if let Some(error) = self.error.clone() {
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(100, 38, 40))
-                    .inner_margin(10.0)
-                    .corner_radius(5.0)
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(error).color(Color32::WHITE));
-                            #[cfg(target_arch = "wasm32")]
-                            if self.worker.transaction_state() == db::TransactionState::Disconnected
-                                && ui.add_enabled(self.changes.is_empty() && self.edit.is_none(), egui::Button::new("Start fresh demo"))
-                                    .on_hover_text("Starts a new disposable database. Discard any staged edits first. Saved queries remain in this browser.")
-                                    .clicked() {
-                                self.dispatch(Command::Open(None), Pending::Connect(None));
-                            }
-                            if ui.small_button("Dismiss").clicked() {
-                                self.error = None;
-                            }
-                        });
-                    });
-                ui.add_space(8.0);
-            }
             if self.view == View::Query {
                 let has_results = !self.tabs[self.tab].results.is_empty()
                     || self.tabs[self.tab].result_error.is_some()
@@ -3010,6 +3031,7 @@ impl Rustable {
                 let editor_id = egui::Id::new((ctx.viewport_id(), "query-editor-pane"));
                 crate::pane_sizes::restore(ctx, editor_id, self.prefs.pane_sizes.query_editor, 260.0, 1);
                 egui::TopBottomPanel::top(editor_id)
+                    .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(0))
                     .resizable(true)
                     .default_height(260.0)
                     .height_range(120.0..=max_height)
@@ -3407,27 +3429,28 @@ impl Rustable {
     fn query_result_message(&self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.tab];
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(8.0);
-            if tab.selected_pin.is_none() && matches!(self.pending, Some(Pending::Query(index)) if index == self.tab) {
-                ui.label("Running query…");
-                return;
-            }
-            if tab.results.is_empty() && tab.selected_pin.is_none() {
-                if let Some(error) = &tab.result_error {
-                    ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
+            egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
+                if tab.selected_pin.is_none() && matches!(self.pending, Some(Pending::Query(index)) if index == self.tab) {
+                    ui.label("Running query…");
+                    return;
                 }
-                return;
-            }
-            ui.label(format!("Statement {} completed in {:.1} ms.", tab.selected_pin.map_or(tab.result_index, |index| tab.pins.items[index].statement) + 1, tab.grid.elapsed.as_secs_f64() * 1000.0));
-            ui.label(if tab.grid.columns.is_empty() {
-                format!("{} {} affected.", tab.grid.affected, if tab.grid.affected == 1 { "row" } else { "rows" })
-            } else {
-                format!("{} {} returned{}.", tab.grid.rows.len(), if tab.grid.rows.len() == 1 { "row" } else { "rows" }, if tab.grid.truncated { "; result limit reached" } else { "" })
+                if tab.results.is_empty() && tab.selected_pin.is_none() {
+                    if let Some(error) = &tab.result_error {
+                        ui.add(egui::Label::new(RichText::new(error).color(ui.visuals().error_fg_color)).wrap().selectable(true));
+                    }
+                    return;
+                }
+                ui.label(format!("Statement {} completed in {:.1} ms.", tab.selected_pin.map_or(tab.result_index, |index| tab.pins.items[index].statement) + 1, tab.grid.elapsed.as_secs_f64() * 1000.0));
+                ui.label(if tab.grid.columns.is_empty() {
+                    format!("{} {} affected.", tab.grid.affected, if tab.grid.affected == 1 { "row" } else { "rows" })
+                } else {
+                    format!("{} {} returned{}.", tab.grid.rows.len(), if tab.grid.rows.len() == 1 { "row" } else { "rows" }, if tab.grid.truncated { "; result limit reached" } else { "" })
+                });
+                if let Some(error) = &tab.result_error && tab.selected_pin.is_none() {
+                    ui.add_space(8.0);
+                    ui.add(egui::Label::new(RichText::new(error).color(ui.visuals().error_fg_color)).wrap().selectable(true));
+                }
             });
-            if let Some(error) = &tab.result_error && tab.selected_pin.is_none() {
-                ui.add_space(8.0);
-                ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
-            }
         });
     }
 
@@ -3683,9 +3706,6 @@ impl Rustable {
             tab.completion
                 .receive_server(&tab.sql, tab.cursor.start, &items);
         }
-        if let crate::sql::Dialect::Mysql(mode) = self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)) {
-            self.language.check_mysql(&tab.sql, mode);
-        }
         let search_action = {
             let tab = &mut self.tabs[self.tab];
             let was_open = tab.search.open;
@@ -3703,10 +3723,6 @@ impl Rustable {
             36.0
         } else {
             76.0
-        } + if self.language.diagnostics.is_empty() {
-            0.0
-        } else {
-            22.0
         };
         let editor_height = (ui.available_height() - footer_height).max(0.0);
         let line_index = crate::editor::line_index(ui.ctx(), &self.tabs[self.tab].sql);
@@ -3767,7 +3783,7 @@ impl Rustable {
                                 .id_salt(("query-editor", tab.id))
                                 .font(egui::TextStyle::Monospace)
                                 .code_editor()
-                                .layouter(&mut crate::editor::layout)
+                                .layouter(&mut crate::editor::editor_layout)
                                 .desired_rows(1)
                                 .min_size(egui::vec2(0.0, editor_height))
                                 .vertical_align(egui::Align::Min)
@@ -3834,7 +3850,9 @@ impl Rustable {
                                 tab.cursor.clone(),
                                 self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)),
                             );
-                            self.language.paint(ui, &output, &tab.sql);
+                            if let Some(range) = &tab.error_highlight {
+                                crate::editor::paint_query_error(ui, &output, range.clone());
+                            }
                             if tab.focus_editor && ui.is_enabled() {
                                 output.response.request_focus();
                                 tab.focus_editor = false;
@@ -3912,34 +3930,6 @@ impl Rustable {
             );
         });
         ui.add_space(4.0);
-        if !self.language.diagnostics.is_empty() {
-            let message = &self.language.diagnostics[0].message;
-            ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(format!(
-                    "{} · {} diagnostic{}",
-                    message.lines().next().unwrap_or("SQL diagnostic"),
-                    self.language.diagnostics.len(),
-                    if self.language.diagnostics.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                ))
-                .small()
-                .color(ui.visuals().warn_fg_color),
-            )
-            .on_hover_text(
-                self.language
-                    .diagnostics
-                    .iter()
-                    .map(|item| item.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-            });
-        }
         let current = crate::editor::line_index(ui.ctx(), &self.tabs[self.tab].sql);
         let (line, column) = current.line_column(active_caret);
         ui.horizontal(|ui| {
@@ -5006,8 +4996,19 @@ impl Rustable {
             self.browse.cycle_sort(column);
             self.refresh();
         }
-        if finish {
-            self.finish_cell_edit();
+        if finish && self.finish_cell_edit()
+            && self.edit.is_none()
+            && ui.memory(|memory| memory.focused().is_none() || memory.has_focus(grid_focus.id))
+        {
+            // Enter/blur stages the value after row rendering, so the row's
+            // release handler could not restore focus while the editor existed.
+            // Leave focus alone when the user moved into another input.
+            grid_focus.request_focus();
+            ui.memory_mut(|memory| memory.set_focus_lock_filter(grid_focus.id, egui::EventFilter {
+                horizontal_arrows: true, vertical_arrows: true, tab: true,
+                ..Default::default()
+            }));
+            ui.ctx().request_repaint();
         }
         if edit.is_some() && self.finish_cell_edit() {
             self.edit = edit;
@@ -6027,6 +6028,25 @@ impl Rustable {
         self.toolbar(ctx);
         self.frame_ms = start.elapsed().as_secs_f32() * 1000.0;
     }
+    fn workspace_error_toast(&mut self, ctx: &egui::Context) {
+        // Query failures already have a persistent home in their results pane.
+        let duplicate = self.view == View::Query && self.tabs[self.tab].selected_pin.is_none()
+            && self.error.is_some() && self.error == self.tabs[self.tab].result_error;
+        if duplicate || self.review.is_some() || self.csv_review.is_some() || self.connections { return; }
+        if let Some(error) = self.error.clone() {
+            let dismissed = error_toast(ctx, &error, |ui| {
+                #[cfg(target_arch = "wasm32")]
+                if self.worker.transaction_state() == db::TransactionState::Disconnected
+                    && ui.add_enabled(self.changes.is_empty() && self.edit.is_none(), egui::Button::new("Start fresh demo")).clicked() {
+                    self.dispatch(Command::Open(None), Pending::Connect(None));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                let _ = ui;
+            });
+            if dismissed { self.error = None; }
+        }
+    }
+
     pub(crate) fn render_workspace_frame(&mut self, ctx: &egui::Context) {
         #[cfg(target_arch = "wasm32")]
         if self.redis_demo_active {
@@ -6078,6 +6098,7 @@ impl Rustable {
             // The spinner needs animation only while a task is active.
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
+        self.workspace_error_toast(ctx);
         self.frame_ms += start.elapsed().as_secs_f32() * 1000.0;
     }
 
@@ -6175,7 +6196,14 @@ fn toolbar_action(ui: &mut egui::Ui, kind: u8, selected: bool) -> egui::Response
 }
 
 fn apply_formatted_sql(tab: &mut QueryTab, formatted: crate::sql_format::Formatted, state: &mut egui::text_edit::TextEditState) {
-    if tab.sql != formatted.original || tab.sql == formatted.text { return; }
+    if tab.sql != formatted.original { return; }
+    if tab.sql == formatted.text {
+        tab.cursor = formatted.selection;
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(tab.cursor.start), egui::text::CCursor::new(tab.cursor.end))));
+        tab.focus_editor = true;
+        return;
+    }
     let mut undoer = state.undoer();
     let before = egui::text::CCursorRange::two(egui::text::CCursor::new(tab.cursor.start), egui::text::CCursor::new(tab.cursor.end));
     undoer.add_undo(&(before, tab.sql.clone()));
@@ -9283,6 +9311,9 @@ mod workspace_layout_tests {
         let formatted = app.tabs[0].sql.clone();
         assert_ne!(formatted, original);
         assert!(formatted.contains('\n'));
+        let end = formatted.chars().count();
+        assert_eq!(app.tabs[0].cursor, end..end);
+
         frame(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
         assert_eq!(app.tabs[0].sql, original);
         frame(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
@@ -9739,6 +9770,8 @@ mod workspace_layout_tests {
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| app.query_result_message(ui));
         });
+        assert!(output.shapes.iter().any(|clipped| matches!(&clipped.shape,
+            egui::Shape::Text(text) if text.galley.text() == "syntax error" && text.pos.x >= 22.0 && text.pos.y >= 20.0)));
         positions.clear();
         for clipped in output.shapes { text_positions(&clipped.shape, &mut positions); }
         assert!(positions.iter().any(|(text, _)| text == "syntax error"));
@@ -9945,6 +9978,49 @@ mod workspace_layout_tests {
             .1;
         assert!(run_y > 650.0, "editor left unused vertical space: {run_y}");
         assert!(run_y < 850.0, "run controls escaped viewport: {run_y}");
+    }
+
+    #[test]
+    fn query_text_stays_anchored_when_results_appear() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
+        app.view = View::Query;
+        app.prefs.activity_visible = false;
+        app.tabs[0].sql = "SELECT 47 AS anchor_check".into();
+        let frame = |app: &mut Rustable| {
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 850.0))),
+                ..Default::default()
+            }, |ctx| app.workspace(ctx));
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "SELECT 47 AS anchor_check" => Some(text.pos),
+                _ => None,
+            }).expect("query text")
+        };
+        frame(&mut app);
+        let before = frame(&mut app);
+        app.pending = Some(Pending::Query(0));
+        for _ in 0..3 { assert_eq!(frame(&mut app), before, "starting a query must not shift the text"); }
+        app.pending = None;
+        app.tabs[0].results.push(Arc::new(Grid::default()));
+        for _ in 0..3 { assert_eq!(frame(&mut app), before, "results must not shift the text"); }
+        app.error = Some("query failed".into());
+        app.tabs[0].result_error = app.error.clone();
+        app.tabs[0].result_view = ResultView::Message;
+        for _ in 0..3 { assert_eq!(frame(&mut app), before, "errors must not shift the text"); }
+        app.connections = false;
+        for _ in 0..2 {
+            let output = ctx.run(Default::default(), |ctx| {
+                app.workspace(ctx);
+                app.workspace_error_toast(ctx);
+            });
+            let mut texts = Vec::new();
+            for clipped in output.shapes { text_positions(&clipped.shape, &mut texts); }
+            assert_eq!(texts.iter().filter(|(text, _)| text == "query failed").count(), 1);
+            assert!(!texts.iter().any(|(text, _)| text == "Unable to complete action"));
+        }
+
     }
 
     #[test]
@@ -12290,6 +12366,56 @@ mod mysql_editor_mode_tests {
         assert_eq!(observer.query_first::<String,_>("SELECT label FROM ui_edit_probe").unwrap().as_deref(), Some("external edit"));
         assert_eq!(app.worker.transaction_state(), db::TransactionState::Idle);
         observer.query_drop("DROP TABLE ui_edit_probe").unwrap();
+    }
+
+    #[test]
+    fn query_error_highlight_maps_selected_text_and_clears_on_edit() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.connections = false;
+        app.show_query();
+        let source = "SELECT '😀';\n  SELECT * FRM missing;";
+        app.tabs[0].sql = source.into();
+        let start = source.find("  SELECT").unwrap();
+        let char_start = source[..start].chars().count();
+        app.tabs[0].cursor = char_start..source.chars().count();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.worker.rx = receiver;
+        app.run_query(false);
+        assert!(app.tabs[0].error_highlight.is_none(), "typing never marks errors");
+        app.pending = Some(Pending::Query(0)); // Pair the injected reply with its editor tab.
+        sender.send(Ok(Payload::Query {
+            dialect: crate::sql::Dialect::Sqlite,
+            report: db::ScriptResult { error: Some("syntax error".into()), error_offset: Some(9), ..Default::default() },
+            objects: None, schemas: Default::default(),
+        })).unwrap();
+        app.poll();
+        let range = app.tabs[0].error_highlight.clone().expect("failed run highlights reported token");
+        assert_eq!(source.chars().skip(range.start).take(range.len()).collect::<String>(), "FRM");
+        app.tabs[0].sql.push(' ');
+        app.tabs[0].refresh_dirty();
+        assert!(app.tabs[0].error_highlight.is_none());
+        assert!(app.tabs[0].result_error.is_some(), "execution message remains available");
+        app.run_query(true);
+        app.tabs[0].sql.push(' ');
+        app.tabs[0].refresh_dirty();
+        app.pending = Some(Pending::Query(0)); // Pair the injected reply with its editor tab.
+        sender.send(Ok(Payload::Query {
+            dialect: crate::sql::Dialect::Sqlite,
+            report: db::ScriptResult { error: Some("late error".into()), error_offset: Some(0), ..Default::default() },
+            objects: None, schemas: Default::default(),
+        })).unwrap();
+        app.poll();
+        assert!(app.tabs[0].error_highlight.is_none(), "late errors must not highlight edited SQL");
+        app.run_query(true);
+        app.pending = Some(Pending::Query(0)); // Pair the injected reply with its editor tab.
+        sender.send(Ok(Payload::Query {
+            dialect: crate::sql::Dialect::Sqlite, report: Default::default(),
+            objects: None, schemas: Default::default(),
+        })).unwrap();
+        app.poll();
+        assert!(app.tabs[0].error_highlight.is_none());
+        assert!(app.tabs[0].result_error.is_none());
     }
 
     #[test]

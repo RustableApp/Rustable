@@ -575,8 +575,7 @@ impl Rustable {
                         });
                     }
                 let show_toolbar = can_return || cfg!(any(target_arch = "wasm32", feature = "qa"));
-                let show_header = show_toolbar || self.connection_manager.import_notice.is_some()
-                    || self.error.is_some() || self.connection_manager.error.is_some();
+                let show_header = show_toolbar || self.connection_manager.import_notice.is_some();
                 if let Some(notice) = &self.connection_manager.import_notice { ui.label(notice); }
                 if show_toolbar {
                 ui.horizontal(|ui| {
@@ -600,15 +599,6 @@ impl Rustable {
                         self.connections = false;
                     }
                 });
-                }
-                if let Some(error) = self.error.clone() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(ui.visuals().error_fg_color, error);
-                        if ui.small_button("Dismiss").clicked() { self.error = None; }
-                    });
-                }
-                if let Some(error) = &self.connection_manager.error {
-                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if show_header { ui.separator(); }
                 if self.prefs.saved_connections.profiles.is_empty()
@@ -1081,6 +1071,11 @@ impl Rustable {
                 self.connection_manager.error = Some(error);
             }
         }
+        if let Some(error) = self.connection_manager.error.as_ref().or(self.error.as_ref())
+            && super::error_toast(ctx, error, |_| {}) {
+            if self.connection_manager.error.is_some() { self.connection_manager.error = None; }
+            else { self.error = None; }
+        }
     }
 
     fn connection_search_navigation(&self, ctx: &egui::Context) -> Option<ProfileId> {
@@ -1541,6 +1536,7 @@ fn ssh_form(ui: &mut egui::Ui, options: &mut Option<SshOptions>, generation: u64
             .unwrap_or_else(|| if ssh.port == 0 { String::new() } else { ssh.port.to_string() });
         status_row(ui, "Port", Some(ProbeField::SshPort), |ui| {
             ui.add_sized([120.0, 28.0], TextEdit::singleline(&mut port)
+                .vertical_align(egui::Align::Center)
                 .hint_text(if use_config { "From config" } else { "22" }));
         });
         if port.trim().is_empty() { ssh.port = 0; }

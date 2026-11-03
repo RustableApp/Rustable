@@ -2,7 +2,7 @@
 use eframe::egui::{self, Color32, FontId};
 #[path = "sql_highlight.rs"]
 mod sql_highlight;
-pub use sql_highlight::{layout, preview};
+pub use sql_highlight::{editor_layout, layout, preview};
 
 #[derive(Default)]
 struct TargetComputer;
@@ -56,24 +56,9 @@ pub fn paint_execution_target(
         if start < end {
             let local_start = start - row_start;
             let local_end = end - row_start;
-            // Full-line shading for standalone statements; exact text spans when
-            // two statements share a line, so the other query is never implied.
-            let x1 = if row.glyphs[..local_start]
-                .iter()
-                .all(|g| g.chr.is_whitespace())
-            {
-                clip.left()
-            } else {
-                output.galley_pos.x + row.pos.x + row.x_offset(local_start)
-            };
-            let x2 = if row.glyphs[local_end..]
-                .iter()
-                .all(|g| g.chr.is_whitespace())
-            {
-                clip.right()
-            } else {
-                output.galley_pos.x + row.pos.x + row.x_offset(local_end)
-            };
+            // Follow the statement's actual text span on each visual row.
+            let x1 = output.galley_pos.x + row.pos.x + row.x_offset(local_start);
+            let x2 = output.galley_pos.x + row.pos.x + row.x_offset(local_end);
             let rect = egui::Rect::from_min_max(
                 egui::pos2(x1, output.galley_pos.y + row.pos.y),
                 egui::pos2(x2, output.galley_pos.y + row.pos.y + row.size.y),
@@ -86,6 +71,44 @@ pub fn paint_execution_target(
         row_start = row_end + usize::from(row.ends_with_newline);
     }
     ui.painter().set(slot, egui::Shape::Vec(shapes));
+}
+
+/// Database offsets are UTF-8 bytes; the editor paints Unicode character ranges.
+pub fn error_token_range(sql: &str, offset: usize) -> Option<std::ops::Range<usize>> {
+    if offset > sql.len() || !sql.is_char_boundary(offset) || sql.is_empty() { return None; }
+    let chars: Vec<char> = sql.chars().collect();
+    let start = sql[..offset].chars().count().min(chars.len() - 1);
+    let mut end = start + 1;
+    let first = chars[start];
+    if matches!(first, '\'' | '"' | '`') {
+        while end < chars.len() {
+            if chars[end] == first {
+                end += 1;
+                if chars.get(end) == Some(&first) { end += 1; } else { break; }
+            } else { end += 1; }
+        }
+    } else if first.is_alphanumeric() || first == '_' {
+        while end < chars.len() && (chars[end].is_alphanumeric() || matches!(chars[end], '_' | '$')) { end += 1; }
+    }
+    Some(start..end)
+}
+
+pub fn paint_query_error(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput, range: std::ops::Range<usize>) {
+    let painter = ui.painter().with_clip_rect(output.text_clip_rect.intersect(ui.clip_rect()));
+    let color = Color32::from_rgba_unmultiplied(220, 50, 65, 100);
+    let mut row_start = 0;
+    for row in &output.galley.rows {
+        let row_end = row_start + row.glyphs.len();
+        let start = range.start.max(row_start);
+        let end = range.end.min(row_end);
+        if start < end {
+            let left = output.galley_pos.x + row.pos.x + row.x_offset(start - row_start);
+            let right = output.galley_pos.x + row.pos.x + row.x_offset(end - row_start);
+            let top = output.galley_pos.y + row.pos.y;
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right.max(left + 4.0), top + row.size.y)), 0.0, color);
+        }
+        row_start = row_end + usize::from(row.ends_with_newline);
+    }
 }
 
 /// Character offsets match egui cursors (not UTF-8 byte offsets).
@@ -158,7 +181,7 @@ pub fn paint_line_numbers(
                 egui::pos2(gutter.right() - 8.0, top + row.size.y / 2.0),
                 egui::Align2::RIGHT_CENTER,
                 line.to_string(),
-                FontId::monospace(13.0),
+                FontId::monospace(14.0),
                 color,
             );
         }
@@ -173,6 +196,18 @@ pub fn paint_line_numbers(
 mod line_tests {
     use super::*;
     #[test]
+    fn database_error_tokens_use_character_ranges() {
+        let sql = "SELECT '😀'; SELECT * \"public\".block";
+        let start = sql.find('"').unwrap();
+        let range = error_token_range(sql, start).unwrap();
+        assert_eq!(sql.chars().skip(range.start).take(range.len()).collect::<String>(), "\"public\"");
+        assert!(error_token_range(sql, sql.find('😀').unwrap() + 1).is_none());
+        assert!(error_token_range(sql, sql.len() + 1).is_none());
+        assert!(error_token_range("", 0).is_none());
+        assert_eq!(error_token_range("SELKE", 0), Some(0..5));
+    }
+
+    #[test]
     fn empty_editor_first_line_has_full_font_height_and_unclipped_number() {
         let ctx = egui::Context::default();
         let mut text = String::new();
@@ -182,7 +217,7 @@ mod line_tests {
                     let (gutter, _) =
                         ui.allocate_exact_size(egui::vec2(40.0, 200.0), egui::Sense::hover());
                     let editor = egui::TextEdit::multiline(&mut text)
-                        .layouter(&mut layout)
+                        .layouter(&mut editor_layout)
                         .show(ui);
                     assert!(editor.galley.rows[0].size.y >= 13.0);
                     paint_line_numbers(ui, gutter, &editor, 1);

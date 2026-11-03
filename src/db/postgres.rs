@@ -299,7 +299,14 @@ impl Driver for PostgresDriver {
                         std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
                         prefix,
                     )
-                    .map_err(error)?;
+                    .map_err(|err| {
+                        if let Some(::postgres::error::ErrorPosition::Original(position)) = err.as_db_error().and_then(|error| error.position()) {
+                            let local = statement.char_indices().nth(position.saturating_sub(1) as usize)
+                                .map_or(statement.len(), |(byte, _)| byte);
+                            report.error_offset = Some(statement.as_ptr() as usize - sql.as_ptr() as usize + local);
+                        }
+                        error(err)
+                    })?;
                 let columns = rows
                     .columns()
                     .iter()

@@ -14,15 +14,20 @@ pub fn layout(
     text: &dyn egui::TextBuffer,
     width: f32,
 ) -> std::sync::Arc<egui::Galley> {
-    layout_rows(ui, text, width, usize::MAX)
+    layout_rows(ui, text, width, usize::MAX, false)
+}
+
+/// Roomier typography for the editable SQL pane; compact previews retain their density.
+pub fn editor_layout(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32) -> std::sync::Arc<egui::Galley> {
+    layout_rows(ui, text, width, usize::MAX, true)
 }
 
 /// Compact highlighted preview with whole lines and an overflow ellipsis.
 pub fn preview(ui: &egui::Ui, text: &str, width: f32) -> std::sync::Arc<egui::Galley> {
-    layout_rows(ui, &text, width, 2)
+    layout_rows(ui, &text, width, 2, false)
 }
 
-fn layout_rows(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32, max_rows: usize) -> std::sync::Arc<egui::Galley> {
+fn layout_rows(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32, max_rows: usize, editor: bool) -> std::sync::Arc<egui::Galley> {
     type Cache = egui::cache::FrameCache<LayoutJob, Highlighter>;
     let mut job = ui.ctx().memory_mut(|memory| {
         memory
@@ -30,6 +35,12 @@ fn layout_rows(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32, max_rows:
             .cache::<Cache>()
             .get((text.as_str(), ui.visuals().dark_mode))
     });
+    if editor {
+        for section in &mut job.sections {
+            section.format.font_id = FontId::monospace(14.0);
+            section.format.line_height = Some(18.0);
+        }
+    }
     job.wrap.max_width = width.max(1.0);
     job.wrap.max_rows = max_rows;
     ui.fonts_mut(|fonts| fonts.layout_job(job))

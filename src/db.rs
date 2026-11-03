@@ -232,6 +232,8 @@ impl From<TableData> for Payload {
 #[derive(Debug, Default)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScriptResult {
+    /// UTF-8 byte offset in the submitted script, only when reported by the database.
+    pub error_offset: Option<usize>,
     pub grids: Vec<Arc<Grid>>,
     pub error: Option<String>,
     pub elapsed: Duration,

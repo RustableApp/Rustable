@@ -13,14 +13,7 @@ pub struct LanguageSession {
     started: bool,
     version: u64,
     document: Option<Document>,
-    mysql_checked: Option<(u64, crate::sql::mysql::Mode)>,
     pub status: String,
-    pub diagnostics: Vec<Diagnostic>,
-}
-pub struct Diagnostic {
-    pub range: std::ops::Range<usize>,
-    pub message: String,
-    pub error: bool,
 }
 impl LanguageSession {
     pub fn invalidate(&mut self) {
@@ -70,7 +63,6 @@ impl LanguageSession {
             .is_none_or(|doc| doc.id != id || doc.text != sql || doc.cursor != cursor)
         {
             self.version = self.version.wrapping_add(1);
-            self.diagnostics.clear();
             let doc = Document {
                 id,
                 version: self.version,
@@ -100,32 +92,8 @@ impl LanguageSession {
                     } if engine != "PostgreSQL" && self.matches(response_id, version) => {
                         completions = Some(items)
                     }
-                    Event::Diagnostics {
-                        id: response_id,
-                        version,
-                        items,
-                    } if self.matches(response_id, version) => {
-                        self.diagnostics = items
-                            .iter()
-                            .take(64)
-                            .filter_map(|item| {
-                                Some(Diagnostic {
-                                    range: range(sql, item.get("range")?)?,
-                                    message: item
-                                        .get("message")?
-                                        .as_str()?
-                                        .chars()
-                                        .take(2000)
-                                        .collect(),
-                                    error: item
-                                        .get("severity")
-                                        .and_then(Value::as_u64)
-                                        .unwrap_or(1)
-                                        == 1,
-                                })
-                            })
-                            .collect();
-                    }
+                    // Diagnostics are intentionally not shown while typing.
+                    Event::Diagnostics { id, version, items } => { let _ = (id, version, items); }
                     _ => {}
                 }
             }
@@ -146,64 +114,12 @@ impl LanguageSession {
         }
         completions
     }
-    pub fn check_mysql(&mut self, sql: &str, mode: crate::sql::mysql::Mode) {
-        if self.mysql_checked == Some((self.version, mode)) { return; }
-        self.mysql_checked = Some((self.version, mode));
-        self.status = if sql.len() > 64 * 1024 {
-            "Catalog suggestions · lexical checks skipped above 64 KiB"
-        } else {
-            "Catalog suggestions · quote/comment checks in current session mode; no full SQL diagnostics"
-        }.into();
-        self.diagnostics = crate::sql::mysql::lexical_error(sql, mode).map(|error| Diagnostic {
-            range: sql[..error.range.start].chars().count()..sql[..error.range.end].chars().count(),
-            message: error.message,
-            error: false,
-        }).into_iter().collect();
-    }
     fn matches(&self, id: u64, version: u64) -> bool {
         self.document
             .as_ref()
             .is_some_and(|doc| doc.id == id && doc.version == version)
     }
-    pub fn paint(&self, ui: &egui::Ui, output: &egui::text_edit::TextEditOutput, sql: &str) {
-        if self.document.as_ref().is_none_or(|doc| doc.text != sql) {
-            return;
-        }
-        for diagnostic in &self.diagnostics {
-            let start = output
-                .galley
-                .pos_from_cursor(egui::text::CCursor::new(diagnostic.range.start))
-                .translate(output.galley_pos.to_vec2());
-            let end = output
-                .galley
-                .pos_from_cursor(egui::text::CCursor::new(diagnostic.range.end))
-                .translate(output.galley_pos.to_vec2());
-            if !ui.clip_rect().intersects(start) {
-                continue;
-            }
-            let right = if (start.top() - end.top()).abs() < 1.0 {
-                end.left().max(start.left() + 6.0)
-            } else {
-                output.response.rect.right()
-            };
-            let color = if diagnostic.error {
-                ui.visuals().error_fg_color
-            } else {
-                ui.visuals().warn_fg_color
-            };
-            ui.painter().line_segment(
-                [start.left_bottom(), egui::pos2(right, start.bottom())],
-                egui::Stroke::new(1.0_f32, color),
-            );
-            let rect = egui::Rect::from_min_max(start.min, egui::pos2(right, start.bottom()));
-            ui.interact(
-                rect,
-                ui.id().with(("sql-diagnostic", diagnostic.range.start)),
-                egui::Sense::hover(),
-            )
-            .on_hover_text(&diagnostic.message);
-        }
-    }
+
 }
 
 /// LSP positions count UTF-16 code units, egui counts Unicode scalar values.
@@ -237,36 +153,6 @@ pub fn range(text: &str, value: &Value) -> Option<std::ops::Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn mysql_lexical_diagnostics_follow_text_cursor_and_session_mode() {
-        let ctx = egui::Context::default();
-        let mut session = LanguageSession::default();
-        let mode = crate::sql::mysql::Mode::default();
-        let sql = "SELECT '😀', 'a\\'; SELECT 2;";
-        session.update(&ctx, "MariaDB", &[], 1, sql, 0);
-        session.check_mysql(sql, mode);
-        assert_eq!(session.diagnostics.len(), 1);
-        assert_eq!(session.diagnostics[0].range, 12..sql.chars().count());
-        assert!(!session.diagnostics[0].error);
-        assert!(session.worker.is_none());
-        session.check_mysql(sql, crate::sql::mysql::Mode { no_backslash_escapes: true, ..mode });
-        assert!(session.diagnostics.is_empty());
-        // Moving the caret clears LSP diagnostics; the lexical check must restore its warning.
-        session.update(&ctx, "MariaDB", &[], 1, sql, 4);
-        session.check_mysql(sql, mode);
-        assert_eq!(session.diagnostics.len(), 1);
-        for valid in ["SELECT 'closed'", "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$"] {
-            session.update(&ctx, "MySQL", &[], 2, valid, 0);
-            session.check_mysql(valid, mode);
-            assert!(session.diagnostics.is_empty(), "{valid}");
-        }
-        let large = format!("SELECT '{}'", "x".repeat(65536));
-        session.update(&ctx, "MySQL", &[], 3, &large, 0);
-        session.check_mysql(&large, mode);
-        assert!(session.diagnostics.is_empty());
-        assert!(session.status.contains("skipped"));
-    }
-
     #[test]
     fn utf16_positions_reject_surrogate_midpoints_and_out_of_bounds() {
         let text = "😀a\nSELECT";

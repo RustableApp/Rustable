@@ -302,21 +302,17 @@ pub(crate) fn format_document(
     if original.len() > INPUT_LIMIT {
         return Err("Document exceeds Beautify limit.".into());
     }
-    let chars = original.chars().count();
-    let selected = !selection.is_empty();
-    let range = if selected {
-        selection.start.min(chars)..selection.end.min(chars)
-    } else {
-        0..chars
+    // Use the same statement as Run Current and the editor's execution shading.
+    let Some(target) = crate::sql::execution_range_for_dialect(&original, selection.clone(), false, dialect) else {
+        return Ok(Formatted { text: original.clone(), original, selection });
     };
-    let byte = |index| {
-        original
-            .char_indices()
-            .nth(index)
-            .map_or(original.len(), |(i, _)| i)
-    };
-    let bytes = byte(range.start)..byte(range.end);
+    // Preserve surrounding whitespace verbatim, including blank lines before the
+    // statement. Formatting must not pull the query up to an earlier line.
+    let input = &original[target.clone()];
+    let leading = input.len() - input.trim_start().len();
+    let bytes = target.start + leading..target.end - (input.len() - input.trim_end().len());
     let input = &original[bytes.clone()];
+    let start = original[..bytes.start].chars().count();
     let before = signature(input, dialect)?;
     if before.len() > 100_000 {
         return Err("Too many SQL tokens to format at once. Select fewer statements.".into());
@@ -343,7 +339,7 @@ pub(crate) fn format_document(
             "This SQL construct cannot be formatted safely yet. SQL was left unchanged.".into(),
         );
     }
-    let end = range.start + text.chars().count();
+    let end = start + text.trim_end().chars().count();
     let mut full = original.clone();
     full.replace_range(bytes, &text);
     // Also verify boundaries against the unselected prefix/suffix.
@@ -356,7 +352,7 @@ pub(crate) fn format_document(
     Ok(Formatted {
         original,
         text: full,
-        selection: if selected { range.start..end } else { 0..0 },
+        selection: end..end,
     })
 }
 #[cfg(test)]
@@ -378,8 +374,38 @@ mod tests {
             format_document(doc, start..start + sql.chars().count(), Dialect::Sqlite).unwrap();
         assert!(formatted.text.starts_with(prefix));
         assert!(formatted.text.ends_with("\nselect 9;"));
-        assert_eq!(formatted.selection.start, start);
+        let end = formatted.text.strip_suffix("\nselect 9;").unwrap().chars().count();
+        assert_eq!(formatted.selection, end..end);
+        assert_eq!(formatted.text.chars().nth(end - 1), Some(';'));
     }
+    #[test]
+    fn current_query_preserves_starting_line_and_other_queries() {
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::Mysql(Default::default())] {
+            let prefix = "select 'café';\n\n\n  ";
+            let query = "select id,name from customers where id=2;";
+            let suffix = "\n\nselect 9;";
+            let sql = format!("{prefix}{query}{suffix}");
+            let start = prefix.chars().count();
+            let result = format_document(sql, start + 8..start + 8, dialect).unwrap();
+            assert!(result.text.starts_with(prefix));
+            assert!(result.text.ends_with(suffix));
+            assert!(result.text[prefix.len()..result.text.len() - suffix.len()].contains('\n'));
+            let end = result.text.strip_suffix(suffix).unwrap().chars().count();
+            assert_eq!(result.selection, end..end);
+            assert_eq!(result.text.chars().nth(end - 1), Some(';'));
+        }
+    }
+
+    #[test]
+    fn explicit_selection_preserves_its_leading_blank_lines() {
+        let prefix = "select 0;";
+        let query = "\n\n  select id,name from customers;\n\n";
+        let suffix = "select 9;";
+        let result = format_document(format!("{prefix}{query}{suffix}"), prefix.len()..prefix.len() + query.len(), Dialect::Postgres).unwrap();
+        assert!(result.text.starts_with("select 0;\n\n  select"));
+        assert!(result.text.ends_with("\n\nselect 9;"));
+    }
+
     #[test]
     fn mysql_session_quote_modes_preserve_exact_literals_and_identifiers() {
         for ansi_quotes in [false, true] {
@@ -498,7 +524,7 @@ mod tests {
         let mut samples = Vec::new();
         for run in 0..9 {
             let start = std::time::Instant::now();
-            let formatted = format_document(input.clone(), 0..0, Dialect::Postgres).unwrap();
+            let formatted = format_document(input.clone(), 0..input.chars().count(), Dialect::Postgres).unwrap();
             assert!(formatted.text.len() > input.len());
             if run > 1 {
                 samples.push(start.elapsed().as_secs_f64() * 1000.0);

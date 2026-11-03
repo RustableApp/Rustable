@@ -374,6 +374,12 @@ fn script(conn: &Connection, sql: &str, safe: bool, cancel: &AtomicBool) -> Scri
                 report.grids.push(Arc::new(grid));
             }
             Err(error) => {
+                if let rusqlite::Error::SqlInputError { offset, .. } = &error
+                    && let Ok(offset) = usize::try_from(*offset)
+                {
+                    report.error_offset = Some(range.start + offset);
+                }
+
                 report.error = Some(format!(
                     "Statement {} failed: {}. Execution stopped; earlier autocommitted statements remain committed.",
                     index + 1,
@@ -1766,6 +1772,16 @@ mod tests {
         drop(driver);
         drop(writer);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn syntax_error_offset_includes_previous_statements_and_unicode() {
+        let conn = Connection::open_in_memory().unwrap();
+        let sql = "SELECT '😀'; SELECT * FRM missing;";
+        let report = script(&conn, sql, false, &AtomicBool::new(false));
+        assert!(report.error.is_some());
+        assert_eq!(report.grids.len(), 1);
+        assert_eq!(report.error_offset, sql.find("FRM"));
     }
 
     #[test]

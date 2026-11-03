@@ -1048,6 +1048,33 @@ mod tests {
             app.row_selection.cell_column, 0,
             "Escape restores grid keyboard ownership"
         );
+        // Completing an edit must restore navigation just like cancelling it.
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowRight, false)]);
+        frame(&mut app, &ctx, vec![key(egui::Key::Enter, false)]);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![egui::Event::Text("pending".into())]);
+        frame(&mut app, &ctx, vec![key(egui::Key::Enter, false)]);
+        assert!(app.edit.is_none());
+        assert_eq!(app.changes.len(), 1);
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowLeft, false)]);
+        assert_eq!(app.row_selection.cell_column, 0, "staging an edit restores arrow navigation");
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowRight, false)]);
+        frame(&mut app, &ctx, vec![key(egui::Key::Enter, false)]);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![egui::Event::Text("more".into())]);
+        let next_row = text_position + egui::vec2(0.0, 26.0);
+        for pressed in [true, false] {
+            frame(&mut app, &ctx, vec![egui::Event::PointerMoved(next_row), egui::Event::PointerButton {
+                pos: next_row, button: egui::PointerButton::Primary, pressed,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert!(app.edit.is_none(), "clicking another cell stages the editor");
+        assert_eq!(app.selected, Some(1));
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowUp, false)]);
+        assert_eq!(app.selected, Some(0), "click-away staging restores vertical arrows");
+        frame(&mut app, &ctx, vec![key(egui::Key::ArrowLeft, false)]);
+        assert_eq!(app.row_selection.cell_column, 0);
         frame(&mut app, &ctx, vec![key(egui::Key::ArrowRight, false)]);
         assert_eq!(app.row_selection.cell_column, 1);
         frame(&mut app, &ctx, vec![key(egui::Key::ArrowRight, false)]);

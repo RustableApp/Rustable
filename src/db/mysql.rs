@@ -491,7 +491,11 @@ impl Driver for MysqlDriver {
             }
             let (range, consumed, next_delimiter) = match crate::sql::mysql::next_statement(&sql[offset..], self.mode, &delimiter) {
                 Ok(next) => next,
-                Err(error) => { report.error = Some(error); break; }
+                Err(error) => {
+                    report.error_offset = crate::sql::mysql::lexical_error(&sql[offset..], self.mode)
+                        .map(|error| offset + error.range.start);
+                    report.error = Some(error); break;
+                }
             };
             delimiter = next_delimiter;
             let Some(range) = range else { break; };
