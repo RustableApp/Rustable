@@ -1,5 +1,6 @@
 //! Dialect-aware statement boundaries shared by editor and execution.
 use std::{ffi::CString, ops::Range};
+pub mod destructive;
 pub mod mysql;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
