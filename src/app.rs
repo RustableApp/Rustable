@@ -10013,7 +10013,9 @@ mod workspace_layout_tests {
 
     #[test]
     fn new_query_uses_available_height_until_it_has_results() {
+        for os in [egui::os::OperatingSystem::Mac, egui::os::OperatingSystem::Windows, egui::os::OperatingSystem::Nix] {
         let ctx = egui::Context::default();
+        ctx.set_os(os);
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
         app.pending = None;
         app.view = View::Query;
@@ -10054,9 +10056,13 @@ mod workspace_layout_tests {
         assert!(
             favorite.right() < file.left() && file.right() < run.left()
         );
+        let run_button = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) if rect.fill == BLUE && rect.rect.contains(run.center()) => Some(rect.rect),
+            _ => None,
+        }).expect("run button background");
         assert!(
-            run.right() > 1200.0,
-            "run action must align with the right edge: {run:?}"
+            run_button.right() > 1230.0,
+            "run action must align with the right edge on {os:?}: {run_button:?}"
         );
         let mut positions = Vec::new();
         for shape in output.shapes {
@@ -10070,6 +10076,7 @@ mod workspace_layout_tests {
             .1;
         assert!(run_y > 650.0, "editor left unused vertical space: {run_y}");
         assert!(run_y < 850.0, "run controls escaped viewport: {run_y}");
+        }
     }
 
     #[test]
