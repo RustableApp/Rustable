@@ -17,6 +17,28 @@ For an optimized local build:
 mise exec rust@stable -- cargo run --release
 ```
 
+## Windows cross-builds from macOS
+
+With Xcode command-line tools installed, set up cargo-xwin and Rust's Windows
+target once:
+
+```sh
+mise exec -- cargo install --locked cargo-xwin --version 0.23.1
+mise exec -- rustup component add llvm-tools
+mise exec -- rustup target add aarch64-pc-windows-msvc
+mise exec -- python scripts/build-windows.py
+```
+
+The executable is `target/aarch64-pc-windows-msvc/release/rustable.exe`.
+For x64, install `x86_64-pc-windows-msvc` instead and pass `--arch x64`.
+The helper uses cargo-xwin to download the Microsoft SDK/CRT and configure the
+linker, then adapts Clang flags for the `ring` Windows ARM64 build. See
+[cargo-xwin](https://github.com/rust-cross/cargo-xwin) for SDK license terms.
+
+This builds the app only, not the bundled SQL language servers or a release ZIP.
+It is sufficient to test opening SQLite databases. Test execution and GUI
+verification still require Windows; cross-compilation alone does not verify them.
+
 ## Isolated native QA
 
 Build with `mise exec rust@stable -- cargo build --release --features qa` and copy the binary only to `target/Rustable QA.app/Contents/MacOS/rustable`. QA uses its own window title and persistence namespace.

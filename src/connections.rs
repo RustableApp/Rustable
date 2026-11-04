@@ -302,7 +302,6 @@ fn status_row(
     field: Option<ProbeField>,
     content: impl FnOnce(&mut egui::Ui),
 ) {
-    let response = form_row(ui, label, content);
     let status = field.and_then(|field| {
         ui.ctx()
             .data(|data| {
@@ -317,20 +316,33 @@ fn status_row(
                     .map(|(_, status)| status)
             })
     });
+    let fill = match &status {
+        Some(FieldStatus::Success) => Some(if ui.visuals().dark_mode {
+            Color32::from_rgb(31, 55, 41)
+        } else { Color32::from_rgb(231, 245, 235) }),
+        Some(FieldStatus::Failed(_)) => Some(if ui.visuals().dark_mode {
+            Color32::from_rgb(65, 35, 39)
+        } else { Color32::from_rgb(253, 234, 234) }),
+        _ => None,
+    };
+    let response = form_row(ui, label, |ui| {
+        if let Some(fill) = fill {
+            let visuals = ui.visuals_mut();
+            visuals.extreme_bg_color = fill;
+            for widget in [&mut visuals.widgets.inactive, &mut visuals.widgets.hovered,
+                &mut visuals.widgets.active, &mut visuals.widgets.open] {
+                widget.bg_fill = fill;
+                widget.weak_bg_fill = fill;
+            }
+        }
+        content(ui);
+    });
     if let Some(status) = status {
-        let (color, icon, tooltip) = match status {
-            FieldStatus::Running => (ui.visuals().hyperlink_color, "clock", "Testing…".to_owned()),
-            FieldStatus::Success => (Color32::from_rgb(45, 170, 95), "check", "Verified".to_owned()),
-            FieldStatus::Failed(message) => (ui.visuals().error_fg_color, "circle-alert", message),
+        let tooltip = match status {
+            FieldStatus::Running => "Testing…".to_owned(),
+            FieldStatus::Success => "Verified".to_owned(),
+            FieldStatus::Failed(message) => message,
         };
-        let rect = response.rect;
-        ui.painter().rect_stroke(
-            rect.shrink(0.5),
-            6.0,
-            egui::Stroke::new(1.2_f32, color),
-            egui::StrokeKind::Inside,
-        );
-        crate::icons::paint(ui.painter(), egui::pos2(rect.left() - 6.0, rect.center().y), icon, 10.0, color);
         response.on_hover_text(tooltip);
     }
 }
@@ -1655,23 +1667,33 @@ mod tests {
         app
     }
     #[test]
-    fn probe_outline_tracks_input_frame_after_layout_changes() {
+    fn probe_fill_stays_inside_input_without_changing_layout() {
         for width in [300.0, 700.0] {
             let ctx = egui::Context::default();
-            ctx.data_mut(|data| data.insert_temp(egui::Id::new("connection-probe-status"), vec![(ProbeField::Host, FieldStatus::Success)]));
-            let output = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.set_max_width(width);
-                    form_text(ui, "Host", &mut "localhost".to_owned(), false, Some(ProbeField::Host));
-                });
-            });
-            let rects: Vec<_> = output.shapes.iter().filter_map(|s| match &s.shape {
-                egui::Shape::Rect(r) => Some(r), _ => None,
-            }).collect();
-            let outline = rects.iter().find(|r| r.stroke.color == Color32::from_rgb(45, 170, 95)).unwrap();
-            let input = rects.iter().find(|r| r.fill == ctx.style().visuals.extreme_bg_color).unwrap();
-            assert!((outline.rect.min - input.rect.shrink(0.5).min).length() < 1.0, "outline {:?}, input {:?}", outline.rect, input.rect);
-            assert!((outline.rect.max - input.rect.shrink(0.5).max).length() < 1.0);
+            let render = |status: Option<FieldStatus>| {
+                ctx.data_mut(|data| data.insert_temp(egui::Id::new("connection-probe-status"),
+                    status.map(|status| vec![(ProbeField::Host, status)]).unwrap_or_default()));
+                ctx.run(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.set_max_width(width);
+                        form_text(ui, "Host", &mut "localhost".to_owned(), false, Some(ProbeField::Host));
+                    });
+                })
+            };
+            let input_rect = |output: &egui::FullOutput, fill| output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill == fill => Some(rect.rect), _ => None,
+            }).unwrap();
+            for dark in [false, true] {
+                ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+                let plain = render(None);
+                let rect = input_rect(&plain, ctx.style().visuals.extreme_bg_color);
+                for (status, fill) in [
+                    (FieldStatus::Success, if dark { Color32::from_rgb(31, 55, 41) } else { Color32::from_rgb(231, 245, 235) }),
+                    (FieldStatus::Failed("Connection refused".into()), if dark { Color32::from_rgb(65, 35, 39) } else { Color32::from_rgb(253, 234, 234) }),
+                ] {
+                    assert_eq!(input_rect(&render(Some(status)), fill), rect);
+                }
+            }
         }
     }
 

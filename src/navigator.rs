@@ -71,15 +71,14 @@ impl Rustable {
             entries.push(Entry { label: self.label.clone(), detail: "Current SQLite database".into(), destination: Destination::Database(self.label.clone()) });
         }
         if !self.navigator.databases_only {
-            let command = if ctx.os() == egui::os::OperatingSystem::Mac { "⌘" } else { "Ctrl" };
             let actions = [
                 ("Sync Database", "".to_owned(), Action::Refresh),
-                ("Open Connection", format!("{command} N"), Action::Connections),
-                ("Open Database", format!("{command} K"), Action::Databases),
+                ("Open Connection", crate::icons::shortcut(ctx, false, "N"), Action::Connections),
+                ("Open Database", crate::icons::shortcut(ctx, false, "K"), Action::Databases),
                 ("Cancel Running Queries", String::new(), Action::Cancel),
-                ("Open SQL File…", format!("{command} Shift O"), Action::OpenSql),
+                ("Open SQL File…", crate::icons::shortcut(ctx, true, "O"), Action::OpenSql),
                 ("Import CSV file…", String::new(), Action::ImportCsv),
-                ("New SQL Query", format!("{command} T"), Action::NewQuery),
+                ("New SQL Query", crate::icons::shortcut(ctx, false, "T"), Action::NewQuery),
                 ("Toggle SQL Activity", String::new(), Action::Activity),
                 ("Toggle Inspector", String::new(), Action::Inspector),
             ];

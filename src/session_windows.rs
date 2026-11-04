@@ -118,6 +118,19 @@ impl SessionWindows {
         }
         opened
     }
+    fn hand_off_launcher(&mut self, ctx: &egui::Context) {
+        // Immediate child viewports redirect redraws through the root viewport.
+        // On Windows a hidden root cannot receive the WM_PAINT needed to drive
+        // those frames, leaving the child frozen before worker replies are polled.
+        // Keep the launcher visible behind the focused session on Windows until
+        // session windows have independent (deferred) render callbacks.
+        self.launcher_hidden = !cfg!(target_os = "windows");
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::Visible(!self.launcher_hidden),
+        );
+    }
+
     fn show_launcher(&mut self, ctx: &egui::Context) {
         self.launcher_hidden = false;
         self.root.open_connection_manager();
@@ -303,18 +316,16 @@ impl eframe::App for SessionWindows {
             // The launcher is independently dismissible; closing it must not close
             // sessions or silently commit/discard their state.
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            self.launcher_hidden = true;
+            self.hand_off_launcher(ctx);
+            if !self.launcher_hidden && let Some(window) = self.windows.first() {
+                ctx.send_viewport_cmd_to(window.id, egui::ViewportCommand::Focus);
+            }
         }
         if let Some(id) = opened_window.filter(|_| !self.quitting && !manager_requested) {
             // Hand off immediately to the new window, which owns connection
             // progress and errors. Later connection completion must not re-hide
             // a launcher explicitly reopened by the user.
-            self.launcher_hidden = true;
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::Visible(false),
-            );
+            self.hand_off_launcher(ctx);
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
         }
         if manager_requested || ((self.launcher_hidden || had_windows) && self.windows.is_empty()) {

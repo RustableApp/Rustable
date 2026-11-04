@@ -79,7 +79,16 @@ pub fn toolbar_group<R>(ui: &mut egui::Ui, count: usize, contents: impl FnOnce(&
     egui::InnerResponse { inner, response }
 }
 
-/// Shortcut keys are artwork, not font glyphs: identical on native and WASM.
+/// Use the runtime OS so browser builds also match the user's platform.
+pub fn shortcut(ctx: &egui::Context, shift: bool, key: &str) -> String {
+    if ctx.os() == egui::os::OperatingSystem::Mac {
+        format!("{}⌘{key}", if shift { "⇧" } else { "" })
+    } else {
+        format!("Ctrl+{}{key}", if shift { "Shift+" } else { "" })
+    }
+}
+
+/// macOS shortcut keys use artwork; other platforms use familiar key names.
 /// Leave 12 points before the shortcut and 2 points between its keys.
 pub fn shortcut_button(label: &'static str, shift: bool, key: &'static str, fill: Option<egui::Color32>) -> impl egui::Widget {
     shortcut_widget(label, shift, key, fill, false)
@@ -99,13 +108,16 @@ fn shortcut_widget(label: &'static str, shift: bool, key: &'static str, fill: Op
             atoms.push_right(egui::Atom { size: Some(egui::vec2(8.0, 0.0)), grow: menu, ..Default::default() });
             let icon = |source| egui::Image::new(source).fit_to_exact_size(egui::vec2(14.0, 14.0));
             let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
-            if !mac { atoms.push_right("Ctrl"); }
-            if shift { atoms.push_right(icon(egui::include_image!("../assets/icons/lucide/arrow-big-up.svg"))); }
-            if mac { atoms.push_right(icon(egui::include_image!("../assets/icons/lucide/command.svg"))); }
-            if key == "Enter" {
-                atoms.push_right(icon(egui::include_image!("../assets/icons/lucide/corner-down-left.svg")));
+            if !mac {
+                atoms.push_right(shortcut(ui.ctx(), shift, key));
             } else {
-                atoms.push_right(key);
+                if shift { atoms.push_right(icon(egui::include_image!("../assets/icons/lucide/arrow-big-up.svg"))); }
+                atoms.push_right(icon(egui::include_image!("../assets/icons/lucide/command.svg")));
+                if key == "Enter" {
+                    atoms.push_right(icon(egui::include_image!("../assets/icons/lucide/corner-down-left.svg")));
+                } else {
+                    atoms.push_right(key);
+                }
             }
             let button = egui::Button::new(atoms).image_tint_follows_text_color(fill.is_none())
                 .min_size(egui::vec2(if menu { ui.available_width() } else { 0.0 }, 0.0));
@@ -122,6 +134,19 @@ fn shortcut_widget(label: &'static str, shift: bool, key: &'static str, fill: Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcuts_follow_runtime_platform_including_shift_and_enter() {
+        let ctx = egui::Context::default();
+        for os in [egui::os::OperatingSystem::Windows, egui::os::OperatingSystem::Nix] {
+            ctx.set_os(os);
+            assert_eq!(shortcut(&ctx, false, "S"), "Ctrl+S");
+            assert_eq!(shortcut(&ctx, true, "Enter"), "Ctrl+Shift+Enter");
+        }
+        ctx.set_os(egui::os::OperatingSystem::Mac);
+        assert_eq!(shortcut(&ctx, false, "S"), "⌘S");
+        assert_eq!(shortcut(&ctx, true, "Enter"), "⇧⌘Enter");
+    }
 
     #[test]
     fn toolbar_groups_share_exact_button_and_container_geometry() {

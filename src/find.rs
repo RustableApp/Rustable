@@ -81,12 +81,12 @@ impl Search {
             }
             if ui
                 .add(crate::icons::widget("chevron-left"))
-                .on_hover_text("Previous · Cmd+Shift+G")
+                .on_hover_text(format!("Previous · {}", crate::icons::shortcut(ui.ctx(), true, "G")))
                 .clicked()
             {
                 action = Some(Action::Previous);
             }
-            if ui.add(crate::icons::widget("chevron-right")).on_hover_text("Next · ⌘G").clicked() {
+            if ui.add(crate::icons::widget("chevron-right")).on_hover_text(format!("Next · {}", crate::icons::shortcut(ui.ctx(), false, "G"))).clicked() {
                 action = Some(Action::Next);
             }
             ui.menu_button("Options", |ui| {

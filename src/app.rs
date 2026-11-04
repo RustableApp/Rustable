@@ -2073,9 +2073,10 @@ impl Rustable {
         {
             self.file_dialog(ctx, false);
         }
+        let activity_modifiers = activity_shortcut_modifiers(ctx);
         if ctx.input_mut(|i| {
             i.consume_key(
-                egui::Modifiers::COMMAND | egui::Modifiers::CTRL,
+                activity_modifiers,
                 egui::Key::C,
             )
         }) {
@@ -2188,7 +2189,7 @@ impl Rustable {
                 });
             }
             ui.horizontal(|ui| {
-                commit = ui.add_enabled(import_supported && !self.safe && self.pending.is_none(), egui::Button::new("Import all rows")).on_hover_text("Cmd/Ctrl+Enter or Cmd/Ctrl+S").clicked();
+                commit = ui.add_enabled(import_supported && !self.safe && self.pending.is_none(), egui::Button::new("Import all rows")).on_hover_text(format!("{} or {}", crate::icons::shortcut(ui.ctx(), false, "Enter"), crate::icons::shortcut(ui.ctx(), false, "S"))).clicked();
                 close = ui.add_enabled(!importing, egui::Button::new("Back to mapping")).on_hover_text("Escape").clicked();
             });
         });
@@ -2552,7 +2553,7 @@ impl Rustable {
                         self.connections = true;
                     }
                     if toolbar_action(ui, 1, self.navigator.open)
-                        .on_hover_text("Browse databases · Cmd/Ctrl+K · Find anything: Cmd/Ctrl+P")
+                        .on_hover_text(format!("Browse databases · {} · Find anything: {}", crate::icons::shortcut(ui.ctx(), false, "K"), crate::icons::shortcut(ui.ctx(), false, "P")))
                         .clicked() { self.open_navigator(true); }
                     if toolbar_action(ui, 2, self.view == View::Query)
                         .on_hover_text("Open SQL editor")
@@ -2572,8 +2573,8 @@ impl Rustable {
                         );
                         self.shared_preferences_dirty |= activity_before != self.prefs.activity_visible;
                         toolbar_group(ui, |ui| {
-                            if toolbar_action(ui, 4, false).on_hover_text("Find anything · Cmd/Ctrl+P").clicked() { self.open_navigator(false); }
-                            if ui.add_enabled_ui(self.pending.is_none(), |ui| toolbar_action(ui, 3, false)).inner.on_hover_text("Refresh · Cmd/Ctrl+R").clicked() { self.refresh_current_view(); }
+                            if toolbar_action(ui, 4, false).on_hover_text(format!("Find anything · {}", crate::icons::shortcut(ui.ctx(), false, "P"))).clicked() { self.open_navigator(false); }
+                            if ui.add_enabled_ui(self.pending.is_none(), |ui| toolbar_action(ui, 3, false)).inner.on_hover_text(format!("Refresh · {}", crate::icons::shortcut(ui.ctx(), false, "R"))).clicked() { self.refresh_current_view(); }
                         let before = self.prefs.appearance;
                         let settings = toolbar_action(ui, 5, false).on_hover_text("Appearance");
                         egui::Popup::menu(&settings).show(|ui| {
@@ -2733,7 +2734,7 @@ impl Rustable {
                                 response
                             };
                             let response = if changed {
-                                response.on_hover_text("Pending changes · ⌘S to review")
+                                response.on_hover_text(format!("Pending changes · {} to review", crate::icons::shortcut(ui.ctx(), false, "S")))
                             } else {
                                 response
                             };
@@ -3069,7 +3070,7 @@ impl Rustable {
                             table_view_switch(ui, &mut self.view);
                             if self.view == View::Data && ui
                                     .add_enabled(self.can_insert(), crate::icons::widget("plus"))
-                                    .on_hover_text("Add row · Cmd+I")
+                                    .on_hover_text(format!("Add row · {}", crate::icons::shortcut(ui.ctx(), false, "I")))
                                     .clicked()
                                 {
                                     self.add_insert();
@@ -3098,7 +3099,7 @@ impl Rustable {
                                 ui.menu_button(format!("Pending ({})", self.changes.len()), |ui| {
                                 if ui
                                     .button(format!("Review {} changes", self.changes.len()))
-                                    .on_hover_text("Cmd+Shift+P · Preview SQL without executing")
+                                    .on_hover_text(format!("{} · Preview SQL without executing", crate::icons::shortcut(ui.ctx(), true, "P")))
                                     .clicked()
                                 {
                                     self.preview_changes();
@@ -3108,7 +3109,7 @@ impl Rustable {
                                         self.pending.is_none(),
                                         egui::Button::new("Discard"),
                                     )
-                                    .on_hover_text("Cmd+Shift+Backspace · Discard pending changes")
+                                    .on_hover_text(format!("{} · Discard pending changes", crate::icons::shortcut(ui.ctx(), true, "Backspace")))
                                     .clicked()
                                 {
                                     self.discard_changes();
@@ -3406,7 +3407,7 @@ impl Rustable {
                             });
                         });
                         if ui.add_enabled(!grid.columns.is_empty(), result_search_button())
-                            .on_hover_text("Find in loaded results · ⌘F when results are focused").clicked() {
+                            .on_hover_text(format!("Find in loaded results · {} when results are focused", crate::icons::shortcut(ui.ctx(), false, "F"))).clicked() {
                             let tab = &mut self.tabs[self.tab];
                             tab.result_view = ResultView::Data;
                             tab.result_search.open = !tab.result_search.open;
@@ -3983,11 +3984,11 @@ impl Rustable {
                 let tab = &mut self.tabs[self.tab];
                 if ui.add_enabled(!tab.formatter.busy() && !tab.sql.trim().is_empty(),
                     crate::icons::shortcut_button(if tab.formatter.busy() { "Formatting…" } else { "Beautify" }, false, "I", None))
-                    .on_hover_text("Format selection, or the current query. Undo with Cmd/Ctrl+Z.")
+                    .on_hover_text(format!("Format selection, or the current query. Undo with {}.", crate::icons::shortcut(ui.ctx(), false, "Z")))
                     .clicked() {
                     tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
                 }
-                if ui.add(crate::icons::shortcut_button("Save", false, "S", None)).on_hover_text("Save named SQL query · Cmd/Ctrl+S").clicked() {
+                if ui.add(crate::icons::shortcut_button("Save", false, "S", None)).on_hover_text(format!("Save named SQL query · {}", crate::icons::shortcut(ui.ctx(), false, "S"))).clicked() {
                     self.save_query_file(ui.ctx(), false);
                 }
                 if self.pending.is_some() && ui.button("Cancel").clicked() {
@@ -5107,7 +5108,7 @@ impl Rustable {
                 compact_property(ui, label, &value);
             }
             if has_changes {
-                ui.label(RichText::new("Changes staged · Cmd+S to review").color(Color32::from_rgb(210,150,50)));
+                ui.label(RichText::new(format!("Changes staged · {} to review", crate::icons::shortcut(ui.ctx(), false, "S"))).color(Color32::from_rgb(210,150,50)));
             }
             if ui.add_enabled(schema_editable && !self.safe && self.pending.is_none(),egui::Button::new("Edit properties…")).clicked() {
                 let mut draft = AlterDraft { table:self.browse.table.clone(),column:column.name.clone(),data_type:column.data_type.clone(),original_type:column.data_type.clone(),not_null:column.not_null,original_not_null:column.not_null,default_kind:0,default_text:String::new(),error:None };
@@ -5152,7 +5153,7 @@ impl Rustable {
             }
             if let Some(index) = self.selected_index.and_then(|i|self.indexes.get(i)) {
                 let staged = self.changes.iter().any(|c|matches!(c,Change::DropIndex {table,name} if table == &self.browse.table && name == &index.name));
-                if ui.add_enabled(schema_editable && !self.safe && self.pending.is_none() && index.origin == "c" && !staged,egui::Button::new("− Index").min_size(egui::vec2(78.0, 26.0)).corner_radius(7)).on_hover_text("Stage index removal; review with Cmd+S").clicked() {
+                if ui.add_enabled(schema_editable && !self.safe && self.pending.is_none() && index.origin == "c" && !staged,egui::Button::new("− Index").min_size(egui::vec2(78.0, 26.0)).corner_radius(7)).on_hover_text(format!("Stage index removal; review with {}", crate::icons::shortcut(ui.ctx(), false, "S"))).clicked() {
                     self.changes.push(Change::DropIndex {table:self.browse.table.clone(),name:index.name.clone()}); self.record_changes(); self.review=None;
                 }
                 if staged {ui.label(RichText::new("Removal staged").color(Color32::from_rgb(210,150,50)));}
@@ -5758,7 +5759,7 @@ impl Rustable {
             let mut stage = false;
             egui::Window::new("Edit column properties").id(egui::Id::new((ctx.viewport_id(), "Edit column properties"))).open(&mut open).collapsible(false).show(ctx,|ui| {
                 ui.strong(format!("{}.{}",draft.table,draft.column));
-                ui.label(if self.engine == "SQLite" { "SQLite will rebuild this table and validate existing rows. Review the migration with Cmd+S." } else { "Review ALTER TABLE statements with Cmd+S. Existing rows must satisfy the new type and constraints." });
+                ui.label(if self.engine == "SQLite" { format!("SQLite will rebuild this table and validate existing rows. Review the migration with {}.", crate::icons::shortcut(ui.ctx(), false, "S")) } else { format!("Review ALTER TABLE statements with {}. Existing rows must satisfy the new type and constraints.", crate::icons::shortcut(ui.ctx(), false, "S")) });
                 egui::Grid::new("alter-column-fields").num_columns(2).show(ui,|ui| {
                     ui.label("Data type"); ui.text_edit_singleline(&mut draft.data_type); ui.end_row();
                     ui.label("Required"); ui.checkbox(&mut draft.not_null,"NOT NULL"); ui.end_row();
@@ -5928,7 +5929,7 @@ impl Rustable {
                     apply = ui
                         .add_enabled(
                             matches!(self.engine.as_str(), "SQLite" | "PostgreSQL") && !self.safe && self.pending.is_none(),
-                            egui::Button::new("Save changes · ⌘S / ⌘Enter"),
+                            egui::Button::new(format!("Save changes · {} / {}", crate::icons::shortcut(ui.ctx(), false, "S"), crate::icons::shortcut(ui.ctx(), false, "Enter"))),
                         )
                         .clicked();
                     if matches!(self.pending, Some(Pending::Apply)) {
@@ -6536,7 +6537,7 @@ fn filter_button(selected: bool) -> impl egui::Widget {
     move |ui: &mut egui::Ui| {
         let response = ui.add(result_search_button());
         if selected { ui.painter().line_segment([response.rect.left_bottom(), response.rect.right_bottom()], Stroke::new(2.0_f32, ui.visuals().selection.bg_fill)); }
-        response.on_hover_text("Show or hide table filters · Cmd/Ctrl+F")
+        response.on_hover_text(format!("Show or hide table filters · {}", crate::icons::shortcut(ui.ctx(), false, "F")))
     }
 }
 
@@ -6621,7 +6622,7 @@ fn workspace_tab(
         let close = ui.interact(close_rect, response.id.with("close"), egui::Sense::click());
         crate::icons::paint(ui.painter(), close_rect.center(), "x", 12.0, ui.style().interact(&close).fg_stroke.color);
         closed = close.clicked_by(egui::PointerButton::Middle)
-            || close.on_hover_text("Close tab · ⌘W · Reopen ⌘⇧T").clicked();
+            || close.on_hover_text(format!("Close tab · {} · Reopen {}", crate::icons::shortcut(ui.ctx(), false, "W"), crate::icons::shortcut(ui.ctx(), true, "T"))).clicked();
     }
     (response.on_hover_text(title), closed)
 }
@@ -6887,6 +6888,14 @@ fn bounded_log_text(text: &str) -> String {
         end -= 1;
     }
     format!("{}… [log truncated]", &text[..end])
+}
+
+fn activity_shortcut_modifiers(ctx: &egui::Context) -> egui::Modifiers {
+    egui::Modifiers::COMMAND | if ctx.os() == egui::os::OperatingSystem::Mac {
+        egui::Modifiers::CTRL
+    } else {
+        egui::Modifiers::ALT
+    }
 }
 
 fn activity_description(command: &Command, dialect: crate::sql::Dialect) -> Option<String> {
@@ -10942,6 +10951,28 @@ mod csv_review_keyboard_tests {
 #[cfg(test)]
 mod refresh_shortcut_tests {
     use super::*;
+    #[test]
+    fn activity_shortcut_does_not_consume_copy_on_windows_or_linux() {
+        let ctx = egui::Context::default();
+        for os in [egui::os::OperatingSystem::Windows, egui::os::OperatingSystem::Nix] {
+            ctx.set_os(os);
+            let shortcut = activity_shortcut_modifiers(&ctx);
+            let copy = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+            for alt in [false, true] {
+                let modifiers = egui::Modifiers { alt, ..copy };
+                let _ = ctx.run(egui::RawInput {
+                    events: vec![egui::Event::Key { key: egui::Key::C, physical_key: None, pressed: true, repeat: false, modifiers }],
+                    ..Default::default()
+                }, |ctx| {
+                    assert_eq!(ctx.input_mut(|i| i.consume_key(shortcut, egui::Key::C)), alt);
+                    if !alt {
+                        assert!(ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)));
+                    }
+                });
+            }
+        }
+    }
+
     #[test]
     fn empty_table_workspace_refreshes_schema() {
         let mut app = Rustable::with_preferences(&egui::Context::default(), Preferences::default());

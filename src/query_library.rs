@@ -336,7 +336,7 @@ impl Rustable {
             groups.entry(&file.group).or_default().push(file);
         }
         egui::ScrollArea::vertical().id_salt("saved-query-library").show(ui, |ui| {
-            if groups.is_empty() { ui.weak("Save a named query with ⌘S. Folders are groups."); }
+            if groups.is_empty() { ui.weak(format!("Save a named query with {}. Folders are groups.", crate::icons::shortcut(ui.ctx(), false, "S"))); }
             for (group, files) in groups {
                 let path = root.join(group);
                 let label = if group.is_empty() { "Ungrouped" } else { group };
@@ -406,7 +406,7 @@ impl Rustable {
                     for (index, sql) in self.prefs.favorites.iter().enumerate() {
                         let selection = Selection::Recovered(index);
                         let active = self.query_library.selected.as_ref() == Some(&selection);
-                        let response = query_row(ui, &format!("Recovered query {}", index + 1), active).on_hover_text("Double-click to open, then Cmd/Ctrl+S to name and save as a file");
+                        let response = query_row(ui, &format!("Recovered query {}", index + 1), active).on_hover_text(format!("Double-click to open, then {} to name and save as a file", crate::icons::shortcut(ui.ctx(), false, "S")));
                         if response.clicked() { self.query_library.selected = Some(selection); }
                         if response.double_clicked() { self.tabs.push(QueryTab::new(sql.clone())); self.tab = self.tabs.len()-1; self.view = View::Query; }
                     }
