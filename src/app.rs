@@ -9412,8 +9412,7 @@ mod workspace_layout_tests {
     fn lazy_details_load_in_workspace_without_inspector_and_do_not_retry_each_frame() {
         for view in [View::Indexes, View::Triggers] {
             let ctx = egui::Context::default();
-            let mut app = Rustable::with_preferences(&ctx, Preferences::default());
-            app.pending = None;
+            let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
             app.browse.table = "details_fixture".into();
             app.table_loaded = true;
             app.details_loaded = false;
