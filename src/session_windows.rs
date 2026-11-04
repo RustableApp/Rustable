@@ -36,7 +36,7 @@ struct SessionWindow {
     id: egui::ViewportId,
     title: String,
     size_key: Option<String>,
-    size: [f32; 2],
+    initial_size: [f32; 2],
     request: Option<WindowRequest>,
     app: Option<Box<Rustable>>,
     parked: Vec<Box<Rustable>>,
@@ -46,6 +46,20 @@ struct SessionWindow {
 }
 
 impl SessionWindow {
+    fn viewport_builder(&self) -> egui::ViewportBuilder {
+        // Keep the creation size stable. Feeding observed sizes back into this
+        // builder emits InnerSize commands and can fight native resize/DPI events.
+        egui::ViewportBuilder::default().with_title("Rustable")
+            .with_inner_size(self.initial_size).with_min_inner_size([960.0, 640.0])
+    }
+
+    fn remember_size(&self, size: egui::Vec2, saved: &mut std::collections::HashMap<String, [f32; 2]>) {
+        if size.is_finite() && size.x >= 960.0 && size.y >= 640.0
+            && let Some(key) = &self.size_key {
+            saved.insert(key.clone(), [size.x, size.y]);
+        }
+    }
+
     fn switch_workspace(&mut self, index: usize) {
         let target = self.parked.remove(index);
         let next_slot = index + usize::from(index >= self.active_slot);
@@ -105,7 +119,7 @@ impl SessionWindows {
             opened = Some(id);
             self.windows.push(SessionWindow {
                 id,
-                size: request.draft_scope().and_then(|key| self.window_sizes.get(&key).copied()).unwrap_or([1280.0, 820.0]),
+                initial_size: request.draft_scope().and_then(|key| self.window_sizes.get(&key).copied()).unwrap_or([1280.0, 820.0]),
                 size_key: request.draft_scope(),
                 title: request.title.clone(),
                 request: Some(request),
@@ -170,9 +184,7 @@ impl eframe::App for SessionWindows {
         let root_close_requested = ctx.input(|input| input.viewport().close_requested());
         let mut manager_requested = false;
         for window in &mut self.windows {
-            ctx.show_viewport_immediate(window.id, egui::ViewportBuilder::default()
-                .with_title("Rustable")
-                .with_inner_size(window.size).with_min_inner_size([960.0, 640.0]), |child_ctx, class| {
+            ctx.show_viewport_immediate(window.id, window.viewport_builder(), |child_ctx, class| {
                 if class == egui::ViewportClass::Embedded {
                     // Native desktop backends support immediate viewports. Never draw
                     // a second full workspace over the root on an unsupported backend.
@@ -180,13 +192,11 @@ impl eframe::App for SessionWindows {
                     window.closed = true;
                     return;
                 }
-                if let Some(rect) = child_ctx.input(|input| input.viewport().inner_rect)
-                    && rect.width() >= 960.0 && rect.height() >= 640.0 {
-                    window.size = [rect.width(), rect.height()];
-                    if let Some(key) = &window.size_key { self.window_sizes.insert(key.clone(), window.size); }
+                if let Some(rect) = child_ctx.input(|input| input.viewport().inner_rect) {
+                    window.remember_size(rect.size(), &mut self.window_sizes);
                 }
                 for app in &mut window.parked {
-                    app.poll();
+                    app.poll_with_notifications(child_ctx);
                     self.root.sync_window_preferences(app);
                     self.root.sync_window_profile(app);
                     shared_changed |= self.root.merge_window_preferences(app);
@@ -406,20 +416,49 @@ fn launcher_size(monitor: Option<egui::Vec2>) -> egui::Vec2 {
 mod launcher_tests {
     use super::*;
 
-    #[test]
-    fn launcher_dismissal_waits_for_success_and_does_not_repeat() {
-        let mut window = SessionWindow {
+    fn test_window() -> SessionWindow {
+        SessionWindow {
             id: egui::ViewportId::from_hash_of("test-session"),
             title: "Test".into(),
             size_key: None,
-            size: [1280.0, 820.0],
+            initial_size: [1280.0, 820.0],
             request: None,
             app: None,
             parked: Vec::new(),
                 active_slot: 0,
             closed: false,
             connected: false,
-        };
+        }
+    }
+
+    #[test]
+    fn observed_monitor_resizes_are_saved_without_requesting_another_resize() {
+        let mut window = test_window();
+        window.size_key = Some("connection:database".into());
+        let mut saved = std::collections::HashMap::new();
+        let mut applied = window.viewport_builder();
+        // Includes fractional sizes, a Retina/non-Retina transition, and normal
+        // user resizing. None should turn an observation into a resize request.
+        for size in [[1280.5, 820.5], [1920.0, 1080.0], [960.0, 640.0], [1440.0, 900.0]] {
+            window.remember_size(size.into(), &mut saved);
+            let (commands, recreate) = applied.patch(window.viewport_builder());
+            assert!(commands.is_empty(), "unexpected resize feedback: {commands:?}");
+            assert!(!recreate);
+            assert_eq!(saved["connection:database"], size);
+        }
+        for size in [[0.0, 0.0], [f32::NAN, 820.0], [f32::INFINITY, 820.0]] {
+            window.remember_size(size.into(), &mut saved);
+        }
+        assert_eq!(saved["connection:database"], [1440.0, 900.0]);
+        assert_eq!(window.initial_size, [1280.0, 820.0]);
+        let mut reopened = test_window();
+        reopened.initial_size = saved["connection:database"];
+        assert_eq!(reopened.viewport_builder().inner_size, Some(egui::vec2(1440.0, 900.0)));
+    }
+
+    #[test]
+    fn launcher_dismissal_waits_for_success_and_does_not_repeat() {
+        let mut window = test_window();
         // Pending and failed attempts must leave Connections available.
         assert!(!window.connection_completed(false));
         assert!(!window.connection_completed(false));

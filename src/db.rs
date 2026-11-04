@@ -83,6 +83,7 @@ trait Driver: Send {
     fn postgres_control(&self) -> Option<PostgresControl> { None }
 
     fn set_cancellation(&mut self, _cancel: Arc<AtomicBool>) {}
+    fn ensure_connected(&mut self) -> Result<(), String> { Ok(()) }
     fn definition(&mut self, name: &str) -> Result<String, String> {
         self.objects()?.into_iter().find(|object| object.name == name)
             .map(|object| object.ddl).filter(|ddl| !ddl.trim().is_empty())
@@ -656,6 +657,7 @@ fn handle(
     }
     let driver = connection.as_mut().ok_or("Open a database first")?;
     driver.set_cancellation(cancel.clone());
+    driver.ensure_connected()?;
     match command {
         Command::Query { sql, safe } => {
             let refresh = query_needs_catalog_refresh(

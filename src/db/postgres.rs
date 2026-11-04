@@ -1,5 +1,5 @@
 //! PostgreSQL work stays on the database owner thread. Editor statements use a
-//! single parse/bind/execute exchange; rows are streamed within UI limits.
+//! description followed by execution; rows are streamed within UI limits.
 mod array;
 mod browse;
 mod changes;
@@ -174,6 +174,20 @@ impl PostgresDriver {
 }
 
 impl Driver for PostgresDriver {
+    fn ensure_connected(&mut self) -> Result<(), String> {
+        let tunnel_lost = self.tunnel.as_mut().is_some_and(|tunnel| tunnel.check_alive().is_err());
+        if !self.client.is_closed() && !tunnel_lost {
+            return Ok(());
+        }
+        // Only a new user operation reconnects. Never replay an operation after
+        // a transport error: the server may already have committed its writes.
+        let mut replacement = Self::open(&self.config, self.cancel.clone())
+            .map_err(|error| format!("Could not reconnect to PostgreSQL: {error}. Try again when the connection is available."))?;
+        replacement.schemas = self.schemas.clone();
+        *self = replacement;
+        Ok(())
+    }
+
     fn postgres_control(&self) -> Option<PostgresControl> {
         Some(PostgresControl { config: self.config.clone(), forwarded_port: self.tunnel.as_ref().map(|t| t.local_port()) })
     }
@@ -330,7 +344,7 @@ impl Driver for PostgresDriver {
                 }
                 Err(e) => {
                     let guidance = if self.transaction_state() == TransactionState::Disconnected {
-                        "Connection lost; this statement's outcome is unknown. Verify saved data after reconnecting before retrying writes. Remaining statements were not run."
+                        "Connection lost; this statement's outcome is unknown. Run a new query or reload to reconnect. Verify saved data before retrying writes. Remaining statements were not run."
                     } else {
                         "Autocommitted statements remain committed; an explicit transaction may need ROLLBACK."
                     };
@@ -342,8 +356,8 @@ impl Driver for PostgresDriver {
                 }
             }
         }
-        // Typed streaming owns a temporary prepared statement. Drain its Close
-        // response before exposing transaction state to the UI or the next run.
+        // Errors or early stream termination can leave ReadyForQuery pending.
+        // Fully consumed successful queries already include statement cleanup.
         if self.client.transaction_status().is_none()
             && let Err(failure) = self.client.check_connection()
             && report.error.is_none()

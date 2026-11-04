@@ -510,6 +510,7 @@ pub struct Rustable {
     ddl_preview: Option<(String, String)>,
     activity: std::collections::VecDeque<String>,
     last_operation_ms: Option<f64>,
+    query_completion: Option<crate::query_notification::Outcome>,
     sidebar_section: usize,
     compact_panel: u8,
     history_search: String,
@@ -1001,6 +1002,7 @@ impl Rustable {
             ddl_preview: None,
             activity: Default::default(),
             last_operation_ms: None,
+            query_completion: None,
             sidebar_section: 0,
             compact_panel: 0,
             history_search: String::new(),
@@ -1053,12 +1055,22 @@ impl Rustable {
             Ok(()) => {
                 if let Some(sql) = description { self.log_activity(sql); }
                 if let Some(sql) = history_sql { self.record_query_history(sql); }
+                if matches!(pending, Pending::Query(_)) { crate::query_notification::prepare(); }
                 self.pending = Some(pending);
                 self.started = Instant::now();
                 self.error = None;
                 self.status = "Working…".into();
             }
             Err(e) => self.error = Some(e),
+        }
+    }
+
+    pub(crate) fn poll_with_notifications(&mut self, ctx: &egui::Context) {
+        self.poll();
+        if let Some(outcome) = crate::query_notification::take_background_completion(
+            &mut self.query_completion, ctx.input(|input| input.focused),
+        ) {
+            crate::query_notification::show(ctx, outcome);
         }
     }
 
@@ -1097,6 +1109,15 @@ impl Rustable {
                 self.log_activity(statement);
             }
             let pending = self.pending.take();
+            if matches!(pending, Some(Pending::Query(_))) {
+                self.query_completion = match &result {
+                    Ok(Payload::Query { report, .. }) => Some(if report.error.is_some() {
+                        crate::query_notification::Outcome::Failed
+                    } else { crate::query_notification::Outcome::Finished }),
+                    Err(_) => Some(crate::query_notification::Outcome::Failed),
+                    _ => None,
+                };
+            }
             match result {
                 Ok(Payload::Databases(names)) => { self.navigator.databases = names; self.navigator.loaded = true; }
                 Err(e) => {
@@ -6039,7 +6060,7 @@ impl Rustable {
         #[cfg(not(target_arch = "wasm32"))]
         if self.redis_workspace.is_some() { return; }
         let start = Instant::now();
-        self.poll();
+        self.poll_with_notifications(ctx);
         self.workspace_shortcuts(ctx);
         self.toolbar(ctx);
         self.frame_ms = start.elapsed().as_secs_f32() * 1000.0;
@@ -6895,6 +6916,49 @@ fn activity_shortcut_modifiers(ctx: &egui::Context) -> egui::Modifiers {
         egui::Modifiers::CTRL
     } else {
         egui::Modifiers::ALT
+    }
+}
+
+#[cfg(test)]
+mod query_notification_tests {
+    use super::*;
+
+    #[test]
+    fn only_user_query_replies_generate_completion_alerts() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_launcher_preferences(&ctx, Preferences::default());
+        app.show_query();
+        let (sender, receiver) = mpsc::channel();
+        app.worker.rx = receiver;
+        for (error, expected) in [(None, crate::query_notification::Outcome::Finished),
+            (Some("syntax error".to_owned()), crate::query_notification::Outcome::Failed)] {
+            app.pending = Some(Pending::Query(0));
+            sender.send(Ok(Payload::Query {
+                dialect: crate::sql::Dialect::Sqlite,
+                report: db::ScriptResult { error, ..Default::default() },
+                objects: None, schemas: Default::default(),
+            })).unwrap();
+            app.poll();
+            assert_eq!(app.query_completion.take(), Some(expected));
+            app.poll();
+            assert_eq!(app.query_completion, None);
+        }
+        app.pending = Some(Pending::Table);
+        sender.send(Err("browse failed".into())).unwrap();
+        app.poll();
+        assert_eq!(app.query_completion, None);
+
+        app.pending = Some(Pending::Query(0));
+        sender.send(Err("connection lost".into())).unwrap();
+        app.poll();
+        assert_eq!(app.query_completion.take(), Some(crate::query_notification::Outcome::Failed));
+
+        app.pending = Some(Pending::Query(0));
+        drop(sender);
+        app.poll();
+        assert_eq!(app.query_completion.take(), Some(crate::query_notification::Outcome::Failed));
+        app.poll();
+        assert_eq!(app.query_completion, None);
     }
 }
 

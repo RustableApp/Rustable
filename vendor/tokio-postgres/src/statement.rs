@@ -59,6 +59,12 @@ impl Statement {
         }))
     }
 
+    // Used only by the private, unshared typed-query cleanup guard once the
+    // server acknowledges its pipelined Close. Errors retain Drop cleanup.
+    pub(crate) fn disarm_close(&mut self) {
+        Arc::get_mut(&mut self.0).expect("unshared statement guard").client = Weak::new();
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.0.name
     }

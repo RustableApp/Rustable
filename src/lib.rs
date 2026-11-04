@@ -26,6 +26,7 @@ mod find;
 mod fonts;
 mod icons;
 mod native_menu;
+mod query_notification;
 mod pane_sizes;
 mod result_chart;
 mod search;

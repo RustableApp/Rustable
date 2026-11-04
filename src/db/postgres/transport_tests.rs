@@ -155,3 +155,65 @@ fn lost_commit_acknowledgement_reports_uncertainty_without_replay() {
         "dead session cannot roll back"
     );
 }
+
+#[test]
+#[ignore = "requires opted-in disposable PostgreSQL QA server on port 54329"]
+fn next_operation_reconnects_a_lost_session_without_replaying_work() {
+    assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+    let config = crate::connection::PostgresConfig {
+        host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
+        user: "postgres".into(), password: "rustable_qa_only".into(), tls: false,
+        ssh: None,
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut observer = PostgresDriver::open(&config, cancel.clone()).unwrap();
+    let mut driver = PostgresDriver::open(&config, cancel.clone()).unwrap();
+    driver.objects().unwrap();
+    let selected = driver.schemas.selected.clone();
+    let original_pid: i32 = driver.client.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
+    // Healthy sessions, including explicit transactions, must stay intact.
+    driver.client.batch_execute("BEGIN; CREATE TEMP TABLE reconnect_session(value int)").unwrap();
+    driver.ensure_connected().unwrap();
+    assert_eq!(driver.client.query_one("SELECT pg_backend_pid()", &[]).unwrap().get::<_, i32>(0), original_pid);
+    driver.client.batch_execute("ROLLBACK").unwrap();
+    observer.client.query_one("SELECT pg_terminate_backend($1)", &[&original_pid]).unwrap();
+    // The first failed operation reports its error. Nothing automatically retries.
+    assert!(driver.execute("SELECT 1", true, &cancel).error.is_some());
+    assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
+    let mut connection: Option<Box<dyn Driver>> = Some(Box::new(driver));
+    let result = super::super::handle(&mut connection, Command::Query { sql: "SELECT 42".into(), safe: true }, &cancel).unwrap();
+    let Payload::Query { report, schemas, .. } = result else { panic!("expected query result") };
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(schemas.selected, selected);
+    assert_eq!(connection.as_mut().unwrap().transaction_state(), TransactionState::Idle);
+    // A lost session also recovers when the next action is a catalog reload.
+    let mut driver = PostgresDriver::open(&config, cancel.clone()).unwrap();
+    driver.objects().unwrap();
+    let pid: i32 = driver.client.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
+    observer.client.query_one("SELECT pg_terminate_backend($1)", &[&pid]).unwrap();
+    assert!(driver.objects().is_err());
+    assert_eq!(driver.transaction_state(), TransactionState::Disconnected);
+    connection = Some(Box::new(driver));
+    assert!(super::super::handle(&mut connection, Command::RefreshSchema, &cancel).is_ok());
+    assert_eq!(connection.as_mut().unwrap().transaction_state(), TransactionState::Idle);
+}
+
+#[test]
+#[ignore = "requires opted-in disposable PostgreSQL QA server on port 54329"]
+fn typed_query_closes_statement_in_execution_exchange() {
+    assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+    let mut client = Client::connect(
+        "host=127.0.0.1 port=54329 dbname=rustable_qa user=postgres password=rustable_qa_only", NoTls,
+    ).unwrap();
+    for _ in 0..3 {
+        let rows = client.query_typed("SELECT 42::int", &[]).unwrap();
+        assert_eq!(rows[0].get::<_, i32>(0), 42);
+        assert_eq!(client.transaction_status(), Some(b'I'), "no queued cleanup Sync");
+    }
+    assert!(client.query_typed("SELECT 1 / 0", &[]).is_err());
+    client.check_connection().unwrap();
+    let rows = client.query_typed("SELECT count(*) FROM pg_prepared_statements WHERE name LIKE 'rt%'", &[]).unwrap();
+    // This query closes its own statement before execution too.
+    assert_eq!(rows[0].get::<_, i64>(0), 0);
+    assert_eq!(client.transaction_status(), Some(b'I'));
+}

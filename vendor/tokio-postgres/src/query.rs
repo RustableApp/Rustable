@@ -103,6 +103,9 @@ where
         let execution_buf = client.with_buf(|buf| {
             encode_prefix(prefix, buf)?;
             encode_bind_raw(&name, params, "", buf)?;
+            // The bound portal retains the plan. Close before Execute so even
+            // an execution error cannot skip cleanup, and share its Sync.
+            frontend::close(b'S', &name, buf).map_err(Error::encode)?;
             frontend::execute("", 0, buf).map_err(Error::encode)?;
             frontend::sync(buf);
             Ok(buf.split().freeze())
@@ -130,7 +133,7 @@ where
         }
     }
     // Keep ownership even if resolving a type fails so the named statement closes.
-    let _prepared = Statement::new(client, name, vec![], vec![]);
+    let mut prepared = Statement::new(client, name, vec![], vec![]);
     let mut resolved = Vec::with_capacity(columns.len());
     for (name, table_oid, column_id, type_modifier, oid) in columns {
         resolved.push(Column {
@@ -147,12 +150,16 @@ where
             Message::ParseComplete => {}
             Message::CommandComplete(_) if prefix_remaining > 0 => { prefix_remaining -= 1; }
             Message::BindComplete if prefix_remaining > 0 => {}
-            Message::BindComplete => break,
+            Message::BindComplete => {}
+            Message::CloseComplete if prefix_remaining == 0 => {
+                prepared.disarm_close();
+                break;
+            }
             _ => return Err(Error::unexpected_message()),
         }
     }
-    // The portal owns execution now; dropping the prepared handle queues Close
-    // after this request. RowStream only needs the resolved column metadata.
+    // The statement is already closed; the portal owns execution and RowStream
+    // only needs the resolved column metadata.
     Ok(RowStream {
         statement: Statement::unnamed(vec![], resolved), responses, rows_affected: None,
     })
