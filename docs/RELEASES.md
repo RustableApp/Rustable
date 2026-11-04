@@ -88,3 +88,8 @@ with 15 seconds between attempts, to tolerate transient Apple ticket-service
 failures. Other signing/notarization failures stop immediately; final ticket
 validation remains required. Recovery dispatches can use the current workflow
 while checking out the original immutable release tag for all app artifacts.
+
+For macOS ARM runner capacity failures, recovery also accepts `platform: macos-26`.
+It checks out the same immutable release tag and runs the same tests, packaging,
+signing, and notarization steps on GitHub's alternate supported macOS image.
+Only combine this Mac artifact with successful artifacts from that exact tag.

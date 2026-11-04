@@ -12,7 +12,7 @@ on:
         description: Build all packages or recover only macOS without repeating other jobs
         type: choice
         default: all
-        options: [all, macos-15]
+        options: [all, macos-15, macos-26]
 permissions:
   contents: read
 concurrency:
@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ inputs.platform == 'macos-15' && fromJSON('["macos-15"]') || fromJSON('["macos-15", "windows-latest", "ubuntu-24.04"]') }}
+        os: ${{ startsWith(inputs.platform, 'macos-') && fromJSON(format('["{0}"]', inputs.platform)) || fromJSON('["macos-15", "windows-latest", "ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
@@ -127,7 +127,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   browser:
-    if: ${{ inputs.platform != 'macos-15' }}
+    if: ${{ !startsWith(inputs.platform, 'macos-') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -160,7 +160,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   draft:
-    if: ${{ inputs.platform != 'macos-15' }}
+    if: ${{ !startsWith(inputs.platform, 'macos-') }}
     needs: [build, browser]
     runs-on: ubuntu-24.04
     permissions:
