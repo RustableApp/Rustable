@@ -350,12 +350,17 @@ impl Rustable {
                 self.remove_selected_insert();
                 ui.close();
             }
+            let date = self.columns.iter().find(|c| c.name == column).and_then(|c| crate::date_picker::kind(&c.data_type));
             ui.add_enabled_ui(self.can_insert() && !generated, |ui| {
-                for (title, value) in [
+                let mut options = vec![
                     ("Use DEFAULT", None),
                     ("Set NULL", Some(Value::Null)),
                     ("Set empty text", Some(Value::Text(String::new()))),
-                ] {
+                ];
+                if let Some(kind) = date {
+                    options.push((now_label(kind), Some(Value::Text(crate::date_picker::now_text(kind)))));
+                }
+                for (title, value) in options {
                     if ui.button(title).clicked() && self.finish_cell_edit() {
                         self.set_insert_value(id, column, value);
                         ui.close();
@@ -424,7 +429,7 @@ impl Rustable {
                             |ui| {
                                 ui.add_enabled_ui(self.can_insert() && !column.generated, |ui| {
                                     field_value_menu(ui, |ui| {
-                                        for (title, value, enabled) in [
+                                        let mut options = vec![
                                             ("Use DEFAULT", None, true),
                                             ("Set NULL", Some(Value::Null), !column.not_null),
                                             (
@@ -432,7 +437,11 @@ impl Rustable {
                                                 Some(Value::Text(String::new())),
                                                 true,
                                             ),
-                                        ] {
+                                        ];
+                                        if let Some(kind) = crate::date_picker::kind(&column.data_type) {
+                                            options.push((now_label(kind), Some(Value::Text(crate::date_picker::now_text(kind))), true));
+                                        }
+                                        for (title, value, enabled) in options {
                                             if ui
                                                 .add_enabled(enabled, egui::Button::new(title))
                                                 .clicked()

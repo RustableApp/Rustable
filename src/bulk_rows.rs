@@ -214,32 +214,24 @@ impl Rustable {
             &grid.columns,
             self.row_selection.rows.iter().map(|index| grid.rows[*index].as_slice()),
             &self.changes,
-            (self.view == View::Data).then_some(self.browse.table.as_str()),
+            self.staged_table(),
             columns,
         );
         match text { Ok(text) => ctx.copy_text(text), Err(error) => self.error = Some(error) }
     }
 
     pub(super) fn can_delete_rows(&self) -> bool {
-        self.view == View::Data
-            && self.supports_data_changes()
-            && !self.safe
-            && self.pending.is_none()
-            && self.columns.iter().any(|column| column.pk)
-            && self
-                .objects
-                .iter()
-                .any(|object| object.name == self.browse.table && object.kind == "table")
+        self.can_edit_rows()
     }
 
     pub(super) fn selected_rows_deleted(&self) -> bool {
-        self.view == View::Data
+        self.staged_table().is_some()
             && !self.row_selection.rows.is_empty()
             && self.row_selection.rows.iter().all(|index| {
-                self.table
+                self.grid()
                     .rows
                     .get(*index)
-                    .is_some_and(|row| row_is_deleted(&self.changes, &self.browse.table, row))
+                    .is_some_and(|row| row_is_deleted(&self.changes, self.edit_table(), row))
             })
     }
 
@@ -249,16 +241,17 @@ impl Rustable {
         }
         // Capture the intended set before finalizing an active inline draft can move focus.
         let indices: Vec<_> = self.row_selection.rows.iter().copied().collect();
-        if indices.iter().any(|index| *index >= self.table.rows.len()) {
+        if indices.iter().any(|index| *index >= self.grid().rows.len()) {
             return;
         }
         if !self.finish_cell_edit() {
             return;
         }
+        let (grid, table) = (self.grid(), self.edit_table().to_owned());
         for index in indices {
-            let row = &self.table.rows[index];
-            if row_is_deleted(&self.changes, &self.browse.table, row) != deleted {
-                toggle_row_deletion(&mut self.changes, &self.browse.table, row.clone());
+            let row = &grid.rows[index];
+            if row_is_deleted(&self.changes, &table, row) != deleted {
+                toggle_row_deletion(&mut self.changes, &table, row.clone());
             }
         }
         self.record_changes();
@@ -380,13 +373,15 @@ fn field_summaries<'a>(
 impl Rustable {
     pub(super) fn bulk_inspector(&mut self, ui: &mut egui::Ui, search: &str) {
         let grid = self.grid();
+        let staged_table = self.staged_table().map(str::to_owned);
+        let edit_columns = self.edit_columns().to_vec();
         let indices: Vec<_> = self.row_selection.rows.iter().copied().collect();
         let writable = self.can_delete_rows();
         let summaries = field_summaries(
             &grid,
             &indices,
             &self.changes,
-            (self.view == View::Data).then_some(self.browse.table.as_str()),
+            staged_table.as_deref(),
         );
         ui.strong(format!("{} rows selected", indices.len()));
         let mut start = None;
@@ -404,8 +399,7 @@ impl Rustable {
                                 .size(11.0)
                                 .color(ui.visuals().weak_text_color()),
                         );
-                        if self.view == View::Data
-                            && let Some(metadata) = self.columns.get(column)
+                        if let Some(metadata) = edit_columns.get(column)
                         {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -424,9 +418,9 @@ impl Rustable {
                     });
                     let constant_enabled = writable
                         && values_writable
-                        && self.columns.get(column).is_some_and(|c| !c.generated);
+                        && edit_columns.get(column).is_some_and(|c| !c.generated);
                     let active = self.edit.as_ref().is_some_and(|e| {
-                        !e.bulk_rows.is_empty() && e.table == self.browse.table && e.column == *name
+                        !e.bulk_rows.is_empty() && staged_table.as_deref() == Some(e.table.as_str()) && e.column == *name
                     });
                     egui::Frame::new()
                         .fill(if pending || active {
@@ -445,12 +439,10 @@ impl Rustable {
                                 |ui| {
                                     ui.add_enabled_ui(constant_enabled, |ui| {
                                         field_value_menu(ui, |ui| {
-                                            let editable = self
-                                                .columns
+                                            let editable = edit_columns
                                                 .get(column)
                                                 .is_some_and(|c| !c.generated);
-                                            let nullable = self
-                                                .columns
+                                            let nullable = edit_columns
                                                 .get(column)
                                                 .is_some_and(|c| !c.not_null);
                                             if ui
@@ -460,7 +452,7 @@ impl Rustable {
                                                 )
                                                 .clicked()
                                             {
-                                                constant = Some((column, true));
+                                                constant = Some((column, None));
                                                 ui.close();
                                             }
                                             if ui
@@ -470,7 +462,13 @@ impl Rustable {
                                                 )
                                                 .clicked()
                                             {
-                                                constant = Some((column, false));
+                                                constant = Some((column, Some(String::new())));
+                                                ui.close();
+                                            }
+                                            if let Some(kind) = edit_columns.get(column).and_then(|c| crate::date_picker::kind(&c.data_type))
+                                                && ui.add_enabled(editable, egui::Button::new(now_label(kind))).clicked()
+                                            {
+                                                constant = Some((column, Some(crate::date_picker::now_text(kind))));
                                                 ui.close();
                                             }
                                         })
@@ -512,15 +510,17 @@ impl Rustable {
         if let Some(column) = start {
             self.start_bulk_edit(column);
         }
-        if let Some((column, null)) = constant {
-            self.set_bulk_constant(column, null);
+        if let Some((column, text)) = constant {
+            self.set_bulk_constant(column, text);
         }
     }
 
-    pub(super) fn set_bulk_constant(&mut self, column: usize, null: bool) {
+    /// Stages one value on every selected row: NULL for `None`, else the text.
+    pub(super) fn set_bulk_constant(&mut self, column: usize, text: Option<String>) {
+        let null = text.is_none();
         if !self.can_delete_rows()
             || self
-                .columns
+                .edit_columns()
                 .get(column)
                 .is_none_or(|c| c.generated || (null && c.not_null))
             || !self.finish_cell_edit()
@@ -533,7 +533,7 @@ impl Rustable {
         };
         // A constant is an explicit edit, even when a mixed-value draft starts empty.
         edit.kind = if null { 0 } else { 3 };
-        edit.text.clear();
+        edit.text = text.unwrap_or_default();
         edit.bulk_changed = true;
         self.finish_cell_edit();
     }
@@ -546,14 +546,10 @@ impl Rustable {
         if !self.bulk_field_writable(&indices, column) {
             return;
         }
-        let metadata = &self.columns[column];
-        let (common, _) = field_summary(
-            &self.table,
-            &indices,
-            column,
-            &self.changes,
-            Some(&self.browse.table),
-        );
+        let grid = self.grid();
+        let table = self.edit_table().to_owned();
+        let Some(name) = self.edit_columns().get(column).map(|c| c.name.clone()) else { return };
+        let (common, _) = field_summary(&grid, &indices, column, &self.changes, Some(&table));
         if matches!(common, Some(Value::Blob(_)))
             || matches!(common, Some(Value::Text(t)) if t.len()>65536)
         {
@@ -569,24 +565,19 @@ impl Rustable {
             Some(Value::Null) => 0,
             _ => 3,
         };
-        let row = self.table.rows[indices[0]].clone();
+        let row = grid.rows[indices[0]].clone();
         self.edit = Some(CellEdit {
             bulk_rows: indices
                 .iter()
-                .map(|i| {
-                    (
-                        self.table.rows[*i].clone(),
-                        self.table.rows[*i][column].clone(),
-                    )
-                })
+                .map(|i| (grid.rows[*i].clone(), grid.rows[*i][column].clone()))
                 .collect(),
             bulk_changed: false,
             insert_id: None,
             advance: 0,
-            table: self.browse.table.clone(),
+            table,
             original_value: row[column].clone(),
             row,
-            column: metadata.name.clone(),
+            column: name,
             text,
             kind,
             focus: true,
@@ -596,20 +587,20 @@ impl Rustable {
 
     fn bulk_field_writable(&self, indices: &[usize], column: usize) -> bool {
         indices.len() >= 2
-            && self.columns.get(column).is_some_and(|c| !c.generated)
+            && self.edit_columns().get(column).is_some_and(|c| !c.generated)
             && indices.iter().all(|index| {
-                self.table.rows.get(*index).is_some_and(|row| {
-                    !row_is_deleted(&self.changes, &self.browse.table, row)
+                self.grid().rows.get(*index).is_some_and(|row| {
+                    !row_is_deleted(&self.changes, self.edit_table(), row)
                         && row.get(column).is_some_and(|value| {
                             !matches!(value, Value::Blob(_))
                                 && !matches!(value,Value::Text(t) if t.len()>65536)
                         })
                         && field_summary(
-                            &self.table,
+                            &self.grid(),
                             &[*index],
                             column,
                             &self.changes,
-                            Some(&self.browse.table),
+                            Some(self.edit_table()),
                         )
                         .0
                         .is_some_and(|value| {
@@ -626,7 +617,7 @@ impl Rustable {
         }
         let indices: Vec<_> = self.row_selection.rows.iter().copied().collect();
         let visible = crate::search::Query::new(&self.field_search)
-            .ranked(self.columns.iter().enumerate(), |(_, column)| (&column.name, ""));
+            .ranked(self.edit_columns().iter().enumerate(), |(_, column)| (&column.name, ""));
         let position = visible.iter().position(|(index, _)| *index == column)
             .map_or(if direction > 0 { -1 } else { visible.len() as isize }, |index| index as isize);
         let mut next = position + direction.signum() as isize;
@@ -643,15 +634,15 @@ impl Rustable {
     pub(super) fn finish_bulk_edit(&mut self, mut edit: CellEdit) -> bool {
         // Navigation must not silently move editing to a newly selected group.
         let next = (edit.advance != 0
-            && edit.table == self.browse.table
+            && edit.table == self.edit_table()
             && self.row_selection.rows.len() == edit.bulk_rows.len()
             && self
                 .row_selection
                 .rows
                 .iter()
                 .zip(&edit.bulk_rows)
-                .all(|(index, (row, _))| self.table.rows.get(*index) == Some(row)))
-        .then(|| self.columns.iter().position(|c| c.name == edit.column))
+                .all(|(index, (row, _))| self.grid().rows.get(*index) == Some(row)))
+        .then(|| self.edit_columns().iter().position(|c| c.name == edit.column))
         .flatten();
         if !edit.bulk_changed {
             if let Some(column) = next {
@@ -660,8 +651,8 @@ impl Rustable {
             return true;
         }
         let result = parse_cell_value(&edit).and_then(|value| {
-            if !self.can_delete_rows() || edit.table != self.browse.table
-                || self.columns.iter().find(|c| c.name == edit.column).is_none_or(|c| c.generated || (c.not_null && matches!(value,Value::Null)))
+            if !self.can_delete_rows() || edit.table != self.edit_table()
+                || self.edit_columns().iter().find(|c| c.name == edit.column).is_none_or(|c| c.generated || (c.not_null && matches!(value,Value::Null)))
                 || edit.bulk_rows.iter().any(|(row,_)| row_is_deleted(&self.changes, &edit.table, row)) {
                 Err("These selected rows cannot be edited in the current state. Restore deleted rows or cancel the draft.".into())
             } else { Ok(value) }
@@ -1241,7 +1232,7 @@ mod tests {
     fn shared_field_summaries_preserve_staged_values_and_editability() {
         let mut app = app();
         app.row_selection.rows.extend([0, 2]);
-        app.set_bulk_constant(0, false);
+        app.set_bulk_constant(0, Some(String::new()));
         for table in [Some("t"), None, Some("unrelated")] {
             let summaries = field_summaries(&app.table, &[0, 2], &app.changes, table);
             for (column, summary) in summaries.iter().enumerate() {
@@ -1582,16 +1573,16 @@ mod tests {
         let mut app = app();
         app.row_selection.rows.extend([0, 2]);
         app.columns[0].not_null = true;
-        app.set_bulk_constant(0, true);
+        app.set_bulk_constant(0, None);
         assert!(app.changes.is_empty());
         app.columns[0].not_null = false;
-        app.set_bulk_constant(0, true);
+        app.set_bulk_constant(0, None);
         assert_eq!(
             field_summary(&app.table, &[0, 2], 0, &app.changes, Some("t")),
             (Some(&Value::Null), true)
         );
         assert_eq!(app.changes.len(), 2);
-        app.set_bulk_constant(0, false);
+        app.set_bulk_constant(0, Some(String::new()));
         assert_eq!(
             field_summary(&app.table, &[0, 2], 0, &app.changes, Some("t")),
             (Some(&Value::Text(String::new())), true)
@@ -1602,7 +1593,7 @@ mod tests {
             (Some(&Value::Integer(2)), false)
         );
         app.safe = true;
-        app.set_bulk_constant(0, true);
+        app.set_bulk_constant(0, None);
         assert_eq!(
             field_summary(&app.table, &[0, 2], 0, &app.changes, Some("t")).0,
             Some(&Value::Text(String::new()))
