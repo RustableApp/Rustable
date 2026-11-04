@@ -410,12 +410,16 @@ impl Client {
     /// Pipelines a small metadata query and a streaming data query, each with
     /// its own Sync boundary. Both responses are retained independently so a
     /// caller can validate metadata even when the speculative data query fails.
+    /// Metadata must return built-in types: catalog lookups for unknown metadata
+    /// types could otherwise wait behind the unread data stream.
     pub fn query_typed_raw_with_metadata<P, I>(
         &mut self,
         metadata: &str,
         metadata_params: &[(&(dyn ToSql + Sync), Type)],
         query: &str,
         params: I,
+        max_rows: usize,
+        max_bytes: usize,
     ) -> Result<(Vec<Row>, Result<RowIter<'_>, Error>), Error>
     where
         P: BorrowToSql,
@@ -423,8 +427,14 @@ impl Client {
     {
         let (metadata, stream) = self.connection.block_on(async {
             let (metadata, stream) = futures_util::future::join(
-                self.client.query_typed(metadata, metadata_params),
-                self.client.query_typed_raw(query, params),
+                async {
+                    use futures_util::TryStreamExt;
+                    self.client.query_typed_raw_bounded_with_prefix(
+                        metadata, metadata_params.iter().map(|(value, ty)| (*value, ty.clone())),
+                        &[], 1, max_bytes,
+                    ).await?.try_collect::<Vec<Row>>().await
+                },
+                self.client.query_typed_raw_bounded_with_prefix(query, params, &[], max_rows, max_bytes),
             ).await;
             Ok((metadata?, stream))
         })?;
@@ -444,6 +454,19 @@ impl Client {
     {
         let stream = self.connection.block_on(
             self.client.query_typed_raw_with_prefix(query, params, prefix)
+        )?;
+        Ok(RowIter::new(self.connection.as_ref(), stream))
+    }
+
+    /// Executes in one exchange, with bounded buffering for uncached types.
+    /// Excess rows are drained and discarded; inspect RowIter::truncated.
+    pub fn query_typed_raw_bounded_with_prefix<P, I>(
+        &mut self, query: &str, params: I, prefix: &[&str], max_rows: usize, max_bytes: usize,
+    ) -> Result<RowIter<'_>, Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        let stream = self.connection.block_on(
+            self.client.query_typed_raw_bounded_with_prefix(query, params, prefix, max_rows, max_bytes)
         )?;
         Ok(RowIter::new(self.connection.as_ref(), stream))
     }

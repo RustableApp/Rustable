@@ -9,9 +9,10 @@ use fallible_iterator::FallibleIterator;
 use futures_util::Stream;
 use log::{Level, debug, log_enabled};
 use pin_project_lite::pin_project;
-use postgres_protocol::message::backend::{CommandCompleteBody, Message};
+use postgres_protocol::message::backend::{CommandCompleteBody, DataRowBody, Message};
 use postgres_protocol::message::frontend;
 use postgres_types::Type;
+use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -55,7 +56,7 @@ where
     Ok(RowStream {
         statement,
         responses,
-        rows_affected: None,
+        rows_affected: None, buffered: VecDeque::new(), complete: false, truncated: false,
     })
 }
 
@@ -161,7 +162,91 @@ where
     // The statement is already closed; the portal owns execution and RowStream
     // only needs the resolved column metadata.
     Ok(RowStream {
-        statement: Statement::unnamed(vec![], resolved), responses, rows_affected: None,
+        statement: Statement::unnamed(vec![], resolved), responses, rows_affected: None, buffered: VecDeque::new(), complete: false, truncated: false,
+    })
+}
+
+/// Parse, describe and execute in one exchange. Unknown types are resolved only
+/// after draining execution, so catalog queries cannot block behind unread rows.
+pub async fn query_typed_bounded_with_prefix<P, I>(
+    client: &Arc<InnerClient>, query: &str, params: I, prefix: &[&str],
+    max_rows: usize, max_bytes: usize,
+) -> Result<RowStream, Error>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = (P, Type)>,
+{
+    let params = params.into_iter().collect::<Vec<_>>();
+    let buf = client.with_buf(|buf| {
+        encode_prefix(prefix, buf)?;
+        frontend::parse("", query, params.iter().map(|(_, t)| t.oid()), buf).map_err(Error::parse)?;
+        frontend::describe(b'S', "", buf).map_err(Error::encode)?;
+        encode_bind_raw("", params, "", buf)?;
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })?;
+    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let mut prefix_remaining = prefix.len();
+    let mut columns = Vec::new();
+    loop {
+        match responses.next().await? {
+            Message::ParseComplete | Message::ParameterDescription(_) => {}
+            Message::CommandComplete(_) if prefix_remaining > 0 => { prefix_remaining -= 1; }
+            Message::BindComplete if prefix_remaining > 0 => {}
+            Message::NoData if prefix_remaining == 0 => {}
+            Message::RowDescription(description) if prefix_remaining == 0 => {
+                let mut fields = description.fields();
+                while let Some(field) = fields.next().map_err(Error::parse)? {
+                    columns.push((field.name().to_owned(), field.table_oid(), field.column_id(), field.type_modifier(), field.type_oid()));
+                }
+            }
+            Message::BindComplete => break,
+            _ => return Err(Error::unexpected_message()),
+        }
+    }
+    let cached = columns.iter().map(|column| {
+        Type::from_oid(column.4).or_else(|| client.type_(column.4))
+    }).collect::<Option<Vec<_>>>();
+    let mut buffered = VecDeque::new();
+    let mut rows_affected = None;
+    let mut truncated = false;
+    let complete = cached.is_none();
+    if complete {
+        let mut bytes = 0usize;
+        loop {
+            match responses.next().await? {
+                Message::DataRow(body) => {
+                    let size = body.buffer().len().saturating_add(std::mem::size_of::<DataRowBody>());
+                    if truncated || buffered.len() >= max_rows || size > max_bytes.saturating_sub(bytes) {
+                        truncated = true;
+                    } else {
+                        bytes += size;
+                        buffered.push_back(body);
+                    }
+                }
+                Message::CommandComplete(body) => { rows_affected = Some(extract_row_affected(&body)?); }
+                Message::EmptyQueryResponse => {}
+                Message::ReadyForQuery(_) => break,
+                _ => return Err(Error::unexpected_message()),
+            }
+        }
+    }
+    let types = match cached {
+        Some(types) => types,
+        None => {
+            let mut types = Vec::with_capacity(columns.len());
+            for column in &columns { types.push(get_type(client, column.4).await?); }
+            types
+        }
+    };
+    let resolved = columns.into_iter().zip(types).map(|((name, table_oid, column_id, type_modifier, _), r#type)| Column {
+        name, table_oid: Some(table_oid).filter(|n| *n != 0),
+        column_id: Some(column_id).filter(|n| *n != 0), type_modifier, r#type,
+    }).collect();
+    Ok(RowStream {
+        statement: Statement::unnamed(vec![], resolved), responses, rows_affected,
+        buffered, complete, truncated,
     })
 }
 
@@ -242,7 +327,7 @@ pub async fn query_portal(
     Ok(RowStream {
         statement: portal.statement().clone(),
         responses,
-        rows_affected: None,
+        rows_affected: None, buffered: VecDeque::new(), complete: false, truncated: false,
     })
 }
 
@@ -392,6 +477,9 @@ pin_project! {
         statement: Statement,
         responses: Responses,
         rows_affected: Option<u64>,
+        buffered: VecDeque<DataRowBody>,
+        complete: bool,
+        truncated: bool,
     }
 }
 
@@ -400,6 +488,10 @@ impl Stream for RowStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
+        if let Some(body) = this.buffered.pop_front() {
+            return Poll::Ready(Some(Row::new(this.statement.clone(), body)));
+        }
+        if *this.complete { return Poll::Ready(None); }
         loop {
             match ready!(this.responses.poll_next(cx)?) {
                 Message::DataRow(body) => {
@@ -417,6 +509,9 @@ impl Stream for RowStream {
 }
 
 impl RowStream {
+    /// Whether rows were discarded while draining uncached custom types.
+    pub fn truncated(&self) -> bool { self.truncated }
+
     /// Returns the result columns, including for an empty result set.
     pub fn columns(&self) -> &[Column] {
         self.statement.columns()

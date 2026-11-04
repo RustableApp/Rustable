@@ -103,6 +103,7 @@ fn editor_wan_latency_comparison() {
     let mut legacy = Vec::new();
     let mut current = Vec::new();
     let mut single = Vec::new();
+    let mut describe_first = Vec::new();
     for index in 0..9 {
         let timer = Instant::now();
         let mut tx = driver
@@ -132,31 +133,41 @@ fn editor_wan_latency_comparison() {
         tx.commit().unwrap();
         let old_ms = timer.elapsed().as_secs_f64() * 1000.0;
         let timer = Instant::now();
+        let rows = driver.client.query_typed_raw_with_prefix(
+            sql, std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
+            &["SET LOCAL standard_conforming_strings = on", "SET LOCAL transaction_read_only = on"],
+        ).unwrap();
+        let columns = rows.columns().iter().map(|column| column.name().to_owned()).collect();
+        let previous = collect(rows, columns, QUERY_LIMIT, BYTE_LIMIT, &cancel).unwrap();
+        assert_eq!(previous.rows, grid.rows);
+        let describe_ms = timer.elapsed().as_secs_f64() * 1000.0;
+        let timer = Instant::now();
         let result = driver.execute(sql, true, &cancel);
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.grids[0].rows, grid.rows);
         let new_ms = timer.elapsed().as_secs_f64() * 1000.0;
         let timer = Instant::now();
-        let mut rows = driver
-            .client
-            .query_typed_raw(sql, std::iter::empty::<(&(dyn ToSql + Sync), Type)>())
-            .unwrap();
-        assert!(rows.next().unwrap().is_some());
-        assert!(rows.next().unwrap().is_none());
+        // Simple Query is genuinely one exchange. query_typed_raw now uses
+        // Describe then Execute, so it is not a single-round-trip baseline.
+        let messages = driver.client.simple_query(sql).unwrap();
+        assert_eq!(messages.iter().filter(|message| matches!(message,
+            ::postgres::SimpleQueryMessage::Row(_))).count(), 1);
         let wire_ms = timer.elapsed().as_secs_f64() * 1000.0;
         if index >= 2 {
             legacy.push(old_ms);
             current.push(new_ms);
             single.push(wire_ms);
+            describe_first.push(describe_ms);
         }
     }
-    for values in [&mut legacy, &mut current, &mut single] {
+    for values in [&mut legacy, &mut current, &mut single, &mut describe_first] {
         values.sort_by(f64::total_cmp);
     }
     eprintln!(
-        "30ms simulated RTT, indexed lookup,7samples: legacy p50={:.1}ms p95={:.1}ms; optimized p50={:.1}ms p95={:.1}ms; single-exchange reference p50={:.1}ms",
-        legacy[3], legacy[6], current[3], current[6], single[3]
+        "30ms simulated RTT, indexed lookup,7samples: legacy p50={:.1}ms p95={:.1}ms; optimized p50={:.1}ms p95={:.1}ms; single-exchange reference p50={:.1}ms; describe-first p50={:.1}ms",
+        legacy[3], legacy[6], current[3], current[6], single[3], describe_first[3]
     );
+    assert!(current[3] < describe_first[3] * 0.75, "editor still pays a description round trip");
     assert!(
         current[3] < legacy[3] * 0.8,
         "round-trip reduction must lower measured latency"

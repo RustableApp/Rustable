@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import tomllib
+import xml.etree.ElementTree as ET
 
 root = Path(__file__).resolve().parents[1]
 os.chdir(root)
@@ -37,6 +38,9 @@ version = tomllib.loads((root / 'Cargo.toml').read_text())['package']['version']
 tag = required('RELEASE_TAG')
 if tag != f'v{version}':
     raise SystemExit('Release tag must match Cargo package version')
+release_notes = (root / 'docs' / f'RELEASE-{version}.md').read_text(encoding='utf-8').strip()
+if not release_notes:
+    raise SystemExit('Release notes must not be empty')
 arch = platform.machine()
 if arch not in ('arm64', 'x86_64'):
     raise SystemExit(f'Unsupported macOS architecture: {arch}')
@@ -93,7 +97,14 @@ with tempfile.TemporaryDirectory(prefix='rustable-signing-') as temporary:
         run('ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(archive))
         with tempfile.TemporaryDirectory(prefix='rustable-feed-') as feed_dir:
             shutil.copy2(archive, Path(feed_dir) / archive.name)
-            run(str(root/'target/sparkle/bin/generate_appcast'), '--ed-key-file', '-', '--maximum-deltas', '0', '--download-url-prefix', f'https://github.com/RustableApp/Rustable/releases/download/{tag}/', '-o', str(dist/feed_name), feed_dir, input=private_key+'\n', text=True)
+            # Sparkle discovers notes by the archive basename. Embed Markdown
+            # so the update prompt needs no separately hosted release-notes page.
+            (Path(feed_dir) / archive.with_suffix('.md').name).write_text(release_notes, encoding='utf-8')
+            run(str(root/'target/sparkle/bin/generate_appcast'), '--ed-key-file', '-', '--maximum-deltas', '0', '--embed-release-notes', '--download-url-prefix', f'https://github.com/RustableApp/Rustable/releases/download/{tag}/', '-o', str(dist/feed_name), feed_dir, input=private_key+'\n', text=True)
+            description = ET.parse(dist / feed_name).find('./channel/item/description')
+            if (description is None or (description.text or '').strip() != release_notes
+                    or description.get('{http://www.andymatuschak.org/xml-namespaces/sparkle}format') != 'markdown'):
+                raise SystemExit('Generated Sparkle feed is missing the release notes')
         # Keep Sparkle's ZIP feed separate from the human-facing DMG installer.
         dmg = dist / f'Rustable-macos-{arch}.dmg'
         run('python', 'scripts/create-dmg.py', str(app), str(dmg))

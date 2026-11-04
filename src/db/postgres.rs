@@ -314,10 +314,12 @@ impl Driver for PostgresDriver {
                 };
                 let rows = self
                     .client
-                    .query_typed_raw_with_prefix(
+                    .query_typed_raw_bounded_with_prefix(
                         statement,
                         std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
                         prefix,
+                        QUERY_LIMIT,
+                        budget,
                     )
                     .map_err(|err| {
                         if let Some(::postgres::error::ErrorPosition::Original(position)) = err.as_db_error().and_then(|error| error.position()) {
@@ -539,6 +541,7 @@ fn collect(
         super::progress::decoded_row(&values);
         grid.rows.push(values);
     }
+    grid.truncated |= rows.truncated();
     grid.affected = rows.rows_affected().unwrap_or(0) as usize;
     Ok(grid)
 }
@@ -1203,10 +1206,11 @@ mod live_tests {
             NoTls,
         )
         .unwrap();
-        let mut rows = client.query_typed_raw_with_prefix(
+        let mut rows = client.query_typed_raw_bounded_with_prefix(
             "SELECT current_setting('transaction_read_only'), current_setting('standard_conforming_strings')",
             std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
             &["SET LOCAL standard_conforming_strings = on", "SET LOCAL transaction_read_only = on"],
+            QUERY_LIMIT, BYTE_LIMIT,
         ).unwrap();
         let row = rows.next().unwrap().unwrap();
         assert_eq!(row.get::<_, String>(0), "on");
@@ -1220,10 +1224,11 @@ mod live_tests {
                 .get::<_, String>(0),
             "off"
         );
-        let denied = client.query_typed_raw_with_prefix(
+        let denied = client.query_typed_raw_bounded_with_prefix(
             "SELECT set_config('transaction_read_only','off',true)",
             std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
             &["SET LOCAL transaction_read_only = on"],
+            QUERY_LIMIT, BYTE_LIMIT,
         );
         if let Ok(mut rows) = denied {
             assert!(rows.next().is_err(), "safe flag can be disabled");
@@ -1262,10 +1267,11 @@ mod live_tests {
             assert!(
                 driver
                     .client
-                    .query_typed_raw_with_prefix(
+                    .query_typed_raw_bounded_with_prefix(
                         "INSERT INTO pipeline_qa VALUES (1) RETURNING id",
                         std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
                         &prefix,
+                        QUERY_LIMIT, BYTE_LIMIT,
                     )
                     .is_err()
             );
@@ -1276,10 +1282,11 @@ mod live_tests {
                 .get(0);
             assert_eq!(count, 0, "query executed despite failed prefix");
         }
-        let mut rows = driver.client.query_typed_raw_with_prefix(
+        let mut rows = driver.client.query_typed_raw_bounded_with_prefix(
             "SELECT count(*) FROM pipeline_qa",
             std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
             &["INSERT INTO pipeline_qa VALUES (9)"],
+            QUERY_LIMIT, BYTE_LIMIT,
         ).unwrap();
         assert_eq!(rows.next().unwrap().unwrap().get::<_, i64>(0), 1, "prefix must execute exactly once");
         assert!(rows.next().unwrap().is_none());
@@ -1944,6 +1951,46 @@ mod query_lifetime_tests {
 #[cfg(test)]
 mod custom_type_stream_tests {
     use super::*;
+    #[test]
+    #[ignore = "requires opted-in disposable PostgreSQL on port 54329"]
+    fn single_exchange_custom_types_are_bounded_and_never_replayed() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+        for (row_limit, byte_limit, expected_rows) in [(2, 1_000_000, 2), (20, 0, 0)] {
+            let mut client = Client::connect(
+                "host=127.0.0.1 port=54329 user=postgres password=rustable_qa_only dbname=rustable_qa", NoTls,
+            ).unwrap();
+            client.batch_execute("CREATE TYPE pg_temp.bounded_state AS ENUM ('active'); CREATE TEMP TABLE bounded_rows (id integer, state pg_temp.bounded_state)").unwrap();
+            let rows = client.query_typed_raw_bounded_with_prefix(
+                "INSERT INTO bounded_rows SELECT i, 'active'::pg_temp.bounded_state FROM generate_series(1,10) i RETURNING id,state",
+                std::iter::empty::<(&(dyn ToSql + Sync), Type)>(), &[], row_limit, byte_limit,
+            ).unwrap();
+            let grid = collect(rows, vec!["id".into(), "state".into()], 20, BYTE_LIMIT, &AtomicBool::new(false)).unwrap();
+            assert!(grid.truncated);
+            assert_eq!(grid.rows.len(), expected_rows);
+            assert_eq!(grid.affected, 10);
+            if expected_rows > 0 {
+                assert_eq!(grid.rows[0], [Value::Integer(1), Value::Text("active".into())]);
+            }
+            assert_eq!(client.query_one("SELECT count(*) FROM bounded_rows", &[]).unwrap().get::<_, i64>(0), 10);
+            // A cached enum uses the ordinary streaming decoder on the next run.
+            let rows = client.query_typed_raw_bounded_with_prefix(
+                "SELECT state FROM bounded_rows ORDER BY id", std::iter::empty::<(&(dyn ToSql + Sync), Type)>(), &[], 20, BYTE_LIMIT,
+            ).unwrap();
+            let grid = collect(rows, vec!["state".into()], 20, BYTE_LIMIT, &AtomicBool::new(false)).unwrap();
+            assert!(!grid.truncated);
+            assert_eq!(grid.rows.len(), 10);
+            assert_eq!(grid.rows[0], [Value::Text("active".into())]);
+            client.batch_execute("CREATE DOMAIN pg_temp.empty_domain AS integer").unwrap();
+            let mut rows = client.query_typed_raw_bounded_with_prefix(
+                "SELECT 1::pg_temp.empty_domain AS empty WHERE false", std::iter::empty::<(&(dyn ToSql + Sync), Type)>(), &[], 20, BYTE_LIMIT,
+            ).unwrap();
+            assert_eq!(rows.columns()[0].name(), "empty");
+            assert!(rows.next().unwrap().is_none());
+            assert_eq!(rows.rows_affected(), Some(0));
+            assert!(!rows.truncated());
+        }
+    }
+
     #[test]
     #[ignore = "requires opted-in disposable PostgreSQL on port 54329"]
     fn uncached_custom_type_with_large_rows_does_not_stall() {

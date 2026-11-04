@@ -3975,6 +3975,50 @@ impl Rustable {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 rounded_action_buttons(ui);
                 ui.add_space(8.0);
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    let caret = ui.scope(|ui| {
+                        ui.spacing_mut().button_padding.x = 3.0;
+                        let height = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+                        ui.add_enabled(self.pending.is_none(), egui::Button::image(
+                        egui::Image::new(egui::include_image!("../assets/icons/lucide/chevron-down.svg"))
+                            .fit_to_exact_size(egui::vec2(12.0, 12.0)))
+                        .fill(BLUE)
+                        .min_size(egui::vec2(18.0, height.max(ui.spacing().interact_size.y)))
+                        .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }))
+                    }).inner;
+                    caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && self.pending.is_none(), "Run options"));
+                    ui.painter().line_segment([
+                        caret.rect.left_top() + egui::vec2(0.0, 4.0),
+                        caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
+                    ], Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
+                    egui::Popup::menu(&caret)
+                        .frame(egui::Frame::popup(ui.style()).inner_margin(4.0))
+                        .show(|ui| {
+                        ui.set_width(140.0);
+                        ui.spacing_mut().interact_size.y = 20.0;
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_menu_item("Run current", false, "Enter")).clicked() {
+                            self.run_query(false);
+                            ui.close();
+                        }
+                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_menu_item("Run all", true, "Enter")).clicked() {
+                            self.run_query(true);
+                            ui.close();
+                        }
+                    });
+                    caret.on_hover_text("Run options");
+                    let widgets = &mut ui.visuals_mut().widgets;
+                    for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active, &mut widgets.noninteractive] {
+                        widget.corner_radius = egui::CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 };
+                    }
+                    if ui.add_enabled(self.pending.is_none(), crate::icons::query_run_button(
+                        if self.tabs[self.tab].cursor.is_empty() { "Run current" } else { "Run selection" },
+                        self.pending.is_some(), BLUE,
+                    )).clicked() {
+                        self.run_query(false);
+                    }
+                });
                 ui.menu_button("File", |ui| {
                     if ui
                         .add_enabled(self.pending.is_none(), egui::Button::new("Save SQL"))
@@ -4015,50 +4059,6 @@ impl Rustable {
                 if self.pending.is_some() && ui.button("Cancel").clicked() {
                     self.request_query_cancel(ui.ctx());
                 }
-                ui.scope(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    let caret = ui.scope(|ui| {
-                        ui.spacing_mut().button_padding.x = 3.0;
-                        let height = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
-                        ui.add_enabled(self.pending.is_none(), egui::Button::image(
-                        egui::Image::new(egui::include_image!("../assets/icons/lucide/chevron-down.svg"))
-                            .fit_to_exact_size(egui::vec2(12.0, 12.0)))
-                        .fill(BLUE)
-                        .min_size(egui::vec2(18.0, height.max(ui.spacing().interact_size.y)))
-                        .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }))
-                    }).inner;
-                    caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && self.pending.is_none(), "Run options"));
-                    ui.painter().line_segment([
-                        caret.rect.left_top() + egui::vec2(0.0, 4.0),
-                        caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
-                    ], Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
-                    egui::Popup::menu(&caret)
-                        .frame(egui::Frame::popup(ui.style()).inner_margin(4.0))
-                        .show(|ui| {
-                        ui.set_width(140.0);
-                        ui.spacing_mut().interact_size.y = 20.0;
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_menu_item("Run current", false, "Enter")).clicked() {
-                            self.run_query(false);
-                            ui.close();
-                        }
-                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_menu_item("Run all", true, "Enter")).clicked() {
-                            self.run_query(true);
-                            ui.close();
-                        }
-                    });
-                    caret.on_hover_text("Run options");
-                    let widgets = &mut ui.visuals_mut().widgets;
-                    for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active, &mut widgets.noninteractive] {
-                        widget.corner_radius = egui::CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 };
-                    }
-                    if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_button(
-                        if self.tabs[self.tab].cursor.is_empty() { "Run current" } else { "Run selection" },
-                        false, "Enter", Some(BLUE),
-                    )).clicked() {
-                        self.run_query(false);
-                    }
-                });
             });
         });
         if self.tabs[self.tab].results.len() > 1 || !self.tabs[self.tab].pins.items.is_empty() {
@@ -10052,11 +10052,11 @@ mod workspace_layout_tests {
         );
         assert!(status.right() < run.left());
         assert!(
-            run.right() < favorite.left() && favorite.right() < file.left()
+            favorite.right() < file.left() && file.right() < run.left()
         );
         assert!(
-            file.right() > 1230.0,
-            "query actions must align with the right edge: {file:?}"
+            run.right() > 1200.0,
+            "run action must align with the right edge: {run:?}"
         );
         let mut positions = Vec::new();
         for shape in output.shapes {

@@ -41,6 +41,11 @@ GitHub repository secrets:
 
 Only the signing step receives these credentials. Its temporary keychain and private files are removed afterward. Signing fails closed; no unsigned macOS fallback is published. Keep protected backups of signing material outside Git and preserve the Sparkle key across releases.
 
+The update prompt displays Markdown from `docs/RELEASE-X.Y.Z.md`, embedded in
+the appcast by `generate_appcast --embed-release-notes`. Missing or empty notes
+fail packaging; the generated feed is checked before publication. Keep those
+notes user-facing and concise.
+
 The macOS archive is notarized, its app is stapled and assessed by Gatekeeper, then the archive is recreated before Sparkle signs it. The appcast points to immutable version-specific release asset URLs. Installed macOS builds fetch their architecture's appcast through GitHub's latest-release download URL. Drafts and prereleases do not become the latest stable feed.
 
 Review and test the draft packages before publishing. Never replace a published release asset in place; bump Cargo version and tag a new release. Download buttons must point only to actual published assets, not CI artifacts or missing latest-release links.

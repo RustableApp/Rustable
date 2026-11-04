@@ -27,6 +27,15 @@ Local changes:
   `query_typed_with_prefix` executes prefixes with Bind/Execute in one Sync
   group so setup failure skips execution. Rustable's two idempotent SET LOCAL
   safeguards also run during description; arbitrary prefixes run only once.
+- `query_typed_bounded_with_prefix` is the editor's single-exchange path:
+  safeguards, unnamed Parse/Describe/Bind/Execute, then Sync. Built-in and cached
+  types stream immediately. Uncached types drain execution first, retaining only
+  the configured row/byte budget, then resolve catalog metadata and decode those
+  rows. Overflow is exposed by `RowStream::truncated` / `RowIter::truncated`.
+  This avoids type-lookup deadlocks without replaying SQL; the general typed API
+  retains its describe-first behavior. Live tests cover cold enum results larger
+  than the response channel, truncation, INSERT RETURNING without replay, cached
+  decoding and empty custom-type results.
 - `tokio-postgres/src/client.rs`: additive `query_typed_raw_with_prefix` and
   `transaction_status` APIs; tracks outstanding requests alongside status.
 - `tokio-postgres/src/codec.rs`: reads the terminal ReadyForQuery status from
@@ -38,7 +47,12 @@ Local changes:
 - `postgres/src/client.rs`: additive synchronous `query_typed_raw_with_prefix`
   and `transaction_status` APIs. `query_typed_raw_with_metadata` polls a small
   metadata query and a streaming data query together on the same connection,
-  preserving the metadata response when the data query fails.
+  preserving the metadata response when the data query fails. Table browsing
+  now uses the bounded single-exchange API for both metadata and data: two
+  sequential exchanges on a first load and one pipelined exchange on refresh.
+  The metadata query returns only built-in wire types. Fresh schema validation,
+  stale-shape retries (autocommit only), and separate Sync boundaries remain;
+  an erroneous speculative query cannot discard the fresh catalog response.
 - `postgres/src/cancel_token.rs`: additive `cancel_query_with_timeout` wraps the
   entire cancellation connection/TLS/send future in a deadline. `false` means
   timeout; `true` means sent, never confirmed server cancellation. Rustable uses
@@ -46,7 +60,8 @@ Local changes:
 
 Rustable pipelines SET LOCAL standard_conforming_strings (and, in Safe mode,
 SET LOCAL transaction_read_only) with execution of the parameter-free editor query in one
-exchange, following the separate description/type-resolution exchange. Each is a separate Parse/Bind/Execute operation, with a single Sync
+exchange, including description of the editor query. Each prefix is a separate
+Parse/Bind/Execute operation, with a single Sync
 after the final query. PostgreSQL's extended-protocol error handling skips the
 remaining operations until Sync if any setup command fails. This is essential:
 concurrently sending separate setup/query requests, each with its own Sync,
@@ -59,7 +74,8 @@ user-written transaction commands; explicit transactions remain open across
 runs until the user commits or rolls back. Recovery statements bypass the SET
 prefix so an aborted explicit transaction can still be rolled back.
 
-Results retain binary typed decoding and bounded streaming. The metadata
+Results retain binary typed decoding and bounded streaming (bounded buffering
+while resolving uncached custom types). The metadata
 accessors preserve headers for zero-row results without re-preparing or
 re-running queries after execution. Cancellation follows PostgreSQL semantics:
 a cancelled in-flight statement rolls back, but an already completed autocommit

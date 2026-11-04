@@ -586,6 +586,16 @@ impl Client {
         query::query_typed_with_prefix(&self.inner, query, params, prefix).await
     }
 
+    /// Executes in one exchange, buffering at most these limits when result
+    /// types require a catalog lookup. Excess rows are drained and discarded.
+    pub async fn query_typed_raw_bounded_with_prefix<P, I>(
+        &self, query: &str, params: I, prefix: &[&str], max_rows: usize, max_bytes: usize,
+    ) -> Result<RowStream, Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        query::query_typed_bounded_with_prefix(&self.inner, query, params, prefix, max_rows, max_bytes).await
+    }
+
     /// Executes a statement, returning the number of rows modified.
     ///
     /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list

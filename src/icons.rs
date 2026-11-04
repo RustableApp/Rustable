@@ -91,20 +91,28 @@ pub fn shortcut(ctx: &egui::Context, shift: bool, key: &str) -> String {
 /// macOS shortcut keys use artwork; other platforms use familiar key names.
 /// Leave 12 points before the shortcut and 2 points between its keys.
 pub fn shortcut_button(label: &'static str, shift: bool, key: &'static str, fill: Option<egui::Color32>) -> impl egui::Widget {
-    shortcut_widget(label, shift, key, fill, false)
+    shortcut_widget(label, shift, key, fill, false, None)
 }
 
 /// Menu rows share a width and grow the label/shortcut spacer, aligning key edges.
 pub fn shortcut_menu_item(label: &'static str, shift: bool, key: &'static str) -> impl egui::Widget {
-    shortcut_widget(label, shift, key, None, true)
+    shortcut_widget(label, shift, key, None, true, None)
 }
 
-fn shortcut_widget(label: &'static str, shift: bool, key: &'static str, fill: Option<egui::Color32>, menu: bool) -> impl egui::Widget {
+/// Keep a fixed icon slot so starting a query never shifts toolbar controls.
+pub fn query_run_button(label: &'static str, running: bool, fill: egui::Color32) -> impl egui::Widget {
+    shortcut_widget(label, false, "Enter", Some(fill), false, Some(running))
+}
+
+fn shortcut_widget(label: &'static str, shift: bool, key: &'static str, fill: Option<egui::Color32>, menu: bool, running: Option<bool>) -> impl egui::Widget {
     move |ui: &mut egui::Ui| {
         egui_extras::install_image_loaders(ui.ctx());
         ui.scope(|ui| {
             ui.spacing_mut().icon_spacing = 2.0;
             let mut atoms = egui::Atoms::new(label);
+            if running.is_some() {
+                atoms.push_left(egui::Atom { size: Some(egui::vec2(14.0, 14.0)), ..Default::default() });
+            }
             atoms.push_right(egui::Atom { size: Some(egui::vec2(8.0, 0.0)), grow: menu, ..Default::default() });
             let icon = |source| egui::Image::new(source).fit_to_exact_size(egui::vec2(14.0, 14.0));
             let mac = ui.ctx().os() == egui::os::OperatingSystem::Mac;
@@ -121,12 +129,25 @@ fn shortcut_widget(label: &'static str, shift: bool, key: &'static str, fill: Op
             }
             let button = egui::Button::new(atoms).image_tint_follows_text_color(fill.is_none())
                 .min_size(egui::vec2(if menu { ui.available_width() } else { 0.0 }, 0.0));
-            if let Some(fill) = fill {
+            let response = if let Some(fill) = fill {
                 ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
                 ui.add(button.fill(fill))
             } else {
                 ui.add(button)
+            };
+            if let Some(running) = running {
+                let center = egui::pos2(response.rect.left() + ui.spacing().button_padding.x + 7.0, response.rect.center().y);
+                if running {
+                    egui::Spinner::new().color(egui::Color32::WHITE).paint_at(ui,
+                        egui::Rect::from_center_size(center, egui::vec2(14.0, 14.0)));
+                } else {
+                    ui.painter().add(egui::Shape::convex_polygon(vec![
+                        center + egui::vec2(-4.0, -5.0), center + egui::vec2(5.0, 0.0),
+                        center + egui::vec2(-4.0, 5.0),
+                    ], egui::Color32::WHITE, egui::Stroke::NONE));
+                }
             }
+            response
         }).inner
     }
 }

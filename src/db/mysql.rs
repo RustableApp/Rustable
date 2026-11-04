@@ -395,8 +395,10 @@ impl MysqlDriver {
         };
         let mut object = Object { schema: Some(schema.clone()), name: request.table.clone(),
             display_name: None, metadata_error: None, kind, columns: Vec::new(), ddl };
+        let mut has_invisible_columns = false;
         for row in rows {
             let extra = row.get::<String, _>("Extra").ok_or("Missing column attributes")?;
+            has_invisible_columns |= extra.split_whitespace().any(|attribute| attribute.eq_ignore_ascii_case("INVISIBLE"));
             object.columns.push(Column {
                 name: row.get("Field").ok_or("Missing column name")?,
                 data_type: row.get("Type").ok_or("Missing column type")?,
@@ -407,10 +409,14 @@ impl MysqlDriver {
             });
         }
         // SELECT * omits invisible columns, including possible primary keys.
-        // Project the catalog order explicitly so values and editing metadata
-        // stay aligned, and full-table exports match the table browser.
+        // Only those tables need an explicit projection to keep values aligned
+        // with editing metadata. Ordinary tables and views use SELECT *.
         if object.columns.is_empty() { return Err("No readable columns found for this table.".into()); }
-        let projection = object.columns.iter().map(|column| quote(&column.name)).collect::<Vec<_>>().join(", ");
+        let projection = if has_invisible_columns {
+            object.columns.iter().map(|column| quote(&column.name)).collect::<Vec<_>>().join(", ")
+        } else {
+            "*".to_owned()
+        };
         let mut sql = format!("SELECT {projection} FROM {}.{}", quote(&schema), quote(&object.name));
         let mut parameters = Vec::new();
         if !request.filter.is_empty() {
@@ -1353,12 +1359,19 @@ mod tests {
         let mut driver = MysqlDriver::connect(&config).unwrap();
         let mut other = Conn::new(OptsBuilder::from(&config)).unwrap();
         driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS invisible_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE invisible_probe(id INT PRIMARY KEY, label VARCHAR(30))").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO invisible_probe VALUES(7,'visible')").unwrap();
+        let plain = driver.browse(&Browse { table:"invisible_probe".into(), ..Default::default() }).unwrap();
+        assert!(plain.sql.starts_with("SELECT * FROM "), "{}", plain.sql);
+        assert_eq!(plain.grid.rows[0], [Value::Integer(7),Value::Text("visible".into())]);
+        driver.conn().unwrap().query_drop("DROP TABLE invisible_probe").unwrap();
         driver.conn().unwrap().query_drop("CREATE TABLE invisible_probe(id INT NOT NULL DEFAULT 0 PRIMARY KEY INVISIBLE, label VARCHAR(30), `hidden``value` INT INVISIBLE, qty INT) ENGINE=InnoDB").unwrap();
         driver.conn().unwrap().query_drop("INSERT INTO invisible_probe(id,label,`hidden``value`,qty) VALUES(7,'visible',42,3)").unwrap();
         let handwritten = driver.execute("SELECT * FROM invisible_probe", false, &AtomicBool::new(false));
         assert_eq!(handwritten.grids[0].rows[0].len(),2, "handwritten SQL keeps server star semantics");
         let request = Browse { table:"invisible_probe".into(), ..Default::default() };
         let data = driver.browse(&request).unwrap();
+        assert!(!data.sql.starts_with("SELECT *"), "{}", data.sql);
         assert_eq!(data.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id","label","hidden`value","qty"]);
         assert_eq!(data.grid.rows[0], [Value::Integer(7),Value::Text("visible".into()),Value::Integer(42),Value::Integer(3)]);
         assert!(data.columns[0].pk);

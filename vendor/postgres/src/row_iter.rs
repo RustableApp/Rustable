@@ -18,6 +18,9 @@ impl<'a> RowIter<'a> {
         }
     }
 
+    /// Whether rows were discarded while resolving uncached types.
+    pub fn truncated(&self) -> bool { self.it.truncated() }
+
     /// Returns the result columns, including for an empty result set.
     pub fn columns(&self) -> &[crate::Column] {
         self.it.columns()

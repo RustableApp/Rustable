@@ -71,9 +71,13 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         Some(row) => row,
         None => driver
             .client
-            .query_typed_opt(CATALOG, &[(&request.table, Type::TEXT)])
+            .query_typed_raw_bounded_with_prefix(
+                CATALOG, [(&request.table, Type::TEXT)], &[], 1, BYTE_LIMIT,
+            )
             .map_err(error)?
-            .ok_or("Table no longer exists")?,
+            .collect::<Vec<_>>()
+            .map_err(error)?
+            .into_iter().next().ok_or("Table no longer exists")?,
     };
     if driver.cancel.load(Ordering::Relaxed) {
         return Err("Cancelled".into());
@@ -81,22 +85,30 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
     let table = format!("{}.{}", quote(row.get(0)), quote(row.get(1)));
     let raw_columns: Vec<CatalogColumn> =
         serde_json::from_str(row.get(3)).map_err(|e| format!("Invalid column metadata: {e}"))?;
-    let projection = raw_columns
-        .iter()
-        .map(|(name, _, _, _, _, _, original_oid, base_oid)| {
-            let source = format!("{table}.{}", quote(name));
-            match Type::from_oid(*base_oid).filter(native_display_type) {
-                Some(ty) if original_oid != base_oid => format!(
-                    "CAST({source} AS pg_catalog.{}) AS {}",
-                    quote(ty.name()),
-                    quote(name)
-                ),
-                Some(_) => source,
-                None => format!("CAST({source} AS pg_catalog.text) AS {}", quote(name)),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    // Ordinary columns need no conversion. Use the actual wildcard query in
+    // both execution and activity; retain explicit projections only for casts.
+    let projection = if raw_columns.iter().all(|(_, _, _, _, _, _, oid, base_oid)| {
+        oid == base_oid && Type::from_oid(*base_oid).is_some_and(|ty| native_display_type(&ty))
+    }) {
+        "*".to_owned()
+    } else {
+        raw_columns
+            .iter()
+            .map(|(name, _, _, _, _, _, original_oid, base_oid)| {
+                let source = format!("{table}.{}", quote(name));
+                match Type::from_oid(*base_oid).filter(native_display_type) {
+                    Some(ty) if original_oid != base_oid => format!(
+                        "CAST({source} AS pg_catalog.{}) AS {}",
+                        quote(ty.name()),
+                        quote(name)
+                    ),
+                    Some(_) => source,
+                    None => format!("CAST({source} AS pg_catalog.text) AS {}", quote(name)),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let columns = raw_columns
         .into_iter()
         .map(
@@ -178,7 +190,10 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
     let rows = if pipelined {
         let (fresh, rows) = driver
             .client
-            .query_typed_raw_with_metadata(CATALOG, &[(&request.table, Type::TEXT)], &sql, values)
+            .query_typed_raw_with_metadata(
+                CATALOG, &[(&request.table, Type::TEXT)], &sql, values,
+                request.page_size() + 1, BYTE_LIMIT,
+            )
             .map_err(error)?;
         let fresh = fresh.into_iter().next().ok_or("Table no longer exists")?;
         if driver.cancel.load(Ordering::Relaxed) {
@@ -203,7 +218,9 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         row = fresh;
         rows.map_err(error)?
     } else {
-        driver.client.query_typed_raw(&sql, values).map_err(error)?
+        driver.client.query_typed_raw_bounded_with_prefix(
+            &sql, values, &[], request.page_size() + 1, BYTE_LIMIT,
+        ).map_err(error)?
     };
     let names = rows.columns().iter().map(|c| c.name().to_owned()).collect();
     let mut grid = collect(rows, names, request.page_size(), BYTE_LIMIT, &driver.cancel)?;
@@ -277,6 +294,45 @@ mod tests {
 
     #[test]
     #[ignore = "requires opted-in disposable PostgreSQL QA server on port 54329"]
+    fn stale_wildcard_with_large_uncached_enum_rows_recovers_without_stalling() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig {
+                host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
+                user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+            }, cancel).unwrap();
+            driver.client.batch_execute("CREATE TEMP TABLE wildcard_refresh(id integer PRIMARY KEY); INSERT INTO wildcard_refresh SELECT generate_series(1,40)").unwrap();
+            let mut request = Browse { table: "wildcard_refresh".into(), limit: 20, ..Default::default() };
+            let first = driver.browse(&request).unwrap();
+            assert!(first.sql.starts_with("SELECT *"));
+            assert_eq!(first.grid.rows.len(), 20);
+            assert!(first.grid.truncated);
+            // Cached wildcard now returns an unknown enum and more data than
+            // the driver's bounded response channel can hold. Drain before
+            // type lookup, then discard the stale result and rebuild casts.
+            driver.client.batch_execute("CREATE TYPE pg_temp.wildcard_state AS ENUM ('active'); ALTER TABLE wildcard_refresh ADD COLUMN state pg_temp.wildcard_state DEFAULT 'active'; ALTER TABLE wildcard_refresh ADD COLUMN payload text DEFAULT repeat('x',100000)").unwrap();
+            let refreshed = driver.browse(&request).unwrap();
+            assert_eq!(refreshed.grid.columns, ["id", "state", "payload"]);
+            assert_eq!(refreshed.grid.rows.len(), 20);
+            assert!(refreshed.grid.truncated);
+            assert!(refreshed.sql.contains("CAST("));
+            assert_eq!(refreshed.grid.rows[0][1], Value::Text("active".into()));
+            assert_eq!(refreshed.grid.rows[0][2], Value::Text("x".repeat(100000)));
+            request.offset = 20;
+            let second = driver.browse(&request).unwrap();
+            assert_eq!(second.grid.rows.len(), 20);
+            assert!(!second.grid.truncated);
+            assert_eq!(second.grid.rows[0][0], Value::Integer(21));
+            send.send(()).unwrap();
+        });
+        receive.recv_timeout(Duration::from_secs(10)).expect("stale wildcard refresh stalled or failed");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires opted-in disposable PostgreSQL QA server on port 54329"]
     fn refresh_reads_fresh_metadata_and_preserves_domain_values_and_transactions() {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
         let cancel = Arc::new(AtomicBool::new(false));
@@ -338,10 +394,18 @@ mod tests {
             table: "browse_other".into(),
             ..Default::default()
         };
-        assert_eq!(
-            driver.browse(&other).unwrap().grid.rows,
-            [vec![Value::Integer(42)]]
-        );
+        let plain = driver.browse(&other).unwrap();
+        assert!(plain.sql.starts_with("SELECT * FROM "), "{}", plain.sql);
+        assert_eq!(plain.grid.rows, [vec![Value::Integer(42)]]);
+        assert!(driver.browse(&other).unwrap().sql.starts_with("SELECT * FROM "));
+        // A newly added domain invalidates the cached wildcard shape and uses
+        // the conversion projection, retaining its typed value.
+        driver.client.batch_execute("ALTER TABLE browse_other ADD COLUMN score pg_temp.browse_domain DEFAULT 5").unwrap();
+        let converted = driver.browse(&other).unwrap();
+        assert!(converted.sql.contains("CAST("), "{}", converted.sql);
+        assert_eq!(converted.grid.rows, [vec![Value::Integer(42), Value::Integer(5)]]);
+        driver.client.batch_execute("ALTER TABLE browse_other DROP COLUMN score").unwrap();
+        assert!(driver.browse(&other).unwrap().sql.starts_with("SELECT * FROM "));
         assert_eq!(driver.browse_catalog.len(), 2);
         assert_eq!(
             driver.browse(&request).unwrap().grid.rows,
