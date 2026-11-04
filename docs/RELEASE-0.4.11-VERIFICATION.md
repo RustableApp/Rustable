@@ -1,13 +1,13 @@
-# v0.4.11 release verification — publication pending
+# v0.4.11 release verification
 
 Source tag: `8b1daad44556a156f672d0fdc1cadc7fd53e61f2`.
-Signed release workflow: `41886470946`; Build and test: `41886467961`.
-Windows, Linux, and browser jobs passed. GitHub could not allocate a macOS ARM
-runner and reported capacity constraints. The failed release job was retried;
-alternate macOS 26 recovery run `41889186632` checked out the same release tag.
-Both the retry and alternate image failed to acquire a runner, with the same
-capacity-constraint annotations. No macOS code/build step ran.
-No desktop release has been published yet.
+Signed release workflow: `41886470946`, attempt 3, succeeded across all platforms.
+Earlier attempts and macOS 26 fallback `41889186632` failed before runner
+assignment due to GitHub ARM capacity constraints. The third attempt used the
+original macOS 15 workflow and passed tests, build, signing and notarization.
+Separate CI `41886467961` passed Windows/Linux/browser; its macOS job was cancelled
+by runner allocation failure. Equivalent release-workflow macOS tests passed.
+Published November 4, 2026 at 13:05:47 America/Chicago (19:05:47 UTC).
 
 Local validation: 536 enabled tests passed, 123 optional tests ignored;
 strict all-target Clippy and the separate locked browser package check passed.
@@ -28,9 +28,14 @@ release tag; isolation/CSP headers passed. The public WASM matches the artifact:
 Demo website commit: `912afaf`. Cloudflare deployment:
 `420eb815-e966-4714-9ce4-757b17c1576d`.
 
-Remaining gates: macOS build/tests/signing/notarization, local package and
-Sparkle signature verification, complete draft checksums, publication and all
-public download links. Do not mark this release complete until these pass.
+All six payload checksums matched SHA256SUMS. macOS deep/strict codesign,
+Gatekeeper, app and DMG stapled tickets, DMG integrity, and Sparkle Ed25519
+signature verified. The updater signature matches the installed app's public
+key. All seven latest-release download URLs returned HTTP 200 and the public
+updater feed exactly matches the verified asset. The draft WASM archive is
+byte-identical to the tested and deployed workflow artifact.
 
-Website follow-up `4ffb876` keeps the download label on published v0.4.10 while
-the v0.4.11 demo remains live. Restore the label only when publishing v0.4.11.
+Final website content commit: `2cb75e4`. Cloudflare deployment version:
+`d1b4f87a-5ff2-473a-907b-ca7170a7584c`. Public download label is v0.4.11.
+Installed old-to-new Sparkle update, native notification delivery and physical
+monitor hotplug remain unverified; package/signature checks do not cover these.
