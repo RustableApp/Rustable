@@ -3826,6 +3826,13 @@ impl Rustable {
                                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I)) {
                                 tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
                             }
+                            if ui.is_enabled() && ui.memory(|m| m.has_focus(editor_id))
+                                && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash)) {
+                                let dialect = self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine));
+                                let mut state = egui::TextEdit::load_state(ui.ctx(), editor_id).unwrap_or_default();
+                                toggle_line_comments(tab, dialect, &mut state);
+                                state.store(ui.ctx(), editor_id);
+                            }
                             let was_formatting = tab.formatter.busy();
                             if let Some(formatted) = tab.formatter.poll(&tab.sql) {
                                 let mut state = egui::TextEdit::load_state(ui.ctx(), editor_id).unwrap_or_default();
@@ -6285,6 +6292,21 @@ fn apply_formatted_sql(tab: &mut QueryTab, formatted: crate::sql_format::Formatt
     tab.completion.dismiss();
     tab.refresh_dirty();
     tab.focus_editor = true;
+}
+
+fn toggle_line_comments(tab: &mut QueryTab, dialect: crate::sql::Dialect, state: &mut egui::text_edit::TextEditState) {
+    let cursor = |range: &std::ops::Range<usize>| egui::text::CCursorRange::two(
+        egui::text::CCursor::new(range.start), egui::text::CCursor::new(range.end));
+    let (text, selection) = crate::line_comment::toggle(&tab.sql, tab.cursor.clone(), dialect);
+    let mut undoer = state.undoer();
+    undoer.add_undo(&(cursor(&tab.cursor), tab.sql.clone()));
+    tab.sql = text;
+    tab.cursor = selection;
+    state.cursor.set_char_range(Some(cursor(&tab.cursor)));
+    undoer.add_undo(&(cursor(&tab.cursor), tab.sql.clone()));
+    state.set_undoer(undoer);
+    tab.completion.dismiss();
+    tab.refresh_dirty();
 }
 
 fn accept_completion(tab: &mut QueryTab, value: &str, state: &mut egui::text_edit::TextEditState) {
@@ -9475,6 +9497,36 @@ mod workspace_layout_tests {
         assert_eq!(app.tabs[0].sql, original);
         frame(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
         assert_eq!(app.tabs[0].sql, formatted);
+    }
+    #[test]
+    fn comment_shortcut_toggles_caret_line_in_session_dialect_and_undoes() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
+        app.session_dialect = Some(crate::sql::Dialect::Mysql(Default::default()));
+        let original = "SELECT 1;\n# SELECT 2;";
+        app.tabs[0].sql = original.into();
+        app.show_query();
+        let frame = |app: &mut Rustable, events| {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0))),
+                events, ..Default::default()
+            }, |ctx| app.workspace(ctx));
+        };
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        let end = original.chars().count();
+        assert_eq!(app.tabs[0].cursor, end..end);
+        // MySQL `#` on the caret line counts as a comment, so the first press uncomments.
+        frame(&mut app, vec![key(egui::Key::Slash, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.tabs[0].sql, "SELECT 1;\nSELECT 2;");
+        frame(&mut app, vec![key(egui::Key::Slash, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.tabs[0].sql, "SELECT 1;\n-- SELECT 2;");
+        frame(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.tabs[0].sql, "SELECT 1;\nSELECT 2;");
+        frame(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.tabs[0].sql, original);
     }
     #[test]
     fn completion_tab_accepts_and_undo_redo_preserve_editor_caret() {
