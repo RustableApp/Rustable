@@ -82,7 +82,7 @@ mod tests {
         let generated = "SELECT * FROM customers LIMIT 100";
         for _ in 0..2 {
             app.pending = Some(Pending::Table);
-            sender.send(Ok(Payload::Table {
+            sender.send(Ok(Payload::Table { details_loaded: true,
                 sql: generated.into(), parameters: vec![], grid: Grid::default(),
                 columns: vec![], indexes: vec![], triggers: vec![], foreign_keys: vec![],
             })).unwrap();

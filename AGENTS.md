@@ -24,9 +24,13 @@ even when the database does almost no work.
   for the single-exchange APIs and their constraints.
 - Current PostgreSQL targets on an established healthy connection, with built-in
   or cached result types and an unchanged schema, are one exchange per editor
-  statement, two sequential exchanges for an initial table load, and one
-  pipelined exchange for a cached table refresh/revisit. These are budgets to
-  preserve or improve, not an excuse to add work up to the limit.
+  statement and one pipelined exchange for an initial sidebar table load,
+  refresh, or revisit. Table browsing uses text results, so cold custom types
+  must not add lookup exchanges. Unknown relations (not in the sidebar/cache),
+  schema-change recovery, and explicit transactions retain a metadata-first
+  fallback for safe query construction. Index/trigger definitions are fetched
+  only when their views are opened. These are budgets to preserve or improve,
+  not an excuse to add work up to the limit.
 - Inspect MySQL/MariaDB and other affected drivers too. Do not assume an
   optimization or regression is PostgreSQL-specific without checking.
 

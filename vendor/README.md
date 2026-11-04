@@ -48,8 +48,15 @@ Local changes:
   and `transaction_status` APIs. `query_typed_raw_with_metadata` polls a small
   metadata query and a streaming data query together on the same connection,
   preserving the metadata response when the data query fails. Table browsing
-  now uses the bounded single-exchange API for both metadata and data: two
-  sequential exchanges on a first load and one pipelined exchange on refresh.
+  has a separate `query_text_with_metadata` path: parameterized Parse/Bind
+  (text result format)/Describe portal/Execute/Sync, pipelined with fresh editing
+  metadata. Sidebar column/primary-key hints permit first loads in one exchange.
+  `SimpleColumn::type_oid` validates the returned shape without resolving custom
+  types. Both responses drain concurrently and retained rows are byte/row bounded
+  using `SimpleQueryRow::storage_size`; a truncated page leaves the connection
+  usable. Text decoding preserves exact numeric text, NULL and bytea (hex/escape).
+  Unknown relations and explicit transactions retain the metadata-first path.
+  Index/trigger definitions are loaded separately on demand.
   The metadata query returns only built-in wire types. Fresh schema validation,
   stale-shape retries (autocommit only), and separate Sync boundaries remain;
   an erroneous speculative query cannot discard the fresh catalog response.
@@ -74,7 +81,7 @@ user-written transaction commands; explicit transactions remain open across
 runs until the user commits or rolls back. Recovery statements bypass the SET
 prefix so an aborted explicit transaction can still be rolled back.
 
-Results retain binary typed decoding and bounded streaming (bounded buffering
+Editor results retain binary typed decoding and bounded streaming (bounded buffering
 while resolving uncached custom types). The metadata
 accessors preserve headers for zero-row results without re-preparing or
 re-running queries after execution. Cancellation follows PostgreSQL semantics:
@@ -222,3 +229,10 @@ Compiler compatibility cleanup: stroke-width literals explicitly use `f32`
 no longer imports the legacy `core::f32` module, so `f32::EPSILON` resolves to
 the primitive's associated constant. Numeric values and rendering behavior
 are unchanged; no warning lints are suppressed.
+
+### Compact field caret height
+
+`egui::TextEdit::cursor_vertical_padding` controls the extra caret height above
+and below the text row. Its default preserves upstream behavior. The inspector
+field editor opts into zero extra height; hover and focused carets use the same
+geometry. Text layout, selection and other editors are unchanged.

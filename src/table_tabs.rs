@@ -18,6 +18,7 @@ pub(super) struct TableTab {
     structure_search: String,
 }
 struct TableSnapshot {
+    details_loaded: bool,
     grid: Arc<Grid>,
     columns: Vec<Column>,
     indexes: Vec<db::Index>,
@@ -50,7 +51,7 @@ impl Rustable {
             existing.and_then(|i| self.table_tabs[i].snapshot.as_ref())
                 .filter(|snapshot| Arc::ptr_eq(&snapshot.grid, &self.table)).cloned()
                 .or_else(|| Some(Arc::new(TableSnapshot {
-                    grid: self.table.clone(), columns: self.columns.clone(),
+                    details_loaded: self.details_loaded, grid: self.table.clone(), columns: self.columns.clone(),
                     indexes: self.indexes.clone(), triggers: self.triggers.clone(),
                     foreign_keys: self.foreign_keys.clone(),
                 })))
@@ -88,7 +89,7 @@ impl Rustable {
     pub(super) fn cache_table_result(&mut self) {
         if let Some(tab) = self.table_tabs.iter_mut().find(|tab| Some(tab.id) == self.active_table_tab) {
             tab.snapshot = Some(Arc::new(TableSnapshot {
-                grid: self.table.clone(), columns: self.columns.clone(),
+                details_loaded: self.details_loaded, grid: self.table.clone(), columns: self.columns.clone(),
                 indexes: self.indexes.clone(), triggers: self.triggers.clone(),
                 foreign_keys: self.foreign_keys.clone(),
             }));
@@ -151,8 +152,12 @@ impl Rustable {
             self.columns = snapshot.columns.clone();
             self.indexes = snapshot.indexes.clone();
             self.triggers = snapshot.triggers.clone();
+            self.details_loaded = snapshot.details_loaded;
+            self.details_requested = false;
             self.foreign_keys = snapshot.foreign_keys.clone();
         } else {
+            self.details_loaded = true;
+            self.details_requested = false;
             self.table = Arc::default();
             self.columns.clear();
             self.indexes.clear();

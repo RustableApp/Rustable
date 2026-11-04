@@ -245,6 +245,11 @@ impl SimpleQueryRow {
         Ok(row)
     }
 
+    /// Approximate owned storage, including field ranges and protocol bytes.
+    pub fn storage_size(&self) -> usize {
+        self.body.buffer().len().saturating_add(self.ranges.len() * std::mem::size_of::<Option<Range<usize>>>()).saturating_add(std::mem::size_of::<Self>())
+    }
+
     /// Returns information about the columns of data in the row.
     pub fn columns(&self) -> &[SimpleColumn] {
         &self.columns

@@ -247,15 +247,28 @@ fn browse_wan_latency_comparison() {
     let mut current = Vec::new();
     let mut sequential = Vec::new();
     let mut revisited = Vec::new();
+    let mut cold = Vec::new();
+    let mut baseline = Vec::new();
     driver.client.batch_execute("CREATE TEMP TABLE latency_other(id integer)").unwrap();
     for index in 0..9 {
         let timer = Instant::now();
         let old = legacy_browse(&mut driver, &request).unwrap();
         let old_ms = timer.elapsed().as_secs_f64() * 1000.0;
         driver.browse_catalog.clear();
+        driver.browse_hints.clear();
         let timer = Instant::now();
         let first = driver.browse(&request).unwrap();
         let first_ms = timer.elapsed().as_secs_f64() * 1000.0;
+        // Sidebar column hints exist before a normal first open; clear the
+        // browse catalog to prove that this does not depend on a previous page.
+        driver.browse_catalog.clear();
+        let timer = Instant::now();
+        let cold_page = driver.browse(&request).unwrap();
+        let cold_ms = timer.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(cold_page.grid.rows, first.grid.rows);
+        let timer = Instant::now();
+        driver.client.simple_query("SELECT * FROM latency_address ORDER BY id LIMIT 501 OFFSET 0").unwrap();
+        let baseline_ms = timer.elapsed().as_secs_f64() * 1000.0;
         let timer = Instant::now();
         let new = driver.browse(&request).unwrap();
         let new_ms = timer.elapsed().as_secs_f64() * 1000.0;
@@ -268,15 +281,20 @@ fn browse_wan_latency_comparison() {
         assert_eq!(old.grid.rows, new.grid.rows);
         assert_eq!(old.grid.columns, new.grid.columns);
         assert_eq!(old.columns, new.columns);
-        assert_eq!(old.indexes.len(), new.indexes.len());
-        assert_eq!(old.triggers.len(), new.triggers.len());
+        let (indexes, triggers) = driver.table_details(&request.table).unwrap();
+        assert_eq!(old.indexes.len(), indexes.len());
+        assert_eq!(old.triggers.len(), triggers.len());
         if index >= 2 {
+            cold.push(cold_ms);
+            baseline.push(baseline_ms);
             legacy.push(old_ms);
             current.push(new_ms);
             sequential.push(first_ms);
             revisited.push(revisit_ms);
         }
     }
+    cold.sort_by(f64::total_cmp);
+    baseline.sort_by(f64::total_cmp);
     revisited.sort_by(f64::total_cmp);
     sequential.sort_by(f64::total_cmp);
     legacy.sort_by(f64::total_cmp);
@@ -299,6 +317,9 @@ fn browse_wan_latency_comparison() {
     );
     eprintln!("table revisit p50={:.1}ms p95={:.1}ms", revisited[3], revisited[6]);
     assert!(revisited[3] < sequential[3] * 0.8, "table revisits must retain the pipeline benefit");
+    eprintln!("first sidebar table load p50={:.1}ms p95={:.1}ms; one-exchange reference p50={:.1}ms", cold[3], cold[6], baseline[3]);
+    assert!(cold[3] < sequential[3] * 0.8, "first sidebar load must remove the metadata wait");
+    assert!(cold[3] < baseline[3] * 1.5, "first sidebar load must remain near one exchange");
     drop(driver);
     proxy.join().unwrap();
 }
@@ -430,7 +451,7 @@ fn legacy_browse(driver: &mut PostgresDriver, request: &Browse) -> Result<TableD
             metadata_error: None,
         })
         .collect();
-    Ok(TableData {
+    Ok(TableData { details_loaded: true,
         foreign_keys: vec![],
         sql,
         parameters,

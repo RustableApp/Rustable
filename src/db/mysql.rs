@@ -617,7 +617,7 @@ impl Driver for MysqlDriver {
             }
             let key = foreign_keys.last_mut().unwrap(); key.columns.push(source); key.referenced_columns.push(target);
         }
-        Ok(TableData { sql, parameters, grid, columns: object.columns, indexes, triggers, foreign_keys })
+        Ok(TableData { details_loaded: true, sql, parameters, grid, columns: object.columns, indexes, triggers, foreign_keys })
     }
     fn plan(&mut self, changes: &[Change]) -> Result<ChangePlan, String> {
         self.require_idle()?;

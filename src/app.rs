@@ -462,6 +462,8 @@ pub struct Rustable {
     objects: Vec<Object>,
     browse: Browse,
     columns: Vec<Column>,
+    details_loaded: bool,
+    details_requested: bool,
     indexes: Vec<db::Index>,
     triggers: Vec<Object>,
     foreign_keys: Vec<db::foreign_keys::ForeignKey>,
@@ -954,6 +956,8 @@ impl Rustable {
             objects: vec![],
             browse: Browse::default(),
             columns: vec![],
+            details_loaded: true,
+            details_requested: false,
             indexes: vec![],
             triggers: vec![],
             foreign_keys: vec![],
@@ -1237,6 +1241,7 @@ impl Rustable {
                     }
                 }
                 Ok(Payload::Table {
+                    details_loaded,
                     sql: _,
                     parameters: _,
                     grid,
@@ -1253,6 +1258,8 @@ impl Rustable {
                     self.table = Arc::new(grid);
                     self.table_loaded = true;
                     self.columns = columns;
+                    self.details_loaded = details_loaded;
+                    self.details_requested = false;
                     self.indexes = indexes;
                     self.triggers = triggers;
                     self.foreign_keys = foreign_keys;
@@ -1388,6 +1395,15 @@ impl Rustable {
                     }
                     self.query_library.invalidate();
                     self.status = format!("Saved SQL: {}", path.display())
+                }
+                Ok(Payload::TableDetails { name, indexes, triggers }) => {
+                    if name == self.browse.table {
+                        self.indexes = indexes;
+                        self.triggers = triggers;
+                        self.details_loaded = true;
+                        self.status = "Table details loaded".into();
+                        self.cache_table_result();
+                    }
                 }
                 Ok(Payload::Definition { name, sql }) => {
                     self.ddl_preview = Some((name, sql));
@@ -3301,6 +3317,21 @@ impl Rustable {
                     });
             }
             ui.set_clip_rect(ui.clip_rect().intersect(ui.available_rect_before_wrap()));
+            if matches!(self.view, View::Indexes | View::Triggers) && self.table_loaded && !self.details_loaded {
+                if self.pending.is_none() && !self.details_requested {
+                    self.details_requested = true;
+                    self.dispatch(Command::TableDetails(self.browse.table.clone()), Pending::Export);
+                }
+                egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                    if self.pending.is_some() {
+                        ui.spinner();
+                        ui.label("Loading table details…");
+                    } else if ui.button("Retry loading table details").clicked() {
+                        self.details_requested = false;
+                    }
+                });
+                return;
+            }
             if self.view == View::Indexes {
                 self.index_view(ui);
                 return;
@@ -7333,6 +7364,7 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
         TextEdit::singleline(&mut draft.text)
             .hint_text(RichText::new(if draft.kind == 5 { "DEFAULT" } else if draft.kind == 0 { "NULL" } else { "" }).color(ui.visuals().weak_text_color()))
             .frame(!draft.inspector)
+            .cursor_vertical_padding(if draft.inspector { 0.0 } else { 1.5 })
             .margin(if draft.inspector { egui::Margin::ZERO } else { egui::Margin::symmetric(4, 2) })
             .vertical_align(egui::Align::Center)
             .id(id)
@@ -9373,6 +9405,40 @@ mod workspace_layout_tests {
                 }
             }
             _ => {}
+        }
+    }
+
+    #[test]
+    fn lazy_details_load_in_workspace_without_inspector_and_do_not_retry_each_frame() {
+        for view in [View::Indexes, View::Triggers] {
+            let ctx = egui::Context::default();
+            let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+            app.pending = None;
+            app.browse.table = "details_fixture".into();
+            app.table_loaded = true;
+            app.details_loaded = false;
+            let frame = |app: &mut Rustable| {
+                ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0))),
+                    ..Default::default()
+                }, |ctx| app.workspace(ctx))
+            };
+            app.view = View::Data;
+            let _ = frame(&mut app);
+            assert!(app.pending.is_none());
+            app.view = view;
+            let output = frame(&mut app);
+            assert!(matches!(app.pending, Some(Pending::Export)));
+            let mut text = Vec::new();
+            for shape in &output.shapes { text_positions(&shape.shape, &mut text); }
+            assert!(text.iter().any(|(text,_)| text == "Loading table details…"));
+            // A failed response must offer a retry, never loop requests.
+            app.pending = None;
+            let output = frame(&mut app);
+            assert!(app.pending.is_none());
+            text.clear();
+            for shape in &output.shapes { text_positions(&shape.shape, &mut text); }
+            assert!(text.iter().any(|(text,_)| text == "Retry loading table details"));
         }
     }
 
