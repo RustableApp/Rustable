@@ -83,7 +83,13 @@ impl Completion {
         let range = crate::sql::execution_range_for_dialect(sql, cursor..cursor, false, dialect)
             .unwrap_or(0..sql.len());
         let statement_before = sql.get(range.start.min(byte)..byte).unwrap_or("");
-        let clause = column_clause(statement_before, prefix, dialect);
+        // Work with original SQL boundaries before case folding. Unicode
+        // lowercase can change byte length (İ becomes i + combining dot).
+        let statement_without_prefix = statement_before.strip_suffix(prefix).unwrap_or(statement_before);
+        let context = if qualifier.is_none() {
+            caret_block_tokens(statement_without_prefix, dialect)
+        } else { Vec::new() };
+        let clause = column_clause(&context);
         // Offer columns unprompted right after `SELECT `, `, `, `WHERE ` and
         // similar, where nothing but a column (or expression) can follow.
         let slot = prefix.is_empty() && qualifier.is_none() && !explicit
@@ -93,7 +99,16 @@ impl Completion {
         // from the first typed letter, or unprompted right after the space.
         let table_slot = qualifier.is_none()
             && (!prefix.is_empty() || explicit || before.ends_with(|c: char| c.is_whitespace() || c == ','))
-            && is_table_slot(statement_before, prefix, dialect);
+            && is_table_slot(&context);
+        // A finished clause keyword is not a partially typed identifier.
+        // Wait for its separator instead of replacing FROM with DELETE FROM.
+        if !explicit && qualifier.is_none() && !table_slot
+            && ["FROM", "JOIN", "WHERE", "HAVING", "LIMIT", "OFFSET", "SET", "ON"]
+                .iter().any(|word| prefix.eq_ignore_ascii_case(word))
+        {
+            self.suppress_server = true;
+            return;
+        }
         if prefix.chars().count() < 2 && !explicit && qualifier.is_none() && !slot && !table_slot {
             return;
         }
@@ -125,12 +140,12 @@ impl Completion {
         // listed, so suggestions stay relevant before the query names a source.
         let in_select_list = clause.is_some_and(|clause| clause.select_list);
         let inferred = if references.is_empty() && qualifier.is_none() && in_select_list {
-            infer_tables(statement_before, &prefix, objects, dialect, slot)
+            infer_tables(&context, objects, slot)
         } else {
             Vec::new()
         };
         // Columns already in the select list are rarely wanted twice.
-        let listed = if slot && in_select_list { select_list_words(statement_before, dialect) } else { Vec::new() };
+        let listed = if slot && in_select_list { select_list_words(&context) } else { Vec::new() };
         let unlisted = |name: &&str| !listed.iter().any(|word| word.eq_ignore_ascii_case(name));
         // Rank borrowed candidates before applying the visible limit, so a better
         // match late in a large catalog cannot be hidden by earlier matches.
@@ -144,9 +159,15 @@ impl Completion {
         })).map(|object| (object.display_name.as_deref().unwrap_or(&object.name), true, Some(object)));
         let schemas = objects.iter().take(if qualifier.is_none() && !slot { objects.len() } else { 0 })
             .filter_map(|object| object.schema.as_deref()).map(|schema| (schema, true, None));
-        let keywords = KEYWORDS.iter().filter(|_| qualifier.is_none() && !slot && !table_slot).map(|word| (*word, false, None));
+        let keywords = KEYWORDS.iter().filter(|word| qualifier.is_none() && !slot && !table_slot
+            && word.as_bytes().get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))).map(|word| (*word, false, None));
         let query = crate::search::Query::new(&prefix);
-        let mut candidates = query.ranked(derived_columns.chain(columns).chain(tables).chain(schemas).chain(keywords), |candidate| (candidate.0, ""));
+        // Catalogs repeat names such as id across thousands of tables. Rank
+        // each distinct column once; retain table entries for schema qualification.
+        let deduplicate = relevant.len() + inferred.len() > 1;
+        let mut seen_columns = std::collections::HashSet::new();
+        let columns = derived_columns.chain(columns).filter(|candidate| !deduplicate || seen_columns.insert(candidate.0));
+        let mut candidates = query.ranked(columns.chain(tables).chain(schemas).chain(keywords), |candidate| (candidate.0, ""));
         // One letter is too little for fuzzy matching: `o` should mean names
         // starting with o (or a word after `_`), not every name containing it.
         if prefix.chars().count() == 1 {
@@ -260,6 +281,13 @@ impl Completion {
             let Some(label) = item.get("label").and_then(serde_json::Value::as_str) else {
                 continue;
             };
+            // Fuzzy matching is useful for identifiers, not unrelated SQL
+            // phrases. Apply the same rule to language-server keywords.
+            let keyword = item.get("kind").and_then(serde_json::Value::as_u64) == Some(14)
+                || (item.get("kind").is_none() && KEYWORDS.iter().any(|word| label.eq_ignore_ascii_case(word)));
+            if keyword && !label.as_bytes().get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes())) {
+                continue;
+            }
             let (range, text) = if let Some(edit) = item.get("textEdit") {
                 let Some(range) = edit
                     .get("range")
@@ -524,11 +552,9 @@ fn caret_block_tokens(statement_before: &str, dialect: Dialect) -> Vec<(String, 
     }).collect()
 }
 
-/// Which clause the caret is in, judged from the tokens before it. `prefix`
-/// is the partially typed word, which is not itself a clause keyword.
-fn column_clause(statement_before: &str, prefix: &str, dialect: Dialect) -> Option<ColumnClause> {
-    let text = &statement_before[..statement_before.len() - prefix.len()];
-    let tokens = caret_block_tokens(text, dialect);
+/// Which clause the caret is in. Tokens exclude the partially typed word,
+/// which is not itself a clause keyword.
+fn column_clause(tokens: &[(String, bool)]) -> Option<ColumnClause> {
     const CLAUSES: [&str; 13] = ["SELECT", "FROM", "JOIN", "WHERE", "ON", "BY", "HAVING", "SET", "INTO", "VALUES", "UPDATE", "TABLE", "USING"];
     let clause = tokens.iter().rev().find(|(text, quoted)| !quoted && CLAUSES.iter().any(|c| c.eq_ignore_ascii_case(text)))?;
     let clause = clause.0.to_ascii_uppercase();
@@ -542,9 +568,7 @@ fn column_clause(statement_before: &str, prefix: &str, dialect: Dialect) -> Opti
 }
 
 /// The caret follows a keyword that must be followed by a table name.
-fn is_table_slot(statement_before: &str, prefix: &str, dialect: Dialect) -> bool {
-    let text = &statement_before[..statement_before.len() - prefix.len()];
-    let tokens = caret_block_tokens(text, dialect);
+fn is_table_slot(tokens: &[(String, bool)]) -> bool {
     let word = |index: usize| tokens.get(index).filter(|(_, quoted)| !quoted).map(|(text, _)| text.to_ascii_uppercase());
     let Some(last) = tokens.len().checked_sub(1) else { return false; };
     let previous = last.checked_sub(1).and_then(word);
@@ -564,8 +588,7 @@ fn is_table_slot(statement_before: &str, prefix: &str, dialect: Dialect) -> bool
 }
 
 /// Identifiers already written in the caret's select list (`SELECT id, name, |`).
-fn select_list_words(statement_before: &str, dialect: Dialect) -> Vec<String> {
-    let tokens = caret_block_tokens(statement_before, dialect);
+fn select_list_words(tokens: &[(String, bool)]) -> Vec<String> {
     let start = tokens.iter().rposition(|(text, quoted)| !quoted && text.eq_ignore_ascii_case("SELECT")).map_or(0, |i| i + 1);
     tokens[start..].iter()
         .filter(|(text, quoted)| *quoted || (text.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
@@ -577,10 +600,9 @@ fn select_list_words(statement_before: &str, dialect: Dialect) -> Vec<String> {
 /// Tables that contain every column already listed. With nothing listed yet,
 /// an unprompted popup stays closed rather than dumping the whole catalog,
 /// while a typed prefix searches all columns.
-fn infer_tables<'a>(statement_before: &str, prefix: &str, objects: &'a [Object], dialect: Dialect, slot: bool) -> Vec<&'a Object> {
+fn infer_tables<'a>(tokens: &[(String, bool)], objects: &'a [Object], slot: bool) -> Vec<&'a Object> {
     const MAX_TABLES: usize = 2_000;
-    let text = &statement_before[..statement_before.len() - prefix.len()];
-    let listed: Vec<String> = select_list_words(text, dialect).into_iter()
+    let listed: Vec<String> = select_list_words(tokens).into_iter()
         .filter(|word| objects.iter().take(MAX_TABLES).any(|object| object.columns.iter().any(|c| c.name.eq_ignore_ascii_case(word))))
         .collect();
     if listed.is_empty() {
@@ -1136,6 +1158,58 @@ mod tests {
                 .collect(),
         }
     }
+    #[test]
+    fn completed_from_stays_quiet_until_table_separator() {
+        let objects = [object("customers", &["id"])];
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::Mysql(crate::sql::mysql::Mode::default())] {
+            let mut completion = Completion::default();
+            let sql = "SELECT * FROM";
+            completion.refresh(sql, sql.len(), &objects, &[], false, dialect);
+            completion.receive_server(sql, sql.len(), &[serde_json::json!({"label":"DELETE FROM", "kind":14})]);
+            assert!(!completion.open);
+            assert!(completion.items.is_empty());
+            let sql = "SELECT * FROM ";
+            completion.refresh(sql, sql.len(), &objects, &[], false, dialect);
+            assert_eq!(completion.items, ["customers"]);
+            assert!(completion.passive);
+            let sql = "SELECT * FRO";
+            completion.refresh(sql, sql.len(), &objects, &[], false, dialect);
+            completion.receive_server(sql, sql.len(), &[serde_json::json!({"label":"DELETE FROM", "kind":14})]);
+            assert!(completion.items.iter().any(|item| item == "FROM"));
+            assert!(!completion.items.iter().any(|item| item == "DELETE FROM"));
+            let sql = "DEL";
+            completion.refresh(sql, sql.len(), &objects, &[], false, dialect);
+            assert!(completion.items.iter().any(|item| item == "DELETE FROM"));
+        }
+    }
+
+    #[test]
+    fn repeated_catalog_columns_do_not_consume_prefix_slots() {
+        let fields = ["customer_id", "customer_a", "customer_b", "customer_c", "customer_d", "customer_e", "customer_f", "customer_g", "customer_h", "customer_i", "customer_j", "customer_k", "pivot_customer"];
+        let objects: Vec<_> = (0..20).map(|index| object(&format!("table_{index}"), &fields)).collect();
+        let (items, _) = items_at_end("SELECT cust", &objects);
+        assert_eq!(items.len(), 12);
+        assert!(items[..11].iter().all(|item| item.starts_with("customer")), "{items:?}");
+        assert_eq!(items[11], "pivot_customer");
+    }
+
+    #[test]
+    fn unicode_case_expansion_keeps_original_sql_boundaries() {
+        let objects = [object("customers", &["é", "İİ_value", "İ_value"])];
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::Mysql(crate::sql::mysql::Mode::default())] {
+            for sql in ["SELECT é,İİ", "SELECT İİ", "SELECT é, İİ", "SELECT é,İİ FROM customers"] {
+                let cursor = sql.find(" FROM").map_or(sql.chars().count(), |byte| sql[..byte].chars().count());
+                let mut completion = Completion::default();
+                completion.refresh(sql, cursor, &objects, &[], false, dialect);
+                assert!(completion.items.iter().any(|item| item == "İİ_value"), "{sql}: {:?}", completion.items);
+                let mut edited = sql.to_owned();
+                completion.apply(&mut edited, "İİ_value");
+                assert!(edited.contains("İİ_value"), "{edited}");
+                assert!(!sql.contains('é') || edited.contains('é'));
+            }
+        }
+    }
+
     fn items_at_end(sql: &str, objects: &[Object]) -> (Vec<String>, bool) {
         let mut completion = Completion::default();
         completion.refresh(sql, sql.chars().count(), objects, &[], false, Dialect::Sqlite);
@@ -1883,3 +1957,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "completion_benchmark.rs"]
+mod benchmarks;
