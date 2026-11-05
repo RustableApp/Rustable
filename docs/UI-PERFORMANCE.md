@@ -14,7 +14,8 @@ python3 scripts/ui-performance.py --base <base-commit> --output target/ui-perfor
 
 Use an idle machine, the same mise-selected toolchain and release builds. Do not run
 other builds or benchmarks concurrently. The runner creates a temporary detached
-worktree for the base, builds both versions before timing, then executes five
+worktree for the base, builds both versions in separate target directories to
+avoid reusing stale vendored dependencies across revisions, then executes five
 paired runs in alternating base/candidate order, on the same machine. All test
 processes run serially. It does not access saved connections or user databases.
 The candidate is the current working tree; its commit and dirty status are recorded.
