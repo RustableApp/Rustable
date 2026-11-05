@@ -2016,6 +2016,10 @@ impl Rustable {
             && (ctx.content_rect().width() >= 720.0 || self.compact_panel == 1)
             && self.query_library.renaming_inline();
         if self.dialog_owns_workspace_shortcuts() || renaming_query { return; }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Period)) {
+            self.request_query_cancel(ctx);
+            return;
+        }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
             self.open_navigator(false);
             return;
@@ -2451,7 +2455,7 @@ impl Rustable {
         let right_controls = crate::icons::toolbar_group_width(3) + crate::icons::toolbar_group_width(2) + 6.0;
         let width = (ui.available_width() - right_controls - ui.spacing().item_spacing.x).max(1.0);
         let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(width, 27.0), egui::Sense::click());
+            ui.allocate_exact_size(egui::vec2(width, crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::click());
         let painter = ui.painter().with_clip_rect(rect);
         let background = if self.pending.is_some() {
             Color32::from_rgb(
@@ -2462,7 +2466,7 @@ impl Rustable {
         } else {
             fill
         };
-        painter.rect_filled(rect, 13.0, background);
+        painter.rect_filled(rect, rect.height() / 2.0, background);
         if self.pending.is_some() {
             // Query totals and network throughput are unknown here. Animate a
             // repeating activity pattern, never an invented completion fraction.
@@ -2547,7 +2551,7 @@ impl Rustable {
         if self.pending.is_some()
             && ui
                 .add(crate::icons::widget("x"))
-                .on_hover_text("Cancel database operation")
+                .on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, ".")))
                 .clicked()
         {
             self.request_query_cancel(ui.ctx());
@@ -2575,7 +2579,7 @@ impl Rustable {
                                 }
                             }
                         });
-                        if self.pending.is_some() && ui.button("Cancel").clicked() { self.request_query_cancel(ctx); }
+                        if self.pending.is_some() && ui.button("Cancel").on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() { self.request_query_cancel(ctx); }
                     });
                     return;
                 }
@@ -4095,7 +4099,7 @@ impl Rustable {
                 if ui.add(crate::icons::shortcut_button("Save", false, "S", None)).on_hover_text(format!("Save named SQL query · {}", crate::icons::shortcut(ui.ctx(), false, "S"))).clicked() {
                     self.save_query_file(ui.ctx(), false);
                 }
-                if self.pending.is_some() && ui.button("Cancel").clicked() {
+                if self.pending.is_some() && ui.button("Cancel").on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() {
                     self.request_query_cancel(ui.ctx());
                 }
             });
@@ -8082,6 +8086,9 @@ mod interaction_tests {
             samples.sort_by(f64::total_cmp);
             event_samples.sort_by(f64::total_cmp);
             tessellation_samples.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("grid/{name}/layout"), &samples);
+            crate::ui_benchmark::report(&format!("grid/{name}/wheel_layout"), &event_samples);
+            crate::ui_benchmark::report(&format!("grid/{name}/tessellation"), &tessellation_samples);
             println!("wide grid {name} CPU frame ms: p50={:.3} p95={:.3}",samples[samples.len()/2],samples[samples.len()*95/100]);
             println!("  wheel-event layout p95={:.3} ms; tessellation p95={:.3} ms", event_samples[event_samples.len()*95/100], tessellation_samples[tessellation_samples.len()*95/100]);
         }
@@ -9675,6 +9682,7 @@ mod workspace_layout_tests {
                     if frame >= 20 { samples.push(started.elapsed().as_secs_f64()*1000.0); }
                 }
                 samples.sort_by(f64::total_cmp);
+                crate::ui_benchmark::report(&format!("workspace/{column_count}/{inspector}"), &samples);
                 println!("workspace selection {column_count} columns inspector={inspector}: CPU layout+tessellation p50={:.3} p95={:.3} ms", samples[samples.len()/2], samples[samples.len()*95/100]);
             }
         }
@@ -9746,6 +9754,7 @@ mod workspace_layout_tests {
                 if frame >= 20 { times.push(start.elapsed().as_secs_f64() * 1000.0); }
             }
             times.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("sidebar/{count}"), &times);
             println!("sidebar {count} objects p50={:.3} p95={:.3} ms", times[50], times[95]);
         }
     }

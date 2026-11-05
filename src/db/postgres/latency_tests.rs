@@ -182,11 +182,13 @@ fn browse_wan_latency_comparison() {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+    let ssh_directory = std::env::var_os("RUSTABLE_SSH_QA_DIR");
+    let upstream_port = if ssh_directory.is_some() { 54328 } else { 54329 };
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let proxy = std::thread::spawn(move || {
         let (downstream, _) = listener.accept().unwrap();
-        let upstream = TcpStream::connect("127.0.0.1:54329").unwrap();
+        let upstream = TcpStream::connect(("127.0.0.1", upstream_port)).unwrap();
         upstream.set_nodelay(true).unwrap();
         downstream.set_nodelay(true).unwrap();
         fn forward(mut source: TcpStream, mut target: TcpStream) {
@@ -224,16 +226,34 @@ fn browse_wan_latency_comparison() {
         forward(downstream, upstream);
         reverse.join().unwrap();
     });
+    // Optional local SSH fixture exercises the real tunnel implementation too.
+    let known_hosts = tempfile::NamedTempFile::new().unwrap();
+    let ssh = ssh_directory.map(|directory| {
+        let directory = std::path::PathBuf::from(directory);
+        assert!(directory.starts_with("/tmp"));
+        std::fs::write(known_hosts.path(), format!("[127.0.0.1]:{port} {}", std::fs::read_to_string(directory.join("host.pub")).unwrap())).unwrap();
+        crate::ssh_tunnel::Config {
+            host: "127.0.0.1".into(),
+            port,
+            user: std::env::var("USER").unwrap(),
+            identity_file: Some(directory.join("client")),
+            known_hosts_file: Some(known_hosts.path().to_owned()),
+            config_file: Some("/dev/null".into()),
+            remote_host: "127.0.0.1".into(),
+            remote_port: 54329,
+        }
+    });
+    eprintln!("browse transport: {}", if ssh.is_some() { "SSH over delayed TCP" } else { "delayed TCP" });
     let cancel = Arc::new(AtomicBool::new(false));
     let mut driver = PostgresDriver::open(
         &crate::connection::PostgresConfig {
             host: "127.0.0.1".into(),
-            port,
+            port: if ssh.is_some() { 54329 } else { port },
             database: "rustable_qa".into(),
             user: "postgres".into(),
             password: "rustable_qa_only".into(),
             tls: false,
-            ssh: None,
+            ssh,
         },
         cancel.clone(),
     )
@@ -320,6 +340,29 @@ fn browse_wan_latency_comparison() {
     eprintln!("first sidebar table load p50={:.1}ms p95={:.1}ms; one-exchange reference p50={:.1}ms", cold[3], cold[6], baseline[3]);
     assert!(cold[3] < sequential[3] * 0.8, "first sidebar load must remove the metadata wait");
     assert!(cold[3] < baseline[3] * 1.5, "first sidebar load must remain near one exchange");
+    // Idle requests exercise a different transport pattern from burst refreshes.
+    // Compare the complete browse operation with a genuine one-exchange query
+    // after the same pause; do not attribute shared network idle latency to SQL.
+    for pause_ms in [0, 1000, 3000] {
+        let mut browse_samples = Vec::new();
+        let mut reference_samples = Vec::new();
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(pause_ms));
+            let timer = Instant::now();
+            let page = driver.browse(&request).unwrap();
+            browse_samples.push(timer.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(page.grid.rows[0][0], Value::Integer(2));
+            std::thread::sleep(Duration::from_millis(pause_ms));
+            let timer = Instant::now();
+            driver.client.simple_query("SELECT * FROM latency_address ORDER BY id LIMIT 501 OFFSET 0").unwrap();
+            reference_samples.push(timer.elapsed().as_secs_f64() * 1000.0);
+        }
+        browse_samples.sort_by(f64::total_cmp);
+        reference_samples.sort_by(f64::total_cmp);
+        eprintln!("after {pause_ms}ms idle: browse={browse_samples:?}ms; one-exchange reference={reference_samples:?}ms");
+        assert!(browse_samples[1] < reference_samples[1] * 1.5,
+            "idle browse should remain near the reference without adding exchanges");
+    }
     drop(driver);
     proxy.join().unwrap();
 }
