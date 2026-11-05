@@ -8063,6 +8063,9 @@ mod interaction_tests {
             samples.sort_by(f64::total_cmp);
             event_samples.sort_by(f64::total_cmp);
             tessellation_samples.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("grid/{name}/layout"), &samples);
+            crate::ui_benchmark::report(&format!("grid/{name}/wheel_layout"), &event_samples);
+            crate::ui_benchmark::report(&format!("grid/{name}/tessellation"), &tessellation_samples);
             println!("wide grid {name} CPU frame ms: p50={:.3} p95={:.3}",samples[samples.len()/2],samples[samples.len()*95/100]);
             println!("  wheel-event layout p95={:.3} ms; tessellation p95={:.3} ms", event_samples[event_samples.len()*95/100], tessellation_samples[tessellation_samples.len()*95/100]);
         }
@@ -9626,6 +9629,7 @@ mod workspace_layout_tests {
                     if frame >= 20 { samples.push(started.elapsed().as_secs_f64()*1000.0); }
                 }
                 samples.sort_by(f64::total_cmp);
+                crate::ui_benchmark::report(&format!("workspace/{column_count}/{inspector}"), &samples);
                 println!("workspace selection {column_count} columns inspector={inspector}: CPU layout+tessellation p50={:.3} p95={:.3} ms", samples[samples.len()/2], samples[samples.len()*95/100]);
             }
         }
@@ -9697,6 +9701,7 @@ mod workspace_layout_tests {
                 if frame >= 20 { times.push(start.elapsed().as_secs_f64() * 1000.0); }
             }
             times.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("sidebar/{count}"), &times);
             println!("sidebar {count} objects p50={:.3} p95={:.3} ms", times[50], times[95]);
         }
     }

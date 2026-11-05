@@ -123,3 +123,6 @@ pub(crate) fn browser_error(error: wasm_bindgen::JsValue) -> String {
     }).filter(|message| !message.trim().is_empty()).unwrap_or_else(|| "Browser operation failed".into());
     message.chars().take(500).collect()
 }
+
+#[cfg(test)]
+mod ui_benchmark;
