@@ -202,7 +202,7 @@ impl Driver for PostgresDriver {
     }
 
     fn postgres_control(&self) -> Option<PostgresControl> {
-        Some(PostgresControl { config: self.config.clone(), forwarded_port: self.tunnel.as_ref().map(|t| t.local_port()) })
+        Some(PostgresControl { process_id: self.client.cancel_token().process_id(), config: self.config.clone(), forwarded_port: self.tunnel.as_ref().map(|t| t.local_port()) })
     }
 
     fn definition(&mut self, name: &str) -> Result<String, String> {

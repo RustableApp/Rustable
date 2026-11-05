@@ -7,6 +7,7 @@ mod editing;
 mod export;
 mod import;
 mod expressions;
+mod safe;
 #[cfg(test)]
 mod transport_tests;
 #[cfg(test)]
@@ -484,7 +485,6 @@ impl Driver for MysqlDriver {
     fn execute(&mut self, sql: &str, safe: bool, cancel: &AtomicBool) -> ScriptResult {
         let started = std::time::Instant::now();
         let mut report = ScriptResult::default();
-        if safe { report.error = Some("MySQL read-only execution is not yet available.".into()); return report; }
         let mut remaining = BYTE_LIMIT;
         let mut session_refresh_failed = false;
         let mut offset = 0;
@@ -512,14 +512,48 @@ impl Driver for MysqlDriver {
                 break;
             }
             if cancel.load(Ordering::Relaxed) { report.error = Some("Cancelled before next statement".into()); break; }
+            let wrapped = if safe {
+                match safe::validate(&sql[range.clone()], self.mode) {
+                    Ok(recovery) => !recovery,
+                    Err(error) => { report.error = Some(error); break; }
+                }
+            } else { false };
+            if wrapped && self.connection.as_ref().and_then(Conn::transaction_status) != Some(false) {
+                report.error = Some("Finish the existing transaction with COMMIT or ROLLBACK before running Safe mode queries.".into());
+                break;
+            }
             self.session_dirty = may_change_session(&sql[range.clone()]);
             let Some(conn) = self.connection.as_mut() else { report.error = Some("MySQL connection is disconnected".into()); break; };
             let statement_started = std::time::Instant::now();
             let (outcome, cancellation_error) = with_cancel(&self.config, self.destination, conn.connection_id(), cancel, || {
-                conn.query_iter(&sql[range]).map(|results|
-                    super::mysql_results::collect_budget_since(results, &mut remaining, QUERY_LIMIT, 128 - report.grids.len(), statement_started))
+                if wrapped {
+                    // One COM_QUERY exchange, including setup and successful cleanup.
+                    // Newlines prevent a trailing line comment from hiding ROLLBACK.
+                    let batch = safe::batch(&sql[range], self.mode);
+                    conn.query_iter(batch).map(|results|
+                        super::mysql_results::collect_safe_since(results, &mut remaining, QUERY_LIMIT, statement_started))
+                } else {
+                    conn.query_iter(&sql[range]).map(|results|
+                        super::mysql_results::collect_budget_since(results, &mut remaining, QUERY_LIMIT, 128 - report.grids.len(), statement_started))
+                }
             });
-            if let Some(error) = cancellation_error { report.error = Some(error); }
+            // A multi-statement batch stops at the first error, skipping its
+            // trailing rollback. Clean up only our own transaction, after the
+            // cancellation worker has stopped, and discard an unusable session.
+            if wrapped && conn.transaction_status() != Some(false)
+                && let Err(error) = conn.query_drop("ROLLBACK AND NO CHAIN NO RELEASE") {
+                    report.error = Some(format!("Safe mode cleanup failed; connection closed: {}", error_message(&error)));
+                    self.connection = None;
+                }
+            if let Some(error) = cancellation_error {
+                report.error = Some(match report.error.take() {
+                    Some(previous) => format!("{previous}\n{error}"),
+                    None => error,
+                });
+            }
+            if wrapped && cancel.load(Ordering::Acquire) {
+                report.error.get_or_insert_with(|| "Query cancelled".into());
+            }
             let (result, disconnected) = match outcome {
                 Ok(result) => result,
                 Err(error) => {
@@ -534,8 +568,8 @@ impl Driver for MysqlDriver {
             };
             // Session tracking reports sql_mode changes in the existing OK packet,
             // avoiding a metadata round trip after ordinary editor queries.
-            if !disconnected {
-                let changes = self.connection.as_ref().unwrap().session_state_changes();
+            if !disconnected && let Some(conn) = self.connection.as_ref() {
+                let changes = conn.session_state_changes();
                 match changes {
                     Ok(changes) => {
                         for change in changes {

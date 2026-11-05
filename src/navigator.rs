@@ -55,7 +55,9 @@ impl Rustable {
     }
     pub(super) fn navigator_window(&mut self, ctx: &egui::Context) {
         if !self.navigator.open { return; }
-        if !self.navigator.requested && self.navigator.config.is_some() && self.pending.is_none() {
+        // Opening the command palette is local. Only the dedicated database
+        // picker needs a server list, and it reuses that list on subsequent opens.
+        if self.navigator.databases_only && !self.navigator.loaded && !self.navigator.requested && self.navigator.config.is_some() && self.pending.is_none() {
             self.navigator.requested = true;
             self.dispatch(Command::ListDatabases, Pending::Export);
         }
@@ -250,6 +252,25 @@ mod tests {
             app.navigator_window(ctx);
         });
     }
+    #[test]
+    fn command_palette_never_dispatches_database_work() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.navigator = Navigator::new(Some(&Command::OpenPostgres(crate::connection::PostgresConfig {
+            host: "unused".into(), port: 5432, database: "test".into(), user: "test".into(),
+            password: String::new(), tls: false, ssh: None,
+        })));
+        for _ in 0..2 {
+            key(&ctx, &mut app, egui::Key::P, egui::Modifiers::COMMAND);
+            assert!(app.navigator.open);
+            assert!(app.pending.is_none(), "opening palette must not refresh or list databases");
+            key(&ctx, &mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        }
+        app.navigator.loaded = true;
+        key(&ctx, &mut app, egui::Key::K, egui::Modifiers::COMMAND);
+        assert!(app.pending.is_none(), "database picker should reuse cached list");
+    }
+
     #[test]
     fn picker_owns_enter_and_escape_and_opens_query_without_execution() {
         let ctx = egui::Context::default();

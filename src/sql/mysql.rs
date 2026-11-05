@@ -375,3 +375,26 @@ impl sqlparser::dialect::Dialect for Lexer {
     fn supports_multiline_comment_hints(&self) -> bool { true }
     fn requires_single_line_comment_whitespace(&self) -> bool { true }
 }
+
+/// Executable comments are SQL, not annotations. Keep them visible to safety
+/// checks even when the parser does not understand MariaDB's M! extension.
+pub(crate) fn executable_comments(sql: &str, mode: Mode) -> Result<Vec<String>, String> {
+    use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
+    #[derive(Debug)]
+    struct RawComments(Mode);
+    impl sqlparser::dialect::Dialect for RawComments {
+        fn dialect(&self) -> std::any::TypeId { std::any::TypeId::of::<sqlparser::dialect::MySqlDialect>() }
+        fn is_identifier_start(&self, ch: char) -> bool { Lexer(self.0).is_identifier_start(ch) }
+        fn is_identifier_part(&self, ch: char) -> bool { Lexer(self.0).is_identifier_part(ch) }
+        fn is_delimited_identifier_start(&self, ch: char) -> bool { Lexer(self.0).is_delimited_identifier_start(ch) }
+        fn supports_string_literal_backslash_escape(&self) -> bool { !self.0.no_backslash_escapes }
+        fn ignores_wildcard_escapes(&self) -> bool { true }
+        fn requires_single_line_comment_whitespace(&self) -> bool { true }
+    }
+    Tokenizer::new(&RawComments(mode), sql).tokenize().map(|tokens| tokens.into_iter().filter_map(|token| {
+        match token {
+            Token::Whitespace(Whitespace::MultiLineComment(comment)) if comment.starts_with('!') || comment.starts_with("M!") => Some(comment),
+            _ => None,
+        }
+    }).collect()).map_err(|error| error.to_string())
+}

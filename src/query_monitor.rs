@@ -23,11 +23,24 @@ pub(super) struct QueryMonitor {
     #[cfg(not(target_arch = "wasm32"))]
     reply: Option<mpsc::Receiver<MonitorResult>>,
 }
+impl QueryMonitor {
+    fn replace_rows(&mut self, rows: Vec<RunningQuery>, current_pid: Option<i32>) {
+        // Preserve an explicit selection only while it is still the same query.
+        let previous = self.selected.and_then(|index| self.rows.get(index));
+        self.selected = previous.and_then(|old| rows.iter().position(|row|
+            row.pid == old.pid && row.started == old.started && row.backend_started == old.backend_started && row.sql == old.sql))
+            .or_else(|| rows.iter().position(|row| Some(row.pid) == current_pid))
+            .or_else(|| (current_pid.is_none() && rows.len() == 1).then_some(0));
+        self.rows = rows;
+    }
+}
 impl Rustable {
     pub(super) fn request_query_cancel(&mut self, ctx: &egui::Context) {
         #[cfg(not(target_arch = "wasm32"))]
         if self.worker.postgres_control().is_some() {
             self.query_monitor.open = true;
+            self.query_monitor.rows.clear();
+            self.query_monitor.selected = None;
             self.refresh_query_monitor(ctx, None);
             return;
         }
@@ -64,8 +77,8 @@ impl Rustable {
                 self.query_monitor.reply = None;
                 match result {
                     Ok((rows, message)) => {
-                        self.query_monitor.rows = rows;
-                        self.query_monitor.selected = None;
+                        let current_pid = self.worker.postgres_control().map(|control| control.process_id);
+                        self.query_monitor.replace_rows(rows, current_pid);
                         self.query_monitor.message = message;
                     }
                     Err(error) => self.query_monitor.message = Some(error),
@@ -76,6 +89,14 @@ impl Rustable {
         let busy = self.query_monitor.reply.is_some();
         #[cfg(target_arch = "wasm32")]
         let busy = false;
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.query_monitor.open = false;
+            return;
+        }
+        let confirm = ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter)
+                || i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+        });
         let mut open = true;
         let mut refresh = false;
         let mut cancel = None;
@@ -149,7 +170,7 @@ impl Rustable {
                             self.query_monitor.message = Some("Cancellation requested. Waiting for the database to acknowledge it.".into());
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add_enabled(!busy && self.query_monitor.selected.is_some(), egui::Button::new("Cancel selected query")).clicked() {
+                            if ui.add_enabled(!busy && self.query_monitor.selected.is_some(), crate::icons::shortcut_button("Cancel selected query", false, "Enter", Some(BLUE))).clicked() || (confirm && !busy) {
                                 cancel = self.query_monitor.selected.and_then(|index| self.query_monitor.rows.get(index)).cloned();
                             }
                         });
@@ -220,6 +241,21 @@ where T: tokio_postgres::tls::MakeTlsConnect<tokio_postgres::Socket>,
 mod tests {
     use super::*;
     #[test]
+    fn selection_tracks_query_identity_and_prefers_this_workspace() {
+        let query = |pid, started: &str| RunningQuery { pid, started: started.into(), backend_started: "session".into(), user: String::new(), elapsed: String::new(), wait: String::new(), sql: "SELECT pg_sleep(10)".into() };
+        let mut monitor = QueryMonitor::default();
+        monitor.replace_rows(vec![query(1, "a"), query(2, "b")], Some(2));
+        assert_eq!(monitor.selected, Some(1));
+        monitor.selected = Some(0);
+        monitor.replace_rows(vec![query(2, "b"), query(1, "a")], Some(2));
+        assert_eq!(monitor.selected, Some(1), "keep explicitly selected query after sorting");
+        monitor.replace_rows(vec![query(1, "new query")], Some(2));
+        assert_eq!(monitor.selected, None, "never retarget cancellation to a replacement query");
+        monitor.replace_rows(Vec::new(), Some(2));
+        assert_eq!(monitor.selected, None);
+    }
+
+    #[test]
     #[ignore = "requires opted-in disposable PostgreSQL on port 54329"]
     fn monitor_lists_and_cancels_only_selected_query() {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
@@ -227,9 +263,10 @@ mod tests {
             host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
             user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
         };
-        let control = db::PostgresControl { config: config.clone(), forwarded_port: Some(54329) };
+        let control = db::PostgresControl { process_id: 0, config: config.clone(), forwarded_port: Some(54329) };
         let mut client = ::postgres::Client::connect("host=127.0.0.1 port=54329 user=postgres password=rustable_qa_only dbname=rustable_qa", ::postgres::NoTls).unwrap();
         let pid: i32 = client.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
+        assert_eq!(client.cancel_token().process_id(), pid, "startup metadata must identify the same backend");
         let thread = std::thread::spawn(move || client.batch_execute("SELECT pg_sleep(15) /* rustable monitor regression */"));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let query = loop {

@@ -250,3 +250,7 @@ returns text-format results without custom-type catalog lookups, and drains rows
 beyond the caller's row/byte limit. Rustable rejects truncated refreshes and marks
 the result stale; a committed write is never retried because refresh failed.
 See `docs/QUERY-RESULT-EDITING.md` for latency costs and regression coverage.
+
+The PostgreSQL cancellation tokens expose `process_id()` from the existing startup
+handshake. The query monitor uses it to select this workspace’s running query;
+this accessor performs no network I/O and does not expose the cancellation secret.

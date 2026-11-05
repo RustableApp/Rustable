@@ -21,12 +21,37 @@ pub(super) fn collect_budget<T: Protocol>(results: QueryResult<'_, '_, '_, T>, b
 
 // Start before query_iter/exec_iter: those calls already wait for the server's
 // first response. Later result sets include the wait in results.iter().
-pub(super) fn collect_budget_since<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, set_limit: usize, started: Instant) -> (ScriptResult, bool) {
+pub(super) fn collect_budget_since<T: Protocol>(results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, set_limit: usize, started: Instant) -> (ScriptResult, bool) {
+    collect_inner(results, budget, row_limit, set_limit, started, false)
+}
+
+/// A safe batch contains START, exactly one read, and ROLLBACK. Transaction OK
+/// packets are drained and checked but never exposed or charged to the grid budget.
+pub(super) fn collect_safe_since<T: Protocol>(results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, started: Instant) -> (ScriptResult, bool) {
+    collect_inner(results, budget, row_limit, 1, started, true)
+}
+
+fn collect_inner<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &mut usize, row_limit: usize, set_limit: usize, started: Instant, wrapped: bool) -> (ScriptResult, bool) {
+    let mut sets = 0;
     let mut set_started = started;
     let mut report = ScriptResult::default();
     let mut remaining = *budget;
     let mut disconnected = false;
     while let Some(mut set) = results.iter() {
+        let index = sets;
+        sets += 1;
+        if wrapped && index != 1 {
+            if index > 2 || !set.columns().as_ref().is_empty() {
+                report.error.get_or_insert_with(|| "Unexpected result in Safe mode transaction".into());
+            }
+            for row in set.by_ref() {
+                if let Err(error) = row {
+                    disconnected |= error.is_connectivity_error();
+                    report.error = Some(super::mysql::error_message(&error));
+                }
+            }
+            continue;
+        }
         // Include structural overhead: a script of empty result sets must also
         // have a bound. Do not misrepresent omitted results as a successful run.
         if report.grids.len() >= set_limit {
@@ -76,6 +101,9 @@ pub(super) fn collect_budget_since<T: Protocol>(mut results: QueryResult<'_, '_,
         grid.elapsed = set_started.elapsed();
         report.grids.push(Arc::new(grid));
         set_started = Instant::now();
+    }
+    if wrapped && sets != 3 && report.error.is_none() {
+        report.error = Some("Safe mode transaction did not finish".into());
     }
     report.elapsed = started.elapsed();
     *budget = remaining;

@@ -403,6 +403,7 @@ pub enum Payload {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone)]
 pub(crate) struct PostgresControl {
+    pub process_id: i32,
     pub config: crate::connection::PostgresConfig,
     pub forwarded_port: Option<u16>,
 }
