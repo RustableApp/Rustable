@@ -3819,6 +3819,7 @@ impl Rustable {
                         .fill(editor_background)
                         .corner_radius(3.0)
                         .show(ui, |ui| {
+                            crate::editor::selection_style(ui.visuals_mut());
                             let slot = ui.painter().add(egui::Shape::Noop);
                             let editor_id =
                                 ui.make_persistent_id(egui::Id::new(("query-editor", tab.id)));

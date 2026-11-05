@@ -45,20 +45,19 @@ pub fn toggle(sql: &str, selection: Range<usize>, dialect: Dialect) -> (String, 
         .map(|line| existing_marker(&chars[line.start + indent(line)..line.end], dialect))
         .collect();
     // (position, removed characters, inserted text), ascending by position.
-    let edits: Vec<(usize, usize, &str)> = if markers.iter().all(Option::is_some) {
+    let uncomment = markers.iter().all(Option::is_some);
+    let edits: Vec<(usize, usize, &str)> = if uncomment {
         targets
             .iter()
             .zip(markers)
             .map(|(line, len)| (line.start + indent(line), len.unwrap(), ""))
             .collect()
     } else {
-        // Already-commented lines are left alone rather than double-commented.
+        // Add one layer to every non-blank line so toggling back preserves existing comments.
         let column = targets.iter().map(|line| indent(line)).min().unwrap_or(0);
         targets
             .iter()
-            .zip(&markers)
-            .filter(|(_, marker)| marker.is_none())
-            .map(|(line, _)| (line.start + column.min(line.len()), 0, MARKER))
+            .map(|line| (line.start + column.min(line.len()), 0, MARKER))
             .collect()
     };
     let mut text = String::with_capacity(sql.len() + edits.len() * MARKER.len());
@@ -87,6 +86,13 @@ pub fn toggle(sql: &str, selection: Range<usize>, dialect: Dialect) -> (String, 
         mapped
     };
     let caret = start == end;
+    if caret && !uncomment {
+        // Advance only for a caret-only comment action. Keep block selections
+        // intact, and stop at EOF without adding an unrelated newline.
+        let next = lines.get(first + 1).map_or(chars.len(), |line| line.start);
+        let next = map(next, true);
+        return (text, next..next);
+    }
     (text, map(start, caret)..map(end, true))
 }
 
@@ -117,14 +123,16 @@ mod tests {
     }
 
     #[test]
-    fn caret_line_round_trips() {
+    fn commenting_advances_to_next_line_but_uncommenting_keeps_caret() {
         let sql = "SELECT 1;\nSELECT 2;";
-        let (commented, cursor) = toggle(sql, 12..12, PG);
-        assert_eq!(commented, "SELECT 1;\n-- SELECT 2;");
-        assert_eq!(cursor, 15..15);
-        let (restored, cursor) = toggle(&commented, cursor, PG);
+        let (commented, cursor) = toggle(sql, 3..3, PG);
+        assert_eq!(commented, "-- SELECT 1;\nSELECT 2;");
+        assert_eq!(cursor, 13..13);
+        let (restored, cursor) = toggle(&commented, 6..6, PG);
         assert_eq!(restored, sql);
-        assert_eq!(cursor, 12..12);
+        assert_eq!(cursor, 3..3);
+        let (last, cursor) = toggle(sql, 12..12, PG);
+        assert_eq!(cursor, last.chars().count()..last.chars().count());
     }
 
     #[test]
@@ -148,17 +156,39 @@ mod tests {
     }
 
     #[test]
-    fn mixed_selection_comments_only_uncommented_lines() {
+    fn mixed_selection_preserves_existing_comments_on_round_trip() {
         let sql = "select * from something;\n\n-- select * from test;";
         let (commented, cursor) = toggle(sql, 0..sql.len(), PG);
-        assert_eq!(commented, "-- select * from something;\n\n-- select * from test;");
+        assert_eq!(commented, "-- select * from something;\n\n-- -- select * from test;");
         assert_eq!(cursor, 0..commented.len());
         // Every line is now a comment, so the next press uncomments them all.
         let (uncommented, _) = toggle(&commented, cursor, PG);
-        assert_eq!(uncommented, "select * from something;\n\nselect * from test;");
+        assert_eq!(uncommented, sql);
         // Indented existing comments keep the block aligned.
         let (indented, _) = toggle("  -- a\n  b", 0..10, PG);
-        assert_eq!(indented, "  -- a\n  -- b");
+        assert_eq!(indented, "  -- -- a\n  -- b");
+    }
+
+    #[test]
+    fn query_with_existing_comment_round_trips_in_each_dialect() {
+        for dialect in [PG, Dialect::Sqlite, mysql()] {
+            let sql = "SELECT\n  *\n-- Mid query comment\nFROM\n  address;\n";
+            let (commented, selection) = toggle(sql, 0..sql.chars().count(), dialect);
+            assert!(commented.contains("-- -- Mid query comment"));
+            assert_eq!(toggle(&commented, selection, dialect).0, sql);
+        }
+        let sql = "SELECT 1;\n# keep disabled";
+        let (commented, selection) = toggle(sql, 0..sql.chars().count(), mysql());
+        assert_eq!(toggle(&commented, selection, mysql()).0, sql);
+    }
+
+    #[test]
+    fn next_line_caret_uses_unicode_offsets_and_preserves_crlf() {
+        let sql = "SELECT '😀';\r\n  SELECT 2;";
+        let (commented, cursor) = toggle(sql, 0..0, PG);
+        assert_eq!(commented, format!("-- {sql}"));
+        assert_eq!(cursor.start, "-- SELECT '😀';\r\n".chars().count());
+        assert!(cursor.is_empty());
     }
 
     #[test]
