@@ -273,15 +273,16 @@ pub(super) fn plan(driver: &mut PostgresDriver, changes: &[Change]) -> Result<Ch
             .collect(),
         ..Default::default()
     };
-    type RowEdits = (String, Vec<Value>, Vec<(String, Value)>);
+    type RowEdits = (String, Vec<Value>, Vec<(String, Value)>, Option<Vec<String>>);
     let mut edits: Vec<RowEdits> = Vec::new();
     for change in changes {
         if let Change::Cell {
+            original_columns,
             table,
             column,
             original,
             value,
-        } = change
+         ..} = change
         {
             let meta = &tables[table];
             if !meta
@@ -293,9 +294,9 @@ pub(super) fn plan(driver: &mut PostgresDriver, changes: &[Change]) -> Result<Ch
             }
             let index = edits
                 .iter()
-                .position(|(t, row, _)| t == table && same_row(row, original))
+                .position(|(t, row, _, names)| t == table && same_row(row, original) && names == original_columns)
                 .unwrap_or_else(|| {
-                    edits.push((table.clone(), original.clone(), Vec::new()));
+                    edits.push((table.clone(), original.clone(), Vec::new(), original_columns.clone()));
                     edits.len() - 1
                 });
             if let Some((_, old)) = edits[index].2.iter_mut().find(|(name, _)| name == column) {
@@ -305,18 +306,28 @@ pub(super) fn plan(driver: &mut PostgresDriver, changes: &[Change]) -> Result<Ch
             }
         }
     }
-    for (table, original, fields) in edits {
+    for (table, original, fields, names) in edits {
         if changes
             .iter()
             .any(|c| matches!(c,Change::DeleteRow{table:t,original:o} if *t==table&&same_row(o, &original)))
         {
             continue;
         }
-        let meta = &tables[&table];
+        let mut projected = tables[&table].clone();
+        projected.columns = projected_columns(&projected.columns, names.as_deref(), |c| c.name.as_str(), |c| c.pk)?;
+        let meta = &projected;
+        if original.len() != meta.columns.len() { return Err("Result columns changed. Run the query again.".into()); }
+        let mut saved = original.clone();
+        for (name, value) in &fields {
+            if let Some(index) = meta.columns.iter().position(|column| column.name == *name) { saved[index] = value.clone(); }
+        }
+        let batch = plan.readback_batch(&table, meta.columns.iter().map(|column| column.name.clone()).collect());
+        let read_predicate = predicates(meta, &saved, &mut batch.parameters, true)?;
+        batch.push(&original, &meta.name, &read_predicate);
         let mut parameters = Vec::new();
         let mut assignments = Vec::new();
         for (name, value) in fields {
-            let column = meta.columns.iter().find(|c| c.name == name).unwrap();
+            let column = meta.columns.iter().find(|c| c.name == name && !c.generated).ok_or("Edited column is not in the query result")?;
             assignments.push(format!(
                 "{} = {}",
                 quote(&name),
@@ -396,7 +407,7 @@ pub(super) fn plan(driver: &mut PostgresDriver, changes: &[Change]) -> Result<Ch
     }
     Ok(plan)
 }
-fn bindings(parameters: &[Value]) -> Result<Vec<Option<String>>, String> {
+pub(super) fn bindings(parameters: &[Value]) -> Result<Vec<Option<String>>, String> {
     parameters
         .iter()
         .map(|value| match value {
@@ -522,11 +533,45 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    #[ignore = "requires disposable PostgreSQL QA"]
+    fn saved_row_readback_batches_keys_triggers_and_cold_custom_types() {
+        let mut driver = fixture();
+        driver.client.batch_execute("DROP SCHEMA IF EXISTS rustable_readback CASCADE; CREATE SCHEMA rustable_readback; CREATE TYPE rustable_readback.state AS ENUM('ok'); CREATE TABLE rustable_readback.t(id INT PRIMARY KEY, qty INT, revision INT DEFAULT 0, doubled INT GENERATED ALWAYS AS (qty*2) STORED, state rustable_readback.state DEFAULT 'ok'); INSERT INTO rustable_readback.t(id,qty) VALUES(1,2),(2,3); CREATE FUNCTION rustable_readback.bump() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.revision=OLD.revision+1; RETURN NEW; END $$; CREATE TRIGGER bumped BEFORE UPDATE ON rustable_readback.t FOR EACH ROW EXECUTE FUNCTION rustable_readback.bump();").unwrap();
+        let originals = driver.execute("SELECT * FROM rustable_readback.t ORDER BY id", false, &AtomicBool::new(false)).grids[0].rows.clone();
+        let plan = driver.plan(&[
+            cell("rustable_readback.t", "id", &originals[0], Value::Integer(11)),
+            cell("rustable_readback.t", "qty", &originals[0], Value::Integer(7)),
+            cell("rustable_readback.t", "qty", &originals[1], Value::Integer(9)),
+        ]).unwrap();
+        assert_eq!(plan.readbacks.len(), 1);
+        driver.apply(&plan).unwrap();
+        // Fresh connection has no cached enum description. Text-format readback
+        // must still complete without a custom-type lookup behind unread rows.
+        let mut fresh = fixture();
+        let rows = crate::db::read_saved_rows(&mut fresh, &plan).unwrap();
+        assert_eq!(rows[0].values, vec![Value::Integer(11),Value::Integer(7),Value::Integer(1),Value::Integer(14),Value::Text("ok".into())]);
+        assert_eq!(rows[1].values, vec![Value::Integer(2),Value::Integer(9),Value::Integer(1),Value::Integer(18),Value::Text("ok".into())]);
+        let projected = Change::Cell {
+            original_columns: Some(vec!["qty".into(), "id".into()]), table: "rustable_readback.t".into(),
+            column: "qty".into(), original: vec![Value::Integer(7), Value::Integer(11)], value: Value::Integer(8),
+        };
+        let plan = driver.plan(&[projected]).unwrap();
+        driver.apply(&plan).unwrap();
+        let rows = crate::db::read_saved_rows(&mut driver, &plan).unwrap();
+        assert_eq!(rows[0].values, vec![Value::Integer(8), Value::Integer(11)]);
+        assert!(driver.plan(&[Change::Cell {
+            original_columns: Some(vec!["qty".into()]), table: "rustable_readback.t".into(),
+            column: "qty".into(), original: vec![Value::Integer(8)], value: Value::Integer(9),
+        }]).is_err());
+        driver.client.batch_execute("DROP SCHEMA rustable_readback CASCADE").unwrap();
+    }
+
     fn row(driver: &mut PostgresDriver, sql: &str) -> Vec<Value> {
         decode_row(&driver.client.query_one(sql, &[]).unwrap()).unwrap()
     }
     fn cell(table: &str, column: &str, original: &[Value], value: Value) -> Change {
-        Change::Cell {
+        Change::Cell { original_columns: None,
             table: table.into(),
             column: column.into(),
             original: original.to_vec(),
@@ -759,7 +804,7 @@ mod safety_tests {
             .unwrap();
         let changes = original
             .iter()
-            .map(|row| Change::Cell {
+            .map(|row| Change::Cell { original_columns: None,
                 table: "rustable_edit_safety.t".into(),
                 column: "n".into(),
                 original: row.clone(),
@@ -861,7 +906,7 @@ mod complex_type_tests {
         );
         assert!(matches!(&original[4],Value::Text(text) if text.starts_with("[0:1][2:3]=")));
         assert_eq!(original[6], Value::Blob(vec![0, 255]));
-        let edit = |column: &str, value: Value| Change::Cell {
+        let edit = |column: &str, value: Value| Change::Cell { original_columns: None,
             table: table.into(),
             column: column.into(),
             original: original.clone(),
@@ -945,7 +990,7 @@ mod complex_type_tests {
             1
         );
         // Both enum labels and constraints of a domain are part of review.
-        let pending = || Change::Cell {
+        let pending = || Change::Cell { original_columns: None,
             table: table.into(),
             column: "n".into(),
             original: updated.clone(),

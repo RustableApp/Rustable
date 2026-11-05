@@ -617,7 +617,7 @@ impl Driver for MysqlDriver {
             }
             let key = foreign_keys.last_mut().unwrap(); key.columns.push(source); key.referenced_columns.push(target);
         }
-        Ok(TableData { sql, parameters, grid, columns: object.columns, indexes, triggers, foreign_keys })
+        Ok(TableData { details_loaded: true, sql, parameters, grid, columns: object.columns, indexes, triggers, foreign_keys })
     }
     fn plan(&mut self, changes: &[Change]) -> Result<ChangePlan, String> {
         self.require_idle()?;
@@ -640,6 +640,16 @@ impl Driver for MysqlDriver {
     }
     fn export_table(&mut self, path: &std::path::Path, browse: &Browse, cancel: &AtomicBool, format: ExportFormat) -> Result<(), String> {
         export::table(self, path, browse, cancel, format)
+    }
+    fn readback(&mut self, query: &RowReadback, budget: usize) -> Result<Grid, String> {
+        let params = query.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>, _>>()?;
+        let mut remaining = budget;
+        let started = std::time::Instant::now();
+        let ((report, disconnected), cancellation_error) = self.with_connection_status(|conn| conn.exec_iter(&query.sql, params).map(|results|
+            super::mysql_results::collect_budget_since(results, &mut remaining, query.originals.len() + 1, 1, started)))?;
+        if disconnected { self.connection = None; }
+        if let Some(error) = report.error.or(cancellation_error) { return Err(error); }
+        report.grids.into_iter().next().map(Arc::unwrap_or_clone).ok_or_else(|| "Missing saved-row result".into())
     }
     fn apply(&mut self, plan: &ChangePlan) -> Result<(), String> {
         editing::apply(self, plan)
@@ -668,6 +678,45 @@ mod tests {
         driver.conn().unwrap().query_drop("ALTER TABLE `ddl``preview` ADD COLUMN fresh BOOLEAN").unwrap();
         assert!(driver.definition("ddl`preview").unwrap().contains("`fresh`"));
         assert!(driver.definition("missing_ddl_preview").is_err());
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_saved_row_readback_uses_updated_keys_and_generated_values() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316, 43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port,
+            user: "rustable".into(), password: "rustable-test-only".into(),
+            database: "rustable_test".into(), tls: false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS readback_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE readback_probe(id INT PRIMARY KEY, qty INT, doubled INT GENERATED ALWAYS AS (qty*2) STORED) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO readback_probe(id,qty) VALUES(1,2),(2,3)").unwrap();
+        let report = driver.execute("SELECT * FROM readback_probe ORDER BY id", false, &AtomicBool::new(false));
+        let originals = &report.grids[0].rows;
+        let changes = vec![
+            Change::Cell { original_columns: None, table: "readback_probe".into(), column: "id".into(), original: originals[0].clone(), value: Value::Integer(11) },
+            Change::Cell { original_columns: None, table: "readback_probe".into(), column: "qty".into(), original: originals[0].clone(), value: Value::Integer(7) },
+            Change::Cell { original_columns: None, table: "readback_probe".into(), column: "qty".into(), original: originals[1].clone(), value: Value::Integer(9) },
+        ];
+        let plan = driver.plan(&changes).unwrap();
+        assert_eq!(plan.readbacks.len(), 1, "one bound read for multiple edits in the same table");
+        driver.apply(&plan).unwrap();
+        let rows = crate::db::read_saved_rows(&mut driver, &plan).unwrap();
+        assert_eq!(rows.len(),2);
+        assert_eq!(rows[0].values, vec![Value::Integer(11), Value::Integer(7), Value::Integer(14)]);
+        assert_eq!(rows[1].values, vec![Value::Integer(2), Value::Integer(9), Value::Integer(18)]);
+        let plan = driver.plan(&[Change::Cell {
+            original_columns: Some(vec!["qty".into(), "id".into()]), table: "readback_probe".into(),
+            column: "qty".into(), original: vec![Value::Integer(7), Value::Integer(11)], value: Value::Integer(8),
+        }]).unwrap();
+        driver.apply(&plan).unwrap();
+        assert_eq!(crate::db::read_saved_rows(&mut driver, &plan).unwrap()[0].values, vec![Value::Integer(8), Value::Integer(11)]);
+        assert!(driver.plan(&[Change::Cell {
+            original_columns: Some(vec!["qty".into()]), table: "readback_probe".into(),
+            column: "qty".into(), original: vec![Value::Integer(8)], value: Value::Integer(9),
+        }]).is_err());
+        driver.conn().unwrap().query_drop("DROP TABLE readback_probe").unwrap();
     }
 
     #[test]
@@ -720,7 +769,7 @@ mod tests {
         driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS review_shadow_probe").unwrap();
         driver.conn().unwrap().query_drop("CREATE TABLE review_shadow_probe (id INT PRIMARY KEY, n INT) ENGINE=InnoDB").unwrap();
         driver.conn().unwrap().query_drop("INSERT INTO review_shadow_probe VALUES (1,7)").unwrap();
-        let change = Change::Cell { table:"review_shadow_probe".into(), column:"n".into(),
+        let change = Change::Cell { original_columns: None, table:"review_shadow_probe".into(), column:"n".into(),
             original:vec![Value::Integer(1),Value::Integer(7)], value:Value::Integer(9) };
         let plan = driver.plan(std::slice::from_ref(&change)).unwrap();
         for engine in ["MyISAM", "InnoDB"] {
@@ -1308,8 +1357,8 @@ mod tests {
         let setup = driver.execute("DROP TABLE IF EXISTS plan_data_probe; CREATE TABLE plan_data_probe (id INT PRIMARY KEY, name VARCHAR(80) COLLATE utf8mb4_general_ci, n INT, generated_value INT GENERATED ALWAYS AS (n*2) STORED) ENGINE=InnoDB; INSERT INTO plan_data_probe(id,name,n) VALUES (1,'Before',2);", false, &cancel);
         assert!(setup.error.is_none(), "{:?}", setup.error);
         let original = driver.browse(&Browse { table:"plan_data_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
-        let edits = vec![Change::Cell { table:"plan_data_probe".into(), column:"name".into(), original:original.clone(), value:Value::Text("after'; DROP TABLE plan_data_probe; --".into()) },
-            Change::Cell { table:"plan_data_probe".into(), column:"n".into(), original:original.clone(), value:Value::Integer(3) }];
+        let edits = vec![Change::Cell { original_columns: None, table:"plan_data_probe".into(), column:"name".into(), original:original.clone(), value:Value::Text("after'; DROP TABLE plan_data_probe; --".into()) },
+            Change::Cell { original_columns: None, table:"plan_data_probe".into(), column:"n".into(), original:original.clone(), value:Value::Integer(3) }];
         let plan = driver.plan(&edits).unwrap();
         assert_eq!(plan.statements.len(),1);
         assert_eq!(plan.preconditions.len(),1);
@@ -1339,7 +1388,7 @@ mod tests {
         driver.conn().unwrap().query_drop("UPDATE plan_data_probe SET name='before' WHERE id=1").unwrap();
         let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, params).unwrap();
         assert!(matches.is_empty(), "case-insensitive collation must not conceal a conflict");
-        assert!(driver.plan(&[Change::Cell { table:"plan_data_probe".into(), column:"generated_value".into(), original:original.clone(), value:Value::Integer(4) }]).is_err());
+        assert!(driver.plan(&[Change::Cell { original_columns: None, table:"plan_data_probe".into(), column:"generated_value".into(), original:original.clone(), value:Value::Integer(4) }]).is_err());
         let mut deleted = edits;
         deleted.push(Change::DeleteRow { table:"plan_data_probe".into(), original });
         let plan = driver.plan(&deleted).unwrap();
@@ -1375,11 +1424,11 @@ mod tests {
         assert_eq!(data.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["id","label","hidden`value","qty"]);
         assert_eq!(data.grid.rows[0], [Value::Integer(7),Value::Text("visible".into()),Value::Integer(42),Value::Integer(3)]);
         assert!(data.columns[0].pk);
-        let change = Change::Cell { table:"invisible_probe".into(), column:"label".into(), original:data.grid.rows[0].clone(), value:Value::Text("edited".into()) };
+        let change = Change::Cell { original_columns: None, table:"invisible_probe".into(), column:"label".into(), original:data.grid.rows[0].clone(), value:Value::Text("edited".into()) };
         let plan = driver.plan(&[change]).unwrap();
         driver.apply(&plan).unwrap();
         let data = driver.browse(&request).unwrap();
-        let change = Change::Cell { table:"invisible_probe".into(), column:"label".into(), original:data.grid.rows[0].clone(), value:Value::Text("again".into()) };
+        let change = Change::Cell { original_columns: None, table:"invisible_probe".into(), column:"label".into(), original:data.grid.rows[0].clone(), value:Value::Text("again".into()) };
         let stale = driver.plan(&[change]).unwrap();
         other.query_drop("UPDATE invisible_probe SET `hidden``value`=43 WHERE id=7").unwrap();
         assert!(driver.apply(&stale).unwrap_err().contains("Row changed"));
@@ -1461,9 +1510,9 @@ mod tests {
         assert!(!matches!(original[4], Value::Null));
         for column in ["virtual_qty", "stored_qty"] {
             assert!(driver.plan(&[insert(2,vec![("id".into(),Value::Integer(2)),(column.into(),Value::Integer(99))])]).unwrap_err().contains("writable column"));
-            assert!(driver.plan(&[Change::Cell { table:request.table.clone(),column:column.into(),original:original.clone(),value:Value::Integer(99) }]).unwrap_err().contains("writable column"));
+            assert!(driver.plan(&[Change::Cell { original_columns: None, table:request.table.clone(),column:column.into(),original:original.clone(),value:Value::Integer(99) }]).unwrap_err().contains("writable column"));
         }
-        let change = Change::Cell { table:request.table.clone(),column:"qty".into(),original:original.clone(),value:Value::Integer(7) };
+        let change = Change::Cell { original_columns: None, table:request.table.clone(),column:"qty".into(),original:original.clone(),value:Value::Integer(7) };
         let plan = driver.plan(&[change]).unwrap();
         driver.apply(&plan).unwrap();
         let values: Option<(i32,i32,i32)> = observer.query_first("SELECT qty,virtual_qty,stored_qty FROM generated_review_probe").unwrap();
@@ -1472,7 +1521,7 @@ mod tests {
         assert_eq!(current[4],original[4], "ordinary default does not change during update");
         assert_ne!(current[5],original[5], "ON UPDATE timestamp is refreshed by the server");
         assert!(driver.apply(&plan).unwrap_err().contains("Row changed"), "old review must not overwrite computed/server-updated values");
-        let stale = driver.plan(&[Change::Cell { table:request.table.clone(),column:"qty".into(),original:current,value:Value::Integer(8) }]).unwrap();
+        let stale = driver.plan(&[Change::Cell { original_columns: None, table:request.table.clone(),column:"qty".into(),original:current,value:Value::Integer(8) }]).unwrap();
         observer.query_drop("ALTER TABLE generated_review_probe MODIFY stored_qty INT GENERATED ALWAYS AS (qty*4) STORED").unwrap();
         assert!(driver.apply(&stale).unwrap_err().contains("definition changed"));
         assert_eq!(driver.transaction_state(),TransactionState::Idle);
@@ -1491,7 +1540,7 @@ mod tests {
         driver.conn().unwrap().query_drop("CREATE TABLE apply_constraints_probe(id INT PRIMARY KEY, n INT CHECK(n>0)) ENGINE=InnoDB").unwrap();
         driver.conn().unwrap().query_drop("INSERT INTO apply_constraints_probe VALUES(1,1)").unwrap();
         let original = driver.browse(&Browse { table:"apply_constraints_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
-        let plan = driver.plan(&[Change::Cell { table:"apply_constraints_probe".into(), column:"n".into(), original, value:Value::Integer(2) }]).unwrap();
+        let plan = driver.plan(&[Change::Cell { original_columns: None, table:"apply_constraints_probe".into(), column:"n".into(), original, value:Value::Integer(2) }]).unwrap();
         let mut settings = vec!["foreign_key_checks", "unique_checks"];
         if port == 43317 { settings.push("check_constraint_checks"); }
         for setting in settings {
@@ -1526,7 +1575,7 @@ mod tests {
         driver.conn().unwrap().query_drop("CREATE TABLE apply_cancel_probe(id INT PRIMARY KEY, label VARCHAR(20)) ENGINE=InnoDB").unwrap();
         driver.conn().unwrap().query_drop("INSERT INTO apply_cancel_probe VALUES(1,'before1'),(2,'before2')").unwrap();
         let rows = driver.browse(&Browse { table:"apply_cancel_probe".into(), sort:Some(("id".into(),false)), ..Default::default() }).unwrap().grid;
-        let changes = rows.rows.iter().map(|original| Change::Cell { table:"apply_cancel_probe".into(), column:"label".into(), original:original.clone(), value:Value::Text("saved".into()) }).collect::<Vec<_>>();
+        let changes = rows.rows.iter().map(|original| Change::Cell { original_columns: None, table:"apply_cancel_probe".into(), column:"label".into(), original:original.clone(), value:Value::Text("saved".into()) }).collect::<Vec<_>>();
         let plan = driver.plan(&changes).unwrap();
         let retry = plan.clone();
         let id = driver.conn().unwrap().connection_id();
@@ -1600,7 +1649,7 @@ mod tests {
         review_config.user = "rustable".into();
         let mut reviewer = MysqlDriver::connect(&review_config).unwrap();
         let rows = reviewer.browse(&Browse { table:"hidden_trigger_probe".into(), ..Default::default() }).unwrap();
-        let plan = reviewer.plan(&[Change::Cell { table:"hidden_trigger_probe".into(), column:"label".into(), original:rows.grid.rows[0].clone(), value:Value::Text("edited".into()) }]).unwrap();
+        let plan = reviewer.plan(&[Change::Cell { original_columns: None, table:"hidden_trigger_probe".into(), column:"label".into(), original:rows.grid.rows[0].clone(), value:Value::Text("edited".into()) }]).unwrap();
         assert!(driver.apply(&plan).unwrap_err().contains("direct privileges"));
         assert_eq!(driver.transaction_state(), TransactionState::Idle);
         assert_eq!(admin.query_first::<String,_>("SELECT label FROM hidden_trigger_probe WHERE id=1").unwrap().as_deref(),Some("original"));
@@ -1630,7 +1679,7 @@ mod tests {
         let mut driver = MysqlDriver::connect(&config).unwrap();
         let plan_for = |driver: &mut MysqlDriver, value: &str| {
             let rows = driver.browse(&Browse { table:"global_review_probe".into(), ..Default::default() }).unwrap();
-            driver.plan(&[Change::Cell { table:"global_review_probe".into(), column:"label".into(), original:rows.grid.rows[0].clone(), value:Value::Text(value.into()) }]).unwrap()
+            driver.plan(&[Change::Cell { original_columns: None, table:"global_review_probe".into(), column:"label".into(), original:rows.grid.rows[0].clone(), value:Value::Text(value.into()) }]).unwrap()
         };
         let plan = plan_for(&mut driver, "saved");
         driver.apply(&plan).unwrap();
@@ -1692,7 +1741,7 @@ mod tests {
         let edit = |driver: &mut MysqlDriver, id: i64, column: &str, value: Value| {
             let rows = driver.browse(&Browse { table:"apply_probe".into(), ..Default::default() }).unwrap().grid;
             let original = rows.rows.iter().find(|r| r[0] == Value::Integer(id)).unwrap().clone();
-            Change::Cell { table:"apply_probe".into(), column:column.into(), original, value }
+            Change::Cell { original_columns: None, table:"apply_probe".into(), column:column.into(), original, value }
         };
         let change = edit(&mut driver, 1, "label", Value::Text("saved".into()));
         let plan = driver.plan(&[change]).unwrap();
@@ -1746,7 +1795,7 @@ mod tests {
         other.query_drop("INSERT INTO review_counter_probe(label) VALUES ('first')").unwrap();
         assert_eq!(empty, driver.edit_schema_snapshot("rustable_test", "review_counter_probe").unwrap());
         let original = driver.browse(&Browse { table:"review_counter_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
-        let changes = [Change::Cell { table:"review_counter_probe".into(), column:"label".into(), original, value:Value::Text("edited".into()) }];
+        let changes = [Change::Cell { original_columns: None, table:"review_counter_probe".into(), column:"label".into(), original, value:Value::Text("edited".into()) }];
         let plan = driver.plan(&changes).unwrap();
         other.query_drop("INSERT INTO review_counter_probe(label) VALUES ('unrelated')").unwrap();
         assert_eq!(plan.schemas, driver.plan(&changes).unwrap().schemas, "unrelated inserts must not invalidate the reviewed schema");
@@ -1770,7 +1819,7 @@ mod tests {
         driver.conn().unwrap().query_drop("CREATE TABLE review_lock_probe(id INT PRIMARY KEY, label VARCHAR(30)) ENGINE=InnoDB").unwrap();
         driver.conn().unwrap().query_drop("INSERT INTO review_lock_probe VALUES(1,'original')").unwrap();
         let original = driver.browse(&Browse { table:"review_lock_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
-        let plan = driver.plan(&[Change::Cell { table:"review_lock_probe".into(), column:"label".into(), original, value:Value::Text("edited".into()) }]).unwrap();
+        let plan = driver.plan(&[Change::Cell { original_columns: None, table:"review_lock_probe".into(), column:"label".into(), original, value:Value::Text("edited".into()) }]).unwrap();
         driver.conn().unwrap().query_drop("START TRANSACTION").unwrap();
         // Open the table without reading rows, before validating its snapshot.
         // Both engines must retain this metadata lock until transaction end.
@@ -1814,7 +1863,7 @@ mod tests {
         driver.conn().unwrap().query_drop("CREATE TABLE edit_types_probe(id INT PRIMARY KEY, f FLOAT, d DOUBLE, amount DECIMAL(30,10), dt DATETIME(6), duration TIME(6), bits BIT(9), data VARBINARY(8), label VARCHAR(20)) ENGINE=InnoDB").unwrap();
         driver.conn().unwrap().query_drop("INSERT INTO edit_types_probe VALUES(1,1.2,1.2345678901234567,12345678901234567890.1234567890,'2026-11-01 12:34:56.000123','-817:59:59.000001',b'100000001',X'00FF','before')").unwrap();
         let original = driver.browse(&Browse { table:"edit_types_probe".into(), ..Default::default() }).unwrap().grid.rows[0].clone();
-        let plan = driver.plan(&[Change::Cell { table:"edit_types_probe".into(), column:"label".into(), original, value:Value::Text("after".into()) }]).unwrap();
+        let plan = driver.plan(&[Change::Cell { original_columns: None, table:"edit_types_probe".into(), column:"label".into(), original, value:Value::Text("after".into()) }]).unwrap();
         let check = &plan.preconditions[0];
         let params = check.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>,_>>().unwrap();
         let matches: Vec<u8> = driver.conn().unwrap().exec(&check.sql, params.clone()).unwrap();

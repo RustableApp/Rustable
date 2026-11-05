@@ -70,6 +70,31 @@ impl SessionWindow {
         self.active_slot = next_slot;
     }
 
+    fn close_workspace(&mut self, slot: usize) -> Result<Box<Rustable>, &'static str> {
+        let active = slot == self.active_slot;
+        let index = slot.saturating_sub(usize::from(slot > self.active_slot));
+        let target = if active { self.app.as_deref() } else { self.parked.get(index).map(Box::as_ref) }
+            .ok_or("Database workspace is no longer open.")?;
+        if target.close_blocked() {
+            if !active { self.switch_workspace(index); }
+            return Err("Finish the transaction, save or discard pending edits, and wait for running work before closing this database. SQL drafts are retained.");
+        }
+        if active {
+            let closed = self.app.take().unwrap();
+            if self.parked.is_empty() {
+                self.closed = true;
+            } else {
+                self.active_slot = self.active_slot.min(self.parked.len() - 1);
+                self.app = Some(self.parked.remove(self.active_slot));
+            }
+            Ok(closed)
+        } else {
+            let closed = self.parked.remove(index);
+            if slot < self.active_slot { self.active_slot -= 1; }
+            Ok(closed)
+        }
+    }
+
     fn connection_completed(&mut self, connected: bool) -> bool {
         let completed = connected && !self.connected;
         self.connected |= connected;
@@ -181,6 +206,7 @@ impl eframe::App for SessionWindows {
         let mut shared_changed = self.root.publish_shared_preferences();
         let opened_window = self.collect_requests();
         let had_windows = !self.windows.is_empty();
+        let mut closed_database = false;
         let root_close_requested = ctx.input(|input| input.viewport().close_requested());
         let mut manager_requested = false;
         for window in &mut self.windows {
@@ -224,6 +250,7 @@ impl eframe::App for SessionWindows {
                     app.begin_workspace_frame(child_ctx);
                 }
                 let mut switch = None;
+                let mut close_database = None;
                 if !window.parked.is_empty() {
                     egui::SidePanel::left("database-workspaces").exact_width(92.0).resizable(false)
                         .frame(egui::Frame::new().fill(child_ctx.style().visuals.extreme_bg_color))
@@ -243,6 +270,12 @@ impl eframe::App for SessionWindows {
                                 job.wrap.max_width = rect.width() - 12.0; job.wrap.max_rows = 1;
                                 let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
                                 ui.painter().galley(egui::pos2(rect.center().x - galley.size().x * 0.5, rect.top() + 57.0), galley, ui.visuals().text_color());
+                                response.context_menu(|ui| {
+                                    if ui.button("Close database").clicked() {
+                                        close_database = Some(slot);
+                                        ui.close();
+                                    }
+                                });
                                 if response.on_hover_text(name).clicked() && !active { switch = Some(parked_index); }
                             }
                         }
@@ -251,6 +284,20 @@ impl eframe::App for SessionWindows {
                 if let Some(index) = switch {
                     window.switch_workspace(index);
                     child_ctx.memory_mut(|memory| { if let Some(id) = memory.focused() { memory.surrender_focus(id); } });
+                }
+                if let Some(slot) = close_database {
+                    match window.close_workspace(slot) {
+                        Ok(app) => {
+                            self.root.archive_window(*app);
+                            closed_database = true;
+                            shared_changed = true;
+                            child_ctx.memory_mut(|memory| { if let Some(id) = memory.focused() { memory.surrender_focus(id); } });
+                        }
+                        Err(message) => {
+                            if let Some(app) = &mut window.app { app.window_error(message); }
+                        }
+                    }
+                    if window.closed { return; }
                 }
                 let parked_blocked = window.parked.iter().any(|app| app.close_blocked());
                 let app = window.app.get_or_insert_with(|| Box::new(self.root.new_window(child_ctx, window.request.take().expect("new session request"))));
@@ -294,7 +341,7 @@ impl eframe::App for SessionWindows {
         }
         let closed_window = self.windows.iter().any(|window| window.closed);
         self.windows.retain(|window| !window.closed);
-        if closed_window && let Some(storage) = frame.storage_mut() {
+        if (closed_window || closed_database) && let Some(storage) = frame.storage_mut() {
             self.save(storage);
             storage.flush();
         }
@@ -429,6 +476,44 @@ mod launcher_tests {
             closed: false,
             connected: false,
         }
+    }
+
+    #[test]
+    fn closing_database_preserves_other_workspaces_and_selection() {
+        for active_slot in 0..3 {
+            for close_slot in 0..3 {
+                let cc = eframe::CreationContext::_new_kittest(egui::Context::default());
+                let mut apps: Vec<_> = (0..3).map(|_| Box::new(Rustable::new(&cc))).collect();
+                let identities: Vec<_> = apps.iter().map(|app| &**app as *const Rustable).collect();
+                let mut window = test_window();
+                window.app = Some(apps.remove(active_slot));
+                window.parked = apps;
+                window.active_slot = active_slot;
+                let closed = window.close_workspace(close_slot).ok().unwrap();
+                assert_eq!(&*closed as *const Rustable, identities[close_slot]);
+                assert!(!window.closed);
+                let mut remaining: Vec<_> = window.parked.iter().map(|app| &**app as *const Rustable).collect();
+                remaining.insert(window.active_slot, &**window.app.as_ref().unwrap() as *const Rustable);
+                let expected: Vec<_> = identities.iter().enumerate().filter_map(|(i, id)| (i != close_slot).then_some(*id)).collect();
+                assert_eq!(remaining, expected);
+                if close_slot != active_slot {
+                    assert_eq!(&**window.app.as_ref().unwrap() as *const Rustable, identities[active_slot]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closing_busy_database_keeps_it_open_and_brings_it_forward() {
+        let cc = eframe::CreationContext::_new_kittest(egui::Context::default());
+        let mut window = test_window();
+        window.app = Some(Box::new(Rustable::new(&cc)));
+        // The demo's initial load remains pending until the UI polls its reply.
+        window.parked.push(Box::new(Rustable::new_demo(&cc)));
+        assert!(window.close_workspace(1).is_err());
+        assert_eq!(window.active_slot, 1);
+        assert_eq!(window.parked.len(), 1);
+        assert!(!window.closed);
     }
 
     #[test]

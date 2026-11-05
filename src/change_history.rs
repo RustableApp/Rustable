@@ -153,7 +153,7 @@ mod tests {
     use super::*;
 
     fn cell(value: &str) -> Change {
-        Change::Cell {
+        Change::Cell { original_columns: None,
             table: "t".into(),
             column: "name".into(),
             original: vec![Value::Integer(1), Value::Text("original".into())],

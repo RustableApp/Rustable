@@ -24,9 +24,13 @@ even when the database does almost no work.
   for the single-exchange APIs and their constraints.
 - Current PostgreSQL targets on an established healthy connection, with built-in
   or cached result types and an unchanged schema, are one exchange per editor
-  statement, two sequential exchanges for an initial table load, and one
-  pipelined exchange for a cached table refresh/revisit. These are budgets to
-  preserve or improve, not an excuse to add work up to the limit.
+  statement and one pipelined exchange for an initial sidebar table load,
+  refresh, or revisit. Table browsing uses text results, so cold custom types
+  must not add lookup exchanges. Unknown relations (not in the sidebar/cache),
+  schema-change recovery, and explicit transactions retain a metadata-first
+  fallback for safe query construction. Index/trigger definitions are fetched
+  only when their views are opened. These are budgets to preserve or improve,
+  not an excuse to add work up to the limit.
 - Inspect MySQL/MariaDB and other affected drivers too. Do not assume an
   optimization or regression is PostgreSQL-specific without checking.
 
@@ -79,3 +83,43 @@ replay a write whose commit outcome is unknown. Keep memory bounded. In
 PostgreSQL, do not issue custom-type catalog lookups behind unread result rows:
 that can deadlock the bounded response channel. Preserve the bounded-drain
 fallback and the built-in-type restriction on pipelined metadata queries.
+
+## UI responsiveness is a product requirement
+
+Keep typing, completion, scrolling, selection, editing, tab switching, resizing,
+and window management responsive. A feature is not complete if it makes those
+interactions materially slower. Network latency and UI CPU cost are separate
+budgets: improving one does not justify degrading the other.
+
+- For changes on a rendering/input hot path, run the relevant release-mode UI
+  benchmarks against the PR base on the same machine. Use
+  `python3 scripts/ui-performance.py --base <base-commit>`; see
+  `docs/UI-PERFORMANCE.md` for scope, thresholds, artifacts and limitations.
+- Treat a repeatable p95 increase above 10% as a regression requiring investigation
+  and explicit justification. Noisy or incomplete measurements are inconclusive,
+  not a pass. Do not weaken thresholds or change fixtures to hide a slowdown.
+  Compare identical work; if fixtures change, run the same revised workload on
+  both implementations and record why. Historical timings from another machine
+  or debug build are not an acceptable comparison baseline.
+- Review p50, p95, p99 and maximum stalls where available. Record hardware, OS,
+  toolchain, profile, sample counts, warmups, viewport, scale and fixture. Run
+  benchmarks serially, without competing builds/benchmarks. Retain raw results.
+- Preserve row/column virtualization, bounded allocations and cached text/layout.
+  Avoid rescanning whole catalogs/results or cloning large buffers every frame.
+  No database/network calls, blocking file I/O, process waits or long computations
+  on the UI thread. Keep background result handling bounded too.
+- Request redraws only while needed. Test that animations/scrolling settle at idle;
+  do not solve responsiveness by permanently repainting or polling faster. Include
+  first-use and first-interaction-after-idle behavior for affected paths.
+- For newly introduced interactions, extend the benchmark suite or add a matching
+  workload; passing unrelated existing scenarios is not evidence of performance.
+- CPU layout/tessellation p95 is not input-to-display latency or sustained FPS.
+  Changes to the event loop, renderer, scaling, resize or repaint scheduling also
+  need native checks: 60/120 Hz where available, multiple windows, mixed-DPI
+  displays, monitor disconnect/reconnect, moving and macOS snapping/tiling. Capture
+  frame intervals, input-to-present timing and missed frames when instrumentation
+  is available. State unavailable checks explicitly; never claim they passed.
+- In PR descriptions, report before/after timings, measurement scope and untested
+  cases. Any accepted regression needs a concrete user benefit/correctness reason,
+  alternatives considered and the measured cost. Existing speed is worth preserving
+  even when both versions fit within a display frame budget.
