@@ -21,11 +21,10 @@ processes run serially. It does not access saved connections or user databases.
 The candidate is the current working tree; its commit and dirty status are recorded.
 Each invocation needs a new/empty output directory to preserve prior evidence.
 
-The `UI CPU performance` workflow runs for PRs and can also be
-started manually with a baseline revision. It uses a read-only token, no secrets,
-and the ordinary `pull_request` event, never `pull_request_target`. Repository
-branch protection must separately require this check if merging should be blocked;
-adding the workflow alone does not configure that policy.
+Performance comparisons run locally to avoid consuming GitHub Actions minutes
+on repeated release builds. Keep the raw report and summarize the relevant
+before/after measurements in the PR. There is no automated GitHub performance
+check or branch-protection requirement for this suite.
 
 ## Initial workloads
 
@@ -67,7 +66,7 @@ For each of 19 metrics:
 - **Pass (exit 0):** neither condition applies.
 
 Missing scenarios, invalid values, fewer than five pairs, failed builds or tests
-fail the runner. CI uploads artifacts even on failure. The initial 10% threshold
+fail the runner. Preserve the local report directory even on failure. The initial 10% threshold
 is an investigation policy, not a scientifically calibrated universal limit.
 Tiny rounded legacy measurements and shared-runner scheduling can cause noisy
 results; inspect raw data and rerun rather than relaxing thresholds reflexively.
