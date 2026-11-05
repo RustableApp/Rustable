@@ -25,6 +25,7 @@ pub(super) struct PostgresDriver {
     schemas: SchemaCatalog,
     browse_catalog: Vec<(String, Row)>,
     browse_hints: Vec<Object>,
+    result_origins: std::collections::HashMap<u32, (String, String)>,
 }
 
 impl PostgresDriver {
@@ -65,6 +66,7 @@ impl PostgresDriver {
             schemas: SchemaCatalog::default(),
             browse_catalog: Vec::new(),
             browse_hints: Vec::new(),
+            result_origins: Default::default(),
         })
     }
 
@@ -121,7 +123,7 @@ impl PostgresDriver {
             "SELECT c.relname,c.relkind::text,a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),a.attnotnull, \
              COALESCE(pg_catalog.pg_get_expr(d.adbin,d.adrelid),''), \
              EXISTS(SELECT 1 FROM pg_catalog.pg_index i WHERE i.indrelid=c.oid AND i.indisprimary AND a.attnum=ANY(i.indkey)), \
-             (a.attgenerated <> '' OR a.attidentity <> '') \
+             (a.attgenerated <> '' OR a.attidentity <> ''), c.oid \
              FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
              LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped \
              LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum \
@@ -129,11 +131,13 @@ impl PostgresDriver {
             [(&schema as &(dyn ToSql + Sync), Type::TEXT)], &[], usize::MAX, BYTE_LIMIT,
         ).map_err(error)?;
         let mut objects: Vec<Object> = Vec::new();
+        let mut origins = std::collections::HashMap::new();
         while let Some(row) = rows.next().map_err(error)? {
             if self.cancel.load(Ordering::Relaxed) {
                 return Err("Cancelled".into());
             }
             let relation: &str = row.get(0);
+            origins.insert(row.get::<_, u32>(8), (schema.clone(), relation.to_owned()));
             if objects.last().is_none_or(|object| object.display_name() != relation) {
                 let kind: &str = row.get(1);
                 objects.push(Object {
@@ -158,6 +162,7 @@ impl PostgresDriver {
             }
         }
         drop(rows);
+        self.result_origins = origins;
         self.browse_hints = objects.clone();
         Ok(objects)
     }
@@ -342,7 +347,13 @@ impl Driver for PostgresDriver {
                     .iter()
                     .map(|column| column.name().to_owned())
                     .collect();
+                let source = rows.columns().first().and_then(|column| {
+                    let oid = column.table_oid()?;
+                    rows.columns().iter().all(|column| column.table_oid() == Some(oid) && column.column_id().is_some())
+                        .then(|| self.result_origins.get(&oid).cloned()).flatten()
+                });
                 let mut grid = collect(rows, columns, QUERY_LIMIT, budget, cancel)?;
+                grid.source = source;
                 grid.elapsed = timer.elapsed();
                 Ok(grid)
             })();
@@ -384,6 +395,33 @@ impl Driver for PostgresDriver {
 
     fn plan(&mut self, changes: &[Change]) -> Result<ChangePlan, String> {
         changes::plan(self, changes)
+    }
+    fn readback(&mut self, query: &RowReadback, budget: usize) -> Result<Grid, String> {
+        self.check_tunnel()?;
+        let _watch = self.watch();
+        let values = changes::bindings(&query.parameters)?;
+        let (messages, truncated) = self.client.query_text_bounded(&query.sql,
+            values.iter().map(|value| (value, Type::TEXT)), query.originals.len() + 1, budget).map_err(error)?;
+        let mut grid = Grid { truncated, ..Default::default() };
+        let mut remaining = budget;
+        for message in messages {
+            match message {
+                ::postgres::SimpleQueryMessage::RowDescription(columns) => {
+                    grid.columns = columns.iter().map(|column| column.name().to_owned()).collect();
+                }
+                ::postgres::SimpleQueryMessage::Row(row) => {
+                    let values = row.columns().iter().enumerate().map(|(index, column)|
+                        browse::text::decode(row.try_get(index).map_err(error)?, column.type_oid()))
+                        .collect::<Result<Vec<_>, String>>()?;
+                    let size = values.iter().map(value_size).sum::<usize>();
+                    if size > remaining { grid.truncated = true; continue; }
+                    remaining -= size;
+                    grid.rows.push(values);
+                }
+                _ => {}
+            }
+        }
+        Ok(grid)
     }
     fn apply(&mut self, plan: &ChangePlan) -> Result<(), String> {
         changes::apply(self, plan)

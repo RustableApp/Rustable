@@ -328,7 +328,7 @@ mod tests {
     fn staged_edits_keep_a_preview_and_block_closing_it() {
         let mut app = app();
         app.prepare_table("first".into());
-        app.changes.push(Change::Cell {
+        app.changes.push(Change::Cell { original_columns: None,
             table: "first".into(),
             column: "name".into(),
             original: vec![Value::Integer(1)],

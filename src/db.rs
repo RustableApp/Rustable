@@ -131,6 +131,9 @@ trait Driver: Send {
     }
     fn plan(&mut self, changes: &[Change]) -> Result<ChangePlan, String>;
     fn apply(&mut self, plan: &ChangePlan) -> Result<(), String>;
+    fn readback(&mut self, _query: &RowReadback, _budget: usize) -> Result<Grid, String> {
+        Err("Saved-row refresh is unavailable for this database".into())
+    }
 }
 
 pub const PAGE_SIZE: usize = 500;
@@ -174,6 +177,10 @@ pub struct Column {
 #[derive(Clone, Debug, Default)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Grid {
+    /// Server-provided origin shared by every result column, when available.
+    /// Used to keep query edits tied to their actual source, not a name guess.
+    #[serde(default)]
+    pub source: Option<(String, String)>,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     pub truncated: bool,
@@ -362,6 +369,7 @@ pub enum Payload {
     CsvPreview(#[cfg_attr(not(target_arch = "wasm32"), serde(with = "unavailable_transport"))] csv_preview::Preview),
     Planned(ChangePlan),
     Applied {
+        refreshed: Option<Result<Vec<RefreshedRow>, String>>,
         objects: Option<Result<Vec<Object>, String>>,
     },
     Connected {
@@ -733,7 +741,9 @@ fn handle(
             // A metadata refresh failure must never turn a committed batch into
             // a retryable save failure: repeating it could duplicate mutations.
             cancel.store(false, Ordering::Relaxed);
+            let refreshed = plan.refresh_results.then(|| read_saved_rows(driver.as_mut(), &plan));
             Ok(Payload::Applied {
+                refreshed,
                 objects: plan.statements.iter().any(|statement| statement.expected_rows.is_none())
                     .then(|| driver.objects()),
             })
@@ -1152,7 +1162,7 @@ mod worker_tests {
                 statements: vec![PlannedStatement { sql: String::new(), parameters: vec![], expected_rows }],
                 ..Default::default()
             };
-            let Payload::Applied { objects } = handle(&mut driver, Command::Apply(plan), &cancel).unwrap() else {
+            let Payload::Applied { objects, .. } = handle(&mut driver, Command::Apply(plan), &cancel).unwrap() else {
                 panic!("expected applied changes");
             };
             assert_eq!(objects.is_some(), expected_rows.is_none());
@@ -1362,7 +1372,7 @@ mod worker_tests {
             panic!("expected plan")
         };
         worker.send(Command::Apply(plan)).unwrap();
-        let Payload::Applied { objects } = receive(&worker).unwrap() else {
+        let Payload::Applied { objects, .. } = receive(&worker).unwrap() else {
             panic!("expected committed result")
         };
         let objects = objects.unwrap().unwrap();
@@ -1481,6 +1491,8 @@ pub enum Change {
         definition: ColumnDefinition,
     },
     Cell {
+        #[serde(default)]
+        original_columns: Option<Vec<String>>,
         table: String,
         column: String,
         original: Vec<Value>,
@@ -1510,6 +1522,10 @@ impl Change {
 #[derive(Clone, Debug, Default)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ChangePlan {
+    #[serde(default)]
+    pub refresh_results: bool,
+    #[serde(default)]
+    pub readbacks: Vec<RowReadback>,
     pub rebuild: bool,
     pub schema_version: Option<i64>,
     pub statements: Vec<PlannedStatement>,
@@ -1658,4 +1674,85 @@ pub(crate) fn probe_mysql(config: &crate::connection::MysqlConfig, cancel: &Atom
     let mut driver = mysql::open(config, cancel)?;
     let report = driver.execute("SELECT 1", false, cancel);
     match report.error { Some(error) => Err(error), None => Ok(()) }
+}
+
+/// At most 64 rows per bound read, safely below SQLite compound-select and
+/// parameter limits for ordinary composite keys. Oversized batches fail stale.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct RowReadback {
+    pub table: String,
+    pub columns: Vec<String>,
+    pub originals: Vec<Vec<Value>>,
+    pub sql: String,
+    pub parameters: Vec<Value>,
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RefreshedRow {
+    pub columns: Vec<String>,
+    pub table: String,
+    pub original: Vec<Value>,
+    pub values: Vec<Value>,
+}
+impl ChangePlan {
+    fn readback_batch(&mut self, table: &str, columns: Vec<String>) -> &mut RowReadback {
+        let index = self.readbacks.iter().position(|batch| batch.table == table && batch.columns == columns
+            && batch.originals.len() < 64 && batch.parameters.len() < 400);
+        let index = index.unwrap_or_else(|| {
+            self.readbacks.push(RowReadback { table: table.into(), columns, ..Default::default() });
+            self.readbacks.len() - 1
+        });
+        &mut self.readbacks[index]
+    }
+}
+impl RowReadback {
+    fn push(&mut self, original: &[Value], table_sql: &str, predicate: &str) {
+        if !self.sql.is_empty() { self.sql.push_str(" UNION ALL "); }
+        let mysql = table_sql.starts_with('`');
+        let quote = if mysql { '`' } else { '"' };
+        let projection = self.columns.iter().map(|name| format!("rustable_saved.{quote}{}{quote}", name.replace(quote, &format!("{quote}{quote}")))).collect::<Vec<_>>().join(", ");
+        self.sql.push_str(&format!("SELECT {} AS __rustable_row, {} FROM {} AS rustable_saved WHERE {}", self.originals.len(), projection, table_sql, predicate));
+        self.originals.push(original.to_vec());
+    }
+}
+fn read_saved_rows(driver: &mut dyn Driver, plan: &ChangePlan) -> Result<Vec<RefreshedRow>, String> {
+    let mut remaining = BYTE_LIMIT;
+    let mut result = Vec::new();
+    if plan.readbacks.iter().map(|batch| batch.originals.len()).sum::<usize>() > QUERY_LIMIT {
+        return Err("Too many saved rows to refresh automatically. Rerun the query.".into());
+    }
+    for batch in &plan.readbacks {
+        let grid = driver.readback(batch, remaining)?;
+        if grid.truncated || grid.columns.get(1..) != Some(batch.columns.as_slice()) {
+            return Err("Saved rows exceeded the refresh limit or their columns changed. Rerun the query.".into());
+        }
+        let mut seen = vec![false; batch.originals.len()];
+        for mut row in grid.rows {
+            let Some(Value::Integer(index)) = row.first() else { return Err("Invalid saved-row identity".into()) };
+            let index = usize::try_from(*index).map_err(|_| "Invalid saved-row identity")?;
+            if index >= seen.len() || seen[index] { return Err("Saved-row identity changed. Rerun the query.".into()); }
+            seen[index] = true;
+            row.remove(0);
+            let bytes = row.iter().map(|value| match value {
+                Value::Text(text) => text.len(), Value::Blob(bytes) => bytes.len(), _ => 8,
+            }).sum::<usize>();
+            remaining = remaining.checked_sub(bytes).ok_or("Saved rows exceeded the refresh limit")?;
+            result.push(RefreshedRow { columns: batch.columns.clone(), table: batch.table.clone(), original: batch.originals[index].clone(), values: row });
+        }
+        if seen.iter().any(|seen| !seen) { return Err("A saved row was deleted, hidden or its key changed. Rerun the query.".into()); }
+    }
+    Ok(result)
+}
+
+/// Validate a named result snapshot against fresh metadata, preserving result order.
+fn projected_columns<T: Clone>(columns: &[T], names: Option<&[String]>, name: impl Fn(&T) -> &str, primary: impl Fn(&T) -> bool) -> Result<Vec<T>, String> {
+    let Some(names) = names else { return Ok(columns.to_vec()); };
+    let mut seen = std::collections::HashSet::new();
+    let selected = names.iter().map(|n| {
+        if !seen.insert(n) { return Err("Duplicate result columns cannot be edited".to_owned()); }
+        columns.iter().find(|column| name(column) == n).cloned().ok_or_else(|| "Result columns changed. Run the query again.".to_owned())
+    }).collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(&primary) || columns.iter().filter(|column| primary(column)).any(|key| !selected.iter().any(|column| name(column) == name(key))) {
+        return Err("Include every primary-key column in the query result before editing.".into());
+    }
+    Ok(selected)
 }

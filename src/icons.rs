@@ -7,6 +7,7 @@ pub fn paint(painter: &egui::Painter, center: egui::Pos2, name: &str, size: f32,
     let (uri, bytes): (&str, &'static [u8]) = match name {
         "arrow-right" => ("bytes://lucide/arrow-right.svg", include_bytes!("../assets/icons/lucide/arrow-right.svg")),
         "clipboard" => ("bytes://lucide/clipboard.svg", include_bytes!("../assets/icons/lucide/clipboard.svg")),
+        "calendar" => ("bytes://lucide/calendar.svg", include_bytes!("../assets/icons/lucide/calendar.svg")),
         "check" => ("bytes://lucide/check.svg", include_bytes!("../assets/icons/lucide/check.svg")),
         "chevron-down" => ("bytes://lucide/chevron-down.svg", include_bytes!("../assets/icons/lucide/chevron-down.svg")),
         "chevron-left" => ("bytes://lucide/chevron-left.svg", include_bytes!("../assets/icons/lucide/chevron-left.svg")),

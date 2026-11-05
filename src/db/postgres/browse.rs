@@ -1,7 +1,7 @@
 //! Sidebar hints allow a first autocommit page and fresh editing metadata to
 //! share one exchange. Unknown relations and explicit transactions validate first.
 use super::*;
-mod text;
+pub(super) mod text;
 
 const CATALOG: &str = r#"
 WITH RECURSIVE relation AS (

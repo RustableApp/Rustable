@@ -221,6 +221,10 @@ struct QueryTab {
     error_highlight: Option<std::ops::Range<usize>>,
     result_search: crate::result_search::Search,
     result_grid_focus: Option<egui::Id>,
+    /// SQL sent for the latest run, kept only until its reply arrives.
+    executed_sql: Option<String>,
+    /// Base table whose rows the single current result exactly reproduces.
+    edit_target: Option<crate::result_edit::Target>,
     pins: crate::result_pins::Pins,
     selected_pin: Option<usize>,
     cursor: std::ops::Range<usize>,
@@ -281,6 +285,8 @@ impl QueryTab {
             error_highlight: None,
             result_search: Default::default(),
             result_grid_focus: None,
+            executed_sql: None,
+            edit_target: None,
             pins: Default::default(),
             selected_pin: None,
             cursor: 0..0,
@@ -510,6 +516,8 @@ pub struct Rustable {
     navigator: navigator::Navigator,
     query_monitor: query_monitor::QueryMonitor,
     ddl_preview: Option<(String, String)>,
+    json_editor: Option<crate::json_editor::JsonEditor>,
+    date_picker: Option<crate::date_picker::DatePicker>,
     activity: std::collections::VecDeque<String>,
     last_operation_ms: Option<f64>,
     query_completion: Option<crate::query_notification::Outcome>,
@@ -831,6 +839,127 @@ impl Rustable {
                 && !self.columns.is_empty())
     }
 
+    /// Single, unpinned query results that reproduce one base table's rows can
+    /// be edited like the Data view. Detection is catalog-only (no round trip).
+    fn query_edit_target(&self) -> Option<&crate::result_edit::Target> {
+        let tab = self.tabs.get(self.tab)?;
+        (self.view == View::Query
+            && tab.selected_pin.is_none()
+            && tab.results.len() == 1
+            && tab.result_index == 0)
+            .then_some(tab.edit_target.as_ref())
+            .flatten()
+    }
+
+    /// Recognize a query result as editable using only the loaded catalog.
+    fn update_query_edit_target(&mut self, index: usize) {
+        let dialect = self
+            .session_dialect
+            .unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine));
+        let Some(tab) = self.tabs.get_mut(index) else { return };
+        let sql = tab.executed_sql.take();
+        tab.edit_target = match (sql, tab.results.as_slice()) {
+            (Some(sql), [grid]) if tab.result_error.is_none() && !grid.columns.is_empty() => {
+                crate::result_edit::target(
+                    &sql,
+                    dialect,
+                    &self.objects,
+                    if matches!(dialect, crate::sql::Dialect::Postgres) {
+                        grid.source.as_ref().map(|(schema, _)| schema.as_str())
+                    } else { self.schemas.selected.as_deref() },
+                    &grid.columns,
+                ).filter(|target| {
+                    match dialect {
+                        crate::sql::Dialect::Sqlite => grid.source.as_ref().is_some_and(|(schema, table)|
+                            schema == "main" && table == &target.table),
+                        crate::sql::Dialect::Postgres => grid.source.as_ref().is_some_and(|(schema, table)|
+                            self.objects.iter().any(|object| object.schema.as_ref() == Some(schema)
+                                && object.display_name() == table && object.name == target.table)),
+                        _ => true,
+                    }
+                })
+            }
+            _ => None,
+        };
+    }
+
+    /// Refresh only changed rows from the committed database state. Never
+    /// re-execute the original SQL or replay writes after a read-back failure.
+    fn apply_saved_rows_to_query_results(&mut self, saved: &[Change], refreshed: Option<&Result<Vec<db::RefreshedRow>, String>>) {
+        for tab in &mut self.tabs {
+            let Some(target) = &tab.edit_target else { continue };
+            if !saved.iter().any(|change| change.table() == target.table) { continue; }
+            let Some(grid) = tab.results.first() else { continue };
+            let result = match refreshed {
+                Some(Ok(rows)) => saved_query_rows(grid, &target.table, saved, rows),
+                Some(Err(error)) => Err(error.clone()),
+                None => Err("Saved-row refresh was unavailable".into()),
+            };
+            match result {
+                Ok(Some(updated)) => {
+                    let updated = Arc::new(updated);
+                    if Arc::ptr_eq(&tab.grid, &tab.results[0]) { tab.grid = updated.clone(); }
+                    tab.results[0] = updated;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tab.results.clear();
+                    if tab.selected_pin.is_none() { tab.grid = Arc::default(); }
+                    tab.edit_target = None;
+                    tab.result_error = Some(format!("Changes saved, but results could not be refreshed: {error}. Run the query again to reload the results."));
+                }
+            }
+        }
+        if self.view == View::Query {
+            self.row_selection.clear();
+            self.selected = None;
+        }
+    }
+
+    /// Table that staged row edits in the visible grid belong to ("" if none).
+    pub(super) fn edit_table(&self) -> &str {
+        match self.view {
+            View::Query => self.query_edit_target().map_or("", |target| target.table.as_str()),
+            _ => &self.browse.table,
+        }
+    }
+
+    /// Edit metadata positionally aligned with the visible grid's columns.
+    pub(super) fn edit_columns(&self) -> &[Column] {
+        match self.view {
+            View::Query => self.query_edit_target().map_or(&[], |target| target.columns.as_slice()),
+            _ => &self.columns,
+        }
+    }
+
+    /// Staged changes shown over the visible grid, when it is an edit target.
+    pub(super) fn staged_table(&self) -> Option<&str> {
+        Some(self.edit_table()).filter(|table| {
+            !table.is_empty() && (self.view == View::Data || self.query_edit_target().is_some())
+        })
+    }
+
+    pub(super) fn can_edit_rows(&self) -> bool {
+        if self.safe || self.pending.is_some() {
+            return false;
+        }
+        match self.view {
+            View::Data => {
+                self.supports_data_changes()
+                    && self.columns.iter().any(|c| c.pk)
+                    && self
+                        .objects
+                        .iter()
+                        .any(|o| o.name == self.browse.table && o.kind == "table")
+            }
+            View::Query => {
+                matches!(self.engine.as_str(), "SQLite" | "PostgreSQL" | "MySQL" | "MariaDB")
+                    && self.query_edit_target().is_some_and(|target| !target.missing_key)
+            }
+            _ => false,
+        }
+    }
+
     fn supports_table_export(&self) -> bool {
         matches!(self.engine.as_str(), "SQLite" | "PostgreSQL" | "MySQL" | "MariaDB")
     }
@@ -1004,6 +1133,8 @@ impl Rustable {
             navigator: navigator::Navigator::new(initial.as_ref()),
             query_monitor: Default::default(),
             ddl_preview: None,
+            json_editor: None,
+            date_picker: None,
             activity: Default::default(),
             last_operation_ms: None,
             query_completion: None,
@@ -1143,7 +1274,7 @@ impl Rustable {
                         self.save_changes(false);
                     }
                 }
-                Ok(Payload::Applied { objects }) => {
+                Ok(Payload::Applied { objects, refreshed }) => {
                     self.saved_selection = self
                         .selected
                         .and_then(|i| self.table.rows.get(i))
@@ -1156,7 +1287,8 @@ impl Rustable {
                             )
                         })
                         .map(|keys| (self.browse.table.clone(), keys));
-                    self.changes.clear();
+                    let saved = std::mem::take(&mut self.changes);
+                    self.apply_saved_rows_to_query_results(&saved, refreshed.as_ref());
                     self.clear_change_history();
                     self.review = None;
                     self.status = "Changes saved".into();
@@ -1199,6 +1331,8 @@ impl Rustable {
                         self.prefs.recent.truncate(12);
                     }
                     self.edit = None;
+                    self.json_editor = None;
+                    self.date_picker = None;
                     self.rename = None;
                     self.add_column = None;
                     self.alter_column = None;
@@ -1226,6 +1360,8 @@ impl Rustable {
                     for tab in &mut self.tabs {
                         tab.grid = Arc::default();
                         tab.results.clear();
+                        tab.edit_target = None;
+                        tab.executed_sql = None;
                         tab.chart = Default::default();
             tab.formatter = Default::default();
             tab.pins.clear();
@@ -1326,6 +1462,9 @@ impl Rustable {
                                 None => warning,
                             });
                         }
+                    }
+                    if let Some(Pending::Query(index)) = pending {
+                        self.update_query_edit_target(index);
                     }
                     self.row_selection.clear();
                     self.selected = None;
@@ -1668,6 +1807,10 @@ impl Rustable {
         }
         self.tabs[self.tab].error_highlight = None;
         self.tabs[self.tab].execution_source = Some((self.tabs[self.tab].sql.clone(), source_offset));
+        self.tabs[self.tab].executed_sql = Some(sql.clone());
+        // Staged changes belong to the workspace, not to this result snapshot.
+        // Preserve them across reruns; the planner still checks the original row.
+        if !self.finish_cell_edit() { return; }
         self.prefs.history.retain(|s| s != &sql);
         self.prefs.history.insert(0, sql.clone());
         self.prefs.history.truncate(100);
@@ -1980,7 +2123,7 @@ impl Rustable {
     }
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
-        self.query_monitor.open || self.ddl_preview.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
+        self.query_monitor.open || self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some() || self.alter_column.is_some()
             || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some()
@@ -1988,7 +2131,7 @@ impl Rustable {
 
     fn workspace_shortcuts(&mut self, ctx: &egui::Context) {
         // Import windows own the keyboard, including their first visible frame.
-        if self.ddl_preview.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() {
+        if self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() {
             return;
         }
         if matches!(self.pending, Some(Pending::Plan(_))) {
@@ -2066,7 +2209,11 @@ impl Rustable {
         }) {
             if self.view == View::Query { self.save_query_file(ctx, true); } else { self.save_changes(true); }
         } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            if self.view == View::Query { self.save_query_file(ctx, false); } else { self.save_changes(false); }
+            if self.view == View::Query && self.changes.is_empty() && self.edit.is_none() {
+                self.save_query_file(ctx, false);
+            } else {
+                self.save_changes(false);
+            }
         }
         // Consume the more specific chord first: Cmd+Shift+Enter must not become Run Current.
         if ctx.input_mut(|i| {
@@ -2814,8 +2961,12 @@ impl Rustable {
         if !self.inspector {
             return;
         }
+        let edit_table = self.staged_table().unwrap_or_default().to_owned();
+        let edit_columns = self.edit_columns().to_vec();
         let mut finish = false;
         let mut start_edit = None;
+        let mut open_json = None;
+        let mut open_date = None;
         let mut stage_constant = false;
         let compact = ctx.content_rect().width() < 720.0;
         let id = egui::Id::new((ctx.viewport_id(), if compact { "compact-inspector" } else { "inspector" }));
@@ -2861,7 +3012,7 @@ impl Rustable {
                     self.selected.and_then(|i| grid.rows.get(i).map(|r| (i, r)))
                 {
 
-                    if self.view == View::Data && row_is_deleted(&self.changes, &self.browse.table, row) { ui.colored_label(Color32::from_rgb(220, 90, 90), "Pending deletion · restore from the table toolbar"); }
+                    if row_is_deleted(&self.changes, edit_table.as_str(), row) { ui.colored_label(Color32::from_rgb(220, 90, 90), "Pending deletion · restore from the table toolbar"); }
                     ui.add_space(2.0);
                     compact_inspector_spacing(ui);
                     let visible: Vec<usize> = crate::search::Query::new(&search).ranked(grid.columns.iter().enumerate(), |(_, name)| (name.as_str(), ""))
@@ -2878,14 +3029,14 @@ impl Rustable {
                             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 44.0),
                                 egui::Layout::top_down(egui::Align::Min), |ui| {
                             ui.set_min_height(44.0);
-                            let staged = if self.view == View::Data {
+                            let staged = if self.staged_table().is_some() {
                                 self.changes.iter().find_map(|change| match change {
                                     Change::Cell {
                                         table,
                                         column,
                                         original,
-                                        value,
-                                    } if table == &self.browse.table
+                                        value, original_columns,
+                                    } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && table == edit_table.as_str()
                                         && column == name
                                         && original == row =>
                                     {
@@ -2901,7 +3052,7 @@ impl Rustable {
                                 ui.add(egui::Label::new(RichText::new(name).size(11.0).color(ui.visuals().weak_text_color())).truncate()).on_hover_text(name);
                                 if self.view == View::Data
                                     && let Some(column) =
-                                        self.columns.iter().find(|c| c.name == *name)
+                                        edit_columns.as_slice().iter().find(|c| c.name == *name)
                                 {
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.add(egui::Label::new(
@@ -2910,11 +3061,9 @@ impl Rustable {
                                     });
                                 }
                             });
-                            let writable = self.view == View::Data && self.supports_data_changes() && !self.safe && self.pending.is_none()
-                                && !row_is_deleted(&self.changes, &self.browse.table, row)
-                                && self.columns.iter().any(|c| c.pk)
-                                && self.objects.iter().any(|o| o.name == self.browse.table && o.kind == "table")
-                                && self.columns.iter().any(|c| c.name == *name && !c.generated)
+                            let writable = self.can_edit_rows()
+                                && !row_is_deleted(&self.changes, edit_table.as_str(), row)
+                                && edit_columns.as_slice().iter().any(|c| c.name == *name && !c.generated)
                                 && !matches!(value, Value::Blob(_))
                                 && !matches!(value, Value::Text(t) if t.len() > 65536);
                             let text = db::preview(value, 4096);
@@ -2929,12 +3078,17 @@ impl Rustable {
                                         ui.add_enabled_ui(writable, |ui| {
                                             ui.push_id(("field-actions", name), |ui| {
                                                 field_value_menu(ui, |ui| {
-                                                    let nullable = self.columns.iter().any(|c| c.name == *name && !c.not_null);
+                                                    let nullable = edit_columns.as_slice().iter().any(|c| c.name == *name && !c.not_null);
                                                     let mut kind = None;
-                                                    if ui.add_enabled(nullable, egui::Button::new("Set NULL")).clicked() { kind = Some(0); }
-                                                    if ui.button("Set empty text").clicked() { kind = Some(3); }
-                                                    if let Some(kind) = kind {
-                                                        start_edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: self.browse.table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text: String::new(), kind, focus: false, inspector: true });
+                                                    if ui.add_enabled(nullable, egui::Button::new("Set NULL")).clicked() { kind = Some((0, String::new())); }
+                                                    if ui.button("Set empty text").clicked() { kind = Some((3, String::new())); }
+                                                    if let Some(date) = edit_columns.as_slice().iter().find(|c| c.name == *name).and_then(|c| crate::date_picker::kind(&c.data_type))
+                                                        && ui.button(now_label(date)).clicked()
+                                                    {
+                                                        kind = Some((3, crate::date_picker::now_text(date)));
+                                                    }
+                                                    if let Some((kind, text)) = kind {
+                                                        start_edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: edit_table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text, kind, focus: false, inspector: true });
                                                         stage_constant = true;
                                                         ui.close();
                                                     }
@@ -2946,12 +3100,23 @@ impl Rustable {
                                         if ui.push_id(("copy-field", &self.browse.table, self.view == View::Query, self.tab, index, name), clipboard_button).inner.clicked() {
                                             ui.ctx().copy_text(db::clipboard_text(value));
                                         }
-                                        if self.edit.as_ref().is_some_and(|e| e.inspector && e.table == self.browse.table && e.column == *name && e.row == *row) {
+                                        let json_typed = edit_columns.iter().find(|c| c.name == *name).is_some_and(|c| crate::json_editor::is_json_type(&c.data_type));
+                                        if (json_typed || matches!(value, Value::Text(text) if crate::json_editor::looks_like_json(text)))
+                                            && ui.small_button("{ }").on_hover_text(if writable { "Edit JSON" } else { "View JSON" }).clicked()
+                                        {
+                                            open_json = Some((index, column_index));
+                                        }
+                                        if writable && edit_columns.iter().find(|c| c.name == *name).is_some_and(|c| crate::date_picker::kind(&c.data_type).is_some())
+                                            && crate::icons::button(ui, "calendar", egui::vec2(20.0, 20.0), false).on_hover_text("Choose from calendar").clicked()
+                                        {
+                                            open_date = Some((index, column_index));
+                                        }
+                                        if self.edit.as_ref().is_some_and(|e| e.inspector && e.table == edit_table.as_str() && e.column == *name && e.row == *row) {
                                             finish |= inline_value(ui, &mut self.edit);
                                         } else if writable {
                                             // Render the real input before focus, using the same ID as
                                             // the retained draft so the first click places the caret.
-                                            let mut draft = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: self.browse.table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: false, inspector: true });
+                                            let mut draft = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: edit_table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: false, inspector: true });
                                             let id = cell_edit_id(ui, draft.as_ref().unwrap());
                                             inline_value(ui, &mut draft);
                                             if ui.memory(|memory| memory.has_focus(id)) || draft.as_ref().is_some_and(|draft| draft.bulk_changed) {
@@ -2989,7 +3154,11 @@ impl Rustable {
         if finish {
             self.finish_cell_edit();
         }
-        if start_edit.is_some() && self.finish_cell_edit() {
+        if let Some((row, column)) = open_json {
+            self.open_json_editor(row, column);
+        } else if let Some((row, column)) = open_date {
+            self.open_date_picker(row, column);
+        } else if start_edit.is_some() && self.finish_cell_edit() {
             self.edit = start_edit;
             if stage_constant {
                 self.finish_cell_edit();
@@ -3448,10 +3617,25 @@ impl Rustable {
                         ui.label(RichText::new(duration).color(ui.visuals().weak_text_color()));
                     });
                 });
+                let edit_label = self.query_edit_target().filter(|target| !target.missing_key).map(|target| target.label.clone());
                 ui.scope_builder(egui::UiBuilder::new().max_rect(geometry.center.translate(origin)), |ui| {
                     ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
-                        ui.label(RichText::new(if pending { String::new() } else { count }).color(ui.visuals().weak_text_color()))
-                            .on_hover_text(if grid.truncated { "Result limit reached; more rows may be available" } else { "Rows in the selected result" });
+                        if !self.changes.is_empty() && !pending {
+                            self.query_pending_changes_menu(ui);
+                        } else if let Some(table) = edit_label.filter(|_| !pending) {
+                            let hint = if self.can_edit_rows() {
+                                format!("Rows from {table} · double-click a cell to edit. Changes are reviewed as SQL before saving.")
+                            } else if self.safe {
+                                format!("Rows from {table} · turn off Safe mode to edit")
+                            } else {
+                                format!("Rows from {table}")
+                            };
+                            ui.label(RichText::new(format!("{count} · editable")).color(ui.visuals().weak_text_color()))
+                                .on_hover_text(hint);
+                        } else {
+                            ui.label(RichText::new(if pending { String::new() } else { count }).color(ui.visuals().weak_text_color()))
+                                .on_hover_text(if grid.truncated { "Result limit reached; more rows may be available" } else { "Rows in the selected result" });
+                        }
                     });
                 });
                 ui.scope_builder(egui::UiBuilder::new().max_rect(geometry.right.translate(origin)), |ui| {
@@ -3480,6 +3664,28 @@ impl Rustable {
                     });
                 });
             });
+    }
+
+    fn query_pending_changes_menu(&mut self, ui: &mut egui::Ui) {
+        let count = self.changes.len();
+        ui.menu_button(format!("Pending ({count})"), |ui| {
+            if ui
+                .add_enabled(self.pending.is_none(), egui::Button::new(format!("Review {count} changes…")))
+                .on_hover_text(format!("{} · Preview the SQL before anything runs", crate::icons::shortcut(ui.ctx(), true, "P")))
+                .clicked()
+            {
+                self.preview_changes();
+                ui.close();
+            }
+            if ui
+                .add_enabled(self.pending.is_none(), egui::Button::new("Discard"))
+                .on_hover_text(format!("{} · Discard pending changes", crate::icons::shortcut(ui.ctx(), true, "Backspace")))
+                .clicked()
+            {
+                self.discard_changes();
+                ui.close();
+            }
+        });
     }
 
     fn toggle_result_pin(&mut self) {
@@ -4480,16 +4686,13 @@ impl Rustable {
             .take()
             .filter(|i| *i < grid.rows.len());
         let mut finish = false;
-        let editable = self.view == View::Data
-            && self.supports_data_changes()
-            && !self.safe
-            && self.pending.is_none()
-            && self.columns.iter().any(|c| c.pk)
-            && self
-                .objects
-                .iter()
-                .any(|o| o.name == self.browse.table && o.kind == "table");
-        let start_edit_key = editable
+        let editable = self.can_edit_rows();
+        // Staged edits are keyed by table. Query results only participate when
+        // they exactly reproduce one base table's rows.
+        let edit_table = self.staged_table().unwrap_or_default().to_owned();
+        let edit_columns = self.edit_columns().to_vec();
+        let missing_result_key = self.query_edit_target().is_some_and(|target| target.missing_key);
+        let start_edit_key = (editable || missing_result_key)
             && grid_focus.has_focus()
             && self.edit.is_none()
             && self.review.is_none()
@@ -4775,7 +4978,7 @@ impl Rustable {
                                 self.insert_grid_row(&mut row, insert_ids[index - grid.rows.len()], index, table_clip);
                                 return;
                             }
-                            let deleting = self.view == View::Data && row_is_deleted(&self.changes, &self.browse.table, &grid.rows[index]);
+                            let deleting = !edit_table.is_empty() && row_is_deleted(&self.changes, &edit_table, &grid.rows[index]);
                             let row_selected = self.selected == Some(index) || self.row_selection.rows.contains(&index);
                             row.set_hovered(false);
                             row.set_selected(false);
@@ -4793,15 +4996,15 @@ impl Rustable {
                             row.set_selected(false);
                             let mut released = false;
                             for (column, original_value) in grid.rows[index].iter().enumerate() {
-                                let staged = if self.view == View::Data { self.changes.iter().find_map(|change| match change {
-                                    Change::Cell { table, column: name, original, value } if table == &self.browse.table && name == &grid.columns[column] && original == &grid.rows[index] => Some(value),
+                                let staged = if !edit_table.is_empty() { self.changes.iter().find_map(|change| match change {
+                                    Change::Cell { table, column: name, original, value, original_columns } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && table == edit_table.as_str() && name == &grid.columns[column] && original == &grid.rows[index] => Some(value),
                                     _ => None,
                                 }) } else { None };
                                 let value = staged.unwrap_or(original_value);
                                 let active_cell = self.row_selection.focused == Some(index)
                                     && self.row_selection.rows.contains(&index)
                                     && self.row_selection.cell_column.min(grid.columns.len().saturating_sub(1)) == column;
-                                let editing = self.edit.as_ref().is_some_and(|e| !e.inspector && e.table == self.browse.table && e.column == grid.columns[column] && e.row == grid.rows[index]);
+                                let editing = self.edit.as_ref().is_some_and(|e| !e.inspector && e.table == edit_table.as_str() && e.column == grid.columns[column] && e.row == grid.rows[index]);
                                 if !fit_columns && !editing
                                     && !(active_cell && (self.row_selection.pending_cell_scroll || start_edit_key))
                                     && row.skip_invisible_column()
@@ -4829,6 +5032,24 @@ impl Rustable {
                                         horizontal_scroll_target = Some(ui.max_rect());
                                         ui.scroll_to_rect(ui.max_rect(), None);
                                         self.row_selection.pending_cell_scroll = false;
+                                    }
+                                    if editing && edit_columns.get(column).is_some_and(|c| crate::date_picker::kind(&c.data_type).is_some()) {
+                                        // DataGrip-style: a calendar button inside the cell editor.
+                                        let rect = ui.max_rect();
+                                        let button = egui::Rect::from_min_max(egui::pos2(rect.right() - 22.0, rect.top()), rect.max);
+                                        if crate::icons::button(&mut ui.new_child(egui::UiBuilder::new().max_rect(button)), "calendar", egui::vec2(20.0, rect.height().min(20.0)), false)
+                                            .on_hover_text("Choose from calendar").clicked()
+                                        {
+                                            menu_action = Some(("date", column, index));
+                                        }
+                                        ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(rect.min, egui::pos2(button.left(), rect.bottom()))), |ui| {
+                                            finish |= inline_value(ui, &mut self.edit);
+                                        });
+                                        if self.edit.is_none() {
+                                            grid_focus.request_focus();
+                                            ui.ctx().request_repaint();
+                                        }
+                                        return;
                                     }
                                     if editing {
                                         finish |= inline_value(ui, &mut self.edit);
@@ -4863,16 +5084,37 @@ impl Rustable {
                                         paint_grid_text_aligned(ui, text.as_ref(), color, fit_columns, numeric);
                                     }
                                 });
-                                let response = if self.view == View::Data && self.columns.get(column).is_some_and(|c| c.generated) {
+                                let response = if edit_columns.as_slice().get(column).is_some_and(|c| c.generated) {
                                     response.on_hover_text("Generated by the database · read-only")
                                 } else { response };
                                 if !editing {
                                     response.context_menu(|ui| {
-                                        let writable = editable && !deleting && !self.columns.get(column).is_some_and(|c| c.generated) && !matches!(value, Value::Blob(_));
+                                        let writable = editable && !deleting && !edit_columns.as_slice().get(column).is_some_and(|c| c.generated) && !matches!(value, Value::Blob(_));
                                         if ui.button("Quick Look Editor").clicked() { menu_action = Some(("inspect", column, index)); ui.close(); }
+                                        let json_typed = edit_columns.get(column).is_some_and(|c| crate::json_editor::is_json_type(&c.data_type));
+                                        if json_typed || matches!(value, Value::Text(text) if crate::json_editor::looks_like_json(text)) {
+                                            let label = if writable && matches!(value, Value::Text(_) | Value::Null) { "Edit JSON…" } else { "View JSON…" };
+                                            if ui.button(label).clicked() { menu_action = Some(("json", column, index)); ui.close(); }
+                                        }
+                                        if let Some(kind) = edit_columns.get(column).and_then(|c| crate::date_picker::kind(&c.data_type))
+                                            && ui.add_enabled(writable && matches!(value, Value::Text(_) | Value::Null), egui::Button::new(match kind {
+                                                crate::date_picker::Kind::Date => "Choose Date…",
+                                                crate::date_picker::Kind::Time => "Choose Time…",
+                                                _ => "Choose Date & Time…",
+                                            })).clicked()
+                                        {
+                                            menu_action = Some(("date", column, index));
+                                            ui.close();
+                                        }
                                         ui.add_enabled_ui(writable, |ui| ui.menu_button("Set Value", |ui| {
                                             if ui.button("Edit value…").clicked() { menu_action = Some(("edit", column, index)); ui.close(); }
-                                            if ui.add_enabled(!self.columns.get(column).is_some_and(|c| c.not_null), egui::Button::new("NULL")).clicked() { menu_action = Some(("null", column, index)); ui.close(); }
+                                            if ui.add_enabled(!edit_columns.as_slice().get(column).is_some_and(|c| c.not_null), egui::Button::new("NULL")).clicked() { menu_action = Some(("null", column, index)); ui.close(); }
+                                            if let Some(kind) = edit_columns.get(column).and_then(|c| crate::date_picker::kind(&c.data_type))
+                                                && ui.button(if kind == crate::date_picker::Kind::Date { "Today" } else { "Now" }).clicked()
+                                            {
+                                                menu_action = Some(("now", column, index));
+                                                ui.close();
+                                            }
                                             if ui.button("Empty string").clicked() { menu_action = Some(("empty", column, index)); ui.close(); }
                                         }));
                                         ui.separator();
@@ -4886,14 +5128,14 @@ impl Rustable {
                                         if ui.button("Copy cell").clicked() { ui.ctx().copy_text(db::clipboard_text(value)); ui.close(); }
                                         for (label, selected_column) in [("Copy Rows", None), ("Copy Selected Cells", Some(column))] {
                                             if ui.button(label).clicked() {
-                                                let result = row_copy::formatted(&grid.columns, self.row_selection.copy_indices(index).into_iter().filter_map(|i| grid.rows.get(i).map(Vec::as_slice)), &self.changes, (self.view == View::Data).then_some(self.browse.table.as_str()), selected_column, row_copy::Format::Plain, self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
+                                                let result = row_copy::formatted(&grid.columns, self.row_selection.copy_indices(index).into_iter().filter_map(|i| grid.rows.get(i).map(Vec::as_slice)), &self.changes, (!edit_table.is_empty()).then_some(edit_table.as_str()), selected_column, row_copy::Format::Plain, self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
                                                 match result { Ok(text) => ui.ctx().copy_text(text), Err(error) => self.error = Some(error) }
                                                 ui.close();
                                             }
                                             ui.menu_button(format!("{label} As"), |ui| {
                                                 for (label, format) in row_copy::FORMATS {
                                                     if ui.add_enabled(!matches!(format, row_copy::Format::Insert) || self.view == View::Data, egui::Button::new(*label)).clicked() {
-                                                        let result = row_copy::formatted(&grid.columns, self.row_selection.copy_indices(index).into_iter().filter_map(|i| grid.rows.get(i).map(Vec::as_slice)), &self.changes, (self.view == View::Data).then_some(self.browse.table.as_str()), selected_column, *format, self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
+                                                        let result = row_copy::formatted(&grid.columns, self.row_selection.copy_indices(index).into_iter().filter_map(|i| grid.rows.get(i).map(Vec::as_slice)), &self.changes, (!edit_table.is_empty()).then_some(edit_table.as_str()), selected_column, *format, self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
                                                         match result { Ok(text) => ui.ctx().copy_text(text), Err(error) => self.error = Some(error) }
                                                         ui.close();
                                                     }
@@ -4901,7 +5143,7 @@ impl Rustable {
                                             });
                                         }
                                         if ui.button("Copy All Column Values (Current Page)").clicked() {
-                                            match row_copy::formatted(&grid.columns, grid.rows.iter().map(Vec::as_slice), &self.changes, (self.view == View::Data).then_some(self.browse.table.as_str()), Some(column), row_copy::Format::Plain, crate::sql::Dialect::for_engine(&self.engine)) { Ok(text) => ui.ctx().copy_text(text), Err(error) => self.error = Some(error) }
+                                            match row_copy::formatted(&grid.columns, grid.rows.iter().map(Vec::as_slice), &self.changes, (!edit_table.is_empty()).then_some(edit_table.as_str()), Some(column), row_copy::Format::Plain, crate::sql::Dialect::for_engine(&self.engine)) { Ok(text) => ui.ctx().copy_text(text), Err(error) => self.error = Some(error) }
                                             ui.close();
                                         }
                                         ui.separator();
@@ -4936,9 +5178,9 @@ impl Rustable {
                                             row_action = Some((index, grid.rows[index].clone(), deleting));
                                             ui.close();
                                         }
-                                        let writable = editable && !deleting && !self.columns.get(column).is_some_and(|c| c.generated);
+                                        let writable = editable && !deleting && !edit_columns.as_slice().get(column).is_some_and(|c| c.generated);
                                         if ui.add_enabled(writable && staged.is_some(), egui::Button::new("Revert cell")).clicked() {
-                                            cell_action = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: self.browse.table.clone(), row: grid.rows[index].clone(), original_value: original_value.clone(), column: grid.columns[column].clone(), text: if matches!(original_value, Value::Null) { String::new() } else { db::display(original_value) }, kind: match original_value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, Value::Blob(_) => 4, _ => 3 }, focus: false, inspector: false });
+                                            cell_action = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: edit_table.clone(), row: grid.rows[index].clone(), original_value: original_value.clone(), column: grid.columns[column].clone(), text: if matches!(original_value, Value::Null) { String::new() } else { db::display(original_value) }, kind: match original_value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, Value::Blob(_) => 4, _ => 3 }, focus: false, inspector: false });
                                             ui.close();
                                         }
                                     });
@@ -4946,10 +5188,24 @@ impl Rustable {
                                 let cell_press = primary_pressed(&response);
                                 if cell_press { self.row_selection.cell_column = column; }
                                 released |= response.clicked();
-                                if (same_target_double_click(&response, egui::Id::new(("grid-cell", &self.browse.table, self.view == View::Query, self.tabs[self.tab].id, Arc::as_ptr(&grid) as usize, index, column))) || (start_edit_key && active_cell))
+                                let double_clicked = same_target_double_click(&response, egui::Id::new(("grid-cell", &self.browse.table, self.view == View::Query, self.tabs[self.tab].id, Arc::as_ptr(&grid) as usize, index, column)));
+                                let activated = double_clicked || (start_edit_key && active_cell);
+                                if activated && missing_result_key {
+                                    self.error = Some("Cannot edit this result. Include every primary-key column in your SELECT query, then run it again.".into());
+                                }
+                                // JSON documents get the multi-line editor, or a viewer when read-only.
+                                let json_cell = activated && !deleting
+                                    && (edit_columns.get(column).is_some_and(|c| crate::json_editor::is_json_type(&c.data_type))
+                                        || (!editable && matches!(value, Value::Text(text) if crate::json_editor::looks_like_json(text))));
+                                if json_cell {
+                                    menu_action = Some(("json", column, index));
+                                } else if double_clicked && !editable && !missing_result_key && self.view == View::Query {
+                                    self.status = read_only_result_hint(self.safe, edit_table.is_empty());
+                                }
+                                if activated && !json_cell
                                     && editable
                                     && !deleting
-                                    && !self.columns.get(column).is_some_and(|c| c.generated)
+                                    && !edit_columns.as_slice().get(column).is_some_and(|c| c.generated)
                                     && !matches!(value, Value::Blob(_))
                                 {
                                     if matches!(value, Value::Text(text) if text.len() > 65536) {
@@ -4957,7 +5213,7 @@ impl Rustable {
                                         return;
                                     }
                                     edit = Some(CellEdit {
-            bulk_rows: Vec::new(), bulk_changed: false, insert_id: None,                                        advance: 0,                                        table: self.browse.table.clone(),
+            bulk_rows: Vec::new(), bulk_changed: false, insert_id: None,                                        advance: 0,                                        table: edit_table.clone(),
                                         focus: true,
                                         inspector: false,
                                         row: grid.rows[index].clone(),
@@ -5033,6 +5289,8 @@ impl Rustable {
         if let Some((action, column, index)) = menu_action {
             match action {
                 "refresh" => { if self.finish_cell_edit() { self.refresh(); } }
+                "json" => self.open_json_editor(index, column),
+                "date" => self.open_date_picker(index, column),
                 "add" => self.add_insert(),
                 #[cfg(not(target_arch = "wasm32"))]
                 "import" => self.preview_csv_dialog(ui.ctx()),
@@ -5050,15 +5308,21 @@ impl Rustable {
                         if action == "paste" { self.selected = self.row_selection.click(index, false, false, None); }
                         let multiple = self.row_selection.rows.len() > 1;
                         if multiple { self.start_bulk_edit(column); }
-                        else if editable && !self.columns.get(column).is_some_and(|c| c.generated) && !matches!(grid.rows[index][column], Value::Blob(_)) {
+                        else if editable && !edit_columns.as_slice().get(column).is_some_and(|c| c.generated) && !matches!(grid.rows[index][column], Value::Blob(_)) {
                             let original = &grid.rows[index][column];
-                            let value = self.changes.iter().find_map(|change| match change { Change::Cell { table, column: name, original: source, value } if table == &self.browse.table && name == &grid.columns[column] && source == &grid.rows[index] => Some(value), _ => None }).unwrap_or(original);
+                            let value = self.changes.iter().find_map(|change| match change { Change::Cell { table, column: name, original: source, value, original_columns } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && table == edit_table.as_str() && name == &grid.columns[column] && source == &grid.rows[index] => Some(value), _ => None }).unwrap_or(original);
                             if !matches!(value, Value::Text(t) if t.len() > 65536) {
-                                self.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: self.browse.table.clone(), row: grid.rows[index].clone(), original_value: original.clone(), column: grid.columns[column].clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: true, inspector: true });
+                                self.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: edit_table.clone(), row: grid.rows[index].clone(), original_value: original.clone(), column: grid.columns[column].clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: true, inspector: true });
                             }
                         }
-                        if matches!(action, "null" | "empty") {
-                            if let Some(edit) = &mut self.edit { edit.text.clear(); edit.kind = if action == "null" { 0 } else { 3 }; edit.bulk_changed = true; }
+                        if matches!(action, "null" | "empty" | "now") {
+                            let now = (action == "now").then(|| self.edit_columns().get(column).and_then(|c| crate::date_picker::kind(&c.data_type))).flatten()
+                                .map(crate::date_picker::now_text);
+                            if let Some(edit) = &mut self.edit {
+                                edit.text = now.unwrap_or_default();
+                                edit.kind = if action == "null" { 0 } else { 3 };
+                                edit.bulk_changed = true;
+                            }
                             self.finish_cell_edit();
                         } else if action.starts_with("paste") && self.edit.is_some() {
                             self.paste_requested = true;
@@ -5103,7 +5367,7 @@ impl Rustable {
         if let Some((index, row, deleting)) = row_action
             && self.finish_cell_edit()
         {
-            toggle_row_deletion(&mut self.changes, &self.browse.table, row);
+            toggle_row_deletion(&mut self.changes, &edit_table, row);
             self.record_changes();
             self.review = None;
             self.row_selection.clear();
@@ -5283,6 +5547,102 @@ impl Rustable {
                     });
             });
         });
+    }
+
+    /// Opens the JSON editor for a grid cell, read-only when it cannot be edited.
+    fn open_json_editor(&mut self, row: usize, column: usize) {
+        if !self.finish_cell_edit() {
+            return;
+        }
+        let grid = self.grid();
+        let (Some(values), Some(name)) = (grid.rows.get(row), grid.columns.get(column)) else { return };
+        let table = self.staged_table().unwrap_or_default().to_owned();
+        let original = values[column].clone();
+        let current = self.changes.iter().find_map(|change| match change {
+            Change::Cell { table: t, column: c, original: o, value, original_columns } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && !table.is_empty() && *t == table && c == name && o == values => Some(value.clone()),
+            _ => None,
+        }).unwrap_or_else(|| original.clone());
+        let metadata = self.edit_columns().get(column);
+        let writable = self.can_edit_rows()
+            && !table.is_empty()
+            && !row_is_deleted(&self.changes, &table, values)
+            && metadata.is_some_and(|c| !c.generated)
+            && matches!(current, Value::Text(_) | Value::Null);
+        let strict = metadata.is_some_and(|c| crate::json_editor::is_json_type(&c.data_type));
+        let nullable = metadata.is_some_and(|c| !c.not_null);
+        let target = crate::json_editor::Target { table, row: values.clone(), column: name.clone(), original };
+        self.json_editor = Some(crate::json_editor::JsonEditor::new(target, &current, writable, nullable, strict));
+    }
+
+    fn json_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = self.json_editor.as_mut() else { return };
+        match editor.show(ctx) {
+            crate::json_editor::Outcome::Open => {}
+            crate::json_editor::Outcome::Close => self.json_editor = None,
+            crate::json_editor::Outcome::Apply(value) => self.stage_json(value),
+        }
+    }
+
+    fn stage_json(&mut self, value: Value) {
+        if let Some(editor) = self.json_editor.take() {
+            self.stage_picked_value(editor.target, value, "JSON value");
+        }
+    }
+
+    /// Opens the calendar picker for a date/time cell the user can edit.
+    fn open_date_picker(&mut self, row: usize, column: usize) {
+        if !self.finish_cell_edit() {
+            return;
+        }
+        let grid = self.grid();
+        let (Some(values), Some(name)) = (grid.rows.get(row), grid.columns.get(column)) else { return };
+        let Some(metadata) = self.edit_columns().get(column) else { return };
+        let Some(kind) = crate::date_picker::kind(&metadata.data_type) else { return };
+        let (nullable, generated) = (!metadata.not_null, metadata.generated);
+        let Some(table) = self.staged_table().map(str::to_owned) else { return };
+        let original = values[column].clone();
+        let current = self.changes.iter().find_map(|change| match change {
+            Change::Cell { table: t, column: c, original: o, value, original_columns } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && *t == table && c == name && o == values => Some(value.clone()),
+            _ => None,
+        }).unwrap_or_else(|| original.clone());
+        if !self.can_edit_rows() || generated || row_is_deleted(&self.changes, &table, values)
+            || !matches!(current, Value::Text(_) | Value::Null)
+        {
+            return;
+        }
+        let target = crate::json_editor::Target { table, row: values.clone(), column: name.clone(), original };
+        self.date_picker = Some(crate::date_picker::DatePicker::new(target, &current, kind, nullable));
+    }
+
+    fn date_window(&mut self, ctx: &egui::Context) {
+        let Some(picker) = self.date_picker.as_mut() else { return };
+        match picker.show(ctx) {
+            crate::date_picker::Outcome::Open => {}
+            crate::date_picker::Outcome::Close => self.date_picker = None,
+            crate::date_picker::Outcome::Apply(value) => {
+                if let Some(picker) = self.date_picker.take() {
+                    self.stage_picked_value(picker.target, value, "Date");
+                }
+            }
+        }
+    }
+
+    fn stage_picked_value(&mut self, target: crate::json_editor::Target, value: Value, what: &str) {
+        // The target was captured on open; refuse if editing state changed since.
+        if !self.can_edit_rows() || self.staged_table() != Some(target.table.as_str()) {
+            self.error = Some("This result can no longer be edited. Reopen the editor from the grid.".into());
+            return;
+        }
+        let edit = CellEdit {
+            bulk_rows: Vec::new(), bulk_changed: true, insert_id: None, advance: 0,
+            table: target.table, row: target.row, original_value: target.original,
+            column: target.column, text: String::new(), kind: 3, focus: false, inspector: false,
+        };
+        let names = (self.view == View::Query).then(|| self.edit_columns().iter().map(|column| column.name.clone()).collect());
+        stage_cell_value_with_columns(&mut self.changes, edit, value, names);
+        self.record_changes();
+        self.review = None;
+        self.status = format!("{what} staged · review before saving");
     }
 
     fn ddl_window(&mut self, ctx: &egui::Context) {
@@ -5625,24 +5985,25 @@ impl Rustable {
                     return true;
                 }
                 let navigation = (edit.advance != 0).then(|| edit.clone());
-                stage_cell_value(&mut self.changes, edit, value);
+                let names = (self.view == View::Query).then(|| self.edit_columns().iter().map(|column| column.name.clone()).collect());
+        stage_cell_value_with_columns(&mut self.changes, edit, value, names);
                 self.record_changes();
                 if let Some(source) = navigation {
                     self.edit = next_cell_edit(
                         &source,
-                        &self.table,
-                        &self.columns,
+                        &self.grid(),
+                        self.edit_columns(),
                         &self.changes,
                         &self.field_search,
                     );
                     if let Some(next) = &self.edit {
-                        self.selected = self.table.rows.iter().position(|row| *row == next.row);
+                        self.selected = self.grid().rows.iter().position(|row| *row == next.row);
                         if next.inspector {
                             self.row_selection.clear();
                         } else if let Some(row) = self.selected {
                             self.row_selection.click(row, false, false, self.selected);
                             self.row_selection.cell_column = self
-                                .table
+                                .grid()
                                 .columns
                                 .iter()
                                 .position(|column| *column == next.column)
@@ -5651,7 +6012,7 @@ impl Rustable {
                         }
                     } else if source.advance > 0
                         && !source.inspector
-                        && source.table == self.browse.table
+                        && self.view == View::Data && source.table == self.browse.table
                     {
                         self.focus_first_insert();
                     }
@@ -5709,7 +6070,9 @@ impl Rustable {
             self.error = Some("Turn off Safe mode before saving changes.".into());
             return;
         }
-        if let Some(plan) = self.review.clone() {
+        if let Some(mut plan) = self.review.clone() {
+            plan.refresh_results = self.tabs.iter().any(|tab| tab.edit_target.as_ref().is_some_and(|target|
+                self.changes.iter().any(|change| change.table() == target.table)));
             self.dispatch(Command::Apply(plan), Pending::Apply);
         } else {
             self.dispatch(Command::Plan(self.changes.clone()), Pending::Plan(bypass));
@@ -5960,16 +6323,23 @@ impl Rustable {
             let mut edit_changes = false;
             egui::Window::new("Review changes").id(egui::Id::new((ctx.viewport_id(), "Review changes")))
                 .open(&mut open)
+                .collapsible(false)
                 .default_width(720.0)
+                .frame(egui::Frame::window(&ctx.style()).inner_margin(16.0))
                 .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing.y = 10.0;
                     if let Some(error) = &self.error {
                         ui.colored_label(Color32::from_rgb(230, 105, 105), error);
-                        ui.label("Pending edits are retained. Return to the table to correct them, then review again.");
+                        ui.label("Pending edits are retained. Return to the grid to correct them, then review again.");
                     }
-                    ui.label("These changes will run in one transaction. Values are shown inline.");
+                    ui.horizontal(|ui| {
+                        let count = plan.statements.len();
+                        ui.strong(format!("{count} {}", if count == 1 { "statement" } else { "statements" }));
+                        ui.weak("· Saved together in one transaction");
+                    });
                     if !plan.preconditions.is_empty() {
-                        ui.label(if schema_plan { "Table and type definitions are checked again inside the transaction. Changed definitions cancel the save." } else { "Rows are verified immediately before each change, inside the same transaction. Concurrent edits cancel the save." });
                         ui.collapsing(format!("{} ({})", if schema_plan { "Schema checks" } else { "Concurrency checks" }, plan.preconditions.len()), |ui| {
+                            ui.weak(if schema_plan { "Definitions are checked before saving. Changed definitions cancel the save." } else { "Rows are checked before saving. Conflicting edits cancel the save." });
                             egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
                                 for check in &plan.preconditions {
                                     ui.weak(format!("Before statement {} · {}", check.before_statement + 1, if schema_plan { "must match the reviewed definition" } else { "must match exactly one row" }));
@@ -5981,29 +6351,42 @@ impl Rustable {
                         });
                     }
                     if plan.rebuild { ui.label("Migration: temporarily disable foreign-key enforcement before BEGIN; check all foreign keys before COMMIT; restore enforcement on success or rollback. Table copying may take time."); }
-                    egui::ScrollArea::both().max_height(430.0).show(ui, |ui| {
-                        for (index, sql) in self.review_sql.iter().enumerate() {
-                            ui.push_id(("review-sql", index), |ui| {
-                                if clipboard_button(ui).on_hover_text("Copy SQL").clicked() { ui.ctx().copy_text(sql.clone()); }
-                                ui.add(egui::Label::new(crate::editor::layout(ui, &sql.as_str(), ui.available_width())).selectable(true));
+                    egui::Frame::new()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .corner_radius(8.0)
+                        .inner_margin(12.0)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.weak("SQL preview");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if clipboard_button(ui).on_hover_text("Copy SQL").clicked() {
+                                        ui.ctx().copy_text(self.review_sql.join("\n\n"));
+                                    }
+                                });
                             });
-                            ui.separator();
-                        }
-                    });
-                    apply = ui
-                        .add_enabled(
-                            matches!(self.engine.as_str(), "SQLite" | "PostgreSQL") && !self.safe && self.pending.is_none(),
-                            egui::Button::new(format!("Save changes · {} / {}", crate::icons::shortcut(ui.ctx(), false, "S"), crate::icons::shortcut(ui.ctx(), false, "Enter"))),
-                        )
-                        .clicked();
-                    if matches!(self.pending, Some(Pending::Apply)) {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Saving changes…");
-                            if ui.button("Cancel save").clicked() { self.worker.cancel(); }
+                            egui::ScrollArea::both().max_height(360.0).show(ui, |ui| {
+                                for (index, sql) in self.review_sql.iter().enumerate() {
+                                    ui.push_id(("review-sql", index), |ui| {
+                                        if index > 0 { ui.separator(); }
+                                        ui.add(egui::Label::new(crate::editor::layout(ui, &sql.as_str(), ui.available_width())).selectable(true));
+                                    });
+                                }
+                            });
                         });
-                    }
-                    edit_changes = ui.add_enabled(self.pending.is_none(), egui::Button::new("Back to editing")).clicked();
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        rounded_action_buttons(ui);
+                        edit_changes = ui.add_enabled(self.pending.is_none(), egui::Button::new("Back to editing")).clicked();
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let enabled = matches!(self.engine.as_str(), "SQLite" | "PostgreSQL" | "MySQL" | "MariaDB") && !self.safe && self.pending.is_none();
+                            apply = ui.add_enabled(enabled, crate::icons::shortcut_button("Save changes", false, "Enter", Some(BLUE)))
+                                .on_hover_text(format!("{} or {}", crate::icons::shortcut(ui.ctx(), false, "S"), crate::icons::shortcut(ui.ctx(), false, "Enter"))).clicked();
+                            if matches!(self.pending, Some(Pending::Apply)) {
+                                if ui.button("Cancel save").clicked() { self.worker.cancel(); }
+                                ui.spinner();
+                            }
+                        });
+                    });
                 });
             if apply {
                 self.save_changes(false);
@@ -6160,6 +6543,8 @@ impl Rustable {
         self.navigator_window(ctx);
         self.query_monitor_window(ctx);
         self.ddl_window(ctx);
+        self.json_window(ctx);
+        self.date_window(ctx);
         self.csv_preview_window(ctx);
         self.csv_import_review(ctx);
         #[cfg(target_arch = "wasm32")]
@@ -8853,7 +9238,7 @@ mod interaction_tests {
         assert!(app.changes.is_empty());
 
         app.edit = None;
-        app.changes.push(Change::Cell {
+        app.changes.push(Change::Cell { original_columns: None,
             table: "customers".into(),
             column: "name".into(),
             original: vec![Value::Text("old".into())],
@@ -9019,17 +9404,21 @@ mod interaction_tests {
     }
 }
 
+#[cfg(test)]
 fn stage_cell_value(changes: &mut Vec<Change>, edit: CellEdit, value: Value) {
+    stage_cell_value_with_columns(changes, edit, value, None);
+}
+fn stage_cell_value_with_columns(changes: &mut Vec<Change>, edit: CellEdit, value: Value, names: Option<Vec<String>>) {
     if changes.iter().any(|change| matches!(change,
-        Change::Cell { table, column, original, value: staged }
-        if table == &edit.table && column == &edit.column && original == &edit.row && staged == &value
+        Change::Cell { table, column, original, value: staged, original_columns}
+        if original_columns == &names && table == &edit.table && column == &edit.column && original == &edit.row && staged == &value
     )) { return; }
     changes.retain(|change| {
-        !matches!(change, Change::Cell { table, column, original, .. }
-        if table == &edit.table && column == &edit.column && original == &edit.row)
+        !matches!(change, Change::Cell { table, column, original, original_columns, .. }
+        if original_columns == &names && table == &edit.table && column == &edit.column && original == &edit.row)
     });
     if edit.original_value != value {
-        changes.push(Change::Cell {
+        changes.push(Change::Cell { original_columns: names,
             table: edit.table,
             column: edit.column,
             original: edit.row,
@@ -9098,6 +9487,39 @@ mod staging_tests {
     }
 }
 
+/// "Set Value" helper label for date/time columns.
+fn now_label(kind: crate::date_picker::Kind) -> &'static str {
+    if kind == crate::date_picker::Kind::Date { "Set today" } else { "Set now" }
+}
+
+fn read_only_result_hint(safe: bool, untargeted: bool) -> String {
+    if !untargeted && safe {
+        "Turn off Safe mode to edit these rows".into()
+    } else if untargeted {
+        "Read-only result. To edit, select columns from one table including its full primary key (WHERE/ORDER BY/LIMIT allowed)".into()
+    } else {
+        "Rows cannot be edited while another operation is running".into()
+    }
+}
+
+fn saved_query_rows(grid: &Grid, table: &str, saved: &[Change], refreshed: &[db::RefreshedRow]) -> Result<Option<Grid>, String> {
+    let mut changed = false;
+    let mut rows = Vec::with_capacity(grid.rows.len());
+    for row in &grid.rows {
+        if row_is_deleted(saved, table, row) { changed = true; continue; }
+        let edited = saved.iter().any(|change| matches!(change,
+            Change::Cell { table: t, original, original_columns, .. } if t == table && original == row && original_columns.as_ref().is_none_or(|names| names == &grid.columns)));
+        if edited {
+            let refreshed = refreshed.iter().find(|saved| saved.table == table && saved.original == *row && saved.columns == grid.columns)
+                .ok_or("A saved row could not be located")?;
+            if refreshed.values.len() != grid.columns.len() { return Err("Saved row columns changed".into()); }
+            rows.push(refreshed.values.clone());
+            changed = true;
+        } else { rows.push(row.clone()); }
+    }
+    Ok(changed.then(|| Grid { rows, ..grid.clone() }))
+}
+
 fn row_is_deleted(changes: &[Change], table: &str, row: &[Value]) -> bool {
     changes.iter().any(
         |c| matches!(c, Change::DeleteRow { table: t, original } if t == table && original == row),
@@ -9120,7 +9542,7 @@ mod deletion_staging_tests {
     #[test]
     fn restoring_deletion_keeps_previously_staged_cell_edits() {
         let row = vec![Value::Integer(1), Value::Text("old".into())];
-        let mut changes = vec![Change::Cell {
+        let mut changes = vec![Change::Cell { original_columns: None,
             table: "t".into(),
             column: "name".into(),
             original: row.clone(),
@@ -9155,7 +9577,7 @@ fn saved_row_identity(
                     column: c,
                     original,
                     value: v,
-                } if t == table && *c == column.name && original == row => value = v.clone(),
+                 ..} if t == table && *c == column.name && original == row => value = v.clone(),
                 Change::RenameColumn { table: t, from, to }
                     if t == table && *from == column.name =>
                 {
@@ -9198,7 +9620,7 @@ mod selection_restore_tests {
         };
         let row = vec![Value::Integer(1)];
         let changes = vec![
-            Change::Cell {
+            Change::Cell { original_columns: None,
                 table: "t".into(),
                 column: "id".into(),
                 original: row.clone(),
@@ -9309,8 +9731,8 @@ fn cell_edit_from_slot(
                     table,
                     column,
                     original: r,
-                    value,
-                } if *table == source.table && column == name && r == row => Some(value),
+                    value, original_columns,
+                } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && *table == source.table && column == name && r == row => Some(value),
                 _ => None,
             })
             .unwrap_or(original);
@@ -9387,7 +9809,7 @@ mod cell_navigation_tests {
             inspector: false,
         };
         let changes = vec![
-            Change::Cell {
+            Change::Cell { original_columns: None,
                 table: "t".into(),
                 column: "name".into(),
                 original: row(1),
@@ -10005,7 +10427,7 @@ mod workspace_layout_tests {
             app.pending = None;
             app.view = View::Data;
             app.prefs.activity_visible = false;
-            app.changes.push(Change::Cell {
+            app.changes.push(Change::Cell { original_columns: None,
                 table: "t".into(),
                 column: "name".into(),
                 original: vec![],
@@ -10081,7 +10503,7 @@ mod workspace_layout_tests {
                 ..Default::default()
             });
             app.selected = Some(0);
-            app.changes.push(Change::Cell {
+            app.changes.push(Change::Cell { original_columns: None,
                 table: "t".into(),
                 column: "id".into(),
                 original: vec![Value::Integer(1)],
@@ -10447,6 +10869,32 @@ mod review_recovery_tests {
             _ => None,
         }
     }
+    #[test]
+    fn review_actions_share_a_footer_with_save_on_the_right() {
+        for width in [640.0, 1440.0] {
+            let ctx = egui::Context::default();
+            let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+            app.connections = false;
+            app.review = Some(ChangePlan::default());
+            app.review_sql = vec!["UPDATE customers SET name = 'Grace' WHERE id = 1;".into()];
+            let mut output = None;
+            for _ in 0..3 {
+                output = Some(ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 800.0))),
+                    ..Default::default()
+                }, |ctx| app.windows(ctx)));
+            }
+            let shapes = output.unwrap().shapes;
+            let rect = |text| shapes.iter().find_map(|shape| text_rect(&shape.shape, text)).unwrap();
+            let back = rect("Back to editing");
+            let save = rect("Save changes");
+            assert!((back.center().y - save.center().y).abs() < 1.0);
+            assert!(save.left() > back.right());
+            assert!(save.right() <= width);
+            assert!(rect("SQL preview").bottom() < save.top());
+        }
+    }
+
     #[test]
     fn pending_review_shows_preparation_feedback_before_database_reply() {
         let ctx = egui::Context::default();
@@ -10899,7 +11347,7 @@ mod close_workspace_keyboard_tests {
         app.pending = Some(Pending::Query(0));
         assert!(!command_w(&ctx, &mut app));
         app.pending = None;
-        app.changes.push(Change::Cell {
+        app.changes.push(Change::Cell { original_columns: None,
             table: "customers".into(),
             column: "name".into(),
             original: vec![],
@@ -12372,7 +12820,7 @@ mod dialog_shortcut_tests {
         app.pending = None;
         app.connections = false;
         app.safe = true;
-        app.changes.push(Change::Cell { table: "customers".into(), original: vec![Value::Integer(1)], column: "name".into(), value: Value::Text("pending".into()) });
+        app.changes.push(Change::Cell { original_columns: None, table: "customers".into(), original: vec![Value::Integer(1)], column: "name".into(), value: Value::Text("pending".into()) });
         app.review = Some(ChangePlan::default());
         key(&ctx, &mut app, egui::Key::Enter, egui::Modifiers::COMMAND);
         assert!(app.error.as_deref().unwrap().contains("Safe mode"));
@@ -12427,7 +12875,7 @@ mod transaction_window_tests {
             assert!(app.worker.transaction_state().label().contains("VERIFY WRITES"));
             assert!(!app.close_blocked(), "a dead connection cannot accept ROLLBACK");
             // Local pending edits still prevent replacement, even on a dead socket.
-            app.changes.push(Change::Cell { table: "t".into(), original: vec![Value::Integer(1)],
+            app.changes.push(Change::Cell { original_columns: None, table: "t".into(), original: vec![Value::Integer(1)],
                 column: "id".into(), value: Value::Integer(2) });
             assert!(app.close_blocked());
             app.dispatch(Command::OpenPostgres(config.clone()), Pending::Connect(None));
@@ -12776,5 +13224,576 @@ mod double_click_target_tests {
         drop(frame);
         assert!(pointer_double,"fixture should reproduce the global double-click");
         assert_eq!(confirmed, expected, "only two clicks on the same cell count as a double-click");
+    }
+}
+
+#[cfg(test)]
+mod query_result_editing_tests {
+    use super::*;
+
+    fn settle(app: &mut Rustable) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while app.pending.is_some() {
+            assert!(Instant::now() < deadline, "worker timeout");
+            app.poll();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn run(app: &mut Rustable, sql: &str) {
+        app.view = View::Query;
+        app.tabs[app.tab].sql = sql.into();
+        app.tabs[app.tab].cursor = 0..0;
+        app.run_query(true);
+        settle(app);
+        assert!(app.tabs[app.tab].result_error.is_none(), "{:?}", app.tabs[app.tab].result_error);
+    }
+
+    fn edit(app: &Rustable, row: usize, column: &str, text: &str) -> CellEdit {
+        let grid = app.grid();
+        let index = grid.columns.iter().position(|c| c == column).unwrap();
+        CellEdit {
+            bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+            table: app.edit_table().to_owned(), row: grid.rows[row].clone(),
+            original_value: grid.rows[row][index].clone(), column: column.into(),
+            text: text.into(), kind: 3, focus: false, inspector: false,
+        }
+    }
+
+    #[test]
+    fn projected_results_save_by_composite_key_and_preserve_hidden_columns() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(file.path()).unwrap();
+        conn.execute_batch("CREATE TABLE customers(tenant INT, id INT, name TEXT, hidden TEXT DEFAULT 'keep', revision INT DEFAULT 0, PRIMARY KEY(tenant,id)); INSERT INTO customers(tenant,id,name) VALUES(1,2,'Ada'); CREATE TRIGGER bump AFTER UPDATE OF name ON customers BEGIN UPDATE customers SET revision=revision+1 WHERE tenant=NEW.tenant AND id=NEW.id; END;").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(), Command::Open(Some(file.path().into())), None);
+        settle(&mut app);
+        app.safe = false;
+        for sql in ["SELECT name FROM customers", "SELECT id,name FROM customers"] {
+            run(&mut app, sql);
+            assert!(!app.can_edit_rows());
+            assert!(app.query_edit_target().unwrap().missing_key);
+        }
+        app.connections = false;
+        app.selected = Some(0);
+        app.row_selection.click(0, false, false, Some(0));
+        let input = |events| egui::RawInput { events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0))), ..Default::default() };
+        let _ = ctx.run(input(vec![]), |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+        ctx.memory_mut(|memory| memory.request_focus(app.tabs[0].result_grid_focus.unwrap()));
+        let _ = ctx.run(input(vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui));
+        });
+        assert!(app.error.as_deref().is_some_and(|message| message.contains("primary-key")));
+        assert!(app.edit.is_none());
+        assert!(app.changes.is_empty());
+        app.error = None;
+        run(&mut app, "SELECT name,id,tenant,revision FROM customers");
+        assert!(app.can_edit_rows());
+        assert!(app.pending.is_none());
+        app.edit = Some(edit(&app, 0, "name", "Grace"));
+        assert!(app.finish_cell_edit());
+        app.preview_changes(); settle(&mut app);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(app.review.as_ref().unwrap().readbacks.len(), 1);
+        app.save_changes(false); settle(&mut app);
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(app.tabs[0].grid.rows[0], vec![Value::Text("Grace".into()), Value::Integer(2), Value::Integer(1), Value::Integer(1)]);
+        assert_eq!(conn.query_row("SELECT hidden FROM customers", [], |r| r.get::<_,String>(0)).unwrap(), "keep");
+        // A concurrent change to a selected value must still reject the save.
+        app.edit = Some(edit(&app, 0, "name", "Stale"));
+        assert!(app.finish_cell_edit());
+        conn.execute("UPDATE customers SET name='Other'", []).unwrap();
+        app.preview_changes(); settle(&mut app);
+        app.save_changes(false); settle(&mut app);
+        assert!(app.error.is_some());
+        assert!(!app.changes.is_empty());
+    }
+
+    #[test]
+    fn command_save_reviews_result_edits_including_active_cell() {
+        for active_cell in [false, true] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let conn = rusqlite::Connection::open(file.path()).unwrap();
+            conn.execute_batch("CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO customers VALUES(1, 'Ada');").unwrap();
+            let ctx = egui::Context::default();
+            let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(), Command::Open(Some(file.path().into())), None);
+            settle(&mut app);
+            app.connections = false;
+            app.safe = false;
+            run(&mut app, "SELECT * FROM customers");
+            app.edit = Some(edit(&app, 0, "name", "Grace"));
+            if !active_cell { assert!(app.finish_cell_edit()); }
+            let _ = ctx.run(egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::S, physical_key: None, pressed: true, repeat: false,
+                    modifiers: egui::Modifiers::COMMAND,
+                }], ..Default::default()
+            }, |ctx| app.workspace_shortcuts(ctx));
+            assert!(matches!(app.pending, Some(Pending::Plan(false))));
+            settle(&mut app);
+            assert!(app.review.is_some());
+            assert_eq!(app.changes.len(), 1);
+            assert!(app.edit.is_none());
+            // Opening the preview must not write anything yet.
+            assert_eq!(conn.query_row("SELECT name FROM customers", [], |row| row.get::<_, String>(0)).unwrap(), "Ada");
+        }
+    }
+
+    #[test]
+    fn review_refresh_must_keep_edits_from_another_tab() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(file.path()).unwrap();
+        conn.execute_batch("CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO customers VALUES(1, 'Ada'),(2, 'Grace');").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(), Command::Open(Some(file.path().into())), None);
+        settle(&mut app);
+        run(&mut app, "SELECT * FROM customers WHERE id=1");
+        app.edit = Some(edit(&app, 0, "name", "Pending"));
+        assert!(app.finish_cell_edit());
+        app.tabs.push(QueryTab::new(String::new()));
+        app.tab = 1;
+        run(&mut app, "SELECT * FROM customers WHERE id=2");
+        assert_eq!(app.changes.len(), 1);
+        run(&mut app, "SELECT * FROM customers WHERE id=2");
+        assert_eq!(app.changes.len(), 1, "refreshing tab 2 must not discard tab 1's edit");
+    }
+
+    #[test]
+    fn review_saved_result_must_include_trigger_changes() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(file.path()).unwrap();
+        conn.execute_batch("CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT, revision INTEGER); INSERT INTO customers VALUES(1, 'Ada', 0); CREATE TRIGGER bump AFTER UPDATE OF name ON customers BEGIN UPDATE customers SET revision=revision+1 WHERE id=new.id; END;").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(), Command::Open(Some(file.path().into())), None);
+        settle(&mut app);
+        run(&mut app, "SELECT * FROM customers");
+        app.edit = Some(edit(&app, 0, "name", "Updated"));
+        assert!(app.finish_cell_edit());
+        app.save_changes(false); settle(&mut app);
+        app.save_changes(false); settle(&mut app);
+        assert!(app.changes.is_empty(), "{:?}", app.error);
+        let revision: i64 = conn.query_row("SELECT revision FROM customers", [], |r| r.get(0)).unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(app.grid().rows[0][2], Value::Integer(revision), "result must show the actual saved row");
+    }
+
+    #[test]
+    fn committed_save_with_changed_key_is_not_retryable_when_refresh_fails() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(file.path()).unwrap();
+        conn.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT, revision INTEGER); INSERT INTO t VALUES(1,'before',0); CREATE TRIGGER moved AFTER UPDATE OF name ON t BEGIN UPDATE t SET id=id+100, revision=revision+1 WHERE id=new.id; END;").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(), Command::Open(Some(file.path().into())), None);
+        settle(&mut app);
+        run(&mut app, "SELECT * FROM t");
+        app.edit = Some(edit(&app, 0, "name", "after"));
+        assert!(app.finish_cell_edit());
+        app.save_changes(false); settle(&mut app);
+        app.save_changes(false); settle(&mut app);
+        assert!(app.changes.is_empty());
+        assert!(app.review.is_none());
+        assert!(app.grid().rows.is_empty());
+        assert!(!app.can_edit_rows());
+        assert!(app.tabs[0].result_error.as_deref().unwrap().starts_with("Changes saved, but results could not be refreshed"));
+        app.save_changes(false);
+        assert!(app.pending.is_none());
+        assert_eq!(conn.query_row("SELECT id,revision FROM t", [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?))).unwrap(), (101,1));
+    }
+
+    #[test]
+    fn review_main_query_must_not_update_shadowing_temp_table() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let observer = rusqlite::Connection::open(file.path()).unwrap();
+        observer.execute_batch("CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO customers VALUES(1, 'Ada');").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(),
+            Command::Open(Some(file.path().into())), None);
+        settle(&mut app);
+        run(&mut app, "CREATE TEMP TABLE customers(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO temp.customers VALUES(1, 'Ada');");
+        run(&mut app, "SELECT * FROM customers");
+        assert!(!app.can_edit_rows(), "temp-table results must not inherit main-table editing metadata");
+        run(&mut app, "SELECT * FROM main.customers");
+        assert!(app.can_edit_rows());
+        app.edit = Some(edit(&app, 0, "name", "Updated"));
+        assert!(app.finish_cell_edit());
+        app.save_changes(false); settle(&mut app);
+        app.save_changes(false); settle(&mut app);
+        assert!(app.changes.is_empty(), "{:?}", app.error);
+        let actual: String = observer.query_row("SELECT name FROM customers WHERE id=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(actual, "Updated", "saving main.customers must update main, not a shadowing temp table");
+    }
+
+    #[test]
+    fn select_star_result_edits_are_reviewed_saved_and_reflected_in_place() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let observer = rusqlite::Connection::open(file.path()).unwrap();
+        observer.execute_batch("CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT);
+            INSERT INTO customers VALUES (123, 'Ada', 'ada@example.com'), (124, 'Grace', NULL);
+            CREATE VIEW customer_names AS SELECT id, name FROM customers;").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(),
+            Command::Open(Some(file.path().into())), None);
+        settle(&mut app);
+
+        for read_only in ["SELECT id + 1, name FROM customers", "SELECT * FROM customer_names",
+            "SELECT * FROM customers c JOIN customers d ON c.id = d.id", "SELECT 1; SELECT * FROM customers"] {
+            run(&mut app, read_only);
+            assert!(!app.can_edit_rows(), "{read_only} must stay read-only");
+            assert_eq!(app.staged_table(), None);
+        }
+
+        run(&mut app, "SELECT * FROM customers WHERE id = 123");
+        assert!(app.can_edit_rows());
+        assert_eq!(app.edit_table(), "customers");
+        // Detection is catalog-only and must not leave the worker busy.
+        assert!(app.pending.is_none());
+
+        let render = |app: &mut Rustable| {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    app.query_result_footer(ui);
+                    app.data_grid(ui);
+                });
+            });
+            output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            }).collect::<Vec<_>>().join("|")
+        };
+        assert!(render(&mut app).contains("1 row · editable"));
+
+        app.edit = Some(edit(&app, 0, "name", "Ada Lovelace"));
+        assert!(app.finish_cell_edit());
+        assert_eq!(app.changes.len(), 1);
+        let painted = render(&mut app);
+        assert!(painted.contains("Pending (1)"), "{painted}");
+        assert!(painted.contains("Ada Lovelace"), "staged value is shown over the result: {painted}");
+        // Safe mode still blocks editing query results.
+        app.safe = true;
+        assert!(!app.can_edit_rows());
+        app.safe = false;
+
+        app.preview_changes();
+        settle(&mut app);
+        let review = app.review_sql.join("\n");
+        assert!(review.contains("UPDATE main.\"customers\" SET \"name\" = 'Ada Lovelace'"), "{review}");
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.changes.is_empty(), "{:?}", app.error);
+        let name: String = observer.query_row("SELECT name FROM customers WHERE id = 123", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "Ada Lovelace");
+        assert_eq!(app.grid().rows[0][1], Value::Text("Ada Lovelace".into()));
+        assert!(app.can_edit_rows(), "the patched result remains editable");
+
+        // A second edit uses the patched row as its original image.
+        app.edit = Some(edit(&app, 0, "email", "ada@lovelace.dev"));
+        assert!(app.finish_cell_edit());
+        app.save_changes(false);
+        settle(&mut app);
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.changes.is_empty(), "{:?}", app.error);
+        let email: String = observer.query_row("SELECT email FROM customers WHERE id = 123", [], |r| r.get(0)).unwrap();
+        assert_eq!(email, "ada@lovelace.dev");
+
+        // Concurrent changes are still caught by the full-row precondition.
+        observer.execute("UPDATE customers SET email = 'changed@elsewhere' WHERE id = 123", []).unwrap();
+        app.edit = Some(edit(&app, 0, "name", "Stale"));
+        assert!(app.finish_cell_edit());
+        app.save_changes(false);
+        settle(&mut app);
+        app.save_changes(false);
+        settle(&mut app);
+        assert_eq!(app.changes.len(), 1, "a stale row must not be overwritten");
+        let name: String = observer.query_row("SELECT name FROM customers WHERE id = 123", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "Ada Lovelace");
+        app.discard_changes();
+
+        // Re-running stages the open draft and preserves pending changes across tables.
+        run(&mut app, "SELECT * FROM customers WHERE id = 123");
+        app.edit = Some(edit(&app, 0, "name", "Discard me"));
+        assert!(app.finish_cell_edit());
+        app.edit = Some(edit(&app, 0, "email", "draft"));
+        app.changes.push(Change::Cell { original_columns: None, table: "other".into(), column: "x".into(), original: vec![Value::Integer(1)], value: Value::Integer(2) });
+        run(&mut app, "SELECT * FROM customers WHERE id = 123");
+        assert!(app.edit.is_none());
+        assert_eq!(app.changes.len(), 3);
+        assert!(app.changes.iter().any(|change| change.table() == "other"));
+        assert!(app.changes.iter().any(|change| matches!(change, Change::Cell { column, value: Value::Text(value), .. } if column == "email" && value == "draft")));
+        assert_eq!(app.grid().rows[0][1], Value::Text("Ada Lovelace".into()));
+        app.changes.clear();
+
+        // Deleting a row from a query result removes it after saving.
+        run(&mut app, "SELECT * FROM customers ORDER BY id");
+        app.row_selection.click(1, false, false, None);
+        app.set_selected_rows_deleted(true);
+        assert_eq!(app.changes.len(), 1);
+        app.save_changes(false);
+        settle(&mut app);
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.changes.is_empty(), "{:?}", app.error);
+        assert_eq!(app.grid().rows.len(), 1);
+        let remaining: i64 = observer.query_row("SELECT count(*) FROM customers", [], |r| r.get(0)).unwrap();
+        assert_eq!(remaining, 1);
+    }
+}
+
+#[cfg(test)]
+mod postgres_query_result_editing_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires disposable PostgreSQL QA on localhost54329 with RUSTABLE_POSTGRES_QA=1"]
+    fn live_postgres_unqualified_select_star_edits_resolve_through_search_path() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+        let mut observer = ::postgres::Client::connect(
+            "host=127.0.0.1 port=54329 dbname=rustable_qa user=postgres password=rustable_qa_only",
+            ::postgres::NoTls).unwrap();
+        observer.batch_execute("DROP TABLE IF EXISTS public.rustable_result_edit;
+            CREATE TABLE public.rustable_result_edit(id integer PRIMARY KEY, name text NOT NULL, amount numeric(12,2), seen timestamptz, created integer GENERATED ALWAYS AS IDENTITY, doc jsonb);
+            INSERT INTO public.rustable_result_edit(id, name, amount, seen) VALUES (123, 'before', 12.50, '2024-02-29 12:00:00+00');
+            UPDATE public.rustable_result_edit SET doc = '{\"b\": [1, 2], \"a\": 12345678901234567890.5}';").unwrap();
+        let ctx = egui::Context::default();
+        let config = crate::connection::PostgresConfig {
+            host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
+            password: "rustable_qa_only".into(), tls: false, ..Default::default()
+        };
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(), Command::OpenPostgres(config), None);
+        let settle = |app: &mut Rustable| {
+            let deadline = Instant::now() + std::time::Duration::from_secs(10);
+            while app.pending.is_some() {
+                assert!(Instant::now() < deadline, "worker timeout");
+                app.poll();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        settle(&mut app);
+        app.view = View::Query;
+        app.tabs[0].sql = "SELECT * FROM rustable_result_edit WHERE id = 123".into();
+        app.run_query(true);
+        settle(&mut app);
+        assert!(app.tabs[0].result_error.is_none(), "{:?}", app.tabs[0].result_error);
+        assert!(app.can_edit_rows(), "{:?}", app.tabs[0].edit_target);
+        assert_eq!(app.edit_table(), "\"public\".\"rustable_result_edit\"");
+        assert!(app.edit_columns().iter().any(|c| c.name == "created" && c.generated));
+        let grid = app.grid();
+        for (column, text) in [("name", "after"), ("amount", "99.95")] {
+            let index = grid.columns.iter().position(|c| c == column).unwrap();
+            app.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+                table: app.edit_table().to_owned(), row: grid.rows[0].clone(), original_value: grid.rows[0][index].clone(),
+                column: column.into(), text: text.into(), kind: 3, focus: false, inspector: false });
+            assert!(app.finish_cell_edit());
+        }
+        let doc = grid.columns.iter().position(|c| c == "doc").unwrap();
+        app.open_json_editor(0, doc);
+        let editor = app.json_editor.as_mut().unwrap();
+        assert!(editor.writable && editor.strict, "jsonb is recognized from the catalog type");
+        editor.text = editor.text.replace("2\n", "3\n");
+        let value = editor.staged_value().unwrap();
+        app.stage_json(value);
+        assert_eq!(app.changes.len(), 3);
+        let seen = grid.columns.iter().position(|c| c == "seen").unwrap();
+        app.open_date_picker(0, seen);
+        let picker = app.date_picker.as_mut().unwrap();
+        assert_eq!(picker.kind, crate::date_picker::Kind::DateTimeTz);
+        assert_eq!(picker.text, "2024-02-29 12:00:00+00");
+        picker.text = "2024-03-01 09:30:00+05:30".into();
+        let value = picker.staged_value().unwrap();
+        let target = app.date_picker.take().unwrap().target;
+        app.stage_picked_value(target, value, "Date");
+        assert_eq!(app.changes.len(), 4);
+        app.preview_changes();
+        settle(&mut app);
+        let review = app.review_sql.join("\n");
+        assert!(review.contains("UPDATE \"public\".\"rustable_result_edit\" SET"), "{review}");
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.changes.is_empty(), "{:?}", app.error);
+        let row = observer.query_one("SELECT name, amount::text FROM public.rustable_result_edit WHERE id = 123", &[]).unwrap();
+        assert_eq!((row.get::<_, String>(0), row.get::<_, String>(1)), ("after".into(), "99.95".into()));
+        let doc: String = observer.query_one("SELECT doc::text FROM public.rustable_result_edit WHERE id = 123", &[]).unwrap().get(0);
+        assert_eq!(doc, r#"{"a": 12345678901234567890.5, "b": [1, 3]}"#);
+        let seen: String = observer.query_one("SELECT to_char(seen AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') FROM public.rustable_result_edit WHERE id = 123", &[]).unwrap().get(0);
+        assert_eq!(seen, "2024-03-01 04:00:00");
+        let name = app.grid().columns.iter().position(|c| c == "name").unwrap();
+        assert_eq!(app.grid().rows[0][name], Value::Text("after".into()));
+        observer.batch_execute("DROP TABLE public.rustable_result_edit").unwrap();
+    }
+}
+
+#[cfg(test)]
+mod json_editor_tests {
+    use super::*;
+
+    fn settle(app: &mut Rustable) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while app.pending.is_some() {
+            assert!(Instant::now() < deadline, "worker timeout");
+            app.poll();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn json_cells_open_formatted_stage_compact_and_save_through_review() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let observer = rusqlite::Connection::open(file.path()).unwrap();
+        observer.execute_batch(r#"CREATE TABLE docs(id INTEGER PRIMARY KEY, doc JSON NOT NULL, note TEXT);
+            INSERT INTO docs VALUES (1, '{"name":"Ada","tags":["math"],"n":12345678901234567890.5}', '[1,2]');"#).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(),
+            Command::Open(Some(file.path().into())), None);
+        settle(&mut app);
+        app.view = View::Query;
+        app.tabs[0].sql = "SELECT * FROM docs".into();
+        app.run_query(true);
+        settle(&mut app);
+        assert!(app.can_edit_rows());
+
+        app.open_json_editor(0, 1);
+        let editor = app.json_editor.as_mut().unwrap();
+        assert!(editor.writable && editor.strict && !editor.nullable);
+        assert!(editor.text.starts_with("{\n  \"name\": \"Ada\""), "{}", editor.text);
+        // Modals size themselves invisibly on their first frame.
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.json_window(ctx));
+        let painted = ctx.run(egui::RawInput::default(), |ctx| app.json_window(ctx)).shapes.iter()
+            .filter_map(|shape| match &shape.shape { egui::Shape::Text(text) => Some(text.galley.text().to_owned()), _ => None })
+            .collect::<Vec<_>>().join("|");
+        assert!(painted.contains("Edit JSON") && painted.contains("Valid JSON"), "{painted}");
+        assert!(app.dialog_owns_workspace_shortcuts());
+
+        let editor = app.json_editor.as_mut().unwrap();
+        editor.text = editor.text.replace("\"math\"", "\"math\", \"computing\"");
+        let value = editor.staged_value().unwrap();
+        assert_eq!(value, Value::Text(r#"{"name":"Ada","tags":["math","computing"],"n":12345678901234567890.5}"#.into()));
+        app.stage_json(value);
+        assert!(app.json_editor.is_none());
+        assert_eq!(app.changes.len(), 1);
+
+        // A text column holding JSON can be edited too; invalid JSON is allowed there.
+        app.open_json_editor(0, 2);
+        let editor = app.json_editor.as_mut().unwrap();
+        assert!(editor.writable && !editor.strict && editor.nullable);
+        editor.null = true;
+        let value = editor.staged_value().unwrap();
+        app.stage_json(value);
+        assert_eq!(app.changes.len(), 2);
+
+        app.preview_changes();
+        settle(&mut app);
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.changes.is_empty(), "{:?}", app.error);
+        let (doc, note): (String, Option<String>) = observer.query_row("SELECT doc, note FROM docs WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(doc, r#"{"name":"Ada","tags":["math","computing"],"n":12345678901234567890.5}"#);
+        assert_eq!(note, None);
+
+        // Read-only results still open a viewer.
+        app.tabs[0].sql = "SELECT doc FROM docs".into();
+        app.run_query(true);
+        settle(&mut app);
+        app.open_json_editor(0, 0);
+        assert!(!app.json_editor.as_ref().unwrap().writable);
+    }
+}
+
+#[cfg(test)]
+mod date_picker_tests {
+    use super::*;
+
+    fn settle(app: &mut Rustable) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while app.pending.is_some() {
+            assert!(Instant::now() < deadline, "worker timeout");
+            app.poll();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn painted(output: egui::FullOutput) -> String {
+        output.shapes.iter().filter_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+            _ => None,
+        }).collect::<Vec<_>>().join("|")
+    }
+
+    #[test]
+    fn date_cells_open_a_calendar_and_save_through_review() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let observer = rusqlite::Connection::open(file.path()).unwrap();
+        observer.execute_batch("CREATE TABLE events(id INTEGER PRIMARY KEY, day DATE NOT NULL, at DATETIME, label TEXT);
+            INSERT INTO events VALUES (1, '2024-02-29', '2024-02-29 12:34:56', 'x');").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(),
+            Command::Open(Some(file.path().into())), None);
+        settle(&mut app);
+        app.view = View::Query;
+        app.tabs[0].sql = "SELECT * FROM events".into();
+        app.run_query(true);
+        settle(&mut app);
+
+        // Text columns never get a picker.
+        app.open_date_picker(0, 3);
+        assert!(app.date_picker.is_none());
+
+        // The inline editor for a date column shows the calendar button.
+        app.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+            table: app.edit_table().to_owned(), row: app.grid().rows[0].clone(), original_value: app.grid().rows[0][1].clone(),
+            column: "day".into(), text: "2024-02-29".into(), kind: 3, focus: false, inspector: false });
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+        }
+        app.edit = None;
+
+        app.open_date_picker(0, 1);
+        let picker = app.date_picker.as_ref().unwrap();
+        assert_eq!(picker.kind, crate::date_picker::Kind::Date);
+        assert!(!picker.nullable);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.date_window(ctx));
+        let text = painted(ctx.run(egui::RawInput::default(), |ctx| app.date_window(ctx)));
+        assert!(text.contains("Choose date") && text.contains("February 2024") && text.contains("Today"), "{text}");
+        assert!(app.dialog_owns_workspace_shortcuts());
+        let picker = app.date_picker.as_mut().unwrap();
+        picker.text = "2024-03-01".into();
+        let value = picker.staged_value().unwrap();
+        let target = app.date_picker.take().unwrap().target;
+        app.stage_picked_value(target, value, "Date");
+
+        app.open_date_picker(0, 2);
+        let picker = app.date_picker.as_mut().unwrap();
+        assert_eq!(picker.kind, crate::date_picker::Kind::DateTime);
+        assert!(picker.nullable);
+        let text = { let _ = ctx.run(egui::RawInput::default(), |ctx| app.date_window(ctx)); painted(ctx.run(egui::RawInput::default(), |ctx| app.date_window(ctx))) };
+        assert!(text.contains("Choose date and time") && text.contains("Time") && text.contains("Now"), "{text}");
+        let picker = app.date_picker.as_mut().unwrap();
+        picker.text = "2024-03-01T08:15".into();
+        let value = picker.staged_value().unwrap();
+        let target = app.date_picker.take().unwrap().target;
+        app.stage_picked_value(target, value, "Date");
+        assert_eq!(app.changes.len(), 2);
+
+        app.preview_changes();
+        settle(&mut app);
+        app.save_changes(false);
+        settle(&mut app);
+        assert!(app.changes.is_empty(), "{:?}", app.error);
+        let (day, at): (String, String) = observer.query_row("SELECT day, at FROM events WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((day.as_str(), at.as_str()), ("2024-03-01", "2024-03-01 08:15:00"));
+
+        // "Set now" on several selected query-result rows uses the result's
+        // column metadata (not the Data view's) and stages one value per row.
+        observer.execute("INSERT INTO events VALUES (2, '2024-01-01', NULL, 'y')", []).unwrap();
+        app.run_query(true);
+        settle(&mut app);
+        app.row_selection.click(0, false, false, None);
+        app.row_selection.click(1, false, true, Some(0));
+        assert_eq!(app.row_selection.rows.len(), 2);
+        let now = crate::date_picker::now_text(crate::date_picker::Kind::DateTime);
+        app.set_bulk_constant(2, Some(now.clone()));
+        assert_eq!(app.changes.len(), 2, "{:?}", app.error);
+        assert!(app.changes.iter().all(|c| matches!(c, Change::Cell { column, value: Value::Text(v), .. } if column == "at" && *v == now)));
+        app.set_bulk_constant(1, None);
+        assert_eq!(app.changes.len(), 2, "NOT NULL columns refuse a NULL constant");
     }
 }
