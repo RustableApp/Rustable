@@ -221,7 +221,7 @@ impl Rustable {
     }
 
     pub(super) fn can_delete_rows(&self) -> bool {
-        self.can_edit_rows()
+        self.can_edit_rows() && self.query_edit_target().is_none_or(|target| !target.projected)
     }
 
     pub(super) fn selected_rows_deleted(&self) -> bool {
@@ -283,8 +283,8 @@ fn field_summary<'a>(
                 table: target,
                 column: name,
                 original: source,
-                value,
-            } if table == Some(target.as_str())
+                value, original_columns,
+            } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && table == Some(target.as_str())
                 && grid.columns.get(column) == Some(name)
                 && source == row =>
             {
@@ -331,8 +331,8 @@ fn field_summaries<'a>(
                         table: target,
                         column,
                         original,
-                        value,
-                    } if target == table && original == row => {
+                        value, original_columns,
+                    } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && target == table && original == row => {
                         if let Some(i) = grid.columns.iter().position(|name| name == column) {
                             // Preserve the same first-match semantics as field_summary.
                             staged[i].get_or_insert(value);
@@ -376,7 +376,7 @@ impl Rustable {
         let staged_table = self.staged_table().map(str::to_owned);
         let edit_columns = self.edit_columns().to_vec();
         let indices: Vec<_> = self.row_selection.rows.iter().copied().collect();
-        let writable = self.can_delete_rows();
+        let writable = self.can_edit_rows();
         let summaries = field_summaries(
             &grid,
             &indices,
@@ -518,7 +518,7 @@ impl Rustable {
     /// Stages one value on every selected row: NULL for `None`, else the text.
     pub(super) fn set_bulk_constant(&mut self, column: usize, text: Option<String>) {
         let null = text.is_none();
-        if !self.can_delete_rows()
+        if !self.can_edit_rows()
             || self
                 .edit_columns()
                 .get(column)
@@ -539,7 +539,7 @@ impl Rustable {
     }
 
     pub(super) fn start_bulk_edit(&mut self, column: usize) {
-        if !self.can_delete_rows() || !self.finish_cell_edit() {
+        if !self.can_edit_rows() || !self.finish_cell_edit() {
             return;
         }
         let indices: Vec<_> = self.row_selection.rows.iter().copied().collect();
@@ -612,7 +612,7 @@ impl Rustable {
     }
 
     fn advance_bulk_field(&mut self, column: usize, direction: i8) {
-        if direction == 0 || !self.can_delete_rows() {
+        if direction == 0 || !self.can_edit_rows() {
             return;
         }
         let indices: Vec<_> = self.row_selection.rows.iter().copied().collect();
@@ -651,7 +651,7 @@ impl Rustable {
             return true;
         }
         let result = parse_cell_value(&edit).and_then(|value| {
-            if !self.can_delete_rows() || edit.table != self.edit_table()
+            if !self.can_edit_rows() || edit.table != self.edit_table()
                 || self.edit_columns().iter().find(|c| c.name == edit.column).is_none_or(|c| c.generated || (c.not_null && matches!(value,Value::Null)))
                 || edit.bulk_rows.iter().any(|(row,_)| row_is_deleted(&self.changes, &edit.table, row)) {
                 Err("These selected rows cannot be edited in the current state. Restore deleted rows or cancel the draft.".into())
@@ -659,11 +659,12 @@ impl Rustable {
         });
         match result {
             Ok(value) => {
+                let names: Option<Vec<String>> = (self.view == View::Query).then(|| self.edit_columns().iter().map(|column| column.name.clone()).collect());
                 for (row, original_value) in edit.bulk_rows {
-                    if self.changes.iter().any(|change| matches!(change, Change::Cell { table, column, original, value: staged } if table == &edit.table && column == &edit.column && original == &row && staged == &value)) { continue; }
-                    self.changes.retain(|change| !matches!(change, Change::Cell { table, column, original, .. } if table == &edit.table && column == &edit.column && original == &row));
+                    if self.changes.iter().any(|change| matches!(change, Change::Cell { table, column, original, value: staged, original_columns } if original_columns == &names && table == &edit.table && column == &edit.column && original == &row && staged == &value)) { continue; }
+                    self.changes.retain(|change| !matches!(change, Change::Cell { table, column, original, original_columns, .. } if original_columns == &names && table == &edit.table && column == &edit.column && original == &row));
                     if original_value != value {
-                        self.changes.push(Change::Cell {
+                        self.changes.push(Change::Cell { original_columns: names.clone(),
                             table: edit.table.clone(),
                             column: edit.column.clone(),
                             original: row,
@@ -850,7 +851,7 @@ mod tests {
         assert_eq!(app.row_selection.cell_columns, Some((1, 2)));
         assert_eq!(app.row_selection.rows.iter().copied().collect::<Vec<_>>(), vec![0, 1, 2]);
         assert!(app.edit.is_none());
-        app.changes.push(Change::Cell { table: "t".into(), column: "a".into(), original: app.table.rows[0].clone(), value: Value::Text("a, \"quoted\"".into()) });
+        app.changes.push(Change::Cell { original_columns: None, table: "t".into(), column: "a".into(), original: app.table.rows[0].clone(), value: Value::Text("a, \"quoted\"".into()) });
         for event in [egui::Event::Copy, egui::Event::Key {
             key: egui::Key::C, physical_key: None, pressed: true, repeat: false,
             modifiers: egui::Modifiers::COMMAND,
@@ -1252,7 +1253,7 @@ mod tests {
         assert!(!field_summaries(&app.table, &[0, 2], &app.changes, Some("t"))[0].2);
         assert!(!field_summaries(&app.table, &[0, 99], &app.changes, Some("t"))[0].2);
         app.changes.clear();
-        app.changes.push(Change::Cell {
+        app.changes.push(Change::Cell { original_columns: None,
             table: "t".into(),
             column: "id".into(),
             original: app.table.rows[0].clone(),
@@ -1273,7 +1274,7 @@ mod tests {
         };
         let indices: Vec<_> = (0..500).collect();
         let changes: Vec<_> = (0..500)
-            .map(|i| Change::Cell {
+            .map(|i| Change::Cell { original_columns: None,
                 table: "t".into(),
                 column: grid.columns[i % 12].clone(),
                 original: grid.rows[i].clone(),
@@ -1355,7 +1356,7 @@ mod tests {
         let mut app = app();
         app.safe = true;
         app.row_selection.rows.extend([0, 2]);
-        app.changes.push(Change::Cell {
+        app.changes.push(Change::Cell { original_columns: None,
             table: "t".into(),
             column: "id".into(),
             original: app.table.rows[0].clone(),
@@ -1442,7 +1443,7 @@ mod tests {
     fn mixed_selection_delete_is_idempotent_and_restore_preserves_edits() {
         let mut app = app();
         let first = app.table.rows[0].clone();
-        app.changes.push(Change::Cell {
+        app.changes.push(Change::Cell { original_columns: None,
             table: "t".into(),
             column: "id".into(),
             original: first.clone(),

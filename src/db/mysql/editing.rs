@@ -48,16 +48,19 @@ pub(super) fn plan(changes: &[Change], objects: &[Object]) -> Result<ChangePlan,
     let mut plan = ChangePlan::default();
     let object = |table: &str| objects.iter().find(|o| o.name == table && o.kind == "table")
         .ok_or_else(|| "Only existing base tables can be edited.".to_owned());
-    type RowEdits = (String, Vec<Value>, Vec<(String, Value)>);
+    type RowEdits = (String, Vec<Value>, Vec<(String, Value)>, Option<Vec<String>>);
     let mut edits: Vec<RowEdits> = Vec::new();
     for change in changes {
         let table = object(change.table())?;
         match change {
-            Change::Cell { table, column, original, value } => {
+            Change::Cell { table, column, original, value, original_columns } => {
                 writable(object(table)?, column, value)?;
-                row_key(object(table)?, original)?;
-                let index = edits.iter().position(|(t, r, _)| t == table && r == original).unwrap_or_else(|| {
-                    edits.push((table.clone(), original.clone(), Vec::new())); edits.len()-1
+                let mut projected = object(table)?.clone();
+                projected.columns = projected_columns(&projected.columns, original_columns.as_deref(), |c| c.name.as_str(), |c| c.pk)?;
+                writable(&projected, column, value)?;
+                row_key(&projected, original)?;
+                let index = edits.iter().position(|(t, r, _, names)| t == table && r == original && names == original_columns).unwrap_or_else(|| {
+                    edits.push((table.clone(), original.clone(), Vec::new(), original_columns.clone())); edits.len()-1
                 });
                 let fields = &mut edits[index].2;
                 if let Some((_, previous)) = fields.iter_mut().find(|(name, _)| name == column) { *previous = value.clone(); }
@@ -74,9 +77,19 @@ pub(super) fn plan(changes: &[Change], objects: &[Object]) -> Result<ChangePlan,
             _ => return Err("MySQL schema changes require a separate review because DDL can implicitly commit.".into()),
         }
     }
-    for (table, original, fields) in edits {
+    for (table, original, fields, names) in edits {
         if changes.iter().any(|c| matches!(c, Change::DeleteRow { table: t, original: r } if t == &table && r == &original)) { continue; }
-        let object = object(&table)?;
+        let mut projected = object(&table)?.clone();
+        projected.columns = projected_columns(&projected.columns, names.as_deref(), |c| c.name.as_str(), |c| c.pk)?;
+        let object = &projected;
+        let mut saved = original.clone();
+        for (name, value) in &fields {
+            if let Some(index) = object.columns.iter().position(|column| column.name == *name) { saved[index] = value.clone(); }
+        }
+        let (read_predicate, read_parameters) = row_key(object, &saved)?;
+        let batch = plan.readback_batch(&table, object.columns.iter().map(|column| column.name.clone()).collect());
+        batch.parameters.extend(read_parameters);
+        batch.push(&original, &qualified(object)?, &read_predicate);
         let (predicate, key) = row_key(object, &original)?;
         check_row(&mut plan, object, &original)?;
         let set = fields.iter().map(|(name, _)| format!("{} = ?", quote(name))).collect::<Vec<_>>().join(", ");

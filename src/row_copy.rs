@@ -54,8 +54,8 @@ pub(super) fn format_rows<'a>(
                         table: target,
                         column,
                         original: source,
-                        value,
-                    } if table == Some(target.as_str())
+                        value, original_columns,
+                    } if original_columns.as_ref().is_none_or(|names| names.as_slice() == columns) && table == Some(target.as_str())
                         && columns.get(index) == Some(column)
                         && source == row =>
                     {
@@ -152,7 +152,7 @@ mod tests {
     fn copies_staged_values_only_for_matching_table_and_row() {
         let columns = vec!["name".into()];
         let row = vec![Value::Text("before".into())];
-        let changes = vec![Change::Cell {
+        let changes = vec![Change::Cell { original_columns: None,
             table: "t".into(),
             column: "name".into(),
             original: row.clone(),
@@ -317,7 +317,7 @@ pub(super) fn formatted<'a>(
                                 column,
                                 original,
                                 value,
-                            } if table == Some(target.as_str())
+                             ..} if table == Some(target.as_str())
                                 && column == &columns[*i]
                                 && original == row =>
                             {
@@ -468,7 +468,7 @@ mod format_tests {
     fn formats_escape_and_copy_staged_selected_column() {
         let columns = vec!["id".into(), "body".into()];
         let row = vec![Value::Integer(1), Value::Text("old".into())];
-        let changes = vec![Change::Cell {
+        let changes = vec![Change::Cell { original_columns: None,
             table: "t".into(),
             column: "body".into(),
             original: row.clone(),
@@ -515,7 +515,7 @@ pub(super) fn plain_cells<'a>(
         {
             if field_index > 0 { output.push('\t'); }
             let value = changes.iter().find_map(|change| match change {
-                Change::Cell { table: target, column, original: source, value }
+                Change::Cell { table: target, column, original: source, value , ..}
                     if table == Some(target.as_str()) && columns.get(i) == Some(column) && source == row => Some(value),
                 _ => None,
             }).unwrap_or(original);

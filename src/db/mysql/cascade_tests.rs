@@ -29,7 +29,7 @@ fn live_review_foreign_key_cascades_commit_and_rollback_with_parent() {
         driver.browse(&Browse { table:"cascade_review_parent".into(),..Default::default() }).unwrap()
             .grid.rows.iter().find(|row| row[0]==Value::Integer(id)).unwrap().clone()
     };
-    let update = Change::Cell { table:"cascade_review_parent".into(),column:"id".into(),
+    let update = Change::Cell { original_columns: None, table:"cascade_review_parent".into(),column:"id".into(),
         original:original(&mut driver,1),value:Value::Integer(3) };
     let duplicate = Change::InsertRow { id:1,table:"cascade_review_parent".into(),
         fields:vec![("id".into(),Value::Integer(2))] };

@@ -241,3 +241,12 @@ geometry. Text layout, selection and other editors are unchanged.
   `Selection::preserve_text_color` skips recoloring selected glyphs, retaining SQL
   syntax colors over the selection background. Disabled by default; Rustable
   enables it only inside the SQL editor. No extra layout or paint pass.
+
+### Bounded PostgreSQL saved-row reads
+
+`postgres::Client::query_text_bounded` wraps the existing `query_text_raw`
+single-exchange API for post-save row refreshes. It accepts bound parameters,
+returns text-format results without custom-type catalog lookups, and drains rows
+beyond the caller's row/byte limit. Rustable rejects truncated refreshes and marks
+the result stale; a committed write is never retried because refresh failed.
+See `docs/QUERY-RESULT-EDITING.md` for latency costs and regression coverage.

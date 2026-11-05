@@ -1,11 +1,8 @@
-//! Recognizes query results that are an exact row image of one base table, such
-//! as `SELECT * FROM customers WHERE id = 123`, so the result grid can stage
-//! edits through the same reviewed row planners as the Data view.
-//!
-//! Resolution uses only the catalog already loaded with the connection: it adds
-//! no database round trips to query execution or to starting an edit. Planners
-//! still re-read table metadata, verify the row width, and lock-check the full
-//! original row before writing, so a stale catalog cannot widen a write.
+//! Recognizes direct columns from a single base table without catalog requests.
+//! Result order is retained; editing requires every primary-key column. Joins,
+//! aliases of columns, expressions and aggregate results remain read-only.
+//! Save planners validate named snapshots against fresh metadata and check the
+//! selected original values before writing. Omitted columns are never inferred.
 use crate::db::{Column, Object};
 use crate::sql::Dialect;
 use sqlparser::ast::{
@@ -18,10 +15,12 @@ use sqlparser::parser::Parser;
 pub(crate) struct Target {
     /// Table reference passed to the planner in `Change::table`.
     pub table: String,
-    /// Table columns, positionally identical to the result columns.
+    /// Selected table columns, in result order.
     pub columns: Vec<Column>,
     /// Short name for status text.
     pub label: String,
+    pub missing_key: bool,
+    pub projected: bool,
 }
 
 pub(crate) fn target(
@@ -34,19 +33,28 @@ pub(crate) fn target(
     if sql.len() > 64 * 1024 {
         return None;
     }
-    let reference = single_table(sql, dialect)?;
+    let (reference, projection) = single_table(sql, dialect)?;
     let (object, table) = resolve(&reference, dialect, objects, selected_schema)?;
-    let columns = object.columns.clone();
-    let same_shape = object.kind == "table"
-        && object.metadata_error.is_none()
-        && columns.iter().any(|column| column.pk)
-        && columns.len() == result_columns.len()
-        && columns.iter().zip(result_columns).all(|(column, name)| column.name == *name);
-    same_shape.then(|| Target {
-        table,
-        columns,
-        label: object.display_name().to_owned(),
-    })
+    if object.kind != "table" || object.metadata_error.is_some() { return None; }
+    let columns = if let Some(names) = projection {
+        if names.len() != result_columns.len() { return None; }
+        names.iter().zip(result_columns).map(|(name, result)| {
+            let column = object.columns.iter().find(|column| match dialect {
+                Dialect::Postgres => column.name == folded(name, dialect),
+                _ => column.name.eq_ignore_ascii_case(&name.value),
+            })?;
+            (column.name == *result).then(|| column.clone())
+        }).collect::<Option<Vec<_>>>()?
+    } else {
+        if object.columns.len() != result_columns.len() || !object.columns.iter().zip(result_columns).all(|(c,n)| c.name == *n) { return None; }
+        object.columns.clone()
+    };
+    let mut seen = std::collections::HashSet::new();
+    if !columns.iter().all(|column| seen.insert(&column.name)) { return None; }
+    let missing_key = !object.columns.iter().any(|column| column.pk)
+        || object.columns.iter().filter(|column| column.pk).any(|key| !columns.iter().any(|column| column.name == key.name));
+    let projected = columns != object.columns;
+    Some(Target { table, columns, label: object.display_name().to_owned(), missing_key, projected })
 }
 
 type Reference = Vec<Ident>;
@@ -60,10 +68,10 @@ fn parse(sql: &str, dialect: Dialect) -> Option<Vec<Statement>> {
     .ok()
 }
 
-/// Accepts exactly one `SELECT *` (or `alias.*`) over one plain table, with
+/// Accepts a wildcard or direct column list over one plain table, with
 /// optional WHERE, ORDER BY, LIMIT/OFFSET and row locks. Every other clause is
 /// compared against a parsed template so new parser fields default to read-only.
-fn single_table(sql: &str, dialect: Dialect) -> Option<Reference> {
+fn single_table(sql: &str, dialect: Dialect) -> Option<(Reference, Option<Vec<Ident>>)> {
     let mut statements = parse(sql, dialect)?;
     if statements.len() != 1 {
         return None;
@@ -118,6 +126,20 @@ fn single_table(sql: &str, dialect: Dialect) -> Option<Reference> {
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
+    if user.projection.iter().all(|item| matches!(item, SelectItem::UnnamedExpr(_))) {
+        let columns = user.projection.iter().map(|item| {
+            let SelectItem::UnnamedExpr(expr) = item else { return None };
+            match expr {
+                sqlparser::ast::Expr::Identifier(name) => Some(name.clone()),
+                sqlparser::ast::Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                    let qualifier = alias.as_ref().map(|alias| &alias.name).or_else(|| reference.last())?;
+                    same_ident(&parts[0], qualifier, dialect).then(|| parts[1].clone())
+                }
+                _ => None,
+            }
+        }).collect::<Option<Vec<_>>>()?;
+        return Some((reference, Some(columns)));
+    }
     let [item] = user.projection.as_slice() else { return None };
     match item {
         SelectItem::Wildcard(options) if Some(options) == wildcard_options(&base.projection[0]) => {}
@@ -149,7 +171,7 @@ fn single_table(sql: &str, dialect: Dialect) -> Option<Reference> {
         }
         _ => return None,
     }
-    Some(reference)
+    Some((reference, None))
 }
 
 fn wildcard_options(item: &SelectItem) -> Option<&sqlparser::ast::WildcardAdditionalOptions> {
@@ -192,14 +214,9 @@ fn resolve<'a>(
                 object.schema.as_deref() == Some(schema.as_str())
                     && object.display_name() == relation
             })?;
-            // An unqualified name resolves through the session search_path,
-            // exactly like the query that produced these rows. Hand the planner
-            // the same reference; its review shows the resolved relation.
-            let table = if reference.len() == 1 {
-                reference[0].to_string()
-            } else {
-                object.name.clone()
-            };
+            // The caller supplies the schema established by wire column origins,
+            // so later search_path changes cannot redirect this result's edits.
+            let table = object.name.clone();
             Some((object, table))
         }
         Dialect::Mysql(_) => {
@@ -282,7 +299,7 @@ mod tests {
     #[test]
     fn rejects_shapes_that_are_not_one_table_row() {
         for sql in [
-            "SELECT id, name FROM customers",
+            "SELECT id + 1, name FROM customers",
             "SELECT *, 1 FROM customers",
             "SELECT DISTINCT * FROM customers",
             "SELECT * FROM customers GROUP BY id",
@@ -308,15 +325,15 @@ mod tests {
         let reordered = vec!["name".to_owned(), "id".to_owned()];
         assert_eq!(target("SELECT * FROM customers", Dialect::Sqlite, &objects, None, &reordered), None);
         let no_pk = [object(None, "customers", None, "table", false)];
-        assert_eq!(target("SELECT * FROM customers", Dialect::Sqlite, &no_pk, None, &result()), None);
+        assert!(target("SELECT * FROM customers", Dialect::Sqlite, &no_pk, None, &result()).unwrap().missing_key);
         let view = [object(None, "customers", None, "view", true)];
         assert_eq!(target("SELECT * FROM customers", Dialect::Sqlite, &view, None, &result()), None);
     }
 
     #[test]
-    fn postgres_keeps_search_path_resolution_for_unqualified_names() {
-        assert_eq!(postgres("SELECT * FROM customers WHERE id = 1").unwrap().table, "customers");
-        assert_eq!(postgres("SELECT * FROM Customers").unwrap().table, "Customers");
+    fn postgres_pins_resolved_names_to_the_origin_schema() {
+        assert_eq!(postgres("SELECT * FROM customers WHERE id = 1").unwrap().table, "\"public\".\"customers\"");
+        assert_eq!(postgres("SELECT * FROM Customers").unwrap().table, "\"public\".\"customers\"");
         assert_eq!(postgres("SELECT * FROM public.customers").unwrap().table, "\"public\".\"customers\"");
         assert_eq!(postgres("SELECT * FROM \"public\".\"customers\"").unwrap().table, "\"public\".\"customers\"");
         // Quoted identifiers are case-sensitive in PostgreSQL.

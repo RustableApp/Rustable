@@ -126,7 +126,7 @@ pub(super) fn browse(
     )
 }
 
-fn decode(value: Option<&str>, oid: u32) -> Result<Value, String> {
+pub(in crate::db::postgres) fn decode(value: Option<&str>, oid: u32) -> Result<Value, String> {
     let Some(value) = value else {
         return Ok(Value::Null);
     };

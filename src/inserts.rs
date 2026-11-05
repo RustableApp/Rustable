@@ -105,7 +105,7 @@ impl Rustable {
                                 column,
                                 original,
                                 value,
-                            } if table == &self.browse.table
+                             ..} if table == &self.browse.table
                                 && column == name
                                 && original == row =>
                             {
@@ -647,7 +647,7 @@ mod tests {
             ..Default::default()
         });
         app.selected = Some(0);
-        app.changes.push(Change::Cell {
+        app.changes.push(Change::Cell { original_columns: None,
             table: "t".into(),
             column: "name".into(),
             original: app.table.rows[0].clone(),

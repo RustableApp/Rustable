@@ -220,6 +220,12 @@ impl Driver for SqliteDriver {
     fn plan(&mut self, changes: &[Change]) -> Result<ChangePlan, String> {
         plan_changes(&self.connection, changes)
     }
+    fn readback(&mut self, query: &RowReadback, budget: usize) -> Result<Grid, String> {
+        let mut statement = self.connection.prepare(&query.sql).map_err(|e| e.to_string())?;
+        let columns = statement.column_names().into_iter().map(str::to_owned).collect();
+        let mut rows = statement.query(params_from_iter(&query.parameters)).map_err(|e| e.to_string())?;
+        collect_with_budget(&mut rows, columns, query.originals.len() + 1, budget).map_err(|e| e.to_string())
+    }
     fn apply(&mut self, plan: &ChangePlan) -> Result<(), String> {
         self.cursor = None;
         apply_plan(&mut self.connection, plan)
@@ -277,7 +283,7 @@ fn objects(conn: &Connection) -> rusqlite::Result<Vec<Object>> {
 }
 
 fn columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<Column>> {
-    conn.prepare("SELECT name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo(?) WHERE hidden != 1")?
+    conn.prepare("SELECT name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo(?, 'main') WHERE hidden != 1")?
         .query_map([table], |r| Ok(Column {
             name: r.get(0)?, data_type: r.get(1)?, not_null: r.get(2)?,
             default: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
@@ -432,6 +438,14 @@ fn query_with_budget(
             ..Default::default()
         });
     }
+    let metadata = statement.columns_with_metadata();
+    let source = metadata.first().and_then(|first| {
+        let schema = first.database_name()?;
+        let table = first.table_name()?;
+        metadata.iter().all(|column| column.database_name() == Some(schema)
+            && column.table_name() == Some(table) && column.origin_name() == Some(column.name()))
+            .then(|| (schema.to_owned(), table.to_owned()))
+    });
     let mut rows = statement.query([])?;
     let mut grid = collect_with_budget(&mut rows, names, QUERY_LIMIT, budget)?;
     if !read_only {
@@ -440,6 +454,7 @@ fn query_with_budget(
         while rows.next()?.is_some() {}
     }
     drop(rows);
+    grid.source = source;
     grid.affected = (conn.total_changes() - changes_before) as usize;
     grid.elapsed = start.elapsed();
     Ok(grid)
@@ -794,7 +809,7 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
         ..Default::default()
     };
     let objects = objects(conn).map_err(|e| e.to_string())?;
-    type RowChanges = (String, Vec<Value>, Vec<(String, Value)>);
+    type RowChanges = (String, Vec<Value>, Vec<(String, Value)>, Option<Vec<String>>);
     let mut rows: Vec<RowChanges> = Vec::new();
     for change in changes {
         let table = change.table();
@@ -806,13 +821,14 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
             plan.schemas.push((table.to_owned(), object.ddl.clone()));
         }
         if let Change::Cell {
+            original_columns,
             column,
             original,
             value,
             ..
         } = change
         {
-            let cols = columns(conn, table).map_err(|e| e.to_string())?;
+            let cols = projected_columns(&columns(conn, table).map_err(|e| e.to_string())?, original_columns.as_deref(), |c| c.name.as_str(), |c| c.pk)?;
             if cols.len() != original.len()
                 || !cols.iter().any(|c| c.pk)
                 || !cols.iter().any(|c| c.name == *column && !c.generated)
@@ -824,9 +840,9 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
             }
             let index = rows
                 .iter()
-                .position(|(t, r, _)| t == table && r == original);
+                .position(|(t, r, _, names)| t == table && r == original && names == original_columns);
             let index = index.unwrap_or_else(|| {
-                rows.push((table.to_owned(), original.clone(), Vec::new()));
+                rows.push((table.to_owned(), original.clone(), Vec::new(), original_columns.clone()));
                 rows.len() - 1
             });
             let fields = &mut rows[index].2;
@@ -838,11 +854,21 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
         }
     }
     // Data edits precede renames, so their original column identifiers remain valid.
-    for (table, original, fields) in rows {
+    for (table, original, fields, names) in rows {
         if changes.iter().any(|c| matches!(c, Change::DeleteRow { table: t, original: r } if *t == table && *r == original)) {
             continue;
         }
-        let cols = columns(conn, &table).map_err(|e| e.to_string())?;
+        let cols = projected_columns(&columns(conn, &table).map_err(|e| e.to_string())?, names.as_deref(), |c| c.name.as_str(), |c| c.pk)?;
+        let mut saved = original.clone();
+        for (name, value) in &fields {
+            if let Some(index) = cols.iter().position(|column| column.name == *name) { saved[index] = value.clone(); }
+        }
+        let batch = plan.readback_batch(&table, cols.iter().map(|column| column.name.clone()).collect());
+        let predicate = cols.iter().zip(&saved).filter(|(column, _)| column.pk).map(|(column, value)| {
+            batch.parameters.push(value.clone());
+            format!("{} IS ?", quote(&column.name))
+        }).collect::<Vec<_>>().join(" AND ");
+        batch.push(&original, &format!("main.{}", quote(&table)), &predicate);
         let set = fields
             .iter()
             .map(|(c, _)| format!("{} = ?", quote(c)))
@@ -866,7 +892,7 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
             .collect();
         append_row_precondition(&mut plan, &table, &cols, &original);
         plan.statements.push(PlannedStatement {
-            sql: format!("UPDATE {} SET {} WHERE {};", quote(&table), set, predicates),
+            sql: format!("UPDATE main.{} SET {} WHERE {};", quote(&table), set, predicates),
             parameters,
             expected_rows: Some(1),
         });
@@ -890,7 +916,7 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
                 .join(" AND ");
             append_row_precondition(&mut plan, table, &cols, original);
             plan.statements.push(PlannedStatement {
-                sql: format!("DELETE FROM {} WHERE {};", quote(table), predicates),
+                sql: format!("DELETE FROM main.{} WHERE {};", quote(table), predicates),
                 parameters: cols
                     .iter()
                     .zip(original)
@@ -919,10 +945,10 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
                 }
             }
             let sql = if fields.is_empty() {
-                format!("INSERT INTO {} DEFAULT VALUES;", quote(table))
+                format!("INSERT INTO main.{} DEFAULT VALUES;", quote(table))
             } else {
                 format!(
-                    "INSERT INTO {} ({}) VALUES ({});",
+                    "INSERT INTO main.{} ({}) VALUES ({});",
                     quote(table),
                     fields
                         .iter()
@@ -1346,7 +1372,7 @@ fn append_row_precondition(
     plan.preconditions.push(PlannedPrecondition {
         before_statement: plan.statements.len(),
         sql: format!(
-            "SELECT COUNT(*) FROM {} WHERE {};",
+            "SELECT COUNT(*) FROM main.{} WHERE {};",
             quote(table),
             predicates
         ),
@@ -1370,13 +1396,13 @@ mod primary_key_write_tests {
         let plan = plan_changes(
             &conn,
             &[
-                Change::Cell {
+                Change::Cell { original_columns: None,
                     table: "t".into(),
                     column: "a".into(),
                     original: original.clone(),
                     value: Value::Text("new".into()),
                 },
-                Change::Cell {
+                Change::Cell { original_columns: None,
                     table: "t".into(),
                     column: "value".into(),
                     original: original.clone(),
@@ -1387,7 +1413,7 @@ mod primary_key_write_tests {
         .unwrap();
         assert_eq!(
             plan.statements[0].sql,
-            "UPDATE \"t\" SET \"a\" = ?, \"value\" = ? WHERE \"a\" IS ? AND \"b\" IS ?;"
+            "UPDATE main.\"t\" SET \"a\" = ?, \"value\" = ? WHERE \"a\" IS ? AND \"b\" IS ?;"
         );
         assert_eq!(
             plan.statements[0].parameters,
@@ -1425,7 +1451,7 @@ mod primary_key_write_tests {
         .unwrap();
         assert_eq!(
             deletion.statements[0].sql,
-            "DELETE FROM \"t\" WHERE \"a\" IS ? AND \"b\" IS ?;"
+            "DELETE FROM main.\"t\" WHERE \"a\" IS ? AND \"b\" IS ?;"
         );
         assert_eq!(deletion.statements[0].parameters.len(), 2);
         conn.execute("UPDATE t SET value='concurrent'", []).unwrap();
@@ -1443,7 +1469,7 @@ mod primary_key_write_tests {
         conn.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY,n INTEGER); INSERT INTO t VALUES(1,0),(2,0); CREATE TRIGGER change_other AFTER UPDATE ON t WHEN NEW.id=1 BEGIN UPDATE t SET n=100 WHERE id=2; END;").unwrap();
         let changes: Vec<_> = [1, 2]
             .into_iter()
-            .map(|id| Change::Cell {
+            .map(|id| Change::Cell { original_columns: None,
                 table: "t".into(),
                 column: "n".into(),
                 original: vec![Value::Integer(id), Value::Integer(0)],
@@ -1466,7 +1492,7 @@ mod primary_key_write_tests {
         conn.execute_batch("CREATE TABLE t(id TEXT PRIMARY KEY,value TEXT); INSERT INTO t VALUES(NULL,'one'),(NULL,'two'); CREATE TABLE no_key(value TEXT); INSERT INTO no_key VALUES('one');").unwrap();
         let plan = plan_changes(
             &conn,
-            &[Change::Cell {
+            &[Change::Cell { original_columns: None,
                 table: "t".into(),
                 column: "value".into(),
                 original: vec![Value::Null, Value::Text("one".into())],
@@ -1486,7 +1512,7 @@ mod primary_key_write_tests {
         assert!(
             plan_changes(
                 &conn,
-                &[Change::Cell {
+                &[Change::Cell { original_columns: None,
                     table: "no_key".into(),
                     column: "value".into(),
                     original: vec![Value::Text("one".into())],
@@ -1609,7 +1635,7 @@ fn edit(
 ) -> Result<(), String> {
     let plan = plan_changes(
         conn,
-        &[Change::Cell {
+        &[Change::Cell { original_columns: None,
             table: table.into(),
             column: column.into(),
             original: original.to_vec(),
@@ -2081,7 +2107,7 @@ mod adapter_tests {
 mod change_tests {
     use super::*;
     fn cell(id: i64, column: &str, value: Value) -> Change {
-        Change::Cell {
+        Change::Cell { original_columns: None,
             table: "t".into(),
             column: column.into(),
             original: vec![
@@ -2983,7 +3009,7 @@ mod delete_tests {
         let plan = plan_changes(
             &conn,
             &[
-                Change::Cell {
+                Change::Cell { original_columns: None,
                     table: "t".into(),
                     column: "value".into(),
                     original,
@@ -3066,7 +3092,7 @@ mod insert_tests {
             ],
         );
         let plan = plan_changes(&conn, &[insert("t", vec![]), explicit.clone(), explicit]).unwrap();
-        assert_eq!(plan.statements[0].sql, "INSERT INTO \"t\" DEFAULT VALUES;");
+        assert_eq!(plan.statements[0].sql, "INSERT INTO main.\"t\" DEFAULT VALUES;");
         assert_eq!(plan.statements.len(), 3);
         assert_eq!(
             conn.query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0))
@@ -3154,7 +3180,7 @@ mod insert_tests {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE); INSERT INTO t VALUES(1,'one'),(2,'two');").unwrap();
         let changes = vec![
-            Change::Cell {
+            Change::Cell { original_columns: None,
                 table: "t".into(),
                 column: "name".into(),
                 original: vec![Value::Integer(1), Value::Text("one".into())],

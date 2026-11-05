@@ -104,6 +104,13 @@ fn editor_wan_latency_comparison() {
     let mut current = Vec::new();
     let mut single = Vec::new();
     let mut describe_first = Vec::new();
+    let mut readback_times = Vec::new();
+    let readback = RowReadback {
+        table: "latency_address".into(), columns: vec!["id".into(), "address".into()],
+        originals: vec![vec![Value::Integer(2), Value::Text("latency fixture".into())]],
+        sql: "SELECT 0 AS __rustable_row, latency_address.* FROM latency_address WHERE id=$1::text::bigint".into(),
+        parameters: vec![Value::Text("2".into())],
+    };
     for index in 0..9 {
         let timer = Instant::now();
         let mut tx = driver
@@ -153,7 +160,12 @@ fn editor_wan_latency_comparison() {
         assert_eq!(messages.iter().filter(|message| matches!(message,
             ::postgres::SimpleQueryMessage::Row(_))).count(), 1);
         let wire_ms = timer.elapsed().as_secs_f64() * 1000.0;
+        let timer = Instant::now();
+        let refreshed = driver.readback(&readback, BYTE_LIMIT).unwrap();
+        assert_eq!(&refreshed.rows[0][1..], grid.rows[0].as_slice());
+        let readback_ms = timer.elapsed().as_secs_f64() * 1000.0;
         if index >= 2 {
+            readback_times.push(readback_ms);
             legacy.push(old_ms);
             current.push(new_ms);
             single.push(wire_ms);
@@ -167,6 +179,9 @@ fn editor_wan_latency_comparison() {
         "30ms simulated RTT, indexed lookup,7samples: legacy p50={:.1}ms p95={:.1}ms; optimized p50={:.1}ms p95={:.1}ms; single-exchange reference p50={:.1}ms; describe-first p50={:.1}ms",
         legacy[3], legacy[6], current[3], current[6], single[3], describe_first[3]
     );
+    readback_times.sort_by(f64::total_cmp);
+    eprintln!("Bound affected-row readback p50={:.1}ms p95={:.1}ms", readback_times[3], readback_times[6]);
+    assert!(readback_times[3] < single[3] * 1.5, "saved-row readback added a second exchange");
     assert!(current[3] < describe_first[3] * 0.75, "editor still pays a description round trip");
     assert!(
         current[3] < legacy[3] * 0.8,
