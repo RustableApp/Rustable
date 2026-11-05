@@ -5,6 +5,10 @@ pub const TOOLBAR_BUTTON: egui::Vec2 = egui::vec2(37.0, 24.0);
 pub const fn toolbar_group_width(count: usize) -> f32 { count as f32 * TOOLBAR_BUTTON.x + 4.0 }
 pub fn paint(painter: &egui::Painter, center: egui::Pos2, name: &str, size: f32, color: egui::Color32) {
     let (uri, bytes): (&str, &'static [u8]) = match name {
+        "lock" => ("bytes://lucide/lock.svg", include_bytes!("../assets/icons/lucide/lock.svg")),
+        "lock-open" => ("bytes://lucide/lock-open.svg", include_bytes!("../assets/icons/lucide/lock-open.svg")),
+        "circle-x" => ("bytes://lucide/circle-x.svg", include_bytes!("../assets/icons/lucide/circle-x.svg")),
+        "list-upload" => ("bytes://lucide/list-upload.svg", include_bytes!("../assets/icons/lucide/list-upload.svg")),
         "arrow-right" => ("bytes://lucide/arrow-right.svg", include_bytes!("../assets/icons/lucide/arrow-right.svg")),
         "clipboard" => ("bytes://lucide/clipboard.svg", include_bytes!("../assets/icons/lucide/clipboard.svg")),
         "calendar" => ("bytes://lucide/calendar.svg", include_bytes!("../assets/icons/lucide/calendar.svg")),
@@ -57,7 +61,10 @@ pub fn button(ui: &mut egui::Ui, name: &str, size: egui::Vec2, selected: bool) -
         "refresh-cw" => "Refresh", "sliders-horizontal" => "Options", "search" => "Search",
         "chevron-left" => "Previous", "chevron-right" => "Next", "plus" => "Add",
         "x" => "Close", "pin" => "Pin result", "panel-bottom" => "SQL activity",
-        "panel-right" => "Row inspector", _ => name,
+        "panel-right" => "Row inspector", "panel-left" => "Toggle sidebar",
+        "lock" => "Safe mode on", "lock-open" => "Safe mode off",
+        "circle-x" => "Discard changes", "eye" => "Preview changes", "list-upload" => "Save changes",
+        _ => name,
     };
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label));
     paint(ui.painter(), rect.center(), name, 18.0, visuals.fg_stroke.color);

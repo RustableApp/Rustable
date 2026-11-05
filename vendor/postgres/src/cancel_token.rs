@@ -8,6 +8,11 @@ use tokio_postgres::{Error, Socket};
 pub struct CancelToken(tokio_postgres::CancelToken);
 
 impl CancelToken {
+    /// Backend process ID received during connection setup; performs no I/O.
+    pub fn process_id(&self) -> i32 {
+        self.0.process_id()
+    }
+
     pub(crate) fn new(inner: tokio_postgres::CancelToken) -> CancelToken {
         CancelToken(inner)
     }

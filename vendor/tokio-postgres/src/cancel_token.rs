@@ -18,6 +18,11 @@ pub struct CancelToken {
 }
 
 impl CancelToken {
+    /// Backend process ID received during connection setup; performs no I/O.
+    pub fn process_id(&self) -> i32 {
+        self.process_id
+    }
+
     /// Attempts to cancel the in-progress query on the connection associated
     /// with this `CancelToken`.
     ///

@@ -66,7 +66,6 @@ fn error_toast(ctx: &egui::Context, error: &str, actions: impl FnOnce(&mut egui:
 const BLUE: Color32 = Color32::from_rgb(50, 104, 224);
 const MUTED: Color32 = Color32::from_rgb(125, 137, 156);
 const GREEN: Color32 = Color32::from_rgb(40, 145, 110);
-const SAFE_TOGGLE_WIDTH: f32 = 104.0;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -130,6 +129,7 @@ struct Preferences {
     window_documents: Vec<QueryDocument>,
     connection_styles: std::collections::HashMap<String, ConnectionStyle>,
     activity_visible: bool,
+    sidebar_hidden: bool,
     column_widths: crate::column_widths::ColumnWidths,
     pane_sizes: crate::pane_sizes::PaneSizes,
     page_size: usize,
@@ -848,7 +848,7 @@ impl Rustable {
     /// Row planners are distinct from schema rebuild/import capabilities.
     /// Engines whose query path enforces Safe mode in the database session.
     fn supports_safe_mode(&self) -> bool {
-        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL")
+        matches!(self.engine.as_str(), "SQLite" | "PostgreSQL" | "MySQL" | "MariaDB")
     }
 
     fn safe_mode_active(&self) -> bool {
@@ -1579,6 +1579,7 @@ impl Rustable {
                     self.ddl_preview = Some((name, sql));
                 }
                 Ok(Payload::Schema { objects, schemas }) => {
+                    self.navigator.loaded = false;
                     if matches!(self.engine.as_str(), "MySQL" | "MariaDB") { self.connected_database = schemas.selected.clone(); }
                     self.schemas = schemas;
                     self.objects = objects;
@@ -2228,11 +2229,20 @@ impl Rustable {
             return;
         }
         let renaming_query = self.sidebar_section == 1
-            && (ctx.content_rect().width() >= 720.0 || self.compact_panel == 1)
+            && ((ctx.content_rect().width() >= 720.0 && !self.prefs.sidebar_hidden) || self.compact_panel == 1)
             && self.query_library.renaming_inline();
         if self.dialog_owns_workspace_shortcuts() || renaming_query { return; }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Period)) {
             self.request_query_cancel(ctx);
+            return;
+        }
+        if ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::P,
+            )
+        }) {
+            self.preview_changes();
             return;
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
@@ -2265,14 +2275,7 @@ impl Rustable {
         }) {
             self.discard_changes();
         }
-        if ctx.input_mut(|i| {
-            i.consume_key(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::P,
-            )
-        }) {
-            self.preview_changes();
-        }
+
         if ctx.input_mut(|i| {
             i.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -2430,7 +2433,7 @@ impl Rustable {
                 confirmed = ui
                     .add(egui::Button::new(RichText::new("Run anyway").color(Color32::WHITE)).fill(ui.visuals().error_fg_color))
                     .clicked();
-                cancelled = ui.button("Cancel").on_hover_text("Escape").clicked();
+                cancelled = ui.add(crate::icons::shortcut_button("Cancel", false, ".", None)).on_hover_text("Escape").clicked();
             });
         });
         cancelled |= modal.should_close();
@@ -2734,7 +2737,7 @@ impl Rustable {
         } else {
             Color32::WHITE
         };
-        let right_controls = crate::icons::toolbar_group_width(3) + crate::icons::toolbar_group_width(2) + SAFE_TOGGLE_WIDTH + 12.0;
+        let right_controls = crate::icons::toolbar_group_width(3) + crate::icons::toolbar_group_width(2) + 6.0;
         let width = (ui.available_width() - right_controls - ui.spacing().item_spacing.x).max(1.0);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::click());
@@ -2845,19 +2848,22 @@ impl Rustable {
     fn safe_mode_toggle(&mut self, ui: &mut egui::Ui, width: Option<f32>) {
         let supported = self.supports_safe_mode();
         let mut on = self.safe_mode_active();
-        let text = RichText::new(if on { "Safe mode on" } else { "Safe mode" });
+        let name = if on { "lock" } else { "lock-open" };
         let response = ui.add_enabled_ui(supported && self.pending.is_none() && self.has_connection(), |ui| {
-            let button = egui::Button::selectable(on, if on { text.strong() } else { text });
             match width {
-                Some(width) => ui.add_sized([width, crate::icons::TOOLBAR_BUTTON.y], button),
-                None => ui.add(button),
+                Some(width) => crate::icons::button(ui, name, egui::vec2(width, crate::icons::TOOLBAR_BUTTON.y), on),
+                None => ui.horizontal(|ui| {
+                    let response = crate::icons::button(ui, name, crate::icons::TOOLBAR_BUTTON, on);
+                    let label = ui.selectable_label(on, if on { "Safe mode on" } else { "Safe mode off" });
+                    response.union(label)
+                }).inner,
             }
         }).inner;
         let response = if supported {
             response.on_hover_text(if on {
-                "Read-only: the database session rejects writes, and table edits, imports and schema changes are disabled. Click to allow writes."
+                "Safe mode on: the database session rejects writes, and table edits, imports and schema changes are disabled. Click to allow writes."
             } else {
-                "Click for read-only queries: the database session rejects writes. Production connections start in Safe mode."
+                "Safe mode off. Click for read-only queries: the database session rejects writes. Production connections start in Safe mode."
             })
         } else {
             response.on_disabled_hover_text(format!("Safe mode isn't available for {} yet. Use a read-only database user instead.", if self.engine.is_empty() { "this connection" } else { self.engine.as_str() }))
@@ -2866,6 +2872,105 @@ impl Rustable {
             on = !on;
             self.safe = on;
             self.status = if on { "Safe mode on: writes are rejected".into() } else { "Safe mode off: writes allowed".into() };
+        }
+    }
+
+    fn edit_toolbar(&mut self, ui: &mut egui::Ui) {
+        let editable = self.pending.is_none() && (!self.changes.is_empty() || self.edit.is_some());
+        crate::icons::toolbar_group(ui, 3, |ui| {
+            let discard = ui.add_enabled_ui(editable, |ui|
+                crate::icons::button(ui, "circle-x", crate::icons::TOOLBAR_BUTTON, false)).inner;
+            if discard.on_hover_text(format!("Discard all changes · {}", crate::icons::shortcut(ui.ctx(), true, "Backspace"))).clicked() {
+                self.discard_changes();
+            }
+            let preview = ui.add_enabled_ui(editable, |ui|
+                crate::icons::button(ui, "eye", crate::icons::TOOLBAR_BUTTON, false)).inner;
+            if preview.clicked() { self.preview_changes(); }
+            preview.context_menu(|ui| self.staged_changes_list(ui));
+            preview.on_hover_text(format!("Preview changes as SQL ({}) · {}
+Right-click to inspect or remove individual changes",
+                self.changes.len(), crate::icons::shortcut(ui.ctx(), true, "P")));
+            let save = ui.add_enabled_ui(editable && !self.safe, |ui|
+                crate::icons::button(ui, "list-upload", crate::icons::TOOLBAR_BUTTON, false)).inner;
+            if save.on_hover_text(format!("Save changes · {} · Review before committing",
+                crate::icons::shortcut(ui.ctx(), false, "S"))).clicked() {
+                self.save_changes(false);
+            }
+        });
+    }
+
+    fn staged_changes_list(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!("{} pending changes", self.changes.len()));
+        let mut remove = None;
+        egui::ScrollArea::vertical()
+            .max_height(300.0)
+            .show(ui, |ui| {
+                for (index, change) in self.changes.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                self.pending.is_none(),
+                                crate::icons::widget("x"),
+                            )
+                            .on_hover_text("Remove this staged change")
+                            .clicked()
+                        {
+                            remove = Some(index);
+                        }
+                        let description = match change {
+                            Change::InsertRow { table, .. } => {
+                                format!("Insert row into {table}")
+                            }
+                            Change::DeleteRow { table, .. } => {
+                                format!("Delete row from {table}")
+                            }
+                            Change::Cell {
+                                table,
+                                column,
+                                value,
+                                ..
+                            } => format!(
+                                "{table}.{column} = {}",
+                                db::preview(value, 80)
+                            ),
+                            Change::RenameColumn {
+                                table,
+                                from,
+                                to,
+                            } => {
+                                format!("Rename {table}.{from} → {to}")
+                            }
+                            Change::AlterColumn {
+                                table,
+                                column,
+                                ..
+                            } => format!("Alter {table}.{column}"),
+                            Change::CreateIndex {
+                                table, name, ..
+                            } => {
+                                format!(
+                                    "Create index {name} on {table}"
+                                )
+                            }
+                            Change::DropIndex { table, name } => {
+                                format!("Drop index {name} on {table}")
+                            }
+                            Change::AddColumn { table, definition } => {
+                                format!(
+                                    "Add {table}.{} · {}",
+                                    definition.name,
+                                    definition.data_type
+                                )
+                            }
+                        };
+                        ui.label(description);
+                    });
+                }
+            });
+        if let Some(index) = remove {
+            self.changes.remove(index);
+            self.record_changes();
+            self.review = None;
         }
     }
 
@@ -2884,6 +2989,7 @@ impl Rustable {
                             if ui.button("Find anything").clicked() { self.open_navigator(false); ui.close(); }
                             if ui.button(if cfg!(target_arch = "wasm32") { "Open SQLite copy…" } else { "Open SQLite…" }).clicked() { self.file_dialog(ctx, false); ui.close(); }
                             if ui.button("SQL activity").clicked() { self.prefs.activity_visible = !self.prefs.activity_visible; self.shared_preferences_dirty = true; ui.close(); }
+                            self.edit_toolbar(ui);
                             self.safe_mode_toggle(ui, None);
                             for choice in [Appearance::System, Appearance::Light, Appearance::Dark] {
                                 if ui.selectable_value(&mut self.prefs.appearance, choice, choice.label()).clicked() {
@@ -2891,20 +2997,26 @@ impl Rustable {
                                 }
                             }
                         });
-                        if self.pending.is_some() && ui.button("Cancel").on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() { self.request_query_cancel(ctx); }
+                        if self.pending.is_some() && ui.add(crate::icons::shortcut_button("Cancel", false, ".", None)).on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() { self.request_query_cancel(ctx); }
                     });
                     return;
                 }
                 ui.horizontal(|ui| {
                     // Equal breathing room between the status pill and each button side.
                     ui.spacing_mut().item_spacing.x = 10.0;
+                    crate::icons::toolbar_group(ui, 2, |ui| {
+                        if crate::icons::button(ui, "panel-left", crate::icons::TOOLBAR_BUTTON, !self.prefs.sidebar_hidden)
+                            .on_hover_text(if self.prefs.sidebar_hidden { "Show sidebar" } else { "Hide sidebar" }).clicked() {
+                            self.prefs.sidebar_hidden = !self.prefs.sidebar_hidden;
+                            self.shared_preferences_dirty = true;
+                        }
+                        if toolbar_action(ui, 0, self.connections).on_hover_text("Connections").clicked() {
+                            self.connections = true;
+                        }
+                    });
+                    self.edit_toolbar(ui);
                     toolbar_group(ui, |ui| {
-                    if toolbar_action(ui, 0, self.connections)
-                        .on_hover_text("Connections")
-                        .clicked()
-                    {
-                        self.connections = true;
-                    }
+                    self.safe_mode_toggle(ui, Some(crate::icons::TOOLBAR_BUTTON.x));
                     if toolbar_action(ui, 1, self.navigator.open)
                         .on_hover_text(format!("Browse databases · {} · Find anything: {}", crate::icons::shortcut(ui.ctx(), false, "K"), crate::icons::shortcut(ui.ctx(), false, "P")))
                         .clicked() { self.open_navigator(true); }
@@ -2925,7 +3037,6 @@ impl Rustable {
                             &mut self.inspector,
                         );
                         self.shared_preferences_dirty |= activity_before != self.prefs.activity_visible;
-                        self.safe_mode_toggle(ui, Some(SAFE_TOGGLE_WIDTH));
                         toolbar_group(ui, |ui| {
                             if toolbar_action(ui, 4, false).on_hover_text(format!("Find anything · {}", crate::icons::shortcut(ui.ctx(), false, "P"))).clicked() { self.open_navigator(false); }
                             if ui.add_enabled_ui(self.pending.is_none(), |ui| toolbar_action(ui, 3, false)).inner.on_hover_text(format!("Refresh · {}", crate::icons::shortcut(ui.ctx(), false, "R"))).clicked() { self.refresh_current_view(); }
@@ -3432,7 +3543,7 @@ impl Rustable {
                 let grid = self.grid();
                 let selected_count = self.row_selection.rows.len().max(usize::from(self.selected.is_some()));
                 let page_range = table_status_label(self.browse.offset, &grid, selected_count);
-                let control_geometry = table_control_geometry(ui, self.view, self.changes.len(), &page_range);
+                let control_geometry = table_control_geometry(ui, self.view, &page_range);
                 egui::TopBottomPanel::bottom(egui::Id::new((ctx.viewport_id(), "table-view-controls")))
                     .exact_height(control_geometry.height)
                     .show_inside(ui, |ui| {
@@ -3469,101 +3580,7 @@ impl Rustable {
                                     error: None,
                                 });
                             }
-                            if !self.changes.is_empty() {
-                                ui.separator();
-                                let mut remove = None;
-                                ui.menu_button(format!("Pending ({})", self.changes.len()), |ui| {
-                                if ui
-                                    .button(format!("Review {} changes", self.changes.len()))
-                                    .on_hover_text(format!("{} · Preview SQL without executing", crate::icons::shortcut(ui.ctx(), true, "P")))
-                                    .clicked()
-                                {
-                                    self.preview_changes();
-                                }
-                                if ui
-                                    .add_enabled(
-                                        self.pending.is_none(),
-                                        egui::Button::new("Discard"),
-                                    )
-                                    .on_hover_text(format!("{} · Discard pending changes", crate::icons::shortcut(ui.ctx(), true, "Backspace")))
-                                    .clicked()
-                                {
-                                    self.discard_changes();
-                                }
-                                    ui.separator();
-                                    egui::ScrollArea::vertical()
-                                        .max_height(300.0)
-                                        .show(ui, |ui| {
-                                            for (index, change) in self.changes.iter().enumerate() {
-                                                ui.horizontal(|ui| {
-                                                    if ui
-                                                        .add_enabled(
-                                                            self.pending.is_none(),
-                                                            crate::icons::widget("x"),
-                                                        )
-                                                        .on_hover_text("Remove this staged change")
-                                                        .clicked()
-                                                    {
-                                                        remove = Some(index);
-                                                    }
-                                                    let description = match change {
-                                                        Change::InsertRow { table, .. } => {
-                                                            format!("Insert row into {table}")
-                                                        }
-                                                        Change::DeleteRow { table, .. } => {
-                                                            format!("Delete row from {table}")
-                                                        }
-                                                        Change::Cell {
-                                                            table,
-                                                            column,
-                                                            value,
-                                                            ..
-                                                        } => format!(
-                                                            "{table}.{column} = {}",
-                                                            db::preview(value, 80)
-                                                        ),
-                                                        Change::RenameColumn {
-                                                            table,
-                                                            from,
-                                                            to,
-                                                        } => {
-                                                            format!("Rename {table}.{from} → {to}")
-                                                        }
-                                                        Change::AlterColumn {
-                                                            table,
-                                                            column,
-                                                            ..
-                                                        } => format!("Alter {table}.{column}"),
-                                                        Change::CreateIndex {
-                                                            table, name, ..
-                                                        } => {
-                                                            format!(
-                                                                "Create index {name} on {table}"
-                                                            )
-                                                        }
-                                                        Change::DropIndex { table, name } => {
-                                                            format!("Drop index {name} on {table}")
-                                                        }
-                                                        Change::AddColumn { table, definition } => {
-                                                            format!(
-                                                                "Add {table}.{} · {}",
-                                                                definition.name,
-                                                                definition.data_type
-                                                            )
-                                                        }
-                                                    };
-                                                    ui.label(description);
-                                                });
-                                            }
-                                        });
-                                });
-                                if let Some(index) = remove {
-                                    self.changes.remove(index);
-                                    self.record_changes();
-                                    self.review = None;
-                                }
 
-                            }
                           });
                         });
                         if self.view == View::Data {
@@ -3786,9 +3803,7 @@ impl Rustable {
                 let edit_label = self.query_edit_target().filter(|target| !target.missing_key).map(|target| target.label.clone());
                 ui.scope_builder(egui::UiBuilder::new().max_rect(geometry.center.translate(origin)), |ui| {
                     ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
-                        if !self.changes.is_empty() && !pending {
-                            self.query_pending_changes_menu(ui);
-                        } else if let Some(table) = edit_label.filter(|_| !pending) {
+                        if let Some(table) = edit_label.filter(|_| !pending) {
                             let hint = if self.can_edit_rows() {
                                 format!("Rows from {table} · double-click a cell to edit. Changes are reviewed as SQL before saving.")
                             } else if self.safe {
@@ -3830,28 +3845,6 @@ impl Rustable {
                     });
                 });
             });
-    }
-
-    fn query_pending_changes_menu(&mut self, ui: &mut egui::Ui) {
-        let count = self.changes.len();
-        ui.menu_button(format!("Pending ({count})"), |ui| {
-            if ui
-                .add_enabled(self.pending.is_none(), egui::Button::new(format!("Review {count} changes…")))
-                .on_hover_text(format!("{} · Preview the SQL before anything runs", crate::icons::shortcut(ui.ctx(), true, "P")))
-                .clicked()
-            {
-                self.preview_changes();
-                ui.close();
-            }
-            if ui
-                .add_enabled(self.pending.is_none(), egui::Button::new("Discard"))
-                .on_hover_text(format!("{} · Discard pending changes", crate::icons::shortcut(ui.ctx(), true, "Backspace")))
-                .clicked()
-            {
-                self.discard_changes();
-                ui.close();
-            }
-        });
     }
 
     fn toggle_result_pin(&mut self) {
@@ -4471,7 +4464,7 @@ impl Rustable {
                 if ui.add(crate::icons::shortcut_button("Save", false, "S", None)).on_hover_text(format!("Save named SQL query · {}", crate::icons::shortcut(ui.ctx(), false, "S"))).clicked() {
                     self.save_query_file(ui.ctx(), false);
                 }
-                if self.pending.is_some() && ui.button("Cancel").on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() {
+                if self.pending.is_some() && ui.add(crate::icons::shortcut_button("Cancel", false, ".", None)).on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() {
                     self.request_query_cancel(ui.ctx());
                 }
             });
@@ -6701,7 +6694,7 @@ impl Rustable {
                 _ => self.workspace(ctx),
             }
         } else {
-            self.sidebar(ctx);
+            if !self.prefs.sidebar_hidden { self.sidebar(ctx); }
             self.inspector(ctx);
             self.workspace(ctx);
         }
@@ -6980,7 +6973,6 @@ struct TableControlGeometry {
 fn table_control_geometry(
     ui: &egui::Ui,
     view: View,
-    pending: usize,
     page_range: &str,
 ) -> TableControlGeometry {
     let font = egui::TextStyle::Button.resolve(ui.style());
@@ -7001,11 +6993,6 @@ fn table_control_geometry(
             28.0 + gap
         } else if view == View::Structure {
             measure("+ Column") + 12.0 + gap
-        } else {
-            0.0
-        }
-        + if pending > 0 {
-            measure(&format!("Pending ({pending})")) + 24.0 + gap * 2.0
         } else {
             0.0
         };
@@ -10617,7 +10604,7 @@ mod workspace_layout_tests {
                     .iter()
                     .filter_map(|shape| match &shape.shape {
                         egui::Shape::Text(text)
-                            if ["Data", "Pending (1)", "Import / Export"]
+                            if ["Data", "Import / Export"]
                                 .contains(&text.galley.text()) && text.pos.y > 500.0 =>
                         {
                             Some((
@@ -10629,7 +10616,7 @@ mod workspace_layout_tests {
                     })
                     .collect();
             }
-            assert_eq!(controls.len(), 3, "width {width}: {controls:?}");
+            assert_eq!(controls.len(), 2, "width {width}: {controls:?}");
             for (index, (name, rect)) in controls.iter().enumerate() {
                 assert!(
                     rect.left() >= 0.0 && rect.right() <= width && rect.bottom() <= 700.0,
@@ -13617,7 +13604,7 @@ mod query_result_editing_tests {
 
     #[test]
     fn command_save_reviews_result_edits_including_active_cell() {
-        for active_cell in [false, true] {
+        for (active_cell, preview) in [(false, false), (true, false), (false, true), (true, true)] {
             let file = tempfile::NamedTempFile::new().unwrap();
             let conn = rusqlite::Connection::open(file.path()).unwrap();
             conn.execute_batch("CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO customers VALUES(1, 'Ada');").unwrap();
@@ -13631,13 +13618,14 @@ mod query_result_editing_tests {
             if !active_cell { assert!(app.finish_cell_edit()); }
             let _ = ctx.run(egui::RawInput {
                 events: vec![egui::Event::Key {
-                    key: egui::Key::S, physical_key: None, pressed: true, repeat: false,
-                    modifiers: egui::Modifiers::COMMAND,
+                    key: if preview { egui::Key::P } else { egui::Key::S }, physical_key: None, pressed: true, repeat: false,
+                    modifiers: if preview { egui::Modifiers::COMMAND | egui::Modifiers::SHIFT } else { egui::Modifiers::COMMAND },
                 }], ..Default::default()
             }, |ctx| app.workspace_shortcuts(ctx));
             assert!(matches!(app.pending, Some(Pending::Plan(false))));
             settle(&mut app);
             assert!(app.review.is_some());
+            assert!(!app.navigator.open, "preview shortcut must not open the command palette");
             assert_eq!(app.changes.len(), 1);
             assert!(app.edit.is_none());
             // Opening the preview must not write anything yet.
@@ -13772,7 +13760,7 @@ mod query_result_editing_tests {
         assert!(app.finish_cell_edit());
         assert_eq!(app.changes.len(), 1);
         let painted = render(&mut app);
-        assert!(painted.contains("Pending (1)"), "{painted}");
+        assert!(!painted.contains("Pending (1)"), "pending actions belong in the toolbar: {painted}");
         assert!(painted.contains("Ada Lovelace"), "staged value is shown over the result: {painted}");
         // Safe mode still blocks editing query results.
         app.safe = true;

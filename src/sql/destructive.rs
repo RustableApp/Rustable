@@ -40,19 +40,29 @@ fn statement_ranges(sql: &str, dialect: Dialect) -> Vec<Range<usize>> {
 
 fn classify(text: &str, dialect: Dialect) -> Option<&'static str> {
     let body = text.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
+    // Version-conditional SQL can execute even if the AST treats it as a comment.
+    if let Dialect::Mysql(mode) = dialect
+        && let Ok(comments) = mysql::executable_comments(body, mode)
+        && let Some(reason) = comments.iter().find_map(|comment| keywords(comment)) {
+            return Some(reason);
+        }
     let parsed = match dialect {
         Dialect::Sqlite => sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SQLiteDialect {}, body),
         Dialect::Postgres => sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, body),
-        Dialect::Mysql(_) => sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::MySqlDialect {}, body),
+        Dialect::Mysql(mode) => sqlparser::parser::Parser::parse_sql(&mysql::Lexer(mode), body),
     };
     match parsed {
-        Ok(statements) if !statements.is_empty() => statements.iter().find_map(statement),
+        Ok(statements) => statements.iter().find_map(statement),
         _ => keywords(body),
     }
 }
 
-fn statement(statement: &Statement) -> Option<&'static str> {
-    match statement {
+fn statement(node: &Statement) -> Option<&'static str> {
+    match node {
+        Statement::Explain { analyze, options, statement: inner, .. }
+            if *analyze || options.as_ref().is_some_and(|options| options.iter().any(|option|
+                option.name.value.eq_ignore_ascii_case("analyze")
+                && option.arg.as_ref().is_none_or(|arg| !matches!(arg.to_string().to_ascii_lowercase().as_str(), "false" | "off" | "0")))) => statement(inner),
         Statement::Truncate(_) => Some("TRUNCATE removes every row"),
         Statement::Delete(delete) if delete.selection.is_none() => Some("DELETE without WHERE removes every row"),
         Statement::Update(update) if update.selection.is_none() => Some("UPDATE without WHERE changes every row"),
@@ -98,7 +108,7 @@ fn set_expression(expression: &SetExpr) -> Option<&'static str> {
 /// Words inside string bodies count too: a `DO $$ … DROP … $$` block is exactly
 /// the kind of statement that should be reviewed.
 fn keywords(text: &str) -> Option<&'static str> {
-    let words: Vec<String> = strip_comments(text)
+    let words: Vec<String> = text
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|word| !word.is_empty())
         .map(str::to_ascii_uppercase)
@@ -114,27 +124,8 @@ fn keywords(text: &str) -> Option<&'static str> {
     let unbounded = words.iter().enumerate().any(|(index, word)| {
         matches!(word.as_str(), "DELETE" | "UPDATE")
             && !index.checked_sub(1).is_some_and(|previous| matches!(words[previous].as_str(), "ON" | "FOR" | "BEFORE" | "AFTER" | "OF"))
-    }) && !has("WHERE");
-    unbounded.then_some("DELETE or UPDATE without WHERE and could not be fully analysed")
-}
-
-fn strip_comments(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix("--") {
-            rest = after.split_once('\n').map_or("", |(_, tail)| tail);
-            out.push('\n');
-        } else if let Some(after) = rest.strip_prefix("/*") {
-            rest = after.split_once("*/").map_or("", |(_, tail)| tail);
-            out.push(' ');
-        } else {
-            let next = rest.chars().next().unwrap_or_default();
-            out.push(next);
-            rest = &rest[next.len_utf8()..];
-        }
-    }
-    out
+    });
+    unbounded.then_some("Mentions DELETE or UPDATE and could not be fully analysed")
 }
 
 fn preview(text: &str) -> String {
@@ -161,6 +152,7 @@ mod tests {
                 "SELECT * FROM customers",
                 "SELECT 'DROP TABLE customers; DELETE FROM x'",
                 "-- DROP TABLE customers\nSELECT 1",
+                "-- DROP TABLE customers",
                 "DELETE FROM customers WHERE id = 1",
                 "UPDATE customers SET name = 'x' WHERE id = 1",
                 "INSERT INTO customers(name) VALUES ('a')",
@@ -223,6 +215,24 @@ mod tests {
         );
         assert!(keywords("CREATE TRIGGER t AFTER DELETE ON x BEGIN SELECT 1; END").is_none());
         assert!(keywords("frobnicate DELETE everything").is_some());
+    }
+
+    #[test]
+    fn executed_explain_and_opaque_blocks_are_reviewed() {
+        for sql in ["EXPLAIN ANALYZE DELETE FROM customers",
+            "EXPLAIN (ANALYZE TRUE) UPDATE customers SET name='x'",
+            "DO $$ BEGIN DELETE FROM customers; PERFORM 1 FROM settings WHERE true; END $$",
+            "DO $$ BEGIN EXECUTE '-- heading' || chr(10) || 'DELETE FROM customers'; END $$"] {
+            assert_eq!(findings(sql, Dialect::Postgres).len(), 1, "{sql}");
+        }
+        for sql in ["EXPLAIN DELETE FROM customers", "EXPLAIN (ANALYZE FALSE) DELETE FROM customers"] {
+            assert!(findings(sql, Dialect::Postgres).is_empty(), "{sql}");
+        }
+        for sql in ["/*M! DROP TABLE customers */", "/*!50000 DROP TABLE customers */",
+            "SELECT 1 /*M! ; DELETE FROM customers */"] {
+            assert!(!findings(sql, Dialect::for_engine("MariaDB")).is_empty(), "{sql}");
+        }
+        assert!(findings("SELECT '/*M! DROP TABLE t */'", Dialect::for_engine("MariaDB")).is_empty());
     }
 
     #[test]
