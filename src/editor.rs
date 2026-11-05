@@ -2,7 +2,7 @@
 use eframe::egui::{self, Color32, FontId};
 #[path = "sql_highlight.rs"]
 mod sql_highlight;
-pub use sql_highlight::{editor_layout, layout, preview};
+pub use sql_highlight::{editor_layout, layout, preview, selection_style};
 
 #[derive(Default)]
 struct TargetComputer;

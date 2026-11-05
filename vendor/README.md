@@ -236,3 +236,8 @@ are unchanged; no warning lints are suppressed.
 and below the text row. Its default preserves upstream behavior. The inspector
 field editor opts into zero extra height; hover and focused carets use the same
 geometry. Text layout, selection and other editors are unchanged.
+
+- `egui/src/style.rs` and `text_selection/visuals.rs`: opt-in
+  `Selection::preserve_text_color` skips recoloring selected glyphs, retaining SQL
+  syntax colors over the selection background. Disabled by default; Rustable
+  enables it only inside the SQL editor. No extra layout or paint pass.

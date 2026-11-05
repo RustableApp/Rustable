@@ -25,6 +25,7 @@ mod editor_language;
 mod find;
 mod fonts;
 mod icons;
+mod line_comment;
 mod native_menu;
 mod query_notification;
 mod pane_sizes;

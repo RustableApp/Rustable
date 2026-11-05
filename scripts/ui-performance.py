@@ -165,9 +165,11 @@ def main():
         try:
             # Both builds finish before any timing. Separate saved executables
             # prevent the second build from replacing the first benchmark binary.
-            target = root / 'target'
-            base_binary = build(base_path, target, logs, 'base')
-            head_binary = build(root, target, logs, 'head')
+            # Vendored crates can share Cargo package IDs across worktrees.
+            # Never let baseline artifacts satisfy candidate dependencies.
+            target = root / 'target' / 'ui-performance-build'
+            base_binary = build(base_path, target / 'base', logs, 'base')
+            head_binary = build(root, target / 'head', logs, 'head')
             for index in range(args.runs):
                 order = ('base', 'head') if index % 2 == 0 else ('head', 'base')
                 for label in order:
