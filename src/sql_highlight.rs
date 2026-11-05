@@ -20,6 +20,16 @@ pub fn layout(
     layout_rows(ui, text, width, usize::MAX, false)
 }
 
+/// Keep token colors readable over a neutral editor-only selection background.
+pub fn selection_style(visuals: &mut egui::Visuals) {
+    visuals.selection.preserve_text_color = true;
+    visuals.selection.bg_fill = if visuals.dark_mode {
+        Color32::from_gray(65)
+    } else {
+        Color32::from_rgb(213, 223, 232)
+    };
+}
+
 /// Roomier typography for the editable SQL pane; compact previews retain their density.
 pub fn editor_layout(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32) -> std::sync::Arc<egui::Galley> {
     layout_rows(ui, text, width, usize::MAX, true)
@@ -76,9 +86,9 @@ fn highlight(code: &str, dark: bool) -> LayoutJob {
         Color32::from_rgb(128, 67, 174)
     };
     let comment = if dark {
-        Color32::from_rgb(138, 149, 170)
+        Color32::from_rgb(106, 184, 112)
     } else {
-        Color32::from_rgb(116, 128, 147)
+        Color32::from_rgb(36, 113, 48)
     };
     let mut job = LayoutJob::default();
     if code.is_empty() {
@@ -249,6 +259,45 @@ const KEYWORDS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selection_preserves_token_colors_in_both_themes() {
+        for dark in [false, true] {
+            let ctx = egui::Context::default();
+            let mut visuals = if dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+            let sql = "SELECT 42; -- comment\n/* comment */";
+            let job = highlight(sql, dark);
+            for section in &job.sections {
+                if sql[section.byte_range.clone()].contains("comment") {
+                    let color = section.format.color;
+                    assert!(color.g() > color.r() && color.g() > color.b());
+                }
+            }
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                let original = ctx.fonts_mut(|fonts| fonts.layout_job(job.clone()));
+                let glyph_colors = |galley: &egui::Galley| -> Vec<Color32> {
+                    galley.rows.iter().flat_map(|row| {
+                        row.visuals.mesh.vertices[row.visuals.glyph_vertex_range.clone()]
+                            .iter().map(|vertex| vertex.color)
+                    }).collect()
+                };
+                let range = egui::text::CCursorRange::two(
+                    egui::text::CCursor::new(0),
+                    egui::text::CCursor::new(sql.chars().count()),
+                );
+                // Ordinary fields retain the existing selected-text override.
+                let mut ordinary = original.clone();
+                egui::text_selection::visuals::paint_text_selection(&mut ordinary, &visuals, &range, None);
+                assert_ne!(glyph_colors(&ordinary), glyph_colors(&original));
+                selection_style(&mut visuals);
+                let mut selected = original.clone();
+                egui::text_selection::visuals::paint_text_selection(&mut selected, &visuals, &range, None);
+                assert_eq!(glyph_colors(&selected), glyph_colors(&original));
+                assert!(selected.rows[0].visuals.mesh.vertices.iter()
+                    .any(|vertex| vertex.color == visuals.selection.bg_fill));
+            });
+        }
+    }
+
     #[test]
     fn preview_elides_long_sql_without_limiting_the_editor() {
         let ctx = egui::Context::default();

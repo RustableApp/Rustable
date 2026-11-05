@@ -596,6 +596,14 @@ impl Client {
         query::query_typed_bounded_with_prefix(&self.inner, query, params, prefix, max_rows, max_bytes).await
     }
 
+    /// Executes a parameterized row-returning query with text results in one exchange.
+    /// No result-type catalog lookups are performed, including for custom types.
+    pub async fn query_text_raw<P, I>(&self, query: &str, params: I) -> Result<SimpleQueryStream, Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        simple_query::query_text(&self.inner, query, params).await
+    }
+
     /// Executes a statement, returning the number of rows modified.
     ///
     /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list

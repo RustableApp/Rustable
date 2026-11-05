@@ -1134,6 +1134,9 @@ pub struct Selection {
 
     /// Color of selected text.
     pub stroke: Stroke,
+
+    /// Preserve syntax colors when painting text selections. Defaults to false.
+    pub preserve_text_color: bool,
 }
 
 /// Shape of the handle for sliders and similar widgets.
@@ -1502,6 +1505,7 @@ impl Default for Visuals {
 impl Selection {
     fn dark() -> Self {
         Self {
+            preserve_text_color: false,
             bg_fill: Color32::from_rgb(0, 92, 128),
             stroke: Stroke::new(1.0_f32, Color32::from_rgb(192, 222, 255)),
         }
@@ -1509,6 +1513,7 @@ impl Selection {
 
     fn light() -> Self {
         Self {
+            preserve_text_color: false,
             bg_fill: Color32::from_rgb(144, 209, 255),
             stroke: Stroke::new(1.0_f32, Color32::from_rgb(0, 83, 125)),
         }
@@ -2023,7 +2028,8 @@ impl Widgets {
 
 impl Selection {
     pub fn ui(&mut self, ui: &mut crate::Ui) {
-        let Self { bg_fill, stroke } = self;
+        let Self { bg_fill, stroke, preserve_text_color } = self;
+        ui.checkbox(preserve_text_color, "Preserve text colors");
         ui.label("Selectable labels");
 
         Grid::new("selectiom").num_columns(2).show(ui, |ui| {

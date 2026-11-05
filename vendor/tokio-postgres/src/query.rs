@@ -441,6 +441,12 @@ where
     I: IntoIterator<Item = (P, Type)>,
     I::IntoIter: ExactSizeIterator,
 {
+    encode_bind_format(statement_name, params, portal, 1, buf)
+}
+
+pub(crate) fn encode_bind_format<P, I>(statement_name: &str, params: I, portal: &str, result_format: i16, buf: &mut BytesMut) -> Result<(), Error>
+where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>, I::IntoIter: ExactSizeIterator,
+{
     let (param_formats, params): (Vec<_>, Vec<_>) = params
         .into_iter()
         .map(|(p, ty)| (p.borrow_to_sql().encode_format(&ty) as i16, (p, ty)))
@@ -460,7 +466,7 @@ where
                 Err(e)
             }
         },
-        Some(1),
+        Some(result_format),
         buf,
     );
     match r {

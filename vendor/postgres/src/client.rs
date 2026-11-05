@@ -407,6 +407,79 @@ impl Client {
         Ok(RowIter::new(self.connection.as_ref(), stream))
     }
 
+    /// Reads bounded text-format results in one extended-protocol exchange.
+    /// Unknown result types never require catalog lookups; excess rows are drained.
+    pub fn query_text_bounded<P, I>(
+        &mut self, query: &str, params: I, max_rows: usize, max_bytes: usize,
+    ) -> Result<(Vec<SimpleQueryMessage>, bool), Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        self.connection.block_on(async {
+            use futures_util::TryStreamExt;
+            let stream = self.client.query_text_raw(query, params).await?;
+            futures_util::pin_mut!(stream);
+            let mut messages = Vec::new();
+            let mut bytes = 0usize;
+            let mut count = 0usize;
+            let mut truncated = false;
+            while let Some(message) = stream.try_next().await? {
+                if let SimpleQueryMessage::Row(row) = &message {
+                    let size = row.storage_size();
+                    if truncated || count >= max_rows || size > max_bytes.saturating_sub(bytes) {
+                        truncated = true;
+                        continue;
+                    }
+                    count += 1;
+                    bytes += size;
+                }
+                messages.push(message);
+            }
+            Ok((messages, truncated))
+        })
+    }
+
+    /// Pipelines built-in-type metadata with bounded text results. Drains both
+    /// responses concurrently; unknown data types never trigger catalog queries.
+    pub fn query_text_with_metadata<P, I>(
+        &mut self, metadata: &str, metadata_params: &[(&(dyn ToSql + Sync), Type)],
+        query: &str, params: I, max_rows: usize, max_bytes: usize,
+    ) -> Result<(Vec<Row>, Result<(Vec<SimpleQueryMessage>, bool), Error>), Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        self.connection.block_on(async {
+            use futures_util::TryStreamExt;
+            let (metadata, data) = futures_util::future::join(
+                async {
+                    self.client.query_typed_raw_bounded_with_prefix(metadata,
+                        metadata_params.iter().map(|(v,t)| (*v,t.clone())), &[], 1, max_bytes)
+                        .await?.try_collect::<Vec<Row>>().await
+                },
+                async {
+                    let stream = self.client.query_text_raw(query, params).await?;
+                    futures_util::pin_mut!(stream);
+                    let mut messages = Vec::new();
+                    let mut bytes = 0usize;
+                    let mut count = 0usize;
+                    let mut truncated = false;
+                    while let Some(message) = stream.try_next().await? {
+                        if let SimpleQueryMessage::Row(row) = &message {
+                            let size = row.storage_size();
+                            if truncated || count >= max_rows || size > max_bytes.saturating_sub(bytes) {
+                                truncated = true;
+                                continue;
+                            }
+                            count += 1;
+                            bytes += size;
+                        }
+                        messages.push(message);
+                    }
+                    Ok((messages, truncated))
+                },
+            ).await;
+            Ok((metadata?, data))
+        })
+    }
+
     /// Pipelines a small metadata query and a streaming data query, each with
     /// its own Sync boundary. Both responses are retained independently so a
     /// caller can validate metadata even when the speculative data query fails.

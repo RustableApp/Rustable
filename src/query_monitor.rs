@@ -80,39 +80,80 @@ impl Rustable {
         let mut refresh = false;
         let mut cancel = None;
         egui::Window::new("Running queries").open(&mut open).collapsible(false)
-            .default_width(760.0).show(ctx, |ui| {
-                ui.weak("Active queries in this database. Visibility and cancellation depend on your PostgreSQL permissions.");
-                if busy { ui.horizontal(|ui| { ui.spinner(); ui.label("Contacting database…"); }); }
-                if let Some(message) = &self.query_monitor.message { ui.add(egui::Label::new(message).wrap().selectable(true)); }
-                egui::ScrollArea::horizontal().show(ui, |ui| {
-                    TableBuilder::new(ui).striped(true).resizable(true).sense(egui::Sense::click())
-                        .max_scroll_height(250.0)
-                        .column(TableColumn::initial(60.0)).column(TableColumn::initial(100.0))
-                        .column(TableColumn::initial(90.0)).column(TableColumn::initial(100.0))
-                        .column(TableColumn::remainder().at_least(200.0))
-                        .header(26.0, |mut header| { for label in ["PID", "User", "Elapsed", "Waiting on", "Query"] { header.col(|ui| { ui.strong(label); }); } })
-                        .body(|body| {
-                            body.rows(28.0, self.query_monitor.rows.len(), |mut row| {
-                                let index = row.index();
-                                let query = &self.query_monitor.rows[index];
-                                row.set_selected(self.query_monitor.selected == Some(index));
-                                for value in [query.pid.to_string(), query.user.clone(), query.elapsed.clone(), query.wait.clone(), query.sql.clone()] {
-                                    row.col(|ui| { ui.add(egui::Label::new(&value).truncate()).on_hover_text(&value); });
-                                }
-                                if row.response().clicked() { self.query_monitor.selected = Some(index); }
-                            });
+            .default_width(760.0).min_width(580.0).show(ctx, |ui| {
+                egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.strong("Active queries");
+                        ui.weak(format!("{}", self.query_monitor.rows.len()));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            refresh = ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked();
+                            if busy { ui.spinner(); }
                         });
-                });
-                if !busy && self.query_monitor.message.is_none() && self.query_monitor.rows.is_empty() { ui.weak("No active queries found."); }
-                ui.horizontal(|ui| {
-                    refresh = ui.add_enabled(!busy, egui::Button::new("Refresh")).clicked();
-                    if ui.add_enabled(!busy && self.query_monitor.selected.is_some(), egui::Button::new("Cancel selected query")).clicked() {
-                        cancel = self.query_monitor.selected.and_then(|index| self.query_monitor.rows.get(index)).cloned();
+                    });
+                    ui.add_space(8.0);
+                    egui::Frame::new().fill(ui.visuals().extreme_bg_color)
+                        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                        .corner_radius(6).inner_margin(8).show(ui, |ui| {
+                        if self.query_monitor.rows.is_empty() {
+                            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 180.0),
+                                egui::Layout::top_down(egui::Align::Center), |ui| {
+                                ui.add_space(58.0);
+                                ui.strong(if busy { "Loading active queries…" } else { "No active queries" });
+                                ui.add_space(4.0);
+                                ui.weak(if busy { "Contacting the database" } else { "Refresh to check for running queries." });
+                            });
+                        } else {
+                            TableBuilder::new(ui).striped(true).resizable(true).sense(egui::Sense::click())
+                                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                                .min_scrolled_height(180.0).max_scroll_height(300.0)
+                                .column(TableColumn::initial(64.0).at_least(48.0).clip(true))
+                                .column(TableColumn::initial(92.0).at_least(60.0).clip(true))
+                                .column(TableColumn::initial(92.0).at_least(60.0).clip(true))
+                                .column(TableColumn::initial(110.0).at_least(70.0).clip(true))
+                                .column(TableColumn::remainder().at_least(120.0).clip(true))
+                                .header(30.0, |mut header| {
+                                    for label in ["PID", "User", "Elapsed", "Waiting on", "Query"] {
+                                        header.col(|ui| { ui.add(egui::Label::new(RichText::new(label).strong()).truncate()); });
+                                    }
+                                })
+                                .body(|body| {
+                                    body.rows(32.0, self.query_monitor.rows.len(), |mut row| {
+                                        let index = row.index();
+                                        let query = &self.query_monitor.rows[index];
+                                        row.set_selected(self.query_monitor.selected == Some(index));
+                                        for value in [query.pid.to_string(), query.user.clone(), query.elapsed.clone(),
+                                            if query.wait.is_empty() { "—".into() } else { query.wait.clone() }, query.sql.clone()] {
+                                            row.col(|ui| { ui.add(egui::Label::new(&value).truncate()).on_hover_text(&value); });
+                                        }
+                                        if row.response().clicked() { self.query_monitor.selected = Some(index); }
+                                    });
+                                });
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.add(egui::Label::new(RichText::new("Visibility and cancellation depend on your PostgreSQL permissions.").weak().small()).wrap());
+                    if let Some(message) = &self.query_monitor.message {
+                        ui.add_space(8.0);
+                        egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(6)
+                            .inner_margin(10).show(ui, |ui| {
+                                ui.add(egui::Label::new(message).wrap().selectable(true));
+                            });
                     }
-                    if ui.add_enabled(self.pending.is_some(), egui::Button::new("Cancel this window’s operation")).clicked() {
-                        self.worker.cancel();
-                        self.query_monitor.message = Some("Cancellation requested. Waiting for the database to acknowledge it.".into());
-                    }
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(self.pending.is_some(), egui::Button::new("Cancel current operation"))
+                            .on_hover_text("Cancel the operation running in this workspace").clicked() {
+                            self.worker.cancel();
+                            self.query_monitor.message = Some("Cancellation requested. Waiting for the database to acknowledge it.".into());
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add_enabled(!busy && self.query_monitor.selected.is_some(), egui::Button::new("Cancel selected query")).clicked() {
+                                cancel = self.query_monitor.selected.and_then(|index| self.query_monitor.rows.get(index)).cloned();
+                            }
+                        });
+                    });
                 });
             });
         self.query_monitor.open = open;
