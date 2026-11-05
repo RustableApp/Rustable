@@ -41,4 +41,14 @@ Exports include loaded results, not automatically the entire database. On Window
 
 Want to build or contribute? See [development setup](docs/DEVELOPMENT.md) and [performance notes](docs/PERFORMANCE.md).
 
+## Star history
+
+<a href="https://www.star-history.com/#RustableApp/Rustable&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=RustableApp/Rustable&amp;type=Date&amp;theme=dark">
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=RustableApp/Rustable&amp;type=Date">
+    <img alt="Rustable GitHub star history" src="https://api.star-history.com/svg?repos=RustableApp/Rustable&amp;type=Date" width="800">
+  </picture>
+</a>
+
 [MIT licensed](LICENSE). Same SQL. Less ceremony.
