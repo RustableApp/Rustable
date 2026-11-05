@@ -1,6 +1,7 @@
-//! First loads fetch metadata then data. Recently visited autocommit tables pipeline fresh
-//! metadata and bounded data, validating the cached query shape before display.
+//! Sidebar hints allow a first autocommit page and fresh editing metadata to
+//! share one exchange. Unknown relations and explicit transactions validate first.
 use super::*;
+mod text;
 
 const CATALOG: &str = r#"
 WITH RECURSIVE relation AS (
@@ -29,16 +30,7 @@ SELECT r.nspname,r.relname,
  JOIN type_bases b ON b.attnum=a.attnum AND b.typbasetype=0
  LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
  WHERE a.attrelid=r.oid AND a.attnum>0 AND NOT a.attisdropped),'[]'::json)::text,
- COALESCE((SELECT pg_catalog.json_agg(pg_catalog.json_build_array(
- ci.relname,i.indisunique,i.indisprimary,i.indpred IS NOT NULL,
- pg_catalog.pg_get_indexdef(i.indexrelid),
- ARRAY(SELECT pg_catalog.pg_get_indexdef(i.indexrelid,k,true) FROM pg_catalog.generate_series(1,i.indnkeyatts) AS k),
- EXISTS(SELECT 1 FROM pg_catalog.pg_constraint con WHERE con.conindid=i.indexrelid AND con.contype IN ('u','x'))
- ) ORDER BY ci.relname)
- FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ci ON ci.oid=i.indexrelid
- WHERE i.indrelid=r.oid),'[]'::json)::text,
- COALESCE((SELECT pg_catalog.json_agg(pg_catalog.json_build_array(t.tgname,pg_catalog.pg_get_triggerdef(t.oid)) ORDER BY t.tgname)
- FROM pg_catalog.pg_trigger t WHERE t.tgrelid=r.oid AND NOT t.tgisinternal),'[]'::json)::text,
+ '[]'::text, '[]'::text,
  COALESCE((SELECT pg_catalog.json_agg(pg_catalog.json_build_object(
  'name', con.conname, 'schema', ns.nspname, 'table', target.relname,
  'columns', ARRAY(SELECT a.attname FROM unnest(con.conkey) WITH ORDINALITY k(num,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=con.conrelid AND a.attnum=k.num ORDER BY k.ord),
@@ -50,6 +42,31 @@ SELECT r.nspname,r.relname,
 FROM relation r
 "#;
 
+const DETAILS: &str = r#"
+SELECT
+ COALESCE((SELECT pg_catalog.json_agg(pg_catalog.json_build_array(
+ ci.relname,i.indisunique,i.indisprimary,i.indpred IS NOT NULL,
+ pg_catalog.pg_get_indexdef(i.indexrelid),
+ ARRAY(SELECT pg_catalog.pg_get_indexdef(i.indexrelid,k,true) FROM pg_catalog.generate_series(1,i.indnkeyatts) AS k),
+ EXISTS(SELECT 1 FROM pg_catalog.pg_constraint con WHERE con.conindid=i.indexrelid AND con.contype IN ('u','x'))
+ ) ORDER BY ci.relname)
+ FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class ci ON ci.oid=i.indexrelid
+ WHERE i.indrelid=r.oid),'[]'::json)::text,
+ COALESCE((SELECT pg_catalog.json_agg(pg_catalog.json_build_array(t.tgname,pg_catalog.pg_get_triggerdef(t.oid)) ORDER BY t.tgname)
+ FROM pg_catalog.pg_trigger t WHERE t.tgrelid=r.oid AND NOT t.tgisinternal),'[]'::json)::text
+FROM pg_catalog.pg_class r WHERE r.oid=pg_catalog.to_regclass($1)
+"#;
+
+pub(super) fn details(driver: &mut PostgresDriver, table: &str) -> Result<(Vec<Index>, Vec<Object>), String> {
+    driver.check_tunnel()?;
+    let _watch = driver.watch();
+    let row = driver.client.query_typed_raw_bounded_with_prefix(
+        DETAILS, [(table, Type::TEXT)], &[], 1, BYTE_LIMIT,
+    ).map_err(error)?.collect::<Vec<_>>().map_err(error)?
+        .into_iter().next().ok_or("Table no longer exists")?;
+    parse_details(row.get(0), row.get(1))
+}
+
 type CatalogColumn = (String, String, bool, String, bool, bool, u32, u32);
 type CatalogIndex = (String, bool, bool, bool, String, Vec<String>, bool);
 
@@ -57,6 +74,11 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
     driver.check_tunnel()?;
     let _watch = driver.watch();
     let started = Instant::now();
+    if driver.client.transaction_status() == Some(b'I')
+        && let Some(hint) = driver.browse_hints.iter().find(|o| o.name == request.table).cloned()
+    {
+        return text::browse(driver, request, hint, started);
+    }
     // Only speculate in autocommit: stale-column errors must never abort an
     // explicit transaction. Keep up to 16 recently used table shapes.
     let cached = driver
@@ -122,71 +144,15 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
             },
         )
         .collect::<Vec<_>>();
-    let mut sql = format!("SELECT {projection} FROM {table}");
-    let mut parameters = Vec::new();
-    let mut values: Vec<(&(dyn ToSql + Sync), Type)> = Vec::new();
-    if let Some(column) = &request.filter_column {
-        if !columns.iter().any(|c| &c.name == column) {
-            if pipelined {
-                driver
-                    .browse_catalog
-                    .retain(|(name, _)| name != &request.table);
-                return browse(driver, request);
-            }
-            return Err("Filter column no longer exists".into());
+    let (sql, parameters) = match query(request, &columns, &table, &projection) {
+        Ok(query) => query,
+        Err(_) if pipelined => {
+            driver.browse_catalog.retain(|(name,_)| name != &request.table);
+            return browse(driver, request);
         }
-        sql.push_str(&format!(
-            " WHERE pg_catalog.strpos(CAST({} AS text), $1) > 0",
-            quote(column)
-        ));
-        parameters.push(Value::Text(request.filter.clone()));
-        values.push((&request.filter, Type::TEXT));
-    }
-    let predicate = crate::db::filters::predicate(
-        &request.filters,
-        &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
-        crate::sql::Dialect::Postgres,
-    )?;
-    if !predicate.is_empty() {
-        sql.push_str(if request.filter_column.is_some() {
-            " AND "
-        } else {
-            " WHERE "
-        });
-        sql.push_str(&predicate);
-    }
-    if let Some((column, descending)) = request.sort.clone().or_else(|| {
-        columns
-            .iter()
-            .find(|c| c.pk)
-            .map(|c| (c.name.clone(), false))
-    }) {
-        if !columns.iter().any(|c| c.name == column) {
-            if pipelined {
-                driver
-                    .browse_catalog
-                    .retain(|(name, _)| name != &request.table);
-                return browse(driver, request);
-            }
-            return Err("Sort column no longer exists".into());
-        }
-        sql.push_str(&format!(
-            " ORDER BY {table}.{} {}",
-            quote(&column),
-            if descending { "DESC" } else { "ASC" }
-        ));
-    }
-    let limit = (request.page_size() + 1) as i64;
-    let offset = i64::try_from(request.offset).map_err(|_| "Page offset is too large")?;
-    sql.push_str(&format!(
-        " LIMIT ${} OFFSET ${}",
-        values.len() + 1,
-        values.len() + 2
-    ));
-    values.push((&limit, Type::INT8));
-    values.push((&offset, Type::INT8));
-    parameters.push(Value::Integer(limit));
-    parameters.push(Value::Integer(offset));
+        Err(error) => return Err(error),
+    };
+    let values = bind_values(&parameters);
     let rows = if pipelined {
         let (fresh, rows) = driver
             .client
@@ -223,17 +189,117 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         ).map_err(error)?
     };
     let names = rows.columns().iter().map(|c| c.name().to_owned()).collect();
-    let mut grid = collect(rows, names, request.page_size(), BYTE_LIMIT, &driver.cancel)?;
+    let grid = collect(rows, names, request.page_size(), BYTE_LIMIT, &driver.cancel)?;
+    finish(driver, request, row, grid, columns, sql, parameters, started)
+}
+
+fn bind_values(parameters: &[Value]) -> Vec<(&(dyn ToSql + Sync), Type)> {
+    parameters.iter().map(|v| match v {
+        Value::Text(v) => (v as &(dyn ToSql + Sync), Type::TEXT),
+        Value::Integer(v) => (v as &(dyn ToSql + Sync), Type::INT8),
+        _ => unreachable!("browse parameters are text, limit and offset"),
+    }).collect()
+}
+
+fn query(request: &Browse, columns: &[Column], table: &str, projection: &str) -> Result<(String, Vec<Value>), String> {
+    let mut sql = format!("SELECT {projection} FROM {table}");
+    let mut parameters = Vec::new();
+
+    if let Some(column) = &request.filter_column {
+        if !columns.iter().any(|c| &c.name == column) {
+            return Err("Filter column no longer exists".into());
+        }
+        sql.push_str(&format!(
+            " WHERE pg_catalog.strpos(CAST({} AS text), $1) > 0",
+            quote(column)
+        ));
+        parameters.push(Value::Text(request.filter.clone()));
+
+    }
+    let predicate = crate::db::filters::predicate(
+        &request.filters,
+        &columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        crate::sql::Dialect::Postgres,
+    )?;
+    if !predicate.is_empty() {
+        sql.push_str(if request.filter_column.is_some() {
+            " AND "
+        } else {
+            " WHERE "
+        });
+        sql.push_str(&predicate);
+    }
+    if let Some((column, descending)) = request.sort.clone().or_else(|| {
+        columns
+            .iter()
+            .find(|c| c.pk)
+            .map(|c| (c.name.clone(), false))
+    }) {
+        if !columns.iter().any(|c| c.name == column) {
+            return Err("Sort column no longer exists".into());
+        }
+        sql.push_str(&format!(
+            " ORDER BY {table}.{} {}",
+            quote(&column),
+            if descending { "DESC" } else { "ASC" }
+        ));
+    }
+    let limit = (request.page_size() + 1) as i64;
+    let offset = i64::try_from(request.offset).map_err(|_| "Page offset is too large")?;
+    sql.push_str(&format!(
+        " LIMIT ${} OFFSET ${}",
+        parameters.len() + 1,
+        parameters.len() + 2
+    ));
+    parameters.push(Value::Integer(limit));
+    parameters.push(Value::Integer(offset));
+    Ok((sql, parameters))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish(driver: &mut PostgresDriver, request: &Browse, row: Row, mut grid: Grid,
+    columns: Vec<Column>, sql: String, parameters: Vec<Value>, started: Instant) -> Result<TableData, String> {
     let estimate = row
         .get::<_, Option<f64>>(2)
         .filter(|value| value.is_finite() && *value >= 0.0)
         .filter(|_| request.filter_column.is_none() && !request.filters.iter().any(|f| f.enabled))
         .map(|value| value.round() as u64);
-    let raw_indexes: Vec<CatalogIndex> =
-        serde_json::from_str(row.get(4)).map_err(|e| format!("Invalid index metadata: {e}"))?;
-    let raw_triggers: Vec<(String, String)> =
-        serde_json::from_str(row.get(5)).map_err(|e| format!("Invalid trigger metadata: {e}"))?;
     grid.set_browse_total(request.offset, estimate);
+    let indexes = Vec::new();
+    let triggers = Vec::new();
+
+    driver
+        .browse_catalog
+        .retain(|(name, _)| name != &request.table);
+    let foreign_keys = serde_json::from_str(row.get(6))
+        .map_err(|e| format!("Invalid foreign key metadata: {e}"))?;
+    driver.browse_hints.retain(|o| o.name != request.table);
+    driver.browse_hints.push(Object {
+        name: request.table.clone(), schema: Some(row.get(0)), display_name: Some(row.get(1)),
+        kind: "table".into(), columns: columns.clone(), metadata_error: None, ddl: String::new(),
+    });
+    driver.browse_catalog.push((request.table.clone(), row));
+    if driver.browse_catalog.len() > 16 {
+        driver.browse_catalog.remove(0);
+    }
+    grid.elapsed = started.elapsed();
+    Ok(TableData {
+        details_loaded: false,
+        foreign_keys,
+        sql,
+        parameters,
+        grid,
+        columns,
+        indexes,
+        triggers,
+    })
+}
+
+fn parse_details(index_json: &str, trigger_json: &str) -> Result<(Vec<Index>, Vec<Object>), String> {
+    let raw_indexes: Vec<CatalogIndex> =
+        serde_json::from_str(index_json).map_err(|e| format!("Invalid index metadata: {e}"))?;
+    let raw_triggers: Vec<(String, String)> =
+        serde_json::from_str(trigger_json).map_err(|e| format!("Invalid trigger metadata: {e}"))?;
     let indexes = raw_indexes
         .into_iter()
         .map(
@@ -267,25 +333,7 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         })
         .collect();
 
-    driver
-        .browse_catalog
-        .retain(|(name, _)| name != &request.table);
-    let foreign_keys = serde_json::from_str(row.get(6))
-        .map_err(|e| format!("Invalid foreign key metadata: {e}"))?;
-    driver.browse_catalog.push((request.table.clone(), row));
-    if driver.browse_catalog.len() > 16 {
-        driver.browse_catalog.remove(0);
-    }
-    grid.elapsed = started.elapsed();
-    Ok(TableData {
-        foreign_keys,
-        sql,
-        parameters,
-        grid,
-        columns,
-        indexes,
-        triggers,
-    })
+    Ok((indexes, triggers))
 }
 
 #[cfg(test)]
@@ -373,14 +421,16 @@ mod tests {
                 Value::Text("{1,2}".into())
             ]
         );
-        assert_eq!(initial.indexes.len(), 2);
+        assert!(!initial.details_loaded);
+        assert!(initial.indexes.is_empty());
+        let (indexes, triggers) = driver.table_details(&request.table).unwrap();
+        assert_eq!(indexes.len(), 2);
         assert!(
-            initial
-                .indexes
+            indexes
                 .iter()
                 .any(|i| i.partial && i.columns[0].contains("lower"))
         );
-        assert_eq!(initial.triggers.len(), 1);
+        assert_eq!(triggers.len(), 1);
         assert!(initial.columns[0].pk);
         assert!(initial.columns[1].default.contains("hello"));
         // Visiting another table must retain the first table's validated hint.
@@ -441,8 +491,9 @@ mod tests {
         let refreshed = driver.browse(&request).unwrap();
         assert_eq!(refreshed.columns.len(), 5);
         assert_eq!(refreshed.grid.rows[0][4], Value::Integer(7));
-        assert_eq!(refreshed.indexes.len(), 1);
-        assert!(refreshed.triggers.is_empty());
+        let (indexes, triggers) = driver.table_details(&request.table).unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert!(triggers.is_empty());
         // Repeated reads validate the catalog without an extra network wait.
         assert_eq!(
             driver.browse(&request).unwrap().grid.rows,

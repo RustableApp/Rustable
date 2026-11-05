@@ -1,5 +1,5 @@
 //! PostgreSQL work stays on the database owner thread. Editor statements use a
-//! description followed by execution; rows are streamed within UI limits.
+//! single-exchange typed protocol; table browsing uses bounded text results.
 mod array;
 mod browse;
 mod changes;
@@ -24,6 +24,7 @@ pub(super) struct PostgresDriver {
     tunnel: Option<crate::ssh_tunnel::Tunnel>,
     schemas: SchemaCatalog,
     browse_catalog: Vec<(String, Row)>,
+    browse_hints: Vec<Object>,
 }
 
 impl PostgresDriver {
@@ -63,6 +64,7 @@ impl PostgresDriver {
             tunnel,
             schemas: SchemaCatalog::default(),
             browse_catalog: Vec::new(),
+            browse_hints: Vec::new(),
         })
     }
 
@@ -115,7 +117,7 @@ impl PostgresDriver {
         // Relation and attribute rows share one catalog snapshot and one typed
         // exchange. LEFT JOIN retains relations with no user columns. Stream
         // directly into the owned catalog instead of retaining a second row Vec.
-        let mut rows = self.client.query_typed_raw(
+        let mut rows = self.client.query_typed_raw_bounded_with_prefix(
             "SELECT c.relname,c.relkind::text,a.attname,pg_catalog.format_type(a.atttypid,a.atttypmod),a.attnotnull, \
              COALESCE(pg_catalog.pg_get_expr(d.adbin,d.adrelid),''), \
              EXISTS(SELECT 1 FROM pg_catalog.pg_index i WHERE i.indrelid=c.oid AND i.indisprimary AND a.attnum=ANY(i.indkey)), \
@@ -124,7 +126,7 @@ impl PostgresDriver {
              LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped \
              LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum \
              WHERE n.nspname=$1 AND c.relkind IN ('r','p','v','m','f') ORDER BY c.relname,a.attnum",
-            [(&schema as &(dyn ToSql + Sync), Type::TEXT)],
+            [(&schema as &(dyn ToSql + Sync), Type::TEXT)], &[], usize::MAX, BYTE_LIMIT,
         ).map_err(error)?;
         let mut objects: Vec<Object> = Vec::new();
         while let Some(row) = rows.next().map_err(error)? {
@@ -155,6 +157,8 @@ impl PostgresDriver {
                 });
             }
         }
+        drop(rows);
+        self.browse_hints = objects.clone();
         Ok(objects)
     }
 
@@ -174,6 +178,10 @@ impl PostgresDriver {
 }
 
 impl Driver for PostgresDriver {
+    fn table_details(&mut self, table: &str) -> Result<(Vec<Index>, Vec<Object>), String> {
+        browse::details(self, table)
+    }
+
     fn ensure_connected(&mut self) -> Result<(), String> {
         let tunnel_lost = self.tunnel.as_mut().is_some_and(|tunnel| tunnel.check_alive().is_err());
         if !self.client.is_closed() && !tunnel_lost {
@@ -1492,7 +1500,7 @@ mod live_tests {
             vec!["id", "tags", "mood", "score", "duration", "span", "bytes"]
         );
         driver.client.batch_execute("ALTER TABLE complex_browse ADD CONSTRAINT score_unique UNIQUE(score); CREATE INDEX ordinary_tags ON complex_browse(tags)").unwrap();
-        let indexes = driver.browse(&request).unwrap().indexes;
+        let (indexes, _) = driver.table_details(&request.table).unwrap();
         assert_eq!(
             indexes
                 .iter()

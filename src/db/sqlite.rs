@@ -696,7 +696,7 @@ fn browse_table_after(
         }
         let key = foreign_keys.last_mut().unwrap(); key.columns.push(source); key.referenced_columns.push(target);
     }
-    Ok(TableData {
+    Ok(TableData { details_loaded: true,
         foreign_keys,
         sql,
         parameters: params,

@@ -471,6 +471,8 @@ pub struct Rustable {
     objects: Vec<Object>,
     browse: Browse,
     columns: Vec<Column>,
+    details_loaded: bool,
+    details_requested: bool,
     indexes: Vec<db::Index>,
     triggers: Vec<Object>,
     foreign_keys: Vec<db::foreign_keys::ForeignKey>,
@@ -1081,6 +1083,8 @@ impl Rustable {
             objects: vec![],
             browse: Browse::default(),
             columns: vec![],
+            details_loaded: true,
+            details_requested: false,
             indexes: vec![],
             triggers: vec![],
             foreign_keys: vec![],
@@ -1371,6 +1375,7 @@ impl Rustable {
                     }
                 }
                 Ok(Payload::Table {
+                    details_loaded,
                     sql: _,
                     parameters: _,
                     grid,
@@ -1387,6 +1392,8 @@ impl Rustable {
                     self.table = Arc::new(grid);
                     self.table_loaded = true;
                     self.columns = columns;
+                    self.details_loaded = details_loaded;
+                    self.details_requested = false;
                     self.indexes = indexes;
                     self.triggers = triggers;
                     self.foreign_keys = foreign_keys;
@@ -1529,6 +1536,15 @@ impl Rustable {
                     }
                     self.query_library.invalidate();
                     self.status = format!("Saved SQL: {}", path.display())
+                }
+                Ok(Payload::TableDetails { name, indexes, triggers }) => {
+                    if name == self.browse.table {
+                        self.indexes = indexes;
+                        self.triggers = triggers;
+                        self.details_loaded = true;
+                        self.status = "Table details loaded".into();
+                        self.cache_table_result();
+                    }
                 }
                 Ok(Payload::Definition { name, sql }) => {
                     self.ddl_preview = Some((name, sql));
@@ -2143,6 +2159,10 @@ impl Rustable {
             && (ctx.content_rect().width() >= 720.0 || self.compact_panel == 1)
             && self.query_library.renaming_inline();
         if self.dialog_owns_workspace_shortcuts() || renaming_query { return; }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Period)) {
+            self.request_query_cancel(ctx);
+            return;
+        }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::P)) {
             self.open_navigator(false);
             return;
@@ -2578,7 +2598,7 @@ impl Rustable {
         let right_controls = crate::icons::toolbar_group_width(3) + crate::icons::toolbar_group_width(2) + 6.0;
         let width = (ui.available_width() - right_controls - ui.spacing().item_spacing.x).max(1.0);
         let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(width, 27.0), egui::Sense::click());
+            ui.allocate_exact_size(egui::vec2(width, crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::click());
         let painter = ui.painter().with_clip_rect(rect);
         let background = if self.pending.is_some() {
             Color32::from_rgb(
@@ -2589,7 +2609,7 @@ impl Rustable {
         } else {
             fill
         };
-        painter.rect_filled(rect, 13.0, background);
+        painter.rect_filled(rect, rect.height() / 2.0, background);
         if self.pending.is_some() {
             // Query totals and network throughput are unknown here. Animate a
             // repeating activity pattern, never an invented completion fraction.
@@ -2674,7 +2694,7 @@ impl Rustable {
         if self.pending.is_some()
             && ui
                 .add(crate::icons::widget("x"))
-                .on_hover_text("Cancel database operation")
+                .on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, ".")))
                 .clicked()
         {
             self.request_query_cancel(ui.ctx());
@@ -2702,7 +2722,7 @@ impl Rustable {
                                 }
                             }
                         });
-                        if self.pending.is_some() && ui.button("Cancel").clicked() { self.request_query_cancel(ctx); }
+                        if self.pending.is_some() && ui.button("Cancel").on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() { self.request_query_cancel(ctx); }
                     });
                     return;
                 }
@@ -3466,6 +3486,21 @@ impl Rustable {
                     });
             }
             ui.set_clip_rect(ui.clip_rect().intersect(ui.available_rect_before_wrap()));
+            if matches!(self.view, View::Indexes | View::Triggers) && self.table_loaded && !self.details_loaded {
+                if self.pending.is_none() && !self.details_requested {
+                    self.details_requested = true;
+                    self.dispatch(Command::TableDetails(self.browse.table.clone()), Pending::Export);
+                }
+                egui::Frame::new().inner_margin(12).show(ui, |ui| {
+                    if self.pending.is_some() {
+                        ui.spinner();
+                        ui.label("Loading table details…");
+                    } else if ui.button("Retry loading table details").clicked() {
+                        self.details_requested = false;
+                    }
+                });
+                return;
+            }
             if self.view == View::Indexes {
                 self.index_view(ui);
                 return;
@@ -3990,12 +4025,20 @@ impl Rustable {
                         .fill(editor_background)
                         .corner_radius(3.0)
                         .show(ui, |ui| {
+                            crate::editor::selection_style(ui.visuals_mut());
                             let slot = ui.painter().add(egui::Shape::Noop);
                             let editor_id =
                                 ui.make_persistent_id(egui::Id::new(("query-editor", tab.id)));
                             if ui.is_enabled() && ui.memory(|m| m.has_focus(editor_id))
                                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I)) {
                                 tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
+                            }
+                            if ui.is_enabled() && ui.memory(|m| m.has_focus(editor_id))
+                                && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash)) {
+                                let dialect = self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine));
+                                let mut state = egui::TextEdit::load_state(ui.ctx(), editor_id).unwrap_or_default();
+                                toggle_line_comments(tab, dialect, &mut state);
+                                state.store(ui.ctx(), editor_id);
                             }
                             let was_formatting = tab.formatter.busy();
                             if let Some(formatted) = tab.formatter.poll(&tab.sql) {
@@ -4258,7 +4301,7 @@ impl Rustable {
                 if ui.add(crate::icons::shortcut_button("Save", false, "S", None)).on_hover_text(format!("Save named SQL query · {}", crate::icons::shortcut(ui.ctx(), false, "S"))).clicked() {
                     self.save_query_file(ui.ctx(), false);
                 }
-                if self.pending.is_some() && ui.button("Cancel").clicked() {
+                if self.pending.is_some() && ui.button("Cancel").on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() {
                     self.request_query_cancel(ui.ctx());
                 }
             });
@@ -6609,6 +6652,21 @@ fn apply_formatted_sql(tab: &mut QueryTab, formatted: crate::sql_format::Formatt
     tab.focus_editor = true;
 }
 
+fn toggle_line_comments(tab: &mut QueryTab, dialect: crate::sql::Dialect, state: &mut egui::text_edit::TextEditState) {
+    let cursor = |range: &std::ops::Range<usize>| egui::text::CCursorRange::two(
+        egui::text::CCursor::new(range.start), egui::text::CCursor::new(range.end));
+    let (text, selection) = crate::line_comment::toggle(&tab.sql, tab.cursor.clone(), dialect);
+    let mut undoer = state.undoer();
+    undoer.add_undo(&(cursor(&tab.cursor), tab.sql.clone()));
+    tab.sql = text;
+    tab.cursor = selection;
+    state.cursor.set_char_range(Some(cursor(&tab.cursor)));
+    undoer.add_undo(&(cursor(&tab.cursor), tab.sql.clone()));
+    state.set_undoer(undoer);
+    tab.completion.dismiss();
+    tab.refresh_dirty();
+}
+
 fn accept_completion(tab: &mut QueryTab, value: &str, state: &mut egui::text_edit::TextEditState) {
     let mut undoer = state.undoer();
     let before = egui::text::CCursorRange::two(
@@ -7686,6 +7744,7 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
         TextEdit::singleline(&mut draft.text)
             .hint_text(RichText::new(if draft.kind == 5 { "DEFAULT" } else if draft.kind == 0 { "NULL" } else { "" }).color(ui.visuals().weak_text_color()))
             .frame(!draft.inspector)
+            .cursor_vertical_padding(if draft.inspector { 0.0 } else { 1.5 })
             .margin(if draft.inspector { egui::Margin::ZERO } else { egui::Margin::symmetric(4, 2) })
             .vertical_align(egui::Align::Center)
             .id(id)
@@ -8380,6 +8439,9 @@ mod interaction_tests {
             samples.sort_by(f64::total_cmp);
             event_samples.sort_by(f64::total_cmp);
             tessellation_samples.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("grid/{name}/layout"), &samples);
+            crate::ui_benchmark::report(&format!("grid/{name}/wheel_layout"), &event_samples);
+            crate::ui_benchmark::report(&format!("grid/{name}/tessellation"), &tessellation_samples);
             println!("wide grid {name} CPU frame ms: p50={:.3} p95={:.3}",samples[samples.len()/2],samples[samples.len()*95/100]);
             println!("  wheel-event layout p95={:.3} ms; tessellation p95={:.3} ms", event_samples[event_samples.len()*95/100], tessellation_samples[tessellation_samples.len()*95/100]);
         }
@@ -9776,6 +9838,39 @@ mod workspace_layout_tests {
     }
 
     #[test]
+    fn lazy_details_load_in_workspace_without_inspector_and_do_not_retry_each_frame() {
+        for view in [View::Indexes, View::Triggers] {
+            let ctx = egui::Context::default();
+            let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+            app.browse.table = "details_fixture".into();
+            app.table_loaded = true;
+            app.details_loaded = false;
+            let frame = |app: &mut Rustable| {
+                ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0))),
+                    ..Default::default()
+                }, |ctx| app.workspace(ctx))
+            };
+            app.view = View::Data;
+            let _ = frame(&mut app);
+            assert!(app.pending.is_none());
+            app.view = view;
+            let output = frame(&mut app);
+            assert!(matches!(app.pending, Some(Pending::Export)));
+            let mut text = Vec::new();
+            for shape in &output.shapes { text_positions(&shape.shape, &mut text); }
+            assert!(text.iter().any(|(text,_)| text == "Loading table details…"));
+            // A failed response must offer a retry, never loop requests.
+            app.pending = None;
+            let output = frame(&mut app);
+            assert!(app.pending.is_none());
+            text.clear();
+            for shape in &output.shapes { text_positions(&shape.shape, &mut text); }
+            assert!(text.iter().any(|(text,_)| text == "Retry loading table details"));
+        }
+    }
+
+    #[test]
     fn beautify_shortcut_is_one_undoable_editor_change() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
@@ -9809,6 +9904,36 @@ mod workspace_layout_tests {
         assert_eq!(app.tabs[0].sql, original);
         frame(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
         assert_eq!(app.tabs[0].sql, formatted);
+    }
+    #[test]
+    fn comment_shortcut_toggles_caret_line_in_session_dialect_and_undoes() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
+        app.session_dialect = Some(crate::sql::Dialect::Mysql(Default::default()));
+        let original = "SELECT 1;\n# SELECT 2;";
+        app.tabs[0].sql = original.into();
+        app.show_query();
+        let frame = |app: &mut Rustable, events| {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0))),
+                events, ..Default::default()
+            }, |ctx| app.workspace(ctx));
+        };
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![]);
+        let end = original.chars().count();
+        assert_eq!(app.tabs[0].cursor, end..end);
+        // MySQL `#` on the caret line counts as a comment, so the first press uncomments.
+        frame(&mut app, vec![key(egui::Key::Slash, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.tabs[0].sql, "SELECT 1;\nSELECT 2;");
+        frame(&mut app, vec![key(egui::Key::Slash, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.tabs[0].sql, "SELECT 1;\n-- SELECT 2;");
+        frame(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.tabs[0].sql, "SELECT 1;\nSELECT 2;");
+        frame(&mut app, vec![key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        assert_eq!(app.tabs[0].sql, original);
     }
     #[test]
     fn completion_tab_accepts_and_undo_redo_preserve_editor_caret() {
@@ -9956,6 +10081,7 @@ mod workspace_layout_tests {
                     if frame >= 20 { samples.push(started.elapsed().as_secs_f64()*1000.0); }
                 }
                 samples.sort_by(f64::total_cmp);
+                crate::ui_benchmark::report(&format!("workspace/{column_count}/{inspector}"), &samples);
                 println!("workspace selection {column_count} columns inspector={inspector}: CPU layout+tessellation p50={:.3} p95={:.3} ms", samples[samples.len()/2], samples[samples.len()*95/100]);
             }
         }
@@ -10027,6 +10153,7 @@ mod workspace_layout_tests {
                 if frame >= 20 { times.push(start.elapsed().as_secs_f64() * 1000.0); }
             }
             times.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("sidebar/{count}"), &times);
             println!("sidebar {count} objects p50={:.3} p95={:.3} ms", times[50], times[95]);
         }
     }

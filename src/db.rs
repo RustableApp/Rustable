@@ -102,6 +102,10 @@ trait Driver: Send {
     }
     fn execute(&mut self, sql: &str, safe: bool, cancel: &AtomicBool) -> ScriptResult;
     fn browse(&mut self, request: &Browse) -> Result<TableData, String>;
+    fn table_details(&mut self, table: &str) -> Result<(Vec<Index>, Vec<Object>), String> {
+        let result = self.browse(&Browse { table: table.into(), ..Browse::default() })?;
+        Ok((result.indexes, result.triggers))
+    }
     fn validate_export_path(&self, _path: &std::path::Path) -> Result<(), String> {
         Ok(())
     }
@@ -210,6 +214,7 @@ impl Grid {
 
 #[derive(Debug)]
 struct TableData {
+    details_loaded: bool,
     sql: String,
     parameters: Vec<Value>,
     grid: Grid,
@@ -222,6 +227,7 @@ struct TableData {
 impl From<TableData> for Payload {
     fn from(table: TableData) -> Self {
         Self::Table {
+            details_loaded: table.details_loaded,
             sql: table.sql,
             parameters: table.parameters,
             grid: table.grid,
@@ -273,6 +279,7 @@ impl Browse {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum Command {
     Definition(String),
+    TableDetails(String),
     ListDatabases,
     RefreshSchema,
     SelectSchema(String),
@@ -335,6 +342,7 @@ impl Command {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum Payload {
     Definition { name: String, sql: String },
+    TableDetails { name: String, indexes: Vec<Index>, triggers: Vec<Object> },
     Databases(Vec<String>),
     Schema {
         objects: Vec<Object>,
@@ -371,7 +379,7 @@ pub enum Payload {
         schemas: SchemaCatalog,
     },
     Table {
-        sql: String,
+        details_loaded: bool,        sql: String,
         parameters: Vec<Value>,
         grid: Grid,
         columns: Vec<Column>,
@@ -701,6 +709,7 @@ fn handle(
             }
             Ok(Payload::ImportTarget(object))
         }
+        Command::TableDetails(name) => driver.table_details(&name).map(|(indexes,triggers)| Payload::TableDetails { name, indexes, triggers }),
         Command::Definition(name) => driver.definition(&name).map(|sql| Payload::Definition { name, sql }),
         Command::ListDatabases => driver.databases().map(Payload::Databases),
         Command::RefreshSchema => {

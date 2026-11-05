@@ -27,6 +27,7 @@ mod find;
 mod fonts;
 mod icons;
 mod json_editor;
+mod line_comment;
 mod native_menu;
 mod query_notification;
 mod pane_sizes;
@@ -126,3 +127,6 @@ pub(crate) fn browser_error(error: wasm_bindgen::JsValue) -> String {
     }).filter(|message| !message.trim().is_empty()).unwrap_or_else(|| "Browser operation failed".into());
     message.chars().take(500).collect()
 }
+
+#[cfg(test)]
+mod ui_benchmark;
