@@ -1,11 +1,13 @@
 //! Shared Lucide artwork, cached at the display pixel density. See assets/icons/lucide/LICENSE.
 use eframe::egui;
+pub const TOOLBAR_GROUP_HEIGHT: f32 = 32.0;
 pub const TOOLBAR_BUTTON: egui::Vec2 = egui::vec2(37.0, 24.0);
 pub const fn toolbar_group_width(count: usize) -> f32 { count as f32 * TOOLBAR_BUTTON.x + 4.0 }
 pub fn paint(painter: &egui::Painter, center: egui::Pos2, name: &str, size: f32, color: egui::Color32) {
     let (uri, bytes): (&str, &'static [u8]) = match name {
         "arrow-right" => ("bytes://lucide/arrow-right.svg", include_bytes!("../assets/icons/lucide/arrow-right.svg")),
         "clipboard" => ("bytes://lucide/clipboard.svg", include_bytes!("../assets/icons/lucide/clipboard.svg")),
+        "calendar" => ("bytes://lucide/calendar.svg", include_bytes!("../assets/icons/lucide/calendar.svg")),
         "check" => ("bytes://lucide/check.svg", include_bytes!("../assets/icons/lucide/check.svg")),
         "chevron-down" => ("bytes://lucide/chevron-down.svg", include_bytes!("../assets/icons/lucide/chevron-down.svg")),
         "chevron-left" => ("bytes://lucide/chevron-left.svg", include_bytes!("../assets/icons/lucide/chevron-left.svg")),
@@ -68,7 +70,7 @@ pub fn widget(name: &'static str) -> impl egui::Widget {
 
 /// Fixed outer geometry; borders are painted inside and never participate in layout.
 pub fn toolbar_group<R>(ui: &mut egui::Ui, count: usize, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(toolbar_group_width(count), 32.0), egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(toolbar_group_width(count), TOOLBAR_GROUP_HEIGHT), egui::Sense::hover());
     ui.painter().rect(rect, 16.0, ui.visuals().widgets.inactive.weak_bg_fill,
         ui.visuals().widgets.noninteractive.bg_stroke, egui::StrokeKind::Inside);
     let inner = ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(2.0, 4.0)))

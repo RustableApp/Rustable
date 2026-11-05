@@ -83,6 +83,7 @@ pub struct TextEdit<'t> {
     desired_height_rows: usize,
     event_filter: EventFilter,
     cursor_at_end: bool,
+    cursor_vertical_padding: f32,
     min_size: Vec2,
     align: Align2,
     clip_text: bool,
@@ -142,6 +143,7 @@ impl<'t> TextEdit<'t> {
                 ..Default::default()
             },
             cursor_at_end: true,
+            cursor_vertical_padding: 1.5,
             min_size: Vec2::ZERO,
             align: Align2::LEFT_TOP,
             clip_text: false,
@@ -332,6 +334,13 @@ impl<'t> TextEdit<'t> {
         self
     }
 
+    /// Extra caret height above and below its text row, in points (default 1.5).
+    /// Set to zero for compact fields whose caret should match the row height.
+    pub fn cursor_vertical_padding(mut self, padding: f32) -> Self {
+        self.cursor_vertical_padding = padding.max(0.0);
+        self
+    }
+
     /// When `true` (default), the cursor will initially be placed at the end of the text.
     ///
     /// When `false`, the cursor will initially be placed at the beginning of the text.
@@ -487,6 +496,7 @@ impl TextEdit<'_> {
             desired_height_rows,
             event_filter,
             cursor_at_end,
+            cursor_vertical_padding,
             min_size,
             align,
             clip_text,
@@ -589,7 +599,8 @@ impl TextEdit<'_> {
             {
                 // text cursor preview:
                 let cursor_rect = TSTransform::from_translation(rect.min.to_vec2())
-                    * cursor_rect(&galley, &cursor_at_pointer, row_height);
+                    * cursor_rect(&galley, &cursor_at_pointer, row_height)
+                        .expand2(vec2(0.0, cursor_vertical_padding - 1.5));
                 text_selection::visuals::paint_cursor_end(&painter, ui.visuals(), cursor_rect);
             }
 
@@ -760,6 +771,7 @@ impl TextEdit<'_> {
 
             if has_focus && let Some(cursor_range) = state.cursor.range(&galley) {
                 let primary_cursor_rect = cursor_rect(&galley, &cursor_range.primary, row_height)
+                    .expand2(vec2(0.0, cursor_vertical_padding - 1.5))
                     .translate(galley_pos.to_vec2());
 
                 if response.changed() || selection_changed {

@@ -18,6 +18,9 @@ pub struct Completion {
     server_edits: std::collections::HashMap<String, (std::ops::Range<usize>, String)>,
     explicit_requested: bool,
     suppress_server: bool,
+    /// Opened unprompted at an empty column slot (`SELECT id, |`). Enter keeps
+    /// inserting a newline until the user picks an item with the arrow keys.
+    passive: bool,
 }
 impl Completion {
     pub fn before(&mut self, ctx: &egui::Context, editor: egui::Id) -> Option<String> {
@@ -29,14 +32,16 @@ impl Completion {
                 self.open = false;
                 self.suppress_server = true;
             }
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+            // The first ArrowDown from an unprompted popup selects the top item.
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) && !std::mem::take(&mut self.passive) {
                 self.selected = (self.selected + 1).min(self.items.len().saturating_sub(1));
             }
             if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                self.passive = false;
                 self.selected = self.selected.saturating_sub(1);
             }
             if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
-                || i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                || (!self.passive && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
             {
                 self.open = false;
                 return self.items.get(self.selected).cloned();
@@ -60,6 +65,7 @@ impl Completion {
         self.identifiers.clear();
         self.selected = 0;
         self.open = false;
+        self.passive = false;
         let byte = char_to_byte(sql, cursor);
         let before = &sql[..byte];
         // Suppress suggestions inside SQL strings, quoted identifiers and comments.
@@ -74,14 +80,42 @@ impl Completion {
             .trim_end()
             .strip_suffix('.')
             .and_then(|s| tokens_for_dialect(s, dialect).last().cloned());
-        if prefix.chars().count() < 2 && !explicit && qualifier.is_none() {
+        let range = crate::sql::execution_range_for_dialect(sql, cursor..cursor, false, dialect)
+            .unwrap_or(0..sql.len());
+        let statement_before = sql.get(range.start.min(byte)..byte).unwrap_or("");
+        // Work with original SQL boundaries before case folding. Unicode
+        // lowercase can change byte length (İ becomes i + combining dot).
+        let statement_without_prefix = statement_before.strip_suffix(prefix).unwrap_or(statement_before);
+        let context = if qualifier.is_none() {
+            caret_block_tokens(statement_without_prefix, dialect)
+        } else { Vec::new() };
+        let clause = column_clause(&context);
+        // Offer columns unprompted right after `SELECT `, `, `, `WHERE ` and
+        // similar, where nothing but a column (or expression) can follow.
+        let slot = prefix.is_empty() && qualifier.is_none() && !explicit
+            && before.ends_with(|c: char| c.is_whitespace() || c == ',' || c == '(')
+            && clause.is_some_and(|clause| clause.slot);
+        // After FROM/JOIN/INTO/…: only a table can follow, so suggest tables
+        // from the first typed letter, or unprompted right after the space.
+        let table_slot = qualifier.is_none()
+            && (!prefix.is_empty() || explicit || before.ends_with(|c: char| c.is_whitespace() || c == ','))
+            && is_table_slot(&context);
+        // A finished clause keyword is not a partially typed identifier.
+        // Wait for its separator instead of replacing FROM with DELETE FROM.
+        if !explicit && qualifier.is_none() && !table_slot
+            && ["FROM", "JOIN", "WHERE", "HAVING", "LIMIT", "OFFSET", "SET", "ON"]
+                .iter().any(|word| prefix.eq_ignore_ascii_case(word))
+        {
+            self.suppress_server = true;
             return;
         }
+        if prefix.chars().count() < 2 && !explicit && qualifier.is_none() && !slot && !table_slot {
+            return;
+        }
+        let unprompted_tables = table_slot && prefix.is_empty() && !explicit;
         self.start = cursor - prefix.chars().count();
         self.end = cursor;
         let prefix = prefix.to_lowercase();
-        let range = crate::sql::execution_range_for_dialect(sql, cursor..cursor, false, dialect)
-            .unwrap_or(0..sql.len());
         let (references, projected) = scoped_sources(&sql[range.clone()], byte.saturating_sub(range.start), dialect, objects);
         let relevant: Vec<_> = objects
             .iter()
@@ -102,20 +136,47 @@ impl Completion {
                 })
             })
             .collect();
+        // No FROM yet (`SELECT id, |`): infer the table from columns already
+        // listed, so suggestions stay relevant before the query names a source.
+        let in_select_list = clause.is_some_and(|clause| clause.select_list);
+        let inferred = if references.is_empty() && qualifier.is_none() && in_select_list {
+            infer_tables(&context, objects, slot)
+        } else {
+            Vec::new()
+        };
+        // Columns already in the select list are rarely wanted twice.
+        let listed = if slot && in_select_list { select_list_words(&context) } else { Vec::new() };
+        let unlisted = |name: &&str| !listed.iter().any(|word| word.eq_ignore_ascii_case(name));
         // Rank borrowed candidates before applying the visible limit, so a better
         // match late in a large catalog cannot be hidden by earlier matches.
-        let derived_columns = references.iter().filter(|(_, alias)| qualifier.as_ref().is_none_or(|q| q.eq_ignore_ascii_case(alias)))
+        let derived_columns = references.iter().filter(|_| !table_slot).filter(|(_, alias)| qualifier.as_ref().is_none_or(|q| q.eq_ignore_ascii_case(alias)))
             .filter_map(|(table, _)| projected.get(table)).flatten().map(|name| (name.as_str(), true, None));
-        let columns = relevant.iter().flat_map(|object| object.columns.iter()
-            .map(|column| (column.name.as_str(), true, None)));
-        let tables = objects.iter().filter(|object| qualifier.as_ref().is_none_or(|q| {
+        let columns = relevant.iter().chain(&inferred).filter(|_| !table_slot).flat_map(|object| object.columns.iter()
+            .map(|column| column.name.as_str()).filter(unlisted).map(|name| (name, true, None)));
+        let derived_columns = derived_columns.filter(|(name, _, _)| unlisted(name));
+        let tables = objects.iter().filter(|_| !slot).filter(|object| qualifier.as_ref().is_none_or(|q| {
             object.schema.as_ref().is_some_and(|schema| schema.eq_ignore_ascii_case(q))
         })).map(|object| (object.display_name.as_deref().unwrap_or(&object.name), true, Some(object)));
-        let schemas = objects.iter().take(if qualifier.is_none() { objects.len() } else { 0 })
+        let schemas = objects.iter().take(if qualifier.is_none() && !slot { objects.len() } else { 0 })
             .filter_map(|object| object.schema.as_deref()).map(|schema| (schema, true, None));
-        let keywords = KEYWORDS.iter().filter(|_| qualifier.is_none()).map(|word| (*word, false, None));
+        let keywords = KEYWORDS.iter().filter(|word| qualifier.is_none() && !slot && !table_slot
+            && word.as_bytes().get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))).map(|word| (*word, false, None));
         let query = crate::search::Query::new(&prefix);
-        let candidates = query.ranked(derived_columns.chain(columns).chain(tables).chain(schemas).chain(keywords), |candidate| (candidate.0, ""));
+        // Catalogs repeat names such as id across thousands of tables. Rank
+        // each distinct column once; retain table entries for schema qualification.
+        let deduplicate = relevant.len() + inferred.len() > 1;
+        let mut seen_columns = std::collections::HashSet::new();
+        let columns = derived_columns.chain(columns).filter(|candidate| !deduplicate || seen_columns.insert(candidate.0));
+        let mut candidates = query.ranked(columns.chain(tables).chain(schemas).chain(keywords), |candidate| (candidate.0, ""));
+        // One letter is too little for fuzzy matching: `o` should mean names
+        // starting with o (or a word after `_`), not every name containing it.
+        if prefix.chars().count() == 1 {
+            candidates.retain(|(name, _, _)| {
+                let name = name.to_lowercase();
+                name.starts_with(&prefix) || name.contains(&format!("_{prefix}"))
+            });
+        }
+        let candidates = reserve_inner_matches(candidates, &prefix, |candidate| candidate.0);
         for (name, identifier, table) in candidates {
             if (!name.eq_ignore_ascii_case(&prefix)
                     || (identifier && identifier_needs_quotes(name)))
@@ -150,12 +211,15 @@ impl Completion {
                     self.server_edits
                         .insert(name, (self.start..self.end, replacement));
                 }
-                if self.items.len() == 12 {
+                if self.items.len() == VISIBLE {
                     break;
                 }
             }
         }
         self.open = !self.items.is_empty();
+        self.passive = (slot || unprompted_tables) && self.open;
+        // Keep an unprompted column list free of keyword-heavy server results.
+        self.suppress_server |= self.passive;
     }
     pub fn apply(&mut self, sql: &mut String, value: &str) -> usize {
         self.open = false;
@@ -217,6 +281,13 @@ impl Completion {
             let Some(label) = item.get("label").and_then(serde_json::Value::as_str) else {
                 continue;
             };
+            // Fuzzy matching is useful for identifiers, not unrelated SQL
+            // phrases. Apply the same rule to language-server keywords.
+            let keyword = item.get("kind").and_then(serde_json::Value::as_u64) == Some(14)
+                || (item.get("kind").is_none() && KEYWORDS.iter().any(|word| label.eq_ignore_ascii_case(word)));
+            if keyword && !label.as_bytes().get(..prefix.len()).is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes())) {
+                continue;
+            }
             let (range, text) = if let Some(edit) = item.get("textEdit") {
                 let Some(range) = edit
                     .get("range")
@@ -271,9 +342,10 @@ impl Completion {
         // Share palette relevance while retaining each validated server text edit.
         let query = crate::search::Query::new(prefix);
         let mut merged = Vec::new();
-        for item in query.ranked(accepted.into_iter().chain(self.items.iter().cloned()), |item| (item.as_str(), "")) {
+        let ranked = query.ranked(accepted.into_iter().chain(self.items.iter().cloned()), |item| (item.as_str(), ""));
+        for item in reserve_inner_matches(ranked, &prefix.to_lowercase(), String::as_str) {
             if !merged.contains(&item) { merged.push(item); }
-            if merged.len() == 12 { break; }
+            if merged.len() == VISIBLE { break; }
         }
         self.items = merged;
         self.selected = 0;
@@ -333,14 +405,14 @@ impl Completion {
                                 egui::WidgetInfo::selected(
                                     egui::WidgetType::SelectableLabel,
                                     true,
-                                    index == self.selected,
+                                    index == self.selected && !self.passive,
                                     item,
                                 )
                             });
                             let visuals = ui
                                 .style()
-                                .interact_selectable(&response, index == self.selected);
-                            if index == self.selected || response.hovered() {
+                                .interact_selectable(&response, index == self.selected && !self.passive);
+                            if (index == self.selected && !self.passive) || response.hovered() {
                                 ui.painter().rect_filled(rect, 3.0, visuals.weak_bg_fill);
                             }
                             let mut job = egui::text::LayoutJob::simple_singleline(
@@ -421,6 +493,129 @@ fn identifier_needs_quotes(name: &str) -> bool {
 }
 
 // Tokenize incomplete SQL without treating strings or comments as table references.
+/// Suggestions shown at once; the rest are reachable by typing more.
+const VISIBLE: usize = 12;
+/// Places kept for names matching later in the word (`pivot_customers` for
+/// `customer`) when names starting with the prefix would fill the list.
+const INNER_MATCH_PLACES: usize = 3;
+
+/// Reorder a ranked list so prefix matches still lead, but a long run of them
+/// cannot push every inside-word match past the visible limit.
+fn reserve_inner_matches<T>(ranked: Vec<T>, prefix: &str, name: impl Fn(&T) -> &str) -> Vec<T> {
+    if prefix.is_empty() {
+        return ranked;
+    }
+    let (leading, inner): (Vec<T>, Vec<T>) = ranked.into_iter()
+        .partition(|item| name(item).to_lowercase().starts_with(prefix));
+    let head = leading.len().min(VISIBLE - inner.len().min(INNER_MATCH_PLACES));
+    let mut leading = leading.into_iter();
+    let mut ordered: Vec<T> = leading.by_ref().take(head).collect();
+    ordered.extend(inner);
+    ordered.extend(leading);
+    ordered
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ColumnClause {
+    /// Between SELECT and FROM of the innermost query at the caret.
+    select_list: bool,
+    /// The last token accepts a column next (`SELECT`, `,`, `WHERE`, `AND`, …).
+    slot: bool,
+}
+
+/// Top-level tokens of the innermost query block that contains the caret.
+fn caret_block_tokens(statement_before: &str, dialect: Dialect) -> Vec<(String, bool)> {
+    let tokens = relation_tokens(statement_before, dialect);
+    let mut start = 0;
+    let mut opens = Vec::new();
+    for (index, (text, quoted)) in tokens.iter().enumerate() {
+        match text.as_str() {
+            "(" if !quoted => opens.push(index),
+            ")" if !quoted => { opens.pop(); }
+            ";" if !quoted => { start = index + 1; opens.clear(); }
+            _ => {}
+        }
+    }
+    // An unclosed `(SELECT …` is the caret's own subquery.
+    if let Some(&open) = opens.iter().rev().find(|&&open| tokens.get(open + 1).is_some_and(|(t, q)| !q && t.eq_ignore_ascii_case("SELECT"))) {
+        start = start.max(open + 1);
+    }
+    let mut depth = 0usize;
+    tokens.into_iter().skip(start).filter(|(text, quoted)| {
+        let keep = depth == 0 || (*quoted || !matches!(text.as_str(), "(" | ")"));
+        match text.as_str() {
+            "(" if !quoted => depth += 1,
+            ")" if !quoted => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        keep && (depth == 0 || text == "(")
+    }).collect()
+}
+
+/// Which clause the caret is in. Tokens exclude the partially typed word,
+/// which is not itself a clause keyword.
+fn column_clause(tokens: &[(String, bool)]) -> Option<ColumnClause> {
+    const CLAUSES: [&str; 13] = ["SELECT", "FROM", "JOIN", "WHERE", "ON", "BY", "HAVING", "SET", "INTO", "VALUES", "UPDATE", "TABLE", "USING"];
+    let clause = tokens.iter().rev().find(|(text, quoted)| !quoted && CLAUSES.iter().any(|c| c.eq_ignore_ascii_case(text)))?;
+    let clause = clause.0.to_ascii_uppercase();
+    if !matches!(clause.as_str(), "SELECT" | "WHERE" | "ON" | "BY" | "HAVING" | "SET") {
+        return None;
+    }
+    let (last, quoted) = tokens.last()?;
+    let slot = !quoted && [",", "(", "SELECT", "DISTINCT", "WHERE", "AND", "OR", "NOT", "ON", "BY", "HAVING", "SET"]
+        .iter().any(|word| word.eq_ignore_ascii_case(last));
+    Some(ColumnClause { select_list: clause == "SELECT", slot })
+}
+
+/// The caret follows a keyword that must be followed by a table name.
+fn is_table_slot(tokens: &[(String, bool)]) -> bool {
+    let word = |index: usize| tokens.get(index).filter(|(_, quoted)| !quoted).map(|(text, _)| text.to_ascii_uppercase());
+    let Some(last) = tokens.len().checked_sub(1) else { return false; };
+    let previous = last.checked_sub(1).and_then(word);
+    match word(last).as_deref() {
+        Some("FROM" | "JOIN" | "INTO" | "TRUNCATE") => true,
+        // Not `ON UPDATE CASCADE` or `FOR UPDATE`.
+        Some("UPDATE") => !matches!(previous.as_deref(), Some("ON" | "FOR" | "OF" | "BEFORE" | "AFTER")),
+        // `CREATE TABLE` names a new table; ALTER/DROP/TRUNCATE TABLE name an existing one.
+        Some("TABLE") => previous.as_deref() != Some("CREATE"),
+        // `FROM a, |`: another source in a comma join.
+        Some(",") => tokens.iter().rev().find_map(|(text, quoted)| {
+            let text = text.to_ascii_uppercase();
+            (!quoted && matches!(text.as_str(), "SELECT" | "FROM" | "WHERE" | "ON" | "BY" | "HAVING" | "SET" | "VALUES" | "JOIN")).then_some(text)
+        }).as_deref() == Some("FROM"),
+        _ => false,
+    }
+}
+
+/// Identifiers already written in the caret's select list (`SELECT id, name, |`).
+fn select_list_words(tokens: &[(String, bool)]) -> Vec<String> {
+    let start = tokens.iter().rposition(|(text, quoted)| !quoted && text.eq_ignore_ascii_case("SELECT")).map_or(0, |i| i + 1);
+    tokens[start..].iter()
+        .filter(|(text, quoted)| *quoted || (text.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && !KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(text))))
+        .map(|(text, _)| text.clone())
+        .collect()
+}
+
+/// Tables that contain every column already listed. With nothing listed yet,
+/// an unprompted popup stays closed rather than dumping the whole catalog,
+/// while a typed prefix searches all columns.
+fn infer_tables<'a>(tokens: &[(String, bool)], objects: &'a [Object], slot: bool) -> Vec<&'a Object> {
+    const MAX_TABLES: usize = 2_000;
+    let listed: Vec<String> = select_list_words(tokens).into_iter()
+        .filter(|word| objects.iter().take(MAX_TABLES).any(|object| object.columns.iter().any(|c| c.name.eq_ignore_ascii_case(word))))
+        .collect();
+    if listed.is_empty() {
+        return if slot { Vec::new() } else { objects.iter().take(MAX_TABLES).collect() };
+    }
+    let has = |object: &Object, word: &String| object.columns.iter().any(|c| c.name.eq_ignore_ascii_case(word));
+    let all: Vec<_> = objects.iter().take(MAX_TABLES).filter(|object| listed.iter().all(|word| has(object, word))).collect();
+    if !all.is_empty() {
+        return all;
+    }
+    objects.iter().take(MAX_TABLES).filter(|object| listed.iter().any(|word| has(object, word))).collect()
+}
+
 fn tokens_for_dialect(sql: &str, dialect: Dialect) -> Vec<String> {
     relation_tokens(sql, dialect).into_iter().map(|(text, _)| text).collect()
 }
@@ -964,6 +1159,193 @@ mod tests {
         }
     }
     #[test]
+    fn completed_from_stays_quiet_until_table_separator() {
+        let objects = [object("customers", &["id"])];
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::Mysql(crate::sql::mysql::Mode::default())] {
+            let mut completion = Completion::default();
+            let sql = "SELECT * FROM";
+            completion.refresh(sql, sql.len(), &objects, &[], false, dialect);
+            completion.receive_server(sql, sql.len(), &[serde_json::json!({"label":"DELETE FROM", "kind":14})]);
+            assert!(!completion.open);
+            assert!(completion.items.is_empty());
+            let sql = "SELECT * FROM ";
+            completion.refresh(sql, sql.len(), &objects, &[], false, dialect);
+            assert_eq!(completion.items, ["customers"]);
+            assert!(completion.passive);
+            let sql = "SELECT * FRO";
+            completion.refresh(sql, sql.len(), &objects, &[], false, dialect);
+            completion.receive_server(sql, sql.len(), &[serde_json::json!({"label":"DELETE FROM", "kind":14})]);
+            assert!(completion.items.iter().any(|item| item == "FROM"));
+            assert!(!completion.items.iter().any(|item| item == "DELETE FROM"));
+            let sql = "DEL";
+            completion.refresh(sql, sql.len(), &objects, &[], false, dialect);
+            assert!(completion.items.iter().any(|item| item == "DELETE FROM"));
+        }
+    }
+
+    #[test]
+    fn repeated_catalog_columns_do_not_consume_prefix_slots() {
+        let fields = ["customer_id", "customer_a", "customer_b", "customer_c", "customer_d", "customer_e", "customer_f", "customer_g", "customer_h", "customer_i", "customer_j", "customer_k", "pivot_customer"];
+        let objects: Vec<_> = (0..20).map(|index| object(&format!("table_{index}"), &fields)).collect();
+        let (items, _) = items_at_end("SELECT cust", &objects);
+        assert_eq!(items.len(), 12);
+        assert!(items[..11].iter().all(|item| item.starts_with("customer")), "{items:?}");
+        assert_eq!(items[11], "pivot_customer");
+    }
+
+    #[test]
+    fn unicode_case_expansion_keeps_original_sql_boundaries() {
+        let objects = [object("customers", &["é", "İİ_value", "İ_value"])];
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::Mysql(crate::sql::mysql::Mode::default())] {
+            for sql in ["SELECT é,İİ", "SELECT İİ", "SELECT é, İİ", "SELECT é,İİ FROM customers"] {
+                let cursor = sql.find(" FROM").map_or(sql.chars().count(), |byte| sql[..byte].chars().count());
+                let mut completion = Completion::default();
+                completion.refresh(sql, cursor, &objects, &[], false, dialect);
+                assert!(completion.items.iter().any(|item| item == "İİ_value"), "{sql}: {:?}", completion.items);
+                let mut edited = sql.to_owned();
+                completion.apply(&mut edited, "İİ_value");
+                assert!(edited.contains("İİ_value"), "{edited}");
+                assert!(!sql.contains('é') || edited.contains('é'));
+            }
+        }
+    }
+
+    fn items_at_end(sql: &str, objects: &[Object]) -> (Vec<String>, bool) {
+        let mut completion = Completion::default();
+        completion.refresh(sql, sql.chars().count(), objects, &[], false, Dialect::Sqlite);
+        (completion.items.clone(), completion.passive)
+    }
+    #[test]
+    fn empty_column_slots_offer_scoped_columns_without_keywords() {
+        let objects = [object("customers", &["id", "name", "email"]), object("orders", &["id", "total", "customer_id"])];
+        // FROM after the caret still scopes the select list.
+        let sql = "SELECT id, ";
+        let full = format!("{sql} FROM orders");
+        let mut completion = Completion::default();
+        completion.refresh(&full, sql.chars().count(), &objects, &[], false, Dialect::Sqlite);
+        assert_eq!(completion.items, ["total", "customer_id"], "listed id is skipped");
+        assert!(completion.passive);
+        for (sql, expected) in [
+            ("SELECT * FROM customers WHERE ", vec!["id", "name", "email"]),
+            ("SELECT * FROM customers WHERE id = 1 AND ", vec!["id", "name", "email"]),
+            ("SELECT * FROM customers ORDER BY ", vec!["id", "name", "email"]),
+            ("UPDATE orders SET ", vec!["id", "total", "customer_id"]),
+            ("SELECT c.name FROM customers c JOIN orders o ON ", vec!["id", "name", "email", "total", "customer_id"]),
+        ] {
+            let (items, passive) = items_at_end(sql, &objects);
+            assert_eq!(items, expected, "{sql}");
+            assert!(passive, "{sql}");
+        }
+        for sql in ["SELECT * FROM customers WHERE id = ", "SELECT id ", "SELECT 'a, "] {
+            assert!(items_at_end(sql, &objects).0.is_empty(), "{sql}");
+        }
+        // Table positions offer tables, never columns.
+        for sql in ["SELECT * FROM ", "SELECT * FROM customers, ", "INSERT INTO "] {
+            assert_eq!(items_at_end(sql, &objects).0, ["customers", "orders"], "{sql}");
+        }
+    }
+    #[test]
+    fn select_list_without_from_infers_tables_from_listed_columns() {
+        let objects = [object("customers", &["id", "name", "email"]), object("orders", &["id", "total", "customer_id"])];
+        assert_eq!(items_at_end("SELECT id, ", &objects).0, ["name", "email", "total", "customer_id"]);
+        assert_eq!(items_at_end("SELECT id, email, ", &objects).0, ["name"]);
+        assert_eq!(items_at_end("select total,\n  ", &objects).0, ["id", "customer_id"]);
+        // Nothing listed yet: do not dump the whole catalog unprompted.
+        assert!(items_at_end("SELECT ", &objects).0.is_empty());
+        // A typed prefix searches every table's columns.
+        assert!(items_at_end("SELECT tot", &objects).0.contains(&"total".to_owned()));
+        assert!(items_at_end("SELECT id, em", &objects).0.contains(&"email".to_owned()));
+        // Subqueries infer independently of the outer list.
+        assert_eq!(items_at_end("SELECT email, (SELECT total, ", &objects).0, ["id", "customer_id"]);
+    }
+    #[test]
+    fn table_positions_suggest_tables_from_the_first_letter() {
+        let objects = [object("customers", &["id", "name"]), object("orders", &["id", "total"]), object("order_items", &["id"])];
+        for (sql, expected) in [
+            ("SELECT * FROM o", vec!["orders", "order_items"]),
+            ("SELECT * FROM c", vec!["customers"]),
+            ("select * from customers c join o", vec!["orders", "order_items"]),
+            ("INSERT INTO c", vec!["customers"]),
+            ("UPDATE o", vec!["orders", "order_items"]),
+            ("DELETE FROM c", vec!["customers"]),
+            ("SELECT * FROM customers, o", vec!["orders", "order_items"]),
+            ("SELECT name FROM (SELECT * FROM o", vec!["orders", "order_items"]),
+        ] {
+            let (items, passive) = items_at_end(sql, &objects);
+            assert_eq!(items, expected, "{sql}");
+            assert!(!passive, "a typed letter makes Enter accept: {sql}");
+        }
+        // Right after the keyword the list opens unprompted, Enter-safe.
+        let (items, passive) = items_at_end("SELECT * FROM ", &objects);
+        assert_eq!(items, ["customers", "orders", "order_items"]);
+        assert!(passive);
+        assert_eq!(items_at_end("ALTER TABLE ", &objects).0.len(), 3);
+        // Not table positions: nothing opens for a single letter or a space.
+        for sql in ["CREATE TABLE ", "CREATE TABLE c", "SELECT * FROM customers WHERE n", "SELECT * FROM customers FOR UPDATE ", "SELECT * FROM customers c ", "SELECT 'FROM o"] {
+            assert!(items_at_end(sql, &objects).0.is_empty(), "{sql}");
+        }
+        // Word boundaries count as a first letter.
+        let objects = [object("customer_orders", &["id"]), object("vendors", &["id"])];
+        assert_eq!(items_at_end("SELECT * FROM o", &objects).0, ["customer_orders"]);
+    }
+    #[test]
+    fn table_names_match_inside_words_after_prefix_matches() {
+        let objects = [object("pivot_customers", &["id"]), object("customers", &["id"]), object("customer_notes", &["id"]), object("archivedcustomers", &["id"]), object("orders", &["id"])];
+        for sql in ["SELECT * FROM customer", "SELECT * FROM cust", "SELECT custo"] {
+            assert_eq!(
+                items_at_end(sql, &objects).0,
+                ["customers", "customer_notes", "pivot_customers", "archivedcustomers"],
+                "{sql}"
+            );
+        }
+    }
+    #[test]
+    fn many_prefix_matches_leave_room_for_inside_word_matches() {
+        let mut objects: Vec<Object> = (0..20).map(|n| object(&format!("customer_{n:02}"), &["id"])).collect();
+        objects.push(object("customers", &["id"]));
+        objects.push(object("pivot_customers", &["id"]));
+        let items = items_at_end("SELECT * FROM customer", &objects).0;
+        assert_eq!(items.len(), VISIBLE);
+        assert_eq!(items[0], "customers");
+        assert_eq!(items.last().map(String::as_str), Some("pivot_customers"));
+        assert_eq!(items.iter().filter(|item| item.starts_with("customer")).count(), VISIBLE - 1);
+        // Server results get the same treatment when merged.
+        let mut completion = Completion::default();
+        let sql = "SELECT * FROM customer";
+        completion.refresh(sql, sql.len(), &objects, &[], false, Dialect::Postgres);
+        let server: Vec<_> = (20..40).map(|n| serde_json::json!({ "label": format!("customer_{n}") })).collect();
+        completion.receive_server(sql, sql.len(), &server);
+        assert!(completion.items.contains(&"pivot_customers".to_owned()), "{:?}", completion.items);
+        assert!(completion.items[0].starts_with("customer"));
+    }
+    #[test]
+    fn unprompted_popup_lets_enter_insert_a_newline() {
+        let objects = [object("customers", &["id", "name"])];
+        let ctx = egui::Context::default();
+        let editor = egui::Id::new("editor");
+        let press = |key| egui::RawInput {
+            events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }],
+            ..Default::default()
+        };
+        let mut completion = Completion::default();
+        let step = |completion: &mut Completion, key| {
+            let mut accepted = None;
+            let _ = ctx.run(press(key), |ctx| {
+                ctx.memory_mut(|m| m.request_focus(editor));
+                accepted = completion.before(ctx, editor);
+            });
+            accepted
+        };
+        completion.refresh("SELECT id, FROM customers", "SELECT id, ".chars().count(), &objects, &[], false, Dialect::Sqlite);
+        assert!(completion.open && completion.passive);
+        assert_eq!(step(&mut completion, egui::Key::Enter), None, "Enter must not insert a column");
+        completion.refresh("SELECT id, FROM customers", "SELECT id, ".chars().count(), &objects, &[], false, Dialect::Sqlite);
+        assert_eq!(step(&mut completion, egui::Key::ArrowDown), None);
+        assert_eq!(step(&mut completion, egui::Key::Enter), Some("name".into()));
+        completion.refresh("SELECT id, FROM customers", "SELECT id, ".chars().count(), &objects, &[], false, Dialect::Sqlite);
+        assert_eq!(step(&mut completion, egui::Key::Tab), Some("name".into()));
+    }
+    #[test]
     fn cte_completion_resolves_outputs_shadowing_and_nested_visibility() {
         let objects = [object("customers", &["customer_id", "private_value"])];
         for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql(Default::default())] {
@@ -1448,9 +1830,13 @@ mod tests {
                 completion.items
             );
         }
-        let sql = "SELECT * FROM customers; SELECT to";
+        // A previous statement's aliases do not leak into the next one.
+        let sql = "SELECT * FROM customers c; SELECT c.";
         completion.refresh(sql, sql.len(), &objects, &[], false, Dialect::Sqlite);
-        assert!(!completion.items.contains(&"total".into()));
+        assert!(completion.items.is_empty(), "{:?}", completion.items);
+        let sql = "SELECT * FROM orders; SELECT name, to";
+        completion.refresh(sql, sql.len(), &objects, &[], false, Dialect::Sqlite);
+        assert!(!completion.items.contains(&"total".into()), "inferred from name, not the earlier FROM");
         assert_eq!(
             relations("SELECT 'FROM orders' FROM customers -- JOIN orders\n"),
             vec![("customers".into(), "customers".into())]
@@ -1571,3 +1957,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "completion_benchmark.rs"]
+mod benchmarks;

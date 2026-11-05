@@ -18,12 +18,16 @@ use std::task::{Context, Poll, ready};
 #[derive(Debug)]
 pub struct SimpleColumn {
     name: String,
+    type_oid: u32,
 }
 
 impl SimpleColumn {
-    pub(crate) fn new(name: String) -> SimpleColumn {
-        SimpleColumn { name }
+    pub(crate) fn new(name: String, type_oid: u32) -> SimpleColumn {
+        SimpleColumn { name, type_oid }
     }
+
+    /// Returns the server type OID without resolving its catalog definition.
+    pub fn type_oid(&self) -> u32 { self.type_oid }
 
     /// Returns the name of the column.
     pub fn name(&self) -> &str {
@@ -41,6 +45,24 @@ pub async fn simple_query(client: &InnerClient, query: &str) -> Result<SimpleQue
         responses,
         columns: None,
     })
+}
+
+pub async fn query_text<P, I>(client: &InnerClient, query: &str, params: I) -> Result<SimpleQueryStream, Error>
+where P: crate::types::BorrowToSql, I: IntoIterator<Item = (P, crate::types::Type)>,
+{
+    let params = params.into_iter().collect::<Vec<_>>();
+    let buf = client.with_buf(|buf| {
+        frontend::parse("", query, params.iter().map(|(_, ty)| ty.oid()), buf).map_err(Error::encode)?;
+        crate::query::encode_bind_format("", params, "", 0, buf)?;
+        frontend::describe(b'P', "", buf).map_err(Error::encode)?;
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })?;
+    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    match responses.next().await? { Message::ParseComplete => {}, _ => return Err(Error::unexpected_message()) }
+    match responses.next().await? { Message::BindComplete => {}, _ => return Err(Error::unexpected_message()) }
+    Ok(SimpleQueryStream { responses, columns: None })
 }
 
 pub async fn batch_execute(client: &InnerClient, query: &str) -> Result<(), Error> {
@@ -93,7 +115,7 @@ impl Stream for SimpleQueryStream {
             Message::RowDescription(body) => {
                 let columns: Arc<[SimpleColumn]> = body
                     .fields()
-                    .map(|f| Ok(SimpleColumn::new(f.name().to_string())))
+                    .map(|f| Ok(SimpleColumn::new(f.name().to_string(), f.type_oid())))
                     .collect::<Vec<_>>()
                     .map_err(Error::parse)?
                     .into();

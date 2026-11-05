@@ -54,7 +54,7 @@ pub fn paint_text_selection(
         let rect = Rect::from_min_max(pos2(left, 0.0), pos2(right, row.size.y));
         let mesh = &mut row.visuals.mesh;
 
-        if !row.glyphs.is_empty() {
+        if !visuals.selection.preserve_text_color && !row.glyphs.is_empty() {
             // Change color of the selected text:
             let first_glyph_index = if ri == min.row { min.column } else { 0 };
             let last_glyph_index = if ri == max.row {
