@@ -4126,6 +4126,7 @@ Right-click to inspect or remove individual changes",
                 if ui.small_button("Dismiss").clicked() { tab.formatter.status = None; }
             });
         }
+        tab.completion.prepare_input(ui.ctx());
         if let Some(items) = self.language.update(
             ui.ctx(),
             &self.engine,
@@ -4249,7 +4250,12 @@ Right-click to inspect or remove individual changes",
                             if output.response.changed() {
                                 tab.refresh_dirty();
                             }
-                            if output.response.changed() || explicit_completion {
+                            let typed = ui.input(|i| i.events.iter().any(|event| matches!(event,
+                                egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Ime(egui::ImeEvent::Commit(_)))));
+                            if output.response.changed() && !typed {
+                                tab.completion.dismiss();
+                            }
+                            if (output.response.changed() && typed && tab.cursor.is_empty()) || explicit_completion {
                                 if explicit_completion {
                                     self.language.request_again();
                                     ui.ctx().request_repaint();

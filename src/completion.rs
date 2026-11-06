@@ -18,11 +18,25 @@ pub struct Completion {
     server_edits: std::collections::HashMap<String, (std::ops::Range<usize>, String)>,
     explicit_requested: bool,
     suppress_server: bool,
+    armed: bool,
     /// Opened unprompted at an empty column slot (`SELECT id, |`). Enter keeps
     /// inserting a newline until the user picks an item with the arrow keys.
     passive: bool,
 }
 impl Completion {
+    /// Dismiss navigation before asynchronous results can steal this frame's keys.
+    pub fn prepare_input(&mut self, ctx: &egui::Context) {
+        let navigating = ctx.input(|input| input.events.iter().any(|event| match event {
+            egui::Event::Key { key, modifiers, pressed: true, .. } =>
+                matches!(key, egui::Key::ArrowLeft | egui::Key::ArrowRight | egui::Key::Home | egui::Key::End | egui::Key::PageUp | egui::Key::PageDown)
+                || ((!self.open || modifiers.any()) && matches!(key, egui::Key::ArrowUp | egui::Key::ArrowDown)),
+            egui::Event::PointerButton { pos, pressed: true, .. } =>
+                !self.menu_rect.is_some_and(|rect| self.open && rect.contains(*pos)),
+            _ => false,
+        }));
+        if navigating { self.dismiss(); }
+    }
+
     pub fn before(&mut self, ctx: &egui::Context, editor: egui::Id) -> Option<String> {
         if !ctx.memory(|m| m.has_focus(editor)) || !self.open {
             return None;
@@ -59,6 +73,8 @@ impl Completion {
         dialect: Dialect,
     ) {
         self.items.clear();
+        self.armed = true;
+        self.end = cursor;
         self.suppress_server = false;
         self.explicit_requested = explicit;
         self.server_edits.clear();
@@ -103,8 +119,7 @@ impl Completion {
         // A finished clause keyword is not a partially typed identifier.
         // Wait for its separator instead of replacing FROM with DELETE FROM.
         if !explicit && qualifier.is_none() && !table_slot
-            && ["FROM", "JOIN", "WHERE", "HAVING", "LIMIT", "OFFSET", "SET", "ON"]
-                .iter().any(|word| prefix.eq_ignore_ascii_case(word))
+            && KEYWORDS.iter().chain(["ON"].iter()).any(|word| prefix.eq_ignore_ascii_case(word))
         {
             self.suppress_server = true;
             return;
@@ -176,6 +191,11 @@ impl Completion {
                 name.starts_with(&prefix) || name.contains(&format!("_{prefix}"))
             });
         }
+        if !explicit && !prefix.is_empty() && candidates.iter().any(|(name, identifier, _)|
+            name.eq_ignore_ascii_case(&prefix) && (!identifier || !identifier_needs_quotes(name))) {
+            self.suppress_server = true;
+            return;
+        }
         let candidates = reserve_inner_matches(candidates, &prefix, |candidate| candidate.0);
         for (name, identifier, table) in candidates {
             if (!name.eq_ignore_ascii_case(&prefix)
@@ -242,7 +262,7 @@ impl Completion {
     }
 
     pub fn receive_server(&mut self, sql: &str, cursor: usize, items: &[serde_json::Value]) {
-        if self.suppress_server {
+        if !self.armed || self.suppress_server || cursor != self.end {
             return;
         }
         let before = &sql[..char_to_byte(sql, cursor)];
@@ -321,6 +341,9 @@ impl Completion {
                 continue;
             }
             if range.start > cursor || range.end < cursor || text.len() > 65536 {
+                continue;
+            }
+            if !self.explicit_requested && text.eq_ignore_ascii_case(&sql[char_to_byte(sql, range.start)..char_to_byte(sql, range.end)]) {
                 continue;
             }
             if !accepted.iter().any(|entry: &String| entry == label) {
@@ -455,8 +478,7 @@ impl Completion {
 
     pub fn cursor_changed(&mut self, cursor: std::ops::Range<usize>) {
         if cursor.start != self.end || cursor.end != self.end {
-            self.open = false;
-            self.explicit_requested = false;
+            self.dismiss();
             // A new LSP response may arrive without a text-change refresh after
             // arrow/click navigation. Never merge candidates or replacement
             // ranges from the previous caret context into that response.
@@ -467,6 +489,8 @@ impl Completion {
         }
     }
     pub fn dismiss(&mut self) {
+        self.armed = false;
+        self.suppress_server = true;
         self.open = false;
         self.explicit_requested = false;
     }
@@ -1057,12 +1081,70 @@ mod tests {
         let mut completion = super::Completion::default();
         let mut sql = "-- 😀\nSELECT na".to_owned();
         let cursor = sql.chars().count();
+        completion.refresh(&sql, cursor, &[], &[], false, Dialect::Postgres);
         completion.receive_server(&sql, cursor, &[serde_json::json!({
             "label":"name", "textEdit":{"range":{"start":{"line":1,"character":7},"end":{"line":1,"character":9}},"newText":"\"name\""}
         })]);
         let next = completion.apply(&mut sql, "name");
         assert_eq!(sql, "-- 😀\nSELECT \"name\"");
         assert_eq!(next, sql.chars().count());
+    }
+
+    #[test]
+    fn navigation_cannot_arm_or_reopen_completion() {
+        let server = [serde_json::json!({"label":"SELECT", "kind":14})];
+        let mut completion = Completion::default();
+        completion.receive_server("SEL", 3, &server);
+        assert!(!completion.open, "loading a document is not typing");
+        for key in [egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::Home, egui::Key::End, egui::Key::ArrowUp, egui::Key::ArrowDown] {
+            completion.refresh("zz", 2, &[], &[], false, Dialect::Postgres);
+            assert!(!completion.open);
+            let ctx = egui::Context::default();
+            let _ = ctx.run(egui::RawInput { events: vec![egui::Event::Key {
+                key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE,
+            }], ..Default::default() }, |ctx| {
+                completion.prepare_input(ctx);
+                // A result can arrive in the same frame, before TextEdit moves.
+                completion.receive_server("zz", 2, &[serde_json::json!({"label":"zz_field"})]);
+            });
+            assert!(!completion.open, "{key:?}");
+        }
+        for event in [
+            egui::Event::Key { key: egui::Key::ArrowUp, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT },
+            egui::Event::PointerButton { pos: egui::pos2(20.0, 20.0), button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        ] {
+            completion.refresh("SEL", 3, &[], &[], false, Dialect::Postgres);
+            assert!(completion.open);
+            let ctx = egui::Context::default();
+            let _ = ctx.run(egui::RawInput { events: vec![event], ..Default::default() }, |ctx| {
+                completion.prepare_input(ctx);
+                completion.receive_server("SEL", 3, &server);
+            });
+            assert!(!completion.open, "selection gestures dismiss existing suggestions");
+        }
+        completion.refresh("SEL", 3, &[], &[], false, Dialect::Postgres);
+        completion.dismiss();
+        completion.receive_server("SEL", 3, &server);
+        assert!(!completion.open, "focus loss must also suppress delayed responses");
+    }
+
+    #[test]
+    fn complete_tokens_do_not_offer_automatic_replacements() {
+        let objects = [object("customers", &["name"]), object("customers_archive", &["name"] )];
+        let mut completion = Completion::default();
+        for sql in ["SELECT", "select", "SELECT * FROM customers", "SELECT name FROM customers"] {
+            let cursor = if sql.starts_with("SELECT name") { 11 } else { sql.len() };
+            completion.refresh(sql, cursor, &objects, &[], false, Dialect::Postgres);
+            completion.receive_server(sql, cursor, &[serde_json::json!({"label":"SELECT", "kind":14})]);
+            assert!(!completion.open, "{sql}");
+        }
+        completion.refresh("SELECT fun", 10, &[], &[], false, Dialect::Postgres);
+        completion.receive_server("SELECT fun", 10, &[serde_json::json!({"label":"fun", "insertText":"fun"})]);
+        assert!(!completion.open, "server-only no-op edits are redundant too");
+        completion.refresh("SEL", 3, &[], &[], false, Dialect::Postgres);
+        assert!(completion.open);
+        completion.refresh("SELECT * FROM ", 14, &objects, &[], false, Dialect::Postgres);
+        assert!(completion.open, "typing a separator starts the next token");
     }
 
     #[test]
@@ -1075,6 +1157,10 @@ mod tests {
         let sql = "WITH RECURSIVE walk(step) AS (VALUES (1) UNION ALL SELECT w.st FROM walk w) SELECT * FROM walk";
         let cursor = sql.find("w.st").unwrap() + 4;
         completion.cursor_changed(cursor..cursor);
+        completion.receive_server(sql, cursor, &[serde_json::json!({"label":"step", "insertText":"step"})]);
+        assert!(!completion.open && completion.items.is_empty());
+        // Explicit completion is still available after navigating.
+        completion.refresh(sql, cursor, &[], &[], true, Dialect::Postgres);
         completion.receive_server(sql, cursor, &[serde_json::json!({"label":"step", "insertText":"step"})]);
         assert_eq!(completion.items, vec!["step"]);
         let mut applied = sql.to_owned();
