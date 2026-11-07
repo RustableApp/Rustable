@@ -20,3 +20,5 @@
 /site
 
 /dist/
+
+scripts/__pycache__/

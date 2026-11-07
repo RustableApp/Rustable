@@ -764,6 +764,10 @@ impl Rustable {
                                 let response = if filtering { ui.scope(render_row) } else { ui.dnd_drag_source(egui::Id::new(("saved-connection", profile.id.0)), Drag::Profile(profile.id), render_row) };
                                 let row_response = response.response.interact(egui::Sense::click()) | response.inner.clone();
                                 if response.inner.clicked() || row_response.clicked() { row_response.request_focus(); action = Some(Action::Select(profile.id)); }
+                                if selected && row_response.double_clicked()
+                                    && self.connection_manager.draft.as_ref().is_some_and(|draft| draft.id == profile.id) {
+                                    keyboard_connect = true;
+                                }
                                 if row_response.secondary_clicked() {
                                     row_response.request_focus();
                                     self.connection_manager.selection = Some(ListSelection::Profile(profile.id));
@@ -2075,6 +2079,30 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn double_click_opens_saved_connection_in_filtered_and_normal_list() {
+        for filtering in [false, true] {
+            let ctx = egui::Context::default();
+            let mut app = app();
+            app.connection_action(Action::New(false)).unwrap();
+            let draft = app.connection_manager.draft.as_mut().unwrap();
+            draft.name = "Double click fixture".into();
+            draft.connection = ConnectionKind::SQLite { path: PathBuf::from(":memory:") };
+            app.connection_action(Action::Save(false)).unwrap();
+            let id = app.connection_manager.draft.as_ref().unwrap().id;
+            app.connections = true;
+            if filtering { app.connection_manager.search = "Double click".into(); }
+            manager_frame(&ctx, &mut app, vec![]);
+            let output = manager_frame(&ctx, &mut app, vec![]);
+            let pos = painted_text(&output, "Double click fixture").unwrap();
+            manager_click(&ctx, &mut app, pos, egui::PointerButton::Primary);
+            assert!(app.window_requests.is_empty(), "single click only selects");
+            manager_click(&ctx, &mut app, pos, egui::PointerButton::Primary);
+            assert_eq!(app.window_requests.len(), 1);
+            assert_eq!(app.window_requests[0].identity.as_ref().unwrap().id, id);
+        }
+    }
+
     #[test]
     fn first_launch_offers_engines_without_an_empty_connection_list() {
         let ctx = egui::Context::default();

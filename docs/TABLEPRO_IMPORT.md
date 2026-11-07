@@ -1,7 +1,9 @@
 # TablePro connection import
 
-Use **Import… → From TablePro…** in the connection manager. Choose a `.tablepro`
-export, unlock it locally if encrypted, review the preview, and select which
+Use **Import… → From TablePro…** in the connection manager, then **Choose export
+file…**. Select a connections export created in TablePro (`.tablepro` or
+unencrypted JSON), not a database file or SQL dump. Unlock it locally if encrypted,
+review the preview, and select which
 connections to add. Existing profiles are never overwritten; duplicate handling
 and explicit credential import use the same flow as TablePlus. Imported database
 passwords are stored by the credential worker, never in preferences.

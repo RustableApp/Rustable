@@ -470,22 +470,13 @@ pub enum Decision {
     Import,
 }
 impl Dialog {
-    pub fn pick(ctx: egui::Context) -> Self { Self::pick_source(ctx, false) }
-    pub fn pick_source(ctx: egui::Context, tablepro: bool) -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = rfd::FileDialog::new()
-                .set_title(if tablepro { "Import TablePro connections" } else { "Import TablePlus connections" })
-                .add_filter("Connection export", if tablepro { &["tablepro", "json"] } else { &["tableplusconnection", "json"] })
-                .pick_file()
-                .map(|path| if tablepro { crate::tablepro_import::read(&path) } else { read(&path) })
-                .transpose();
-            let _ = tx.send(result);
-            ctx.request_repaint();
-        });
+    pub fn pick(ctx: egui::Context) -> Self {
+        Self::pick_source(ctx, false)
+    }
+    pub fn pick_source(_ctx: egui::Context, tablepro: bool) -> Self {
         Self {
             tablepro,
-            pending: Some(rx),
+            pending: None,
             locked: None,
             password: Zeroizing::new(String::new()),
             candidates: vec![],
@@ -493,6 +484,42 @@ impl Dialog {
             passwords: false,
             error: None,
         }
+    }
+    fn choose_file(&mut self, ctx: egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tablepro = self.tablepro;
+        self.error = None;
+        self.locked = None;
+        self.password.clear();
+        self.candidates.clear();
+        self.pending = Some(rx);
+        std::thread::spawn(move || {
+            let result = rfd::FileDialog::new()
+                .set_title(if tablepro {
+                    "Choose a TablePro connection export"
+                } else {
+                    "Choose a TablePlus connection export"
+                })
+                .add_filter(
+                    "Connection export",
+                    if tablepro {
+                        &["tablepro", "json"]
+                    } else {
+                        &["tableplusconnection", "json"]
+                    },
+                )
+                .pick_file()
+                .map(|path| {
+                    if tablepro {
+                        crate::tablepro_import::read(&path)
+                    } else {
+                        read(&path)
+                    }
+                })
+                .transpose();
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
     }
     pub fn show(&mut self, ctx: &egui::Context, store: &ConnectionProfiles) -> Option<Decision> {
         if let Some(rx) = &self.pending {
@@ -506,7 +533,7 @@ impl Dialog {
                             self.candidates = rows;
                             self.error = None;
                         }
-                        Ok(None) => return Some(Decision::Cancel),
+                        Ok(None) => {}
                         Err(e) => self.error = Some(e),
                     }
                 }
@@ -521,16 +548,35 @@ impl Dialog {
             }
         }
         let mut decision = None;
-        egui::Modal::new(egui::Id::new("tableplus-import")).show(ctx, |ui| {
-            ui.set_width(600.0_f32.min(ctx.content_rect().width() - 48.0));
-            ui.heading(if self.tablepro { "Import from TablePro" } else { "Import from TablePlus" });
+        let frame = egui::Frame::window(&ctx.style())
+            .inner_margin(24.0)
+            .corner_radius(16.0);
+        let modal = egui::Modal::new(egui::Id::new("tableplus-import")).frame(frame).show(ctx, |ui| {
+            ui.set_width(520.0_f32.min((ctx.content_rect().width() - 80.0).max(220.0)));
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
+            ui.spacing_mut().button_padding = egui::vec2(14.0, 8.0);
+            let source = if self.tablepro { "TablePro" } else { "TablePlus" };
+            ui.label(egui::RichText::new("CONNECTIONS").small().weak());
+            ui.label(egui::RichText::new(format!("Import from {source}")).size(22.0).strong());
+            ui.label(format!("Bring your saved connections from {source} into Rustable."));
+            ui.add_space(6.0);
+            if self.candidates.is_empty() {
+            egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(12.0).inner_margin(16.0).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(egui::RichText::new("Start with an exported connections file").strong());
+                ui.label(format!("Export your connections from {source}, then choose that file here. You can review the connections before importing."));
+                ui.weak(if self.tablepro { "TablePro export (.tablepro) or unencrypted JSON · up to 8 MiB" } else { "TablePlus export (.tableplusconnection) or unencrypted JSON · up to 8 MiB" });
+                ui.small("Use a connection export, not a database file or SQL dump.");
+            });
+            }
+            ui.add_space(4.0);
             if let Some(error) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
             if self.pending.is_some() {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Reading export…");
+                    ui.label(if self.locked.is_some() { "Unlocking export…" } else { "Choosing and reading export…" });
                 });
             } else if self.locked.is_some() {
                 ui.label("Enter the export password. Decryption happens locally.");
@@ -542,6 +588,7 @@ impl Dialog {
                 if ui.button("Unlock").clicked()
                     || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 {
+                    self.error = None;
                     let bytes = self.locked.as_ref().unwrap().clone();
                     let password =
                         std::mem::replace(&mut self.password, Zeroizing::new(String::new()));
@@ -557,13 +604,16 @@ impl Dialog {
                     });
                 }
             } else if !self.candidates.is_empty() {
-                ui.label("Select connections to add. Existing connections are never overwritten.");
+                ui.label(egui::RichText::new("Review connections").strong());
+                ui.weak("Choose what to add. Existing connections are never overwritten.");
                 egui::ScrollArea::vertical()
-                    .max_height((ctx.content_rect().height() * 0.55).min(420.0))
+                    .max_height((ctx.content_rect().height() - 340.0).clamp(100.0, 380.0))
                     .show(ui, |ui| {
                         for (i, candidate) in self.candidates.iter_mut().enumerate() {
                             ui.push_id(i, |ui| {
-                                ui.horizontal(|ui| {
+                              egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(10.0).inner_margin(12.0).show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal_wrapped(|ui| {
                                     ui.add_enabled(
                                         candidate.profile.is_some(),
                                         egui::Checkbox::new(
@@ -626,7 +676,8 @@ impl Dialog {
                                         ui.label(warning);
                                     }
                                 });
-                                ui.separator();
+                              });
+                              ui.add_space(4.0);
                             });
                         }
                     });
@@ -639,31 +690,41 @@ impl Dialog {
                     &mut self.passwords,
                     "Save included database passwords in the OS credential store",
                 );
-                let count = self
-                    .candidates
-                    .iter()
-                    .filter(|c| c.selected && c.profile.is_some())
-                    .count();
-                if ui
-                    .add_enabled(
-                        count > 0,
-                        egui::Button::new(format!("Import {count} selected")),
-                    )
-                    .clicked()
-                {
-                    decision = Some(Decision::Import);
+            }
+            ui.add_space(8.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    decision = Some(Decision::Cancel);
                 }
-            }
-            if ui.button("Cancel").clicked() {
-                decision = Some(Decision::Cancel);
-            }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !self.candidates.is_empty() && self.pending.is_none() {
+                        let count = self.candidates.iter().filter(|c| c.selected && c.profile.is_some()
+                            && (self.duplicates != Duplicates::Skip || !is_duplicate(store, c))).count();
+                        if ui.add_enabled(count > 0, egui::Button::new(format!("Import {count} {}", if count == 1 { "connection" } else { "connections" }))
+                            .fill(ui.visuals().selection.bg_fill)).clicked() {
+                            decision = Some(Decision::Import);
+                        }
+                    }
+                    if self.pending.is_none() {
+                        let initial = self.candidates.is_empty() && self.locked.is_none();
+                        let button = egui::Button::new(if initial { "Choose export file…" } else { "Choose another file…" });
+                        let button = if initial { button.fill(ui.visuals().selection.bg_fill) } else { button };
+                        if ui.add(button).clicked() { self.choose_file(ctx.clone()); }
+                    }
+                });
+            });
         });
+        #[cfg(test)]
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("import-dialog-rect"), modal.response.rect)
+        });
+        if modal.should_close() {
+            decision = Some(Decision::Cancel);
+        }
         decision
     }
-    pub fn apply(
-        &mut self,
-        store: &mut ConnectionProfiles,
-    ) -> Result<ImportResult, String> {
+    pub fn apply(&mut self, store: &mut ConnectionProfiles) -> Result<ImportResult, String> {
         apply(store, &mut self.candidates, self.duplicates, self.passwords)
     }
 }
@@ -671,6 +732,45 @@ impl Dialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn import_dialog_starts_with_guidance_and_recovers_from_cancelled_picker() {
+        for tablepro in [false, true] {
+            let ctx = egui::Context::default();
+            let mut dialog = Dialog::pick_source(ctx.clone(), tablepro);
+            assert!(dialog.pending.is_none(), "explain the export before opening a picker");
+            let (tx, rx) = std::sync::mpsc::channel();
+            dialog.pending = Some(rx);
+            tx.send(Ok(None)).unwrap();
+            let mut decision = None;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                decision = dialog.show(ctx, &ConnectionProfiles::default());
+            });
+            assert!(decision.is_none(), "picker cancellation returns to the introduction");
+            assert!(dialog.pending.is_none());
+        }
+    }
+
+    #[test]
+    fn import_dialog_fits_window_in_both_themes_and_preview_states() {
+        for dark in [false, true] {
+            for preview in [false, true] {
+                let ctx = egui::Context::default();
+                ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+                let mut dialog = Dialog::pick_source(ctx.clone(), false);
+                if preview { dialog.candidates = sample(); }
+                let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 700.0));
+                for _ in 0..3 {
+                    let _ = ctx.run(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ctx| {
+                        dialog.show(ctx, &ConnectionProfiles::default());
+                    });
+                }
+                let rect = ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::new("import-dialog-rect"))).unwrap();
+                assert!(screen.contains_rect(rect), "dialog overflow: {rect:?}");
+                assert!(rect.width() <= 570.0, "dialog should remain compact: {rect:?}");
+            }
+        }
+    }
+
     fn hex(s: &str) -> Vec<u8> {
         let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
         (0..s.len())
@@ -832,6 +932,48 @@ mod tests {
             let rows = parse(&serde_json::to_vec(&json).unwrap()).unwrap();
             assert!(rows[0].profile.is_some(), "{}: {:?}", driver, rows[0].error);
             assert!(rows[0].password.is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod import_ui_performance {
+    use super::*;
+
+    /// CPU layout/tessellation only; synthetic exports, no file picker or credentials.
+    #[test]
+    #[ignore = "release-mode UI performance measurement"]
+    fn import_dialog_frame_benchmark() {
+        for dark in [false, true] {
+            for preview in [false, true] {
+                let ctx = egui::Context::default();
+                ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+                let mut candidates = Vec::new();
+                if preview {
+                    for _ in 0..40 {
+                        candidates.extend(parse(br#"[{"ConnectionName":"Fixture connection","Driver":"MySQL","DatabaseHost":"localhost","DatabasePort":"3306","DatabaseUser":"fixture","DatabaseName":"test"}]"#).unwrap());
+                    }
+                }
+                let mut dialog = Dialog {
+                    tablepro: false, pending: None,
+                    locked: if preview { None } else { Some(Zeroizing::new(vec![])) },
+                    password: Zeroizing::new(String::new()), candidates,
+                    duplicates: Duplicates::Skip, passwords: false, error: None,
+                };
+                let store = ConnectionProfiles::default();
+                let mut samples = Vec::new();
+                for frame in 0..120 {
+                    let start = std::time::Instant::now();
+                    let output = ctx.run(egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 900.0))),
+                        time: Some(frame as f64 / 120.0), ..Default::default()
+                    }, |ctx| { dialog.show(ctx, &store); });
+                    std::hint::black_box(ctx.tessellate(output.shapes, output.pixels_per_point));
+                    if frame >= 20 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+                }
+                samples.sort_by(f64::total_cmp);
+                println!("IMPORT_UI dark={dark} preview={preview} p50={} p95={} p99={} max={}", samples[50], samples[95], samples[99], samples[99]);
+            }
         }
     }
 }
