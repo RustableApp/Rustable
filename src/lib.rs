@@ -9,6 +9,7 @@ mod browser_library;
 pub use app::Rustable;
 mod column_widths;
 mod completion;
+mod context_click;
 mod connection;
 mod connection_probe;
 mod connection_profiles;

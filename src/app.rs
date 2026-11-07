@@ -1045,6 +1045,7 @@ impl Rustable {
         initial: Option<Command>,
         identity: Option<ProfileIdentity>,
     ) -> Self {
+        crate::context_click::install(ctx);
         prefs.documents.truncate(1);
         if prefs.documents.is_empty() {
             prefs.documents = std::mem::take(&mut prefs.closed_documents).into_iter().take(1).collect();
