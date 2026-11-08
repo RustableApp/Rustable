@@ -733,7 +733,6 @@ impl Router {
         self.query_at(command, slot, endpoint, false)
     }
     pub fn query_bounded(&mut self, command: &redis::Cmd, limit: usize) -> Result<redis::Value, String> {
-        if !matches!(command.args_iter().next(), Some(redis::Arg::Simple(name)) if name.eq_ignore_ascii_case(b"VSIM")) { return Err("Bounded cluster queries currently support VSIM only.".into()); }
         let slot = command_slot(command)?;
         let endpoint = slot.and_then(|s| self.routes[s as usize].clone()).unwrap_or_else(|| self.seed.clone());
         self.query_at_limited(command, slot, endpoint, false, Some(limit))
@@ -788,7 +787,6 @@ impl Router {
                     self.stopped = true;
                     self.connections.clear();
                     self.recent.clear();
-                    if limit.is_some() { return Err(format!("Cluster search connection closed: {error}. Reconnect before retrying. Nothing was replayed.")); }
                     return Err(format!(
                         "Cluster connection lost: {error}. A submitted write may have completed; verify before reconnecting. Nothing was replayed."
                     ));
@@ -1027,6 +1025,37 @@ mod tests {
         assert_eq!(parse_redirect(":6380", "host").unwrap().host, "host");
         assert_eq!(parse_redirect("[::1]:6380", "host").unwrap().host, "::1");
         assert!(parse_redirect("attacker/path:6380", "host").is_err());
+    }
+    #[test]
+    fn bounded_workbench_commands_preserve_errors_and_unknown_write_outcomes() {
+        let source = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = source.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = source.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut parser = redis::Parser::new();
+            handshake(&mut socket, &mut parser);
+            assert_eq!(read(&mut socket, &mut parser)[0], b"GET");
+            socket.write_all(b"$5\r\nvalue\r\n").unwrap();
+            assert_eq!(read(&mut socket, &mut parser)[0], b"GET");
+            socket.write_all(b"-WRONGTYPE wrong type\r\n").unwrap();
+            assert_eq!(read(&mut socket, &mut parser)[0], b"PING");
+            socket.write_all(b"+PONG\r\n").unwrap();
+            assert_eq!(read(&mut socket, &mut parser)[0], b"INCR");
+            // Simulate a write accepted by the peer, with its reply lost.
+        });
+        let mut router = router(port);
+        assert_eq!(router.query_bounded(redis::cmd("GET").arg("key"), 1024).unwrap(), redis::Value::BulkString(b"value".to_vec()));
+        assert!(router.query_bounded(redis::cmd("GET").arg("bad"), 1024).unwrap_err().contains("WRONGTYPE"));
+        assert!(!router.stopped);
+        assert!(router.query_bounded(&redis::cmd("PING"), 1024).is_ok());
+        let command = redis::cmd("INCR").arg("counter").to_owned();
+        let error = router.query_bounded(&command, 1024).unwrap_err();
+        assert!(error.contains("may have completed"));
+        assert!(error.contains("Nothing was replayed"));
+        assert!(router.stopped && router.connections.is_empty());
+        assert!(router.query_bounded(&command, 1024).is_err());
+        peer.join().unwrap();
     }
     #[test]
     fn bounded_similarity_overflow_stops_router_without_replay() {

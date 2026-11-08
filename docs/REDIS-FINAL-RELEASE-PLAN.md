@@ -563,3 +563,22 @@ release comparison remains pending; do not infer a performance pass from capture
 or fixture checks. Logs: `/tmp/redis-workbench-browser-check.log`,
 `/tmp/redis-workbench-preview-build.log`, `/tmp/redis-workbench-preview.log`,
 `/tmp/redis-workbench-light-preview.log`, `/tmp/redis-workbench-runner-tests.log`.
+
+### Workbench transport audit follow-up
+
+A review during the release comparison's baseline compilation found that the
+Cluster bounded-query entry point still rejected every command except VSIM.
+Removed that obsolete restriction; routing continues to use command_slot and the
+existing MOVED/ASK implementation. Also removed the bounded-path special error
+message so a lost reply consistently explains that a submitted write may have
+completed and was not replayed. Added a disposable protocol-peer regression for
+GET, server-error draining, PING and a lost INCR reply with router shutdown.
+This new test has not yet run: avoid competing test/build work while performance
+comparison session 47793 is live. The rendering fixture and UI implementation were
+not changed during the comparison; the transport-only correction was made before
+candidate compilation and noted in its environment artifact.
+
+Performance run: `target/redis-workbench-performance`, baseline `a495acc`, five
+paired runs with `--redis-pages --redis-editor`. Still in progress; no timing or
+pass claim yet. The milestone remains open for that result, the new Cluster test,
+additional interaction checks and affected Sentinel coverage.
