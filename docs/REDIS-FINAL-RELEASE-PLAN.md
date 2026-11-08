@@ -6,7 +6,7 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
 
 ## Deliverables, in order
 
-- [ ] Connection options: reuse existing verified OpenSSH transport for Redis;
+- [x] Connection options: reuse existing verified OpenSSH transport for Redis;
   preserve the Redis TLS hostname across tunneling and own tunnel lifetime with
   its connection. Add client-certificate/key paths with worker-side loading,
   paired configuration validation and no saved key bytes. Cover applicable
@@ -209,3 +209,28 @@ capture inspected at `target/redis-security-captures/connection-compact-expanded
 text wraps and actions remain visible. Added a dedicated expanded-security CPU
 workload at compact/large viewports with scrolling and a simulated idle time jump;
 its release measurements are pending, not covered by the prior default-form pass.
+
+### Connection milestone status
+
+Functional connection milestone complete: verified OpenSSH settings/ownership,
+preserved TLS host identity, paired worker-loaded client certificates, independent
+Sentinel discovery/data configuration, live Cluster redirects, and normal/node/
+streaming SSH paths. Windows SSH remains explicitly unsupported by the existing
+transport. Live SSH failover/resharding composition and broader native/display
+checks are not claimed; the release validation gates above remain open.
+
+Expanded security-form release workload completed on the same Apple M4 Max/macOS
+27.2 with mise Rust 1.99.1, default egui scale, 20 warmups and 160 samples at each
+viewport. Compact 1000×760 p95: 0.074625 ms; large 1400×1080 p95: 0.081208 ms.
+Raw p50/p95/p99/max and all samples: `target/redis-security-expanded-performance/`.
+This is new-workload CPU evidence, not an input-to-display or comparative pass.
+Together with the earlier default-form comparisons and compact functional/capture
+checks, it completes the targeted connection validation for this milestone;
+full-suite noise and release-native checks remain explicitly open.
+
+Next: Search catalog metadata and reviewed create/drop actions. The current
+catalog performs one FT._LIST exchange and fetches FT.INFO only after selection.
+Enrichment must batch bounded metadata for a catalog page, cache it until explicit
+refresh, preserve names when one index disappears or lacks metadata permission,
+and keep schema/query loading independent. Create/drop must validate again on the
+worker under safe mode; dropping an index must not implicitly delete its documents.
