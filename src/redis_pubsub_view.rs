@@ -188,14 +188,18 @@ impl View {
     fn publish_composer(&mut self, ui: &mut egui::Ui, ready: bool, read_only: bool) -> Option<Publish> {
         let mut publish = None;
         ui.separator();
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::BOTTOM), |ui| {
+        let message_width = (ui.available_width() - 220.0 - 100.0 - 24.0).max(100.0);
+        egui::Grid::new("publish-composer-fields").num_columns(3).spacing(egui::vec2(12.0, 6.0)).show(ui, |ui| {
+            ui.weak("Channel name");
+            ui.horizontal(|ui| { ui.weak("Message"); ui.checkbox(&mut self.hex, "Hex"); });
+            ui.label("");
+            ui.end_row();
             ui.vertical(|ui| {
-                ui.set_width(220.0); ui.weak("Channel name");
-                ui.add(egui::TextEdit::singleline(&mut self.publish_channel).desired_width(220.0).char_limit(8192));
+                ui.set_width(220.0);
+                ui.add(egui::TextEdit::singleline(&mut self.publish_channel).desired_width(f32::INFINITY).char_limit(8192));
             });
             ui.vertical(|ui| {
-                ui.set_width((ui.available_width() - 100.0).max(100.0));
-                ui.horizontal(|ui| { ui.weak("Message"); ui.checkbox(&mut self.hex, "Hex"); });
+                ui.set_width(message_width);
                 ui.add(egui::TextEdit::multiline(&mut self.payload).desired_rows(2).desired_width(f32::INFINITY).char_limit(131072).hint_text("Enter message"));
             });
             if ui.add_enabled(ready && !read_only && !self.publishing, crate::redis_workspace::action_button("arrow-right", "Publish")).on_hover_text("Publish to subscribers immediately").clicked() {
@@ -204,6 +208,7 @@ impl View {
                     Err(error) => self.publish_status = error,
                 }
             }
+            ui.end_row();
         });
         if !self.publish_status.is_empty() { ui.label(&self.publish_status); }
         publish

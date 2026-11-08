@@ -377,7 +377,14 @@ impl View {
                              headers: [&str; 3],
                              rows: &[[String; 3]],
                              numeric: [bool; 3]| {
-                    crate::controls::report_table(ui, id, title, headers, rows, numeric, 260.0);
+                    // A table below the fold must not collapse to the remaining
+                    // viewport height: the outer report owns that scrolling.
+                    let body_height = (rows.len() as f32 * 32.0).min(260.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), body_height + 88.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| crate::controls::report_table(ui, id, title, headers, rows, numeric, body_height),
+                    );
                 };
                 let rankings = |left: &mut egui::Ui, right: &mut egui::Ui| {
                     table(
@@ -447,6 +454,36 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn report_scroll_reaches_expiry_rows_below_rankings() {
+        for width in [800.0, 1200.0] {
+            let ctx = egui::Context::default();
+            let mut view = View::new(Settings::default(), String::new(), String::new());
+            view.prepare_benchmark();
+            let mut reached = false;
+            for frame in 0..60 {
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 600.0))),
+                    time: Some(frame as f64 / 60.0),
+                    events: if frame > 2 { vec![
+                        egui::Event::PointerMoved(egui::pos2(width - 12.0, 500.0)),
+                        egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -80.0), modifiers: egui::Modifiers::NONE },
+                    ] } else { vec![] },
+                    ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| view.show(ui, 0, true)); });
+                fn visible(shape: &egui::Shape, clip: egui::Rect) -> bool {
+                    match shape {
+                        egui::Shape::Text(text) => text.galley.text() == analysis::EXPIRY_LABELS[5]
+                            && clip.contains(text.pos + text.galley.size() * 0.5),
+                        egui::Shape::Vec(shapes) => shapes.iter().any(|s| visible(s, clip)),
+                        _ => false,
+                    }
+                }
+                reached |= output.shapes.iter().any(|s| visible(&s.shape, s.clip_rect));
+            }
+            assert!(reached, "expiry rows must remain reachable at width {width}");
+        }
+    }
     fn fixture() -> Report {
         struct Sample;
         impl analysis::Source for Sample {

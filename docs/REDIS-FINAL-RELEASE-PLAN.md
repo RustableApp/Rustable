@@ -1043,3 +1043,27 @@ It passed, proving the complete batch is rejected before a preceding SET reaches
 the peer (`/tmp/redis-command-workflow-guards.log`). Existing streaming boundary
 checks also passed (`/tmp/redis-command-stream-boundaries.log`). No production
 execution changes or extra exchanges were introduced by this assessment.
+
+### Focused final layout audit
+
+Reviewed current Search catalog, new-key creation, Analyze and Pub/Sub captures.
+Search and new-key structure are retained. The Analyze capture exposed lower
+report tables shrinking to headers because the inner table inherited only the
+remaining viewport height. Analysis now reserves bounded body space per table,
+leaving page scrolling to the outer report. The new scroll test proves the final
+expiry row is reachable at both 800- and 1200-point widths: it fails with the old
+layout and passes with the fix. All three analysis-view tests pass; the live 650-key
+analysis/cancel fixture passed during native capture.
+
+Pub/Sub labels and fields now share grid columns; message entry and Publish stay
+within the composer. An initial grid capture exposed collapsed widths, which were
+corrected before the final dark/light captures. Actual final screenshots are in
+`target/redis-final-polish-{dark,light}/pubsub-ready.png` and
+`target/redis-analysis-final{,-light}-captures/analyze.png`. Capture size is
+1200×760 logical / 2400×1520 physical. No browser redesign or network changes.
+
+Added an identical analysis-scroll workload to both sides of the --redis-pages
+comparison, using wheel input followed by idle frames. It deliberately compares
+the previously clipped layout with the corrected layout; the separate regression
+test, not this timing fixture, establishes reachability. Benchmark smoke and all
+eight runner checks pass. Release comparison remains pending before polish closure.

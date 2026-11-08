@@ -155,7 +155,7 @@ def main():
         EXPECTED.update(('redis/grid', 'redis/hash-inspector', 'redis/string-inspector', 'redis/browser-chrome'))
     if args.redis_pages:
         BENCHMARKS += ('redis_tool_pages_frame_benchmark',)
-        EXPECTED.update(f'redis/page/{page}' for page in ('search', 'analysis', 'pubsub', 'workbench-history', 'json-edit'))
+        EXPECTED.update(f'redis/page/{page}' for page in ('search', 'analysis', 'analysis-scroll', 'pubsub', 'workbench-history', 'json-edit'))
     if args.redis_editor:
         BENCHMARKS += ('redis_command_pane_frame_benchmark',)
         EXPECTED.update(f'redis/command-editor/{count}/{editing}' for count in (20, 200) for editing in ('false', 'true'))

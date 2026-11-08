@@ -358,7 +358,7 @@ mod redis_tool_pages_benchmark {
     #[test]
     #[ignore = "manual full-page tool CPU comparison"]
     fn redis_tool_pages_frame_benchmark() {
-        for page in ["search", "analysis", "pubsub", "workbench-history", "json-edit"] {
+        for page in ["search", "analysis", "analysis-scroll", "pubsub", "workbench-history", "json-edit"] {
             let ctx = egui::Context::default();
             let mut workspace = Workspace::new(Settings { host: String::new(), ..Default::default() }, String::new(), ctx.clone());
             assert!(workspace.receiver.recv().unwrap().is_err());
@@ -370,7 +370,7 @@ mod redis_tool_pages_benchmark {
                     workspace.search.prepare_catalog_benchmark();
                     workspace.search.open = true;
                 }
-                "analysis" => {
+                "analysis" | "analysis-scroll" => {
                     workspace.section = Section::Analyze;
                     workspace.diagnostics_open = false;
                     let names: Vec<_> = (0..1000).map(|i|format!("namespace{}:key:{i:04}",i%16).into_bytes()).collect();
@@ -402,6 +402,10 @@ mod redis_tool_pages_benchmark {
                 let output = ctx.run(egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0,760.0))),
                     time: Some(frame as f64/120.0 + if frame >= 100 {30.0} else {0.0}),
+                    events: if page == "analysis-scroll" && frame < 100 { vec![
+                        egui::Event::PointerMoved(egui::pos2(1180.0, 650.0)),
+                        egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -48.0), modifiers: egui::Modifiers::NONE },
+                    ] } else { vec![] },
                     ..Default::default()
                 }, |ctx| { workspace.show(ctx, "Fixture", egui::Color32::BLUE, &mut sizes, &mut dirty); });
                 if page == "json-edit" && frame > 0 {
