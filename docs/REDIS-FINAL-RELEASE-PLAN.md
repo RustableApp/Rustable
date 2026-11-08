@@ -1163,3 +1163,27 @@ implemented scope, measured performance costs and explicit deferrals/limitations
 Ready for signed packaging. The final release checkbox remains open until CI,
 signing/notarization/checksums/updater verification, exact-tag WASM deployment,
 live startup/provenance/download checks and publication are complete.
+
+
+### Windows candidate gate correction
+
+The v0.4.20 main CI Windows Clippy job (42501193308 / 128794102125)
+failed on the enlarged Redis ConnectionKind variant (472 bytes versus 232 bytes
+for MySQL on Windows) and a Unix-only SSH fixture helper compiled unused there.
+Cancelled signed packaging run 42501193143; no desktop release or website demo
+was published. The v0.4.20 tag remains unchanged as a rejected candidate.
+
+Redis profile settings are now boxed, reducing enum size while preserving serde's
+existing persisted representation, covered by the profile compatibility test.
+The SSH fixture override is compiled only for Unix tests. No network sequence,
+render loop, or driver behavior changes. Prepared v0.4.21 as the next candidate;
+local validation and all-platform CI must pass before tagging/packaging it.
+The staged v0.4.20 website demo is not suitable for final deployment and must be
+replaced by the exact accepted candidate artifact.
+
+
+The corrected v0.4.21 candidate passed all 786 locked tests (204 ignored), strict
+all-target Clippy with QA features, and the separate locked browser check (77
+existing warnings): `/tmp/redis-0421-{tests,clippy,browser}.log`. The saved-profile
+compatibility assertion passes. Cross-platform CI and the connection-profile UI
+comparison remain required before tagging this candidate.

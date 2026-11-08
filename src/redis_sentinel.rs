@@ -673,7 +673,7 @@ mod tests {
         };
         for valid in [true, false] {
             let probe = crate::connection_probe::Probe::start_with_sentinel(
-                crate::connection_profiles::ConnectionKind::Redis(settings.clone()),
+                crate::connection_profiles::ConnectionKind::Redis(Box::new(settings.clone())),
                 "rustable-data-test-only".into(),
                 if valid {
                     "rustable-sentinel-test-only"

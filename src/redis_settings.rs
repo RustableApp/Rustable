@@ -153,11 +153,11 @@ impl Settings {
 
 // Test-only file overrides keep live SSH fixtures out of the user's trust store.
 // Gateway, identity, forwarding and verification still use the production path.
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, unix, not(target_arch = "wasm32")))]
 thread_local! {
     static SSH_TEST_FILES: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const { std::cell::RefCell::new(None) };
 }
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, unix, not(target_arch = "wasm32")))]
 pub(crate) fn with_ssh_test_files<T>(known_hosts: PathBuf, config: PathBuf, run: impl FnOnce() -> T) -> T {
     struct Restore(Option<(PathBuf, PathBuf)>);
     impl Drop for Restore {
@@ -176,7 +176,7 @@ pub(crate) fn start_tunnel(settings: &Settings, cancelled: &std::sync::atomic::A
             config_file: ssh.ignore_config.then(|| PathBuf::from("/dev/null")),
             remote_host: settings.host.clone(), remote_port: settings.port,
         };
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         let config = SSH_TEST_FILES.with(|files| {
             let mut config = config;
             if let Some((known_hosts, file)) = files.borrow().as_ref() {

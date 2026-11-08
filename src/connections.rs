@@ -1325,7 +1325,7 @@ impl Rustable {
                     .as_ref()
                     .ok_or("Choose a connection first.")?;
                 let connection = match &profile.connection {
-                    ConnectionKind::Redis(settings) => crate::session_windows::WindowConnection::Redis { settings: Box::new(settings.clone()), password: self.connection_manager.password.clone(), sentinel_password: self.connection_manager.sentinel_password.clone() },
+                    ConnectionKind::Redis(settings) => crate::session_windows::WindowConnection::Redis { settings: settings.clone(), password: self.connection_manager.password.clone(), sentinel_password: self.connection_manager.sentinel_password.clone() },
                     ConnectionKind::SQLite { path } => {
                         crate::session_windows::WindowConnection::Sqlite(path.clone())
                     }

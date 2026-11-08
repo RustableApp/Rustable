@@ -379,7 +379,7 @@ pub(super) fn convert(v: &Value, warnings: &mut Vec<String>) -> Result<Connectio
                 ConnectionKind::MariaDb(c)
             }
         }
-        "redis" => ConnectionKind::Redis(crate::redis_settings::Settings {
+        "redis" => ConnectionKind::Redis(Box::new(crate::redis_settings::Settings {
             host,
             port: port(v, "DatabasePort", 6379)?,
             database: if database.is_empty() {
@@ -392,7 +392,7 @@ pub(super) fn convert(v: &Value, warnings: &mut Vec<String>) -> Result<Connectio
             username: user,
             tls,
             ..Default::default()
-        }),
+        })),
         _ => unreachable!(),
     })
 }

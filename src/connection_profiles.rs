@@ -148,7 +148,7 @@ pub enum ConnectionKind {
     Postgres(PostgresProfile),
     Mysql(MysqlProfile),
     MariaDb(MysqlProfile),
-    Redis(crate::redis_settings::Settings),
+    Redis(Box<crate::redis_settings::Settings>),
 }
 impl ConnectionKind {
     pub fn validate(&self) -> Result<(), String> {
@@ -541,10 +541,10 @@ mod tests {
 
     #[test]
     fn redis_profile_roundtrips_with_settings_and_no_embedded_password() {
-        let profile = Profile::draft("Redis".into(), ConnectionKind::Redis(crate::redis_settings::Settings {
+        let profile = Profile::draft("Redis".into(), ConnectionKind::Redis(Box::new(crate::redis_settings::Settings {
             host: "cache.example.test".into(), database: 3, username: "app".into(),
             root_certificate: Some("/tmp/ca.crt".into()), ..Default::default()
-        }));
+        })));
         assert!(profile.validate().is_ok());
         let mut storage = Storage::default();
         eframe::set_value(&mut storage, "redis", &profile);
@@ -554,6 +554,10 @@ mod tests {
         let serialized = serde_json::to_string(&config).unwrap();
         assert!(!serialized.contains("password"));
         assert_eq!(config.database, 3);
+        // Boxing must preserve the pre-existing persisted enum representation.
+        let legacy = serde_json::json!({ "Redis": serde_json::to_value(config.as_ref()).unwrap() });
+        let loaded: ConnectionKind = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(serde_json::to_value(loaded).unwrap(), legacy);
     }
     #[test]
     fn ssh_inheritance_roundtrips_without_changing_legacy_explicit_ports() {
@@ -754,9 +758,9 @@ mod tests {
         storage.0.insert("old-profile".into(), legacy);
         let restored: Profile = eframe::get_value(&storage, "old-profile").unwrap();
         assert!(!restored.remember_password);
-        model.profiles[0].connection = ConnectionKind::Redis(crate::redis_settings::Settings {
+        model.profiles[0].connection = ConnectionKind::Redis(Box::new(crate::redis_settings::Settings {
             sentinel: Some(crate::redis_settings::Sentinel { remember_password: true, ..Default::default() }), ..Default::default()
-        });
+        }));
         model.profiles[0].id = ProfileId(0);
         eframe::set_value(&mut storage, "repaired", &model);
         let repaired: ConnectionProfiles = eframe::get_value(&storage, "repaired").unwrap();
