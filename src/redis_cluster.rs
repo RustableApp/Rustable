@@ -1663,6 +1663,60 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "disposable mutual TLS Cluster via scripts/test-redis-cluster-mtls.sh"]
+    fn live_mutual_tls_routes_preserve_identity_on_every_primary() {
+        assert_eq!(std::env::var("RUSTABLE_REDIS_CLUSTER_MTLS_QA").as_deref(), Ok("1"));
+        let certs = std::path::PathBuf::from(std::env::var_os("RUSTABLE_REDIS_MTLS_CERTS").unwrap());
+        let settings = Settings {
+            host: "127.0.0.1".into(), port: 16430, cluster: true, tls: true,
+            root_certificate: Some(certs.join("ca.crt")),
+            client_certificate: Some(certs.join("client.crt")),
+            client_key: Some(certs.join("client.key")),
+            ..Default::default()
+        };
+        let password = "rustable-mtls-test-only";
+        let mut seed = crate::redis_session::Session::raw_node(&settings, password).unwrap();
+        let topology = crate::redis_topology::Cluster::decode(
+            redis::cmd("CLUSTER").arg("SHARDS").query(&mut seed).unwrap(), "127.0.0.1", true,
+        ).unwrap();
+        let routes = topology.routes();
+        let keys: Vec<_> = (16430..=16432).map(|port| {
+            (0..10000).map(|i| format!("mtls:routing:{i}")).find(|key|
+                routes[hash_slot(key.as_bytes()) as usize].as_ref().is_some_and(|endpoint| endpoint.port == port)
+            ).expect("key on each primary")
+        }).collect();
+        // Empty routing forces MOVED discovery rather than pre-populating owners.
+        let connection = crate::redis_session::Session::cluster_node(&settings, password).unwrap();
+        let mut router = Router::new(settings.clone(), password.into(), connection, vec![None; 16384]);
+        for key in &keys {
+            assert_eq!(router.query(redis::cmd("INCR").arg(key)).unwrap(), redis::Value::Int(1));
+            assert_eq!(router.query(redis::cmd("INCR").arg(key)).unwrap(), redis::Value::Int(2));
+        }
+        for key in &keys {
+            assert_eq!(router.query(redis::cmd("GET").arg(key)).unwrap(), redis::Value::BulkString(b"2".to_vec()));
+            router.query(redis::cmd("DEL").arg(key)).unwrap();
+        }
+        // The seed is valid, but newly discovered connections must still require
+        // the identity and the configured server hostname. No plaintext fallback.
+        for fault in 0..3 {
+            let connection = crate::redis_session::Session::cluster_node(&settings, password).unwrap();
+            let mut invalid = settings.clone();
+            if fault == 0 { invalid.client_certificate = None; invalid.client_key = None; }
+            if fault == 1 {
+                invalid.client_certificate = Some(certs.join("untrusted.crt"));
+                invalid.client_key = Some(certs.join("untrusted.key"));
+            }
+            let mut router = Router::new(invalid, password.into(), connection, vec![None; 16384]);
+            router.routes[hash_slot(keys[1].as_bytes()) as usize] = Some(Endpoint {
+                host: if fault == 2 { "localhost" } else { "127.0.0.1" }.into(), port: 16431,
+            });
+            assert!(router.query(redis::cmd("INCR").arg(&keys[1])).is_err(), "invalid discovered identity {fault}");
+        }
+        let mut valid = crate::redis_session::Session::connect(&settings, password).unwrap();
+        assert_eq!(valid.execute(&format!("GET {}", keys[1]), true).unwrap(), vec![redis::Value::Nil]);
+    }
+
+    #[test]
     #[ignore = "disposable cluster fixture via scripts/test-redis-cluster.sh"]
     fn live_resharding_follows_ask_then_caches_moved_without_duplicate_writes() {
         assert_eq!(std::env::var("RUSTABLE_REDIS_CLUSTER_QA").as_deref(), Ok("1"));

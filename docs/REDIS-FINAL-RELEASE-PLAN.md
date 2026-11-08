@@ -146,3 +146,16 @@ both sessions and streams. `bash scripts/test-redis-sentinel-tls.sh` passed;
 evidence: `/tmp/redis-sentinel-mtls.log`. The fixture removes only its own container
 and temporary certificates. Cluster mTLS, SSH topology/stream integration and
 connection UI checks remain open.
+
+### Cluster mutual-TLS routing verification
+
+Added an isolated three-primary TLS-only Cluster fixture requiring client
+certificates on every node. The live test starts with empty routing, follows
+MOVED responses, executes repeated INCR/GET on keys owned by all three primaries,
+and cleans up the keys. New node connections reject missing/untrusted client
+identities and a wrong TLS hostname; a subsequent valid routed GET proves the
+rejected writes did not execute. `bash scripts/test-redis-cluster-mtls.sh` passed
+(`/tmp/redis-cluster-mtls.log`). This covers real discovered connections rather
+than only calling the node constructor against standalone Redis. SSH topology and
+stream integration, UI/performance evidence and the remaining release gates are
+still outstanding.
