@@ -201,7 +201,9 @@ def main():
                     workspace.write_text(source + '\ninclude!("redis_browser_benchmark.rs");\n')
                 metadata['redis_fixture'] = fixture.read_text()
                 (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
-            if args.redis_pages:
+            if args.redis or args.redis_editor or args.redis_pages or args.redis_completion:
+                # All shared fixture variants compile the page workload, even
+                # when another Redis workload is selected for measurement.
                 # The current catalog benchmark represents already loaded data,
                 # never an attempted request to the disconnected fixture worker.
                 # Older catalogs contain names only and need no metadata cache.
