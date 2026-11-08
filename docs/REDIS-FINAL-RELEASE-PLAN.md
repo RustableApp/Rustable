@@ -582,3 +582,22 @@ Performance run: `target/redis-workbench-performance`, baseline `a495acc`, five
 paired runs with `--redis-pages --redis-editor`. Still in progress; no timing or
 pass claim yet. The milestone remains open for that result, the new Cluster test,
 additional interaction checks and affected Sentinel coverage.
+
+### Workbench first performance result and focused safety checks
+
+The five-pair comparison completed. All measured editor/input and unrelated page
+scenarios passed, but 100 individual Workbench result sections regressed from
+0.0600 ms to 0.3100 ms p95 (+416.7%). This is not accepted as a pass. Inspection
+identified offscreen sections still receiving full layout; cached measured row
+heights now allow them to skip layout while preserving scroll extent, with
+invalidation on a new report or changed width. A second identical comparison is
+required; first-use, scrolling and resizing checks remain open.
+
+The new bounded Cluster GET/error/PING/lost-INCR test passed
+(`/tmp/redis-workbench-cluster-test.log`). Sentinel's demotion/lost-reply test now
+uses the production report API and passed, verifying Failed/Not run statuses and
+connection closure without another write (`/tmp/redis-workbench-sentinel-test.log`).
+Copy-feedback coverage now exercises both labelled and icon-only controls; it
+passed clipboard output, single lazy copy and eventual idle checks
+(`/tmp/redis-workbench-copy-test.log`). The generic icon tooltip now says Copy,
+not Copy key name when used for command results.

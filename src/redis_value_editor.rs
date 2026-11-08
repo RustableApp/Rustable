@@ -37,7 +37,7 @@ pub(crate) fn copy(
         icon(
             ui,
             if copied { "check" } else { "clipboard" },
-            if copied { "Copied" } else { "Copy key name" },
+            if copied { "Copied" } else { "Copy" },
             enabled,
         )
     };
@@ -154,6 +154,10 @@ mod tests {
     use super::*;
     #[test]
     fn copy_feedback_is_lazy_and_expires_without_idle_polling() {
+        verify_copy_feedback(Some("Copy value"));
+        verify_copy_feedback(None);
+    }
+    fn verify_copy_feedback(label: Option<&'static str>) {
         let ctx = egui::Context::default();
         let mut rect = egui::Rect::NOTHING;
         let mut copies = 0;
@@ -181,7 +185,7 @@ mod tests {
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         id = ui.make_persistent_id(("redis-copy-feedback", "test"));
-                        rect = copy(ui, "test", Some("Copy value"), true, || {
+                        rect = copy(ui, "test", label, true, || {
                             copies += 1;
                             "value".into()
                         })

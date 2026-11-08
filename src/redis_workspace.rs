@@ -127,6 +127,8 @@ pub(crate) struct Workspace {
     preview: String,
     output: String,
     command_results: crate::redis_command_results::Report,
+    command_result_heights: Vec<f32>,
+    command_result_width: f32,
     command: String,
     command_editor: crate::redis_command_editor::Editor,
     error: Option<String>,
@@ -356,6 +358,8 @@ impl Workspace {
             string_mode: StringMode::Text,
             preview: String::new(),
             command_results: Default::default(),
+            command_result_heights: Vec::new(),
+            command_result_width: 0.0,
             output: if cfg!(target_arch = "wasm32") {
                 "In-memory Redis demo · Rust/WASM. Data stays in this tab and resets on reload. Run INFO for supported commands; key searches support * and ?.".into()
             } else {
@@ -922,7 +926,7 @@ impl Workspace {
                         self.send(Job::Inspect(key));
                     }
                 }
-                Ok(Reply::Output(report)) => { self.output = report.text(); self.command_results = report; },
+                Ok(Reply::Output(report)) => { self.output = report.text(); self.command_results = report; self.command_result_heights.clear(); },
                 Ok(Reply::Changed(notice)) => {
                     if let Some(snapshot) = &self.snapshot {
                         let key = snapshot.key.clone();
@@ -2380,8 +2384,20 @@ impl Workspace {
                                 ui.weak("Run a command to see its result.");
                             });
                         } else if !self.command_results.entries.is_empty() {
+                            let width = ui.available_width();
+                            if (self.command_result_width - width).abs() > 0.5 {
+                                self.command_result_heights.clear();
+                                self.command_result_width = width;
+                            }
+                            self.command_result_heights.resize(self.command_results.entries.len(), 0.0);
                             for (index, entry) in self.command_results.entries.iter().enumerate() {
-                                ui.push_id(index, |ui| {
+                                let height = self.command_result_heights[index];
+                                let bounds = egui::Rect::from_min_size(ui.next_widget_position(), egui::vec2(width, height));
+                                if height > 0.0 && !ui.is_rect_visible(bounds) {
+                                    ui.allocate_space(egui::vec2(width, height));
+                                    continue;
+                                }
+                                let response = ui.push_id(index, |ui| {
                                     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.id().with("result"), true)
                                         .show_header(ui, |ui| {
                                             ui.label(format!("{}. {}", index + 1, entry.command));
@@ -2392,6 +2408,7 @@ impl Workspace {
                                         }).body(|ui| { ui.monospace(&entry.output); });
                                     ui.separator();
                                 });
+                                self.command_result_heights[index] = response.response.rect.height();
                             }
                         } else {
                             ui.monospace(&self.output);

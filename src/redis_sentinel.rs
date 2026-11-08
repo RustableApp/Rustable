@@ -379,7 +379,10 @@ mod tests {
                 .query(&mut connection)
                 .unwrap();
             let mut session = Session::verified_primary(connection, &settings);
-            let error = session.execute("INCR counter\nINCR later", false).unwrap_err();
+            let report = session.execute_report("INCR counter\nINCR later", false).unwrap();
+            assert!(matches!(report.entries[0].status, crate::redis_command_results::Status::Failed));
+            assert!(matches!(report.entries[1].status, crate::redis_command_results::Status::NotRun));
+            let error = &report.entries[0].output;
             assert!(
                 error.contains(if demoted {
                     "not replayed"
