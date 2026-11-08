@@ -261,12 +261,14 @@ impl Editor {
                                     }
                                 }
                                 if !self.suggestions.items.is_empty() {
+                                    ui.visuals_mut().clip_rect_margin = 0.0;
+                                    let row_stride = 25.0 + ui.spacing().item_spacing.y;
                                     let mut list = egui::ScrollArea::vertical()
                                         .id_salt("redis-completions")
-                                        .max_height(176.0);
+                                        .max_height(6.0 * row_stride - ui.spacing().item_spacing.y);
                                     if selection_before != self.selected || changed || explicit {
                                         list = list.vertical_scroll_offset(
-                                            self.selected.saturating_sub(5) as f32 * 25.0,
+                                            self.selected.saturating_sub(5) as f32 * row_stride,
                                         );
                                     }
                                     list.show_rows(
@@ -602,6 +604,28 @@ mod tests {
             FontId::monospace(14.0)
         );
     }
+    #[test]
+    fn typing_exact_command_resets_selection_and_accepts_exact_match() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::default();
+        let mut text = "GE".to_owned();
+        let (_, id) = frame(&ctx, &mut editor, &mut text, vec![], true, true);
+        let mut state = egui::text_edit::TextEditState::load(&ctx, id).unwrap();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(2))));
+        state.store(&ctx, id);
+        frame(&ctx, &mut editor, &mut text, vec![], true, true);
+        editor.selected = 2;
+        frame(&ctx, &mut editor, &mut text, vec![egui::Event::Text("T".into())], true, true);
+        assert_eq!(text, "GET");
+        assert_eq!(editor.selected, 0);
+        assert_eq!(editor.suggestions.items[0].label, "GET");
+        frame(&ctx, &mut editor, &mut text, vec![egui::Event::Key {
+            key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }], true, true);
+        assert_eq!(text, "GET ");
+    }
+
     #[test]
     fn completion_keyboard_acceptance_and_dismissal() {
         let ctx = egui::Context::default();

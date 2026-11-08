@@ -154,14 +154,15 @@ def main():
         BENCHMARKS += ('redis_key_grid_frame_benchmark', 'redis_hash_inspector_frame_benchmark', 'redis_string_inspector_frame_benchmark', 'redis_browser_chrome_frame_benchmark')
         EXPECTED.update(('redis/grid', 'redis/hash-inspector', 'redis/string-inspector', 'redis/browser-chrome'))
     if args.redis_pages:
-        BENCHMARKS += ('redis_tool_pages_frame_benchmark',)
+        BENCHMARKS += ('redis_tool_pages_frame_benchmark', 'redis_pubsub_table_frame_benchmark')
+        EXPECTED.add('redis/pubsub-messages')
         EXPECTED.update(f'redis/page/{page}' for page in ('search', 'analysis', 'analysis-scroll', 'pubsub', 'workbench-history', 'json-edit'))
     if args.redis_editor:
         BENCHMARKS += ('redis_command_pane_frame_benchmark',)
         EXPECTED.update(f'redis/command-editor/{count}/{editing}' for count in (20, 200) for editing in ('false', 'true'))
     if args.redis_completion:
         BENCHMARKS += ('redis_completion_frame_benchmark',)
-        EXPECTED.update(f'redis/completion/{case}' for case in ('commands', 'arguments', 'after-idle', 'counted-keys', 'capability'))
+        EXPECTED.update(f'redis/completion/{case}' for case in ('commands', 'arguments', 'after-idle', 'counted-keys', 'capability', 'typing'))
     if args.redis_editing:
         BENCHMARKS += ('redis_creation_frame_benchmark',)
         EXPECTED.add('redis/editing/create-one')
@@ -198,6 +199,15 @@ def main():
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
+            if args.redis_pages:
+                fixture = root / 'src' / 'redis_pubsub_benchmark.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                source = base_path / 'src' / 'redis_pubsub_view.rs'
+                if 'include!("redis_pubsub_benchmark.rs")' not in source.read_text():
+                    with source.open('a') as output:
+                        output.write('\n#[cfg(test)] include!("redis_pubsub_benchmark.rs");\n')
+                metadata['pubsub_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.redis_vectors:
                 fixture = root / 'src' / 'redis_vector_benchmark.rs'
                 shutil.copy2(fixture, base_path / 'src' / fixture.name)

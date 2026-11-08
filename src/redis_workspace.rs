@@ -118,6 +118,7 @@ pub(crate) struct Workspace {
     selected_key: Option<Vec<u8>>,
     snapshot: Option<Snapshot>,
     value_editor: String,
+    json_string_edit: Option<String>,
     value_page: Option<Page>,
     value_history: Vec<Cursor>,
     pending_navigation: Option<Navigation>,
@@ -356,6 +357,7 @@ impl Workspace {
             selected_key: None,
             snapshot: None,
             value_editor: String::new(),
+            json_string_edit: None,
             value_page: None,
             value_history: vec![],
             pending_navigation: None,
@@ -603,7 +605,7 @@ impl Workspace {
         self.busy || self.value_dirty()
     }
     fn value_dirty(&self) -> bool {
-        self.edit.as_ref().is_some_and(|e| e.action == crate::redis_mutation::Action::Update && e.kind == "ReJSON-RL") || self.snapshot.as_ref().is_some_and(|snapshot| {
+        self.json_string_edit.is_some() || self.edit.as_ref().is_some_and(|e| e.action == crate::redis_mutation::Action::Update && e.kind == "ReJSON-RL") || self.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.kind == "string"
                 && !snapshot.truncated
                 && match &snapshot.value {
@@ -923,6 +925,7 @@ impl Workspace {
                             ),
                         );
                     }
+                    self.json_string_edit = None;
                     self.value_editor = match &snapshot.value {
                         redis::Value::BulkString(bytes) => crate::redis_commands::quote(bytes),
                         _ => String::new(),
@@ -985,11 +988,13 @@ impl Workspace {
                 }
                 Ok(Reply::Output(report)) => { self.output = report.text(); self.command_results = report; self.command_result_heights.clear(); },
                 Ok(Reply::Changed(notice)) => {
+                    let saved_json_string = self.json_string_edit.take().is_some();
                     if let Some(snapshot) = &self.snapshot {
                         let key = snapshot.key.clone();
                         self.snapshot = None;
                         self.send(Job::Inspect(key));
                     }
+                    if saved_json_string { self.string_mode = StringMode::Json; }
                     self.notice = Some(notice.into());
                 }
             }
@@ -1869,9 +1874,41 @@ impl Workspace {
         let remote_search = matches!(snapshot.kind.as_str(), "hash" | "set" | "zset");
         let mut local_changed = false;
         ui.horizontal(|ui| {
+            ui.set_height(28.0);
             ui.label(egui::RichText::new("Value").size(15.0).strong());
             if self.read_only {
                 ui.weak("Read-only");
+            }
+            if matches!(snapshot.kind.as_str(), "string" | "ReJSON-RL") {
+            let previous_mode = self.string_mode;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_enabled_ui(!dirty, |ui| {
+                let formats = [
+                    (StringMode::Text, "Text", 48.0),
+                    (StringMode::Json, "JSON", 52.0),
+                    (StringMode::Hex, "Hex", 44.0),
+                    (StringMode::Edit, "Edit", 44.0),
+                ];
+                crate::controls::segments(
+                    ui,
+                    "redis-value-format",
+                    &mut self.string_mode,
+                    if !snapshot.truncated && snapshot.kind == "string" {
+                        &formats[..]
+                    } else {
+                        &formats[..3]
+                    },
+                );
+            });
+            });
+            if previous_mode == StringMode::Json && self.string_mode == StringMode::Edit
+                && snapshot.kind == "string" && !snapshot.truncated && !self.read_only
+                && let Some(source) = &page.display.strings.json_source {
+                self.json_string_edit = Some(source.clone());
+                self.string_mode = StringMode::Json;
+                self.notice = None;
+                self.error = None;
+            }
             }
         });
         if snapshot.kind == "vectorset" { ui.weak("Elements in name order").on_hover_text("Binary names are ordered by their bytes. Requires Redis 8.4+ and permission to run EVAL_RO and VRANGE."); }
@@ -2011,24 +2048,29 @@ impl Workspace {
                 if cancel { self.edit = None; }
                 return;
             }
-            ui.add_enabled_ui(!dirty, |ui| {
-                let formats = [
-                    (StringMode::Text, "Text", 48.0),
-                    (StringMode::Json, "JSON", 52.0),
-                    (StringMode::Hex, "Hex", 44.0),
-                    (StringMode::Edit, "Edit", 44.0),
-                ];
-                crate::controls::segments(
-                    ui,
-                    "redis-value-format",
-                    &mut self.string_mode,
-                    if !snapshot.truncated && snapshot.kind == "string" {
-                        &formats[..]
-                    } else {
-                        &formats[..3]
-                    },
-                );
-            });
+            if let Some(draft) = &mut self.json_string_edit {
+                let mut layouter = crate::redis_value_editor::layout;
+                ui.add_enabled(!self.busy && !self.read_only, egui::TextEdit::multiline(draft)
+                    .code_editor().layouter(&mut layouter).desired_rows(12)
+                    .desired_width(f32::INFINITY).char_limit(65536));
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    ui.weak("JSON string · Save preserves expiry");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::redis_value_editor::icon(ui, "check", "Save JSON string", self.connected && !self.busy && !self.read_only).clicked() {
+                            match json_string_bytes(draft) {
+                                Ok(value) => if let redis::Value::BulkString(original) = &snapshot.value {
+                                    *job = Some(Job::Save(snapshot.key.clone(), original.clone(), value, self.read_only));
+                                },
+                                Err(error) => self.error = Some(error),
+                            }
+                        }
+                        cancel = crate::redis_value_editor::icon(ui, "x", "Discard JSON edits", !self.busy).clicked();
+                    });
+                });
+                if cancel { self.json_string_edit = None; self.error = None; }
+                return;
+            }
             if self.string_mode == StringMode::Edit && !snapshot.truncated {
                 ui.add_enabled(
                     !self.busy && !self.read_only,
@@ -2092,11 +2134,7 @@ impl Workspace {
                     340.0,
                     (self.string_mode == StringMode::Json).then_some(&views.json_tokens),
                 );
-                crate::redis_value_editor::copy(ui, "value", Some("Copy value"), self.string_mode != StringMode::Json || views.json_source.is_some(), || match self.string_mode {
-                    StringMode::Json => views.json_source.clone().unwrap_or_default(),
-                    StringMode::Hex => views.hex.join("\n"),
-                    _ => views.text_source.clone(),
-                });
+                ui.horizontal(|ui| {
                 if let redis::Value::BulkString(bytes) = &snapshot.value {
                     if bytes.is_empty() {
                         ui.weak("Empty string");
@@ -2109,6 +2147,14 @@ impl Workspace {
                         ));
                     }
                 }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                crate::redis_value_editor::copy(ui, "value", Some("Copy value"), self.string_mode != StringMode::Json || views.json_source.is_some(), || match self.string_mode {
+                    StringMode::Json => views.json_source.clone().unwrap_or_default(),
+                    StringMode::Hex => views.hex.join("\n"),
+                    _ => views.text_source.clone(),
+                });
+                    });
+                });
             }
         } else if collection {
             ui.horizontal(|ui| {
@@ -3170,6 +3216,12 @@ impl Workspace {
         }
     }
 }
+fn json_string_bytes(draft: &str) -> Result<Vec<u8>, String> {
+    if draft.len() > 65536 { return Err("JSON editing is limited to 64 KiB.".into()); }
+    serde_json::from_str::<serde::de::IgnoredAny>(draft).map_err(|error| format!("Invalid JSON: {error}"))?;
+    Ok(draft.as_bytes().to_vec())
+}
+
 struct TreeRow {
     key: usize,
     start: usize,
@@ -3179,6 +3231,7 @@ struct TreeRow {
 }
 // Sorted ranges form virtual folders. Only expanded branches get flattened;
 // depth/prefix limits keep pathological binary key names cheap and navigable.
+
 fn tree_rows(
     keys: &[Vec<u8>],
     separator: &[u8],
@@ -4265,6 +4318,82 @@ mod tests {
         assert_eq!(collection_pattern("").unwrap(), b"*");
         assert!(collection_pattern("\"unterminated").is_err());
     }
+    #[test]
+    fn pretty_json_string_edit_is_inline_and_preserves_failed_drafts() {
+        fn frame(w: &mut Workspace, ctx: &egui::Context, events: Vec<egui::Event>) -> egui::FullOutput {
+            ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(700.0, 760.0))), events, ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| { let mut job = None; w.value_inspector(ui, &mut job); assert!(job.is_none()); });
+            })
+        }
+        fn find(shape: &egui::Shape, label: &str) -> Option<egui::Pos2> {
+            match shape { egui::Shape::Text(t) if t.galley.text() == label => Some(t.pos + t.galley.size() * 0.5),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, label)), _ => None }
+        }
+        let (mut w, responses, jobs) = mock_workspace();
+        let original = br#"{"counter":9007199254740993,"nested":{"enabled":true}}"#.to_vec();
+        let snapshot = Snapshot { key: b"json-string".to_vec(), kind: "string".into(), ttl_ms: 60000,
+            length: Some(original.len() as u64), truncated: false, value: redis::Value::BulkString(original.clone()) };
+        let cursor = Cursor::Offset(0);
+        let display = crate::redis_value::Display::new(&snapshot, &cursor);
+        responses.send(Ok(Reply::Value(Box::new(Inspection { snapshot, page: Page { cursor, next: None, pattern: b"*".to_vec(), display } })))).unwrap();
+        w.poll(); w.string_mode = StringMode::Json; w.read_only = false;
+        let ctx = egui::Context::default();
+        let output = frame(&mut w, &ctx, vec![]);
+        let position = |label| output.shapes.iter().find_map(|s| find(&s.shape, label)).expect("visible control");
+        let edit = position("Edit"); let title = position("Value");
+        assert!(edit.x > title.x && (edit.y - title.y).abs() < 3.0, "formats share the Value row: {edit:?} vs {title:?}");
+        for pressed in [true, false] { frame(&mut w, &ctx, vec![egui::Event::PointerMoved(edit), egui::Event::PointerButton { pos: edit, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }]); }
+        assert!(w.json_string_edit.as_ref().unwrap().contains("\n"));
+        assert!(w.json_string_edit.as_ref().unwrap().contains("9007199254740993"));
+        assert!(w.value_dirty());
+        w.send(Job::Inspect(b"another".to_vec())); assert!(jobs.try_recv().is_err());
+        let draft = "{\n  \"counter\": 9007199254740994\n}".to_owned();
+        w.json_string_edit = Some(draft.clone());
+        w.send(Job::Save(b"json-string".to_vec(), original.clone(), json_string_bytes(&draft).unwrap(), false));
+        assert!(matches!(jobs.try_recv().unwrap(), Job::Save(_, expected, value, false) if expected == original && value == draft.as_bytes()));
+        responses.send(Err(("Value changed; refresh before saving.".into(), true))).unwrap(); w.poll();
+        assert_eq!(w.json_string_edit.as_deref(), Some(draft.as_str()));
+        assert!(json_string_bytes("{broken").is_err());
+        assert!(json_string_bytes("{} trailing").is_err());
+        assert!(json_string_bytes(&" ".repeat(65537)).is_err());
+        responses.send(Ok(Reply::Changed("Value saved."))).unwrap(); w.poll();
+        assert!(w.json_string_edit.is_none());
+        assert!(w.string_mode == StringMode::Json);
+        assert!(matches!(jobs.try_recv().unwrap(), Job::Inspect(key) if key == b"json-string"));
+    }
+
+    #[test]
+    #[ignore = "manual JSON-string editor CPU workload; new interaction has no baseline"]
+    fn redis_json_string_edit_frame_benchmark() {
+        let (mut w, responses, _) = mock_workspace();
+        let document = serde_json::json!({"items": (0..100).map(|i| format!("Item {i}")).collect::<Vec<_>>(), "count": 100});
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let snapshot = Snapshot { key: b"json-string".to_vec(), kind: "string".into(), ttl_ms: -1,
+            length: Some(bytes.len() as u64), truncated: false, value: redis::Value::BulkString(bytes) };
+        let cursor = Cursor::Offset(0); let display = crate::redis_value::Display::new(&snapshot, &cursor);
+        let source = display.strings.json_source.clone().unwrap();
+        responses.send(Ok(Reply::Value(Box::new(Inspection { snapshot, page: Page { cursor, next: None, pattern: b"*".to_vec(), display } })))).unwrap();
+        w.poll(); w.string_mode = StringMode::Json; w.json_string_edit = Some(source.clone()); w.read_only = false;
+        let ctx = egui::Context::default();
+        for editing in [false, true] {
+            let mut samples = Vec::new();
+            for frame in 0..180 {
+                if editing { w.json_string_edit = Some(source.replace("Item 0", if frame % 2 == 0 { "Item A" } else { "Item B" })); }
+                let start = std::time::Instant::now();
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(700.0, 760.0))),
+                    time: Some(frame as f64 / 120.0 + if frame >= 100 { 30.0 } else { 0.0 }), ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| { let mut job = None; w.value_inspector(ui, &mut job); assert!(job.is_none()); }); });
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                if frame == 0 { println!("JSON string editor first frame editing={editing}: {elapsed:.6} ms"); }
+                if frame >= 20 { samples.push(elapsed); }
+            }
+            samples.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("redis/json-string-edit/{editing}"), &samples);
+        }
+    }
+
     #[test]
     fn cached_string_original_still_guards_unsaved_binary_edits() {
         let (mut w, responses, jobs) = mock_workspace();

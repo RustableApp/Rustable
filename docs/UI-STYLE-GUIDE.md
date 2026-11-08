@@ -19,6 +19,15 @@ three-column reports; use the SQL grid or styled `TableBuilder` for interactive 
 - Make selection and hover intentional. Only give a row a pointer affordance if it
   performs an action. Group lists in surfaces with a heading and count; provide
   loading, empty, error and populated states, not just the happy path.
+- Paint one continuous header across column gutters; avoid separate boxed header cells.
+  Header and striped row bounds must match, with 10 px between their outer edges
+  and the first/last text. Include TableBuilder’s half-gutter expansion when painting
+  backgrounds; verify geometry instead of judging a full-page thumbnail alone.
+  Put footer counts and paging inside the table surface with a single divider.
+- Paired report panels share a height; use whole-row scroll viewports so the bottom
+  does not show a stray strip of the next row. Leave clear spacing after summary text.
+- Row hover must persist over child labels and controls, with clipping and overlapping
+  window checks retained. Child text must not punch holes in the row highlight.
 - Keep pagination below its table. Preserve virtualization and bounded page sizes.
 - Review the entire view at narrow and wide sizes, with long names, empty results,
   and both themes. A functional table is not automatically a finished table.
@@ -37,7 +46,9 @@ Clipboard feedback means the app issued the platform copy request, not a clipboa
 read-back verification. Errors and unavailable actions must be visible and specific.
 
 Save/edit operations need visible pending, success and failure states. Preserve
-unsaved drafts on failure. Place key-level actions next to the key name, value actions
+unsaved drafts on failure. Keep value format controls right-aligned on the Value
+heading row, vertically centered. Put byte/range metadata on the left and Copy on
+the right of one footer row. Place key-level actions next to the key name, value actions
 next to the value. Close removes the inspector; no empty reserved right pane.
 
 ## Editors
@@ -59,3 +70,11 @@ and its interactions. Compare with SQL and the supplied Redis Insight references
 Check baseline alignment, padding, row density, action placement, copy feedback,
 empty states and responsive layouts. Record performance evidence per
 [UI-PERFORMANCE.md](UI-PERFORMANCE.md); screenshots alone cannot establish responsiveness.
+
+
+## Native pointer conventions
+
+On macOS, use NSEvent's system double-click interval instead of a fixed toolkit
+value. Keep semantic same-target checks for opening/editing, and preserve ordinary
+single-click selection and Control-click context menus. Test slower valid clicks,
+clicks outside the interval, and adjacent targets; do not tune thresholds by feel.

@@ -207,22 +207,30 @@ pub(crate) fn suggest_with_context(
         } else {
             format!("{} ", lead.join(" "))
         };
-        for c in catalog::COMMANDS {
-            if let Some(tail) = c.name.strip_prefix(&stem)
-                && tail.starts_with(&upper)
-                && tail != upper
-            {
-                out.items.push(Item {
-                    warning: context.capabilities.map_or("", |caps| caps.warning(c.name, c.since)),
-                    label: tail.into(),
-                    insert: format!("{tail} "),
-                    detail: c.summary,
-                    signature: c.signature,
-                });
-                if out.items.len() == 50 {
-                    break;
-                }
-            }
+        let query = crate::search::Query::new(&prefix);
+        // Normalize this immutable catalog once, rather than allocating Unicode
+        // scoring text for every command on every keystroke. Keep every suffix
+        // so subcommands use exactly the same shared ranking as full commands.
+        static NAMES: std::sync::OnceLock<Vec<Vec<crate::search::SearchText>>> = std::sync::OnceLock::new();
+        let names = NAMES.get_or_init(|| catalog::COMMANDS.iter().map(|command| {
+            std::iter::once(0).chain(command.name.match_indices(' ').map(|(i, _)| i + 1))
+                .map(|start| crate::search::SearchText::new(&command.name[start..])).collect()
+        }).collect());
+        let mut candidates: Vec<_> = catalog::COMMANDS.iter().enumerate().filter_map(|(index, command)| {
+            let tail = command.name.strip_prefix(&stem)?;
+            // A single letter should not flood the menu with inner matches.
+            if upper.len() == 1 && !tail.starts_with(&upper) { return None; }
+            query.rank_name(names[index].get(lead.len())?).map(|rank| (rank, tail, command))
+        }).collect();
+        candidates.sort_by_key(|(rank, _, _)| *rank);
+        for (_, tail, c) in candidates.into_iter().take(50) {
+            out.items.push(Item {
+                warning: context.capabilities.map_or("", |caps| caps.warning(c.name, c.since)),
+                label: tail.into(),
+                insert: format!("{tail} "),
+                detail: c.summary,
+                signature: c.signature,
+            });
         }
         if !out.items.is_empty() {
             return out;
@@ -377,6 +385,22 @@ mod tests {
         )
     }
     #[test]
+    fn commands_rank_exact_then_prefix_then_inner_matches() {
+        for text in ["GET", "get", "Get"] {
+            let result = at(text);
+            assert_eq!(result.items[0].label, "GET");
+            assert_eq!(result.items[0].insert, "GET ");
+            let prefix = result.items.iter().position(|i| i.label == "GETDEL").unwrap();
+            let inner = result.items.iter().position(|i| i.label == "HGET").unwrap();
+            assert!(prefix < inner);
+        }
+        assert_eq!(at("CLIENT GETNAME").items[0].label, "GETNAME");
+        assert!(at("G").items.iter().all(|i| i.label.starts_with('G')));
+        assert!(at("GET ").items.iter().all(|i| i.detail.starts_with("Loaded key")));
+        assert!(at("GT").items.iter().any(|i| i.label == "GET"));
+        assert!(at("").items.len() <= 50);
+    }
+    #[test]
     fn cached_capabilities_annotate_without_hiding_or_claiming_acl_access() {
         let caps = crate::redis_capabilities::Capabilities { version: Some([6,2,0]), commands: [Some(false), Some(true), None, None] };
         let context = Context { capabilities: Some(&caps), ..Default::default() };
@@ -499,6 +523,7 @@ mod tests {
                     &context,
                 ));
                 let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                if i == 0 { println!("Redis completion first query {case}: {elapsed:.6} ms"); }
                 assert!(!result.items.is_empty(), "{text}");
                 assert!(result.items.len() <= 50);
                 if i >= 50 {

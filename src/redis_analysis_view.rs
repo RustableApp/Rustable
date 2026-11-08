@@ -93,7 +93,7 @@ impl Prepared {
                     [
                         crate::redis_workspace::display_key(&key.name),
                         format_bytes(key.bytes),
-                        key.kind.clone(),
+                        crate::redis_workspace::type_label(&key.kind).into(),
                     ]
                 })
                 .collect(),
@@ -111,7 +111,7 @@ impl Prepared {
             types: report
                 .types
                 .iter()
-                .map(|(name, t)| summary(name.clone(), t))
+                .map(|(name, t)| summary(crate::redis_workspace::type_label(name).into(), t))
                 .collect(),
             report,
         }
@@ -366,11 +366,16 @@ impl View {
             chrono::DateTime::from_timestamp_millis(report.created_ms.min(i64::MAX as u64) as i64)
                 .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string())
                 .unwrap_or_else(|| "Unknown date".into());
+        ui.add_space(4.0);
         ui.weak(format!("Generated {created}"));
-        ui.weak(format!("{} names disappeared during collection. SCAN is not a snapshot; keys and expiry may change during the report.",report.missing));
+        if report.missing > 0 { ui.weak(format!("{} keys disappeared during collection.", report.missing)); }
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(egui::RichText::new("SCAN is not a snapshot; keys and expiry may change during the report.").small().color(ui.visuals().weak_text_color())).wrap());
+        ui.add_space(16.0);
         egui::ScrollArea::vertical()
             .id_salt("database-analysis-report")
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
                 let table = |ui: &mut egui::Ui,
                              id: &str,
                              title: &str,
@@ -379,11 +384,11 @@ impl View {
                              numeric: [bool; 3]| {
                     // A table below the fold must not collapse to the remaining
                     // viewport height: the outer report owns that scrolling.
-                    let body_height = (rows.len() as f32 * 32.0).min(260.0);
+                    let body_height = 8.0 * 32.0;
                     ui.allocate_ui_with_layout(
                         egui::vec2(ui.available_width(), body_height + 88.0),
                         egui::Layout::top_down(egui::Align::Min),
-                        |ui| crate::controls::report_table(ui, id, title, headers, rows, numeric, body_height),
+                        |ui| crate::controls::report_table_fixed(ui, id, title, headers, rows, numeric, body_height),
                     );
                 };
                 let rankings = |left: &mut egui::Ui, right: &mut egui::Ui| {

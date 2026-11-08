@@ -9,12 +9,12 @@ pub(crate) struct MatchRank {
     length: usize,
 }
 
-struct SearchText {
+pub(crate) struct SearchText {
     chars: Vec<char>,
     boundaries: Vec<bool>,
 }
 impl SearchText {
-    fn new(text: &str) -> Self {
+    pub(crate) fn new(text: &str) -> Self {
         let original: Vec<_> = text.chars().collect();
         let mut chars = Vec::new();
         let mut boundaries = Vec::new();
@@ -92,7 +92,16 @@ impl Query {
         if self.words.is_empty() {
             return Some(MatchRank { metadata_words: 0, worst_tier: 0, total_tier: 0, penalty: 0, length: 0 });
         }
-        let label = SearchText::new(name);
+        self.rank_prepared(&SearchText::new(name), metadata)
+    }
+    /// Reuse normalized names for immutable catalogs without changing ranking.
+    pub(crate) fn rank_name(&self, name: &SearchText) -> Option<MatchRank> {
+        self.rank_prepared(name, "")
+    }
+    fn rank_prepared(&self, label: &SearchText, metadata: &str) -> Option<MatchRank> {
+        if self.words.is_empty() {
+            return Some(MatchRank { metadata_words: 0, worst_tier: 0, total_tier: 0, penalty: 0, length: 0 });
+        }
         let mut detail = None;
         let mut rank = MatchRank { metadata_words: 0, worst_tier: 0, total_tier: 0, penalty: 0, length: label.chars.len() };
         for word in &self.words {
@@ -116,5 +125,20 @@ impl Query {
         }).collect();
         ranked.sort_by_key(|(rank, _)| *rank);
         ranked.into_iter().map(|(_, item)| item).collect()
+    }
+}
+
+#[cfg(test)]
+mod prepared_name_tests {
+    use super::*;
+    #[test]
+    fn prepared_names_preserve_shared_ranking() {
+        for name in ["GET", "GETDEL", "HGET", "CLIENT GETNAME", "JSON.GET", "CaféName", "İstanbul", ""] {
+            let prepared = SearchText::new(name);
+            for text in ["", "get", "GE", "GT", "client get", "café", "name", "İs", "missing"] {
+                let query = Query::new(text);
+                assert_eq!(query.rank(name, ""), query.rank_name(&prepared), "{name}: {text}");
+            }
+        }
     }
 }

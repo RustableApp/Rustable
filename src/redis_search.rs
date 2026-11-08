@@ -339,21 +339,25 @@ impl View {
         let start = self.catalog_page * crate::redis_search_catalog::PAGE_SIZE;
         let end = (start + crate::redis_search_catalog::PAGE_SIZE).min(self.indexes.len());
         crate::controls::table_surface(ui, |ui| {
+        crate::controls::table_header_background(ui, 32.0);
+        let compact = ui.available_width() < 900.0;
         TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("redis-index-catalog").striped(true)
-            .column(Column::remainder().clip(true)).column(Column::remainder().clip(true))
-            .column(Column::initial(120.0).clip(true)).column(Column::exact(80.0)).column(Column::exact(60.0)).column(Column::exact(125.0))
-            .header(32.0, |mut row| { for title in ["Index name", "Prefixes", "Field types", "Documents", "Fields", ""] {
-                row.col(|ui| { crate::controls::table_header(ui, title); });
+            .column(Column::remainder().at_least(100.0).clip(true)).column(Column::initial(if compact {120.0} else {200.0}).clip(true))
+            .column(Column::initial(if compact {110.0} else {190.0}).clip(true)).column(Column::exact(80.0)).column(Column::exact(60.0)).column(Column::exact(125.0))
+            .header(32.0, |mut row| { for (index, title) in ["Index name", "Prefixes", "Field types", "Documents", "Fields", ""].into_iter().enumerate() {
+                row.col(|ui| {
+                    ui.with_layout(if matches!(index, 3 | 4) { egui::Layout::right_to_left(egui::Align::Center) } else { egui::Layout::left_to_right(egui::Align::Center) }, |ui| { crate::controls::table_header(ui, title); });
+                });
             } })
             .body(|body| body.rows(32.0, end.saturating_sub(start), |mut row| {
                 let index = &self.indexes[start + row.index()];
                 let metadata = self.metadata.get(index);
                 row.col(|ui| { let response = ui.monospace(label(index)); if let Some(Err(error)) = metadata { response.on_hover_text(error); } });
                 let info = metadata.and_then(|value| value.as_ref().ok());
-                row.col(|ui| { ui.add(egui::Label::new(info.map_or("—", |m| m.prefixes.as_str())).truncate()); });
-                row.col(|ui| { ui.add(egui::Label::new(info.map_or("—", |m| m.types.as_str())).truncate()); });
-                row.col(|ui| { ui.label(info.and_then(|m| m.documents).map_or_else(|| "—".into(), |n| n.to_string())); });
-                row.col(|ui| { ui.label(info.map_or_else(|| "—".into(), |m| m.fields.to_string())); });
+                row.col(|ui| { ui.add(egui::Label::new(info.map_or("—", |m| m.prefixes.as_str())).truncate()).on_hover_text(info.map_or("—", |m| m.prefixes.as_str())); });
+                row.col(|ui| { ui.add(egui::Label::new(info.map_or("—", |m| m.types.as_str())).truncate()).on_hover_text(info.map_or("—", |m| m.types.as_str())); });
+                row.col(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(info.and_then(|m| m.documents).map_or_else(|| "—".into(), |n| n.to_string())); }); });
+                row.col(|ui| { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(info.map_or_else(|| "—".into(), |m| m.fields.to_string())); }); });
                 row.col(|ui| {
                     if ui.add_enabled(enabled && !self.pending, crate::redis_workspace::action_button("search", "Query")).clicked() {
                         self.index = Some(index.clone()); self.schema.clear(); self.results = None;
@@ -366,13 +370,16 @@ impl View {
                     }
                 });
             }));
-        });
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.weak(format!("{} indexes · {}–{} shown", self.indexes.len(), if end == 0 {0} else {start + 1}, end));
+            ui.weak(format!("{} {} · {}–{} shown", self.indexes.len(), if self.indexes.len() == 1 { "index" } else { "indexes" }, if end == 0 {0} else {start + 1}, end));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add_enabled(enabled && !self.pending && end < self.indexes.len(), crate::redis_workspace::action_button("chevron-right", "Next")).clicked() { self.catalog_page += 1; }
                 if ui.add_enabled(enabled && !self.pending && self.catalog_page > 0, crate::redis_workspace::action_button("chevron-left", "Previous")).clicked() { self.catalog_page -= 1; }
             });
+        });
         });
         let start = self.catalog_page * crate::redis_search_catalog::PAGE_SIZE;
         let end = (start + crate::redis_search_catalog::PAGE_SIZE).min(self.indexes.len());
@@ -550,12 +557,7 @@ impl View {
 
 }
 fn label(bytes: &[u8]) -> String {
-    let text = crate::redis_commands::quote(&bytes[..bytes.len().min(512)]);
-    if bytes.len() > 512 {
-        format!("{text}…")
-    } else {
-        text
-    }
+    crate::redis_workspace::display_key(bytes)
 }
 #[cfg(not(target_arch = "wasm32"))]
 impl Request {

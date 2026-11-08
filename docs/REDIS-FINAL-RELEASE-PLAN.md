@@ -1187,3 +1187,136 @@ all-target Clippy with QA features, and the separate locked browser check (77
 existing warnings): `/tmp/redis-0421-{tests,clippy,browser}.log`. The saved-profile
 compatibility assertion passes. Cross-platform CI and the connection-profile UI
 comparison remain required before tagging this candidate.
+
+
+### Corrected profile representation performance gate
+
+Compared 3839903 to e3372d3 with five serial release pairs using
+`python3 scripts/ui-performance.py --base 3839903828701f6876918a23179e028353252c2e --redis-connections --output target/redis-profile-box-performance`.
+All 20 scenarios passed. On the Apple M4 Max, macOS 27.2 arm64, Rust 1.99.1,
+the unchanged 1400×900 logical-pixel profile fixture at default egui scale measured
+160 samples after 20 warmups per pair.
+Median profile CPU p50: 0.052875→0.052834 ms; p95: 0.063209→0.063583 ms
+(+0.6%); p99: 0.067083→0.066 ms; median maximum: 0.069125→0.067334 ms.
+Worst single maximum: 0.082166→0.110375 ms. Raw samples, environment and all
+scenario results are retained in that directory. This is CPU layout/tessellation,
+not native input-to-display latency; earlier unavailable platform checks remain
+unverified. Boxing adds allocation at profile creation/clone, not per-frame settings
+construction, and reduces inline enum storage without changing persisted data.
+
+Corrected-candidate CI 42501804560 has passed native tests and strict Clippy on
+Windows, macOS and Linux, plus the browser build. Its language-server build/cache
+steps are still running; full CI success and packaging/publication remain open.
+
+
+### User-requested pre-tag interaction and table corrections
+
+Before v0.4.21 was tagged, the user supplied fresh screenshots and requested exact
+completion ranking, Analyze/Search/PubSub table cleanup, stable browser row hover,
+and investigation of app-wide macOS double-click behavior. These are now explicit
+additions to the pre-release scope; packaging stays on hold until they are checked.
+The previous e3372d3 CI completed successfully (42501804560), but does not validate
+these later changes. No v0.4.21 tag or release has been created.
+
+Found exact command suggestions were deliberately excluded; now they use the
+shared name ranking with exact/prefix/inner matches, bounded to 50 and no network
+activity. Added exact-name, case, subcommand, one-letter and keyboard acceptance
+regressions. Table row hover used Response::hovered and lost its highlight over
+child labels; it now uses contains_pointer with layer/clipping checks. A targeted
+hover regression passes. This Mac's NSEvent.doubleClickInterval is 0.5 seconds;
+egui previously used 0.3 seconds. Native initialization now applies the OS setting,
+with synthetic 0.4/0.6-second boundary checks. Existing same-target logic remains.
+
+Analyze uses equal-height row-aligned report panels, clearer summary spacing and
+friendly module type labels. Search and Pub/Sub share continuous headers, quiet
+striping and enclosed footers; Search metric columns align right. Pub/Sub status
+and controls are consolidated. Fresh native captures and performance comparisons
+are still pending; initial full library suite passes 790 tests, 204 ignored.
+
+
+Latest follow-up validation: the full locked suite passed 790 tests (205 ignored),
+strict all-target QA Clippy passed, and the separate browser check passed with its
+77 existing warnings (`/tmp/redis-ui-followup-{full-tests,clippy,browser}.log`).
+After the final completion viewport adjustment, all six editor tests passed;
+the five double-click tests also passed, covering timing, adjacent cells, saved
+queries and connections. Final candidate-wide checks will follow the CPU comparison.
+
+Reviewed fresh dark/light Search, Analyze, completion and populated Pub/Sub captures
+under `target/redis-ui-review-{dark,light}` and `target/redis-ui-pubsub-{dark,light}`.
+The completion popup now displays six whole rows and selects exact GET first.
+Analyze panels have equal heights, whole-row clipping and separated summary text;
+Search/PubSub have continuous headers and enclosed footers. All these captures are
+1200×760 logical pixels at 2× scale. The attempted 800-wide Search capture still
+returned 2400×1520 physical pixels, so it does not prove narrow native layout.
+Native app inventory is available again, but that alone does not validate high-refresh,
+mixed-DPI, multi-monitor or input-to-presentation behavior; those limits remain.
+
+The follow-up comparison is running against e3372d3 in
+`target/redis-ui-followup-performance`, with five serial pairs, identical injected
+fixtures, a populated 1,000-message Pub/Sub table and changing GE/GET completion
+input. No unrelated builds or benchmarks run concurrently. Source changes remain
+uncommitted and are identified as such in the comparison metadata.
+
+
+The first follow-up CPU comparison completed with completion regressions and several
+noisy cases, not a pass. Changing GE/GET measured 0.0402→0.1417 ms p95. The shared
+ranker was rebuilding normalized catalog names on each input change. Redis now
+prepares its immutable command-name suffixes once; scoring still uses the identical
+shared ranker, with a Unicode/multi-word equivalence regression. No user query
+cache or network requests were introduced. The cached follow-up build was explicitly
+stopped when the user identified a remaining header defect; it yielded no final
+performance result and must not be counted as verification.
+
+The screenshot review missed header text flush against the edge and stripes extending
+beyond the header. Shared report/Search/PubSub table surfaces now reserve matching
+half-gutter bounds with 10 px horizontal text insets. Report headers use the common
+background painter. A geometry test checks header/stripe edge equality and text
+insets; it passes. Fresh Analyze light capture reviewed at
+`target/redis-header-padding-light/analyze.png`; dark and Search checks follow.
+This correction is explicit user scope, not an additional feature milestone.
+
+
+Header correction verification: fresh light/dark Analyze and dark Search captures
+show matching header/stripe edges and inset text. The final local suite passes
+792 tests (205 ignored); strict all-target QA Clippy and the separate locked browser
+check pass (`/tmp/redis-final-header-{tests,clippy,browser}.log`). Browser output
+reports 78 warnings; no new warning text versus the prior browser log. The full
+follow-up performance comparison remains required before tagging.
+
+
+### Explicit JSON-string editing and inspector-row follow-up
+
+The user found the live v0.4.19 WASM demo only offered a read-only pretty JSON view
+for string keys. This was a shared UI gap, not a WASM restriction. Added an inline
+highlighted JSON-string draft opened by Edit from the JSON view, with validation
+that preserves source numeric literals, a 64 KiB bound, Save/Cancel, draft retention
+on conflict/failure and existing safe-mode/expiry-preserving compare-and-set save.
+Saving stays in JSON view. No new database operations or exchanges are introduced.
+Value/format controls now share a centered row; bytes and Copy share a second row,
+with controls on the right, as explicitly requested.
+
+The new focused test drives Edit from JSON, checks title/control alignment, prevents
+navigation losing the draft, rejects invalid/trailing/oversized JSON, preserves a
+9007199254740993 integer and retains the draft on a failed save. Local WASM browser
+checks confirmed highlighted inline editing, successful saving of a large integer,
+and visible validation errors with the draft intact; no browser runtime errors.
+Evidence: `/tmp/rustable-json-string-preview/{pretty,edit,saved,invalid}.png`.
+A small follow-up retains JSON mode after saving and clears obsolete success notices
+when starting a new edit; rebuild/reverification and final performance remain pending.
+The prior header-final comparison was explicitly stopped during compilation for
+these user-requested changes and has no final measurement result.
+
+
+JSON-string follow-up verified in the rebuilt local WASM bundle: Edit opens the
+highlighted pretty draft; saving changes the value and returns to JSON view;
+9007199254740993 remains exact. The compact header/footer and temporary Copied
+feedback were visually verified in dark mode, with no browser runtime errors and
+cross-origin isolation enabled. Final captures:
+`/tmp/rustable-json-string-preview/final-{pretty,edit,saved,copied}.png`.
+The initial invalid-JSON capture proves the draft stays open with a visible error.
+The current full locked suite passes 793 tests (206 ignored), strict QA/all-target
+Clippy passes, and the browser release build succeeds (78 known warnings):
+`/tmp/redis-json-final-{tests,clippy}.log`, `/tmp/redis-json-browser-build.log`.
+Added a candidate-only JSON-string typing/idle/after-idle CPU workload and first-frame
+logging; the existing comparable inspector/editor workloads remain unchanged.
+No public deployment has occurred; live BUILD.txt still identifies v0.4.19/405149e.

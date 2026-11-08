@@ -1252,7 +1252,9 @@ impl<'a> TableBody<'a> {
     // Capture the hover information for the just created row. This is used in the next render
     // to ensure that the entire row is highlighted.
     fn capture_hover_state(&self, response: &Option<Response>, row_index: usize) {
-        let is_row_hovered = response.as_ref().is_some_and(|r| r.hovered());
+        // Child labels/buttons may own hover; row highlighting still spans them.
+        // contains_pointer retains clipping/layer checks, unlike raw rect testing.
+        let is_row_hovered = response.as_ref().is_some_and(|r| r.contains_pointer());
         if is_row_hovered {
             self.layout
                 .ui

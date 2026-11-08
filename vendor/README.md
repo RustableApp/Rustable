@@ -151,13 +151,19 @@ Regression checks:
 mise exec -- cargo test --manifest-path vendor/eframe/Cargo.toml --no-default-features --features persistence,glow,x11,wayland,default_fonts checked_persistence_tests
 ```
 
-## egui_extras header-only column resizing
+## egui_extras table interaction corrections
 
 `egui_extras 0.33.3` retains upstream MIT/Apache licenses. The table divider
 continues to paint through the body, but its resize interaction rectangle covers
 only the header, with horizontal grab padding. Existing header drags can continue
 outside the header. Rustable's grid interaction regression checks both body
 non-resizing and persisted header resizing.
+
+Table row hover capture uses `Response::contains_pointer()` instead of `hovered()`.
+Child text may own hover while the enclosing row still contains the pointer; the
+row highlight must remain continuous across that text. Clipping/layer hit testing
+is preserved. `controls::table_hover_tests::row_hover_survives_pointer_over_child_text`
+protects this behavior; the shared SQL-grid and Redis UI benchmarks cover the path.
 
 ## MySQL protocol transaction status
 

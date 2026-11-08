@@ -5,8 +5,17 @@ use std::collections::HashMap;
 
 pub fn install(ctx: &egui::Context) {
     if ctx.os() == egui::os::OperatingSystem::Mac {
+        #[cfg(target_os = "macos")]
+        apply_double_click_interval(ctx, objc2_app_kit::NSEvent::doubleClickInterval());
         // egui registers each plugin type only once per shared context.
         ctx.add_plugin(ControlClick::default());
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn apply_double_click_interval(ctx: &egui::Context, seconds: f64) {
+    if seconds.is_finite() && seconds > 0.0 {
+        ctx.options_mut(|options| options.input_options.max_double_click_delay = seconds);
     }
 }
 
@@ -47,6 +56,21 @@ mod tests {
 
     fn click(pressed: bool, modifiers: Modifiers) -> Event {
         Event::PointerButton { pos: Pos2::new(20.0, 20.0), button: PointerButton::Primary, pressed, modifiers }
+    }
+
+    #[test]
+    fn native_double_click_interval_accepts_normal_pace_and_rejects_slow_clicks() {
+        for (gap, expected) in [(0.4, true), (0.6, false)] {
+            let ctx = egui::Context::default();
+            apply_double_click_interval(&ctx, 0.5);
+            let mut doubled = false;
+            for (time, pressed) in [(0.0, true), (0.02, false), (gap, true), (gap + 0.02, false)] {
+                let _ = ctx.run(egui::RawInput { time: Some(time), events: vec![click(pressed, Modifiers::NONE)], ..Default::default() }, |ctx| {
+                    doubled |= ctx.input(|input| input.pointer.button_double_clicked(PointerButton::Primary));
+                });
+            }
+            assert_eq!(doubled, expected);
+        }
     }
 
     #[test]

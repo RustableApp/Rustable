@@ -427,12 +427,13 @@ mod redis_completion_ui_benchmark {
     #[test]
     #[ignore = "manual focused command completion UI comparison"]
     fn redis_completion_frame_benchmark() {
-        for scenario in ["commands", "arguments", "after-idle", "counted-keys", "capability"] {
+        for scenario in ["commands", "arguments", "after-idle", "counted-keys", "capability", "typing"] {
             let ctx=egui::Context::default();
             let mut editor=crate::redis_command_editor::Editor::default();
             let mut text=if scenario=="arguments" {"SET app:theme dark N"} else if scenario=="capability" {"LMP"} else {"HG"}.to_owned();
             let mut samples=Vec::new();
             for frame in 0..180 {
+                if scenario == "typing" { text = if frame % 2 == 0 { "GE" } else { "GET" }.into(); }
                 if scenario == "counted-keys" { text = if frame % 2 == 0 { "ZUNION 2 one " } else { "ZUNION 2 one two WEIGHTS 1 " }.into(); }
                 let start=std::time::Instant::now();
                 let output=ctx.run(egui::RawInput {

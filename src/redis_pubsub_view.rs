@@ -114,10 +114,9 @@ impl View {
                     break;
                 };
                 self.received += 1;
-                let summary = crate::redis_commands::quote(
-                    &message.preview[..message.preview.len().min(120)],
-                );
-                let channel = crate::redis_commands::quote(&message.channel);
+                let mut summary = crate::redis_workspace::display_key(&message.preview[..message.preview.len().min(120)]);
+                if message.bytes > 120 { summary.push('…'); }
+                let channel = crate::redis_workspace::display_key(&message.channel);
                 if self.messages.len() == 1000 {
                     self.messages.pop_front();
                 }
@@ -187,7 +186,6 @@ impl View {
     }
     fn publish_composer(&mut self, ui: &mut egui::Ui, ready: bool, read_only: bool) -> Option<Publish> {
         let mut publish = None;
-        ui.separator();
         let message_width = (ui.available_width() - 220.0 - 100.0 - 24.0).max(100.0);
         egui::Grid::new("publish-composer-fields").num_columns(3).spacing(egui::vec2(12.0, 6.0)).show(ui, |ui| {
             ui.weak("Channel name");
@@ -234,17 +232,22 @@ impl View {
         let mut publish = None;
             crate::controls::base_spacing(ui.spacing_mut());
             crate::controls::rounded_action_buttons(ui);
-            ui.weak("Live messages").on_hover_text("Pub/Sub spans databases and has no replay. Messages sent while disconnected are lost.");
-            ui.add_space(6.0);
             let active=self.subscription.as_ref().is_some_and(|w|!w.done());
-            if !self.messages.is_empty() { self.subscription_controls(ui, connected, active); }
-            if let Some(worker)=&self.subscription {ui.add(egui::Label::new(worker.status()).wrap());ui.weak(format!("{} received · {} retained · {} dropped while busy",self.received,self.messages.len(),worker.dropped()));}
-            ui.horizontal(|ui|{
-                ui.checkbox(&mut self.follow,"Follow latest");
-                if ui.add_enabled(!self.messages.is_empty(),egui::Button::new("Clear messages")).clicked(){self.messages.clear();self.detail=None;self.selected=None;self.received=0;}
-                ui.weak("1,000 retained · 4 KiB previews");
+            ui.horizontal(|ui| {
+                ui.strong("Messages").on_hover_text("Pub/Sub spans databases and has no replay. Messages sent while disconnected are lost.");
+                if let Some(worker) = &self.subscription { ui.weak(worker.status()); }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(!self.messages.is_empty(), crate::redis_workspace::action_button("trash-2", "Clear")).on_hover_text("Clear retained messages").clicked() {
+                        self.messages.clear(); self.detail=None; self.selected=None; self.received=0;
+                    }
+                    ui.checkbox(&mut self.follow, "Follow latest");
+                });
             });
-            ui.separator();
+            ui.add_space(12.0);
+            if !self.messages.is_empty() {
+                self.subscription_controls(ui, connected, active);
+                ui.add_space(12.0);
+            }
             if self.messages.is_empty(){
                 let height = (ui.available_height() - 220.0).max(280.0);
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), height), egui::Layout::top_down(egui::Align::Center), |ui| {
@@ -259,8 +262,9 @@ impl View {
                 });
             }else{
                 use egui_extras::{Column, TableBuilder};
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("pubsub-messages").striped(true).max_scroll_height(320.0).stick_to_bottom(self.follow)
+                crate::controls::table_surface(ui, |ui| {
+                    crate::controls::table_header_background(ui, 32.0);
+                    TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("pubsub-messages").striped(true).max_scroll_height(336.0).stick_to_bottom(self.follow)
                         .column(Column::exact(110.0)).column(Column::initial(220.0).clip(true)).column(Column::remainder().clip(true))
                         .header(32.0, |mut row| { for name in ["Received (local)", "Channel", "Message"] { row.col(|ui| { crate::controls::table_header(ui, name); }); } })
                         .body(|body| body.rows(28.0, self.messages.len(), |mut table_row| {
@@ -274,7 +278,12 @@ impl View {
                             });
                             table_row.col(|ui| { ui.add(egui::Label::new(egui::RichText::new(&row.summary).monospace()).truncate()); });
                         }));
-                    ui.separator(); ui.weak(format!("{} messages retained · {} received", self.messages.len(), self.received));
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    let dropped = self.subscription.as_ref().map_or(0, |worker| worker.dropped());
+                    ui.weak(format!("{} retained · {} received · {dropped} dropped", self.messages.len(), self.received))
+                        .on_hover_text("Up to 1,000 messages retained; each preview is bounded to 4 KiB. Dropped messages arrived while the bounded receiver was busy.");
                 });
             }
             if let Some(detail)=&self.detail {
@@ -291,7 +300,7 @@ impl View {
                     }
                 });
             }
-            ui.separator();
+            ui.add_space(12.0);
             egui::CollapsingHeader::new("Active channels").open(self.reveal_channels.take()).show(ui,|ui|{
                 let lookup_active=self.lookup.as_ref().is_some_and(|w|w.busy());
                 ui.horizontal(|ui|{
@@ -582,3 +591,6 @@ mod benchmarks {
         }
     }
 }
+
+#[cfg(test)]
+include!("redis_pubsub_benchmark.rs");
