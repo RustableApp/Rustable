@@ -20,7 +20,7 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
   honest sampled/partial coverage, expiry buckets and locally saved reports.
   Make top-key/namespace rankings visible without oversized chart spacing.
   This is not continuous telemetry, exhaustive memory accounting or a scheduler.
-- [ ] Workbench: bounded per-connection persistent automatic command history,
+- [x] Workbench: bounded per-connection persistent automatic command history,
   privacy/clear controls, and distinguishable per-command result sections with
   status/timing/copy. Preserve saved snippets and keyboard execution conventions.
 - [ ] IntelliSense: improve common advanced/count-dependent clauses and gate or
@@ -601,3 +601,49 @@ Copy-feedback coverage now exercises both labelled and icon-only controls; it
 passed clipboard output, single lazy copy and eventual idle checks
 (`/tmp/redis-workbench-copy-test.log`). The generic icon tooltip now says Copy,
 not Copy key name when used for command results.
+
+### Workbench virtualization comparison and interaction evidence
+
+The second five-pair release comparison (`target/redis-workbench-virtualized-performance`)
+reduced the candidate Workbench p95 from 0.3100 ms to 0.071500 ms. Versus the
+plain-output baseline, medians are: p50 0.055292→0.064375 ms, p95
+0.060708→0.071500 ms (+17.8%, +0.010792 ms), p99 0.066500→0.076042 ms;
+median run maximum 0.067250→0.078250 ms, worst observed 0.069834→0.108583 ms.
+This remains a measured threshold regression, explicitly accepted for visible
+per-command status/timing, collapsible results and independent copy controls.
+Offscreen layout has been removed; removing those visible controls would defeat
+the requested result workflow. Further custom-paint replacements would add
+interaction/accessibility complexity for this remaining measured cost. Thresholds
+and identical reply fixtures were not weakened. The full report records 160
+measured/20 warmup frames per run, 1200×760 logical viewport, default scale,
+synthetic 120 Hz timeline and after-idle frames; Apple M4 Max, macOS 27.2 arm64,
+Rust 1.99.1 release. Other affected Redis cases passed; unrelated sidebar/20 was
+inconclusive, not a pass. This is CPU layout/tessellation, not native input-to-present
+or sustained FPS. Mixed-DPI/multi-monitor/60–120 Hz checks remain release gates
+where hardware is available.
+
+The new painted-output test passed first display, scrolling to result 100,
+resizing to a narrower viewport, and replacing a deeply scrolled report with one
+new result (`/tmp/redis-workbench-scroll-test.log`). An initial broader Redis run
+found two tests still assuming recovery had no result report. Updated them to
+assert report-before-recovery, Failed/Not run status, preserved unknown-write
+warning, and existing no-replay socket assertions. Recovery now carries the same
+bounded failure explanation from the report. Revalidation is in progress; this
+entry does not claim the broader run passed yet.
+
+
+### Workbench milestone complete
+
+Final targeted Redis run: 166 passed, 0 failed, 67 ignored fixture-dependent tests
+(`/tmp/redis-workbench-redis-tests.log`). This includes both worker reconnect
+paths after lost writes, history scope/persistence/clear/opt-out, command-result
+bounds, editor shortcuts, copy feedback, and the new scrolling/resizing/replacement
+check. Empty/binary argument headings retain reversible distinctions. Final
+browser-package locked wasm32 check passed with 77 platform/dead-code warnings
+(`/tmp/redis-workbench-final-browser-check.log`). Native theme captures and the
+explicitly accepted remaining CPU cost are recorded above. No required gate is
+being inferred from skipped fixture tests; full release validation, native
+presentation/display checks and the final exact-tag bundle remain open.
+
+The functional Workbench milestone is complete. Continue with targeted
+count-dependent/advanced completion and cached server capability awareness.

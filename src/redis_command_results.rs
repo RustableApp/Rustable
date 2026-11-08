@@ -65,7 +65,7 @@ pub(crate) fn execute(
                 command.push(' ');
             }
             let bytes = &arg[..arg.len().min(256)];
-            if bytes.iter().all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\')) {
+            if !bytes.is_empty() && bytes.iter().all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\')) {
                 command.push_str(std::str::from_utf8(bytes).unwrap());
             } else {
                 command.push_str(&crate::redis_commands::quote(bytes));
@@ -127,6 +127,16 @@ pub(crate) fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_and_binary_arguments_remain_distinguishable_in_headers() {
+        let commands = crate::redis_commands::parse(r#"GET ""
+GET "a b"
+GET \x00"#).unwrap();
+        let report = execute(&commands, |_| Ok(redis::Value::Nil));
+        assert_eq!(report.entries[0].command, "GET \"\"");
+        assert!(report.entries[1].command.contains("\"a b\""));
+        assert!(report.entries[2].command.contains("\\x00"));
+    }
     #[test]
     fn retains_completed_output_and_never_executes_after_error() {
         let commands =

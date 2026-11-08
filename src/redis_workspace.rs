@@ -280,8 +280,11 @@ impl Workspace {
                     let original = match result {
                         Err(error) => error,
                         Ok(reply) => {
+                            let warning = if let Reply::Output(report) = &reply {
+                                report.entries.iter().find(|entry| matches!(entry.status, crate::redis_command_results::Status::Failed)).map(|entry| entry.output.clone())
+                            } else { None };
                             if responses.send(Ok(reply)).is_err() { break; }
-                            "Redis connection lost. Review the operation results before retrying any write.".into()
+                            warning.unwrap_or_else(|| "Redis connection lost. Review the operation results before retrying any write.".into())
                         }
                     };
                     if responses.send(Ok(Reply::Recovering(original.clone()))).is_err() { break; }
@@ -3449,6 +3452,52 @@ mod tests {
         (workspace, responses, jobs)
     }
     #[test]
+    fn workbench_results_scroll_resize_and_replacement_remain_visible() {
+        fn painted_text(shapes: &[egui::epaint::ClippedShape]) -> String {
+            fn append(shape: &egui::Shape, text: &mut String) {
+                match shape {
+                    egui::Shape::Text(shape) => text.push_str(&shape.galley.job.text),
+                    egui::Shape::Vec(shapes) => for shape in shapes { append(shape, text); },
+                    _ => {}
+                }
+            }
+            let mut text = String::new();
+            for shape in shapes { append(&shape.shape, &mut text); }
+            text
+        }
+        let (mut workspace, responses, _jobs) = mock_workspace();
+        workspace.section = Section::Workbench;
+        workspace.prepare_results_benchmark((0..100).map(|i| redis::Value::BulkString(format!("result-{i:04}").into_bytes())).collect());
+        let ctx = egui::Context::default();
+        let mut saw_last = false;
+        let mut saw_first = false;
+        for frame in 0..100 {
+            let width = if frame < 50 { 1000.0 } else { 760.0 };
+            let events = if (3..20).contains(&frame) {
+                vec![egui::Event::PointerMoved(egui::pos2(500.0, 550.0)), egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -1000.0), modifiers: egui::Modifiers::NONE }]
+            } else { vec![] };
+            let output = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 650.0))), time: Some(frame as f64 / 60.0), events, ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| { browser_style(ui); workspace.command_pane(ui); });
+            });
+            let text = painted_text(&output.shapes);
+            saw_first |= frame < 3 && text.contains("result-0000");
+            saw_last |= frame > 50 && text.contains("result-0099");
+        }
+        assert!(saw_first, "initial result should be painted");
+        assert!(saw_last, "scrolling and resizing must expose the last result");
+        let report = crate::redis_command_results::execute(&[vec![b"PING".to_vec()]], |_| Ok(redis::Value::SimpleString("replacement".into())));
+        responses.send(Ok(Reply::Output(report))).unwrap(); workspace.poll();
+        assert!(workspace.command_result_heights.is_empty());
+        let mut saw_replacement = false;
+        for frame in 100..110 {
+            let output = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0,650.0))), time: Some(frame as f64/60.0), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| { browser_style(ui); workspace.command_pane(ui); });
+            });
+            saw_replacement |= painted_text(&output.shapes).contains("replacement");
+        }
+        assert!(saw_replacement, "replacing a scrolled report must reveal its new result");
+    }
+    #[test]
     fn history_is_persisted_per_profile_and_clear_and_recording_survive_reload() {
         let (mut workspace, _, jobs)=mock_workspace();
         let mut preferences=crate::redis_preferences::Preferences::default();
@@ -3567,6 +3616,14 @@ mod tests {
         let timeout = Duration::from_secs(4);
         assert!(matches!(workspace.receiver.recv_timeout(timeout).unwrap(), Ok(Reply::Connected(0))));
         workspace.sender.send(Job::Execute("INCR b\nINCR later".into(), false)).unwrap();
+        match workspace.receiver.recv_timeout(timeout).unwrap() {
+            Ok(Reply::Output(report)) => {
+                assert!(report.entries[0].output.contains("may have completed"));
+                assert!(matches!(report.entries[0].status, crate::redis_command_results::Status::Failed));
+                assert!(matches!(report.entries[1].status, crate::redis_command_results::Status::NotRun));
+            }
+            _ => panic!("Expected the failed command report before recovery"),
+        }
         assert!(matches!(workspace.receiver.recv_timeout(timeout).unwrap(), Ok(Reply::Recovering(error)) if error.contains("may have completed")));
         assert!(matches!(workspace.receiver.recv_timeout(timeout).unwrap(), Ok(Reply::Recovered)));
         drop(workspace);
@@ -3615,6 +3672,14 @@ mod tests {
         let timeout = Duration::from_secs(3);
         assert!(matches!(workspace.receiver.recv_timeout(timeout).unwrap(), Ok(Reply::Connected(0))));
         workspace.sender.send(Job::Execute("INCR counter\nINCR later".into(), false)).unwrap();
+        match workspace.receiver.recv_timeout(timeout).unwrap() {
+            Ok(Reply::Output(report)) => {
+                assert!(report.entries[0].output.contains("may have completed"));
+                assert!(matches!(report.entries[0].status, crate::redis_command_results::Status::Failed));
+                assert!(matches!(report.entries[1].status, crate::redis_command_results::Status::NotRun));
+            }
+            _ => panic!("Expected the failed command report before recovery"),
+        }
         assert!(matches!(workspace.receiver.recv_timeout(timeout).unwrap(), Ok(Reply::Recovering(error)) if error.contains("may have completed")));
         assert!(matches!(workspace.receiver.recv_timeout(timeout).unwrap(), Ok(Reply::Recovered)));
         drop(workspace);

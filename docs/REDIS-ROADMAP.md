@@ -2010,3 +2010,14 @@ Actual captures: `target/redis-polish/verified-dark/`, `verified-light/`,
 The attempted narrow capture retained 1200 logical pixels and is not narrow-layout
 evidence. Desktop lock prevented manual native interaction/display checks.
 This increment is local implementation work, not a new release.
+
+
+### Bounded final-release Workbench milestone
+
+Saved-connection history, recording/clear controls and individual result sections
+are implemented and validated; successful replies remain available on later
+failure, with explicit not-run commands and preserved unknown-write warnings.
+Results use bounded transport and virtualized layout. See
+[the release checklist](REDIS-FINAL-RELEASE-PLAN.md) for tests, theme captures and
+the accepted +0.010792 ms p95 CPU cost for separate result controls. This is not a
+release announcement; the remaining bounded checklist and publication gates are open.
