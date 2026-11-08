@@ -474,6 +474,10 @@ impl Workspace {
     #[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
     pub(crate) fn preview_commands(&mut self) -> bool {
         if self.busy || !self.connected { return false; }
+        if std::env::var_os("RUSTABLE_REDIS_CAPABILITY_CAPTURE").is_some() && self.capabilities.is_none() {
+            self.send(Job::Capabilities);
+            return false;
+        }
         self.auto_scan = false;
         self.preview_queue.clear();
         self.commands_visible = true;

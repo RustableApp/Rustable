@@ -418,12 +418,13 @@ mod redis_completion_ui_benchmark {
     #[test]
     #[ignore = "manual focused command completion UI comparison"]
     fn redis_completion_frame_benchmark() {
-        for scenario in ["commands", "arguments", "after-idle"] {
+        for scenario in ["commands", "arguments", "after-idle", "counted-keys", "capability"] {
             let ctx=egui::Context::default();
             let mut editor=crate::redis_command_editor::Editor::default();
-            let mut text=if scenario=="arguments" {"SET app:theme dark N"} else {"HG"}.to_owned();
+            let mut text=if scenario=="arguments" {"SET app:theme dark N"} else if scenario=="capability" {"LMP"} else {"HG"}.to_owned();
             let mut samples=Vec::new();
             for frame in 0..180 {
+                if scenario == "counted-keys" { text = if frame % 2 == 0 { "ZUNION 2 one " } else { "ZUNION 2 one two WEIGHTS 1 " }.into(); }
                 let start=std::time::Instant::now();
                 let output=ctx.run(egui::RawInput {
                     screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1200.0,760.0))),
@@ -436,7 +437,8 @@ mod redis_completion_ui_benchmark {
                         if let Some(mut state)=egui::text_edit::TextEditState::load(ctx,id) {
                             state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(text.chars().count()))));state.store(ctx,id);
                         }
-                        editor.show(ui,&mut text,true);
+                        if scenario == "capability" { editor.show_capability_benchmark(ui, &mut text, true); }
+                        else { editor.show(ui,&mut text,true); }
                     });
                 });
                 let _=ctx.tessellate(output.shapes,output.pixels_per_point);

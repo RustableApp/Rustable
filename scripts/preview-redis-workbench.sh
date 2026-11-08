@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 fixture="rustable-workbench-preview-$$"
 trap 'docker rm -f "$fixture" >/dev/null 2>&1 || true' EXIT
-docker run -d --name "$fixture" -p 127.0.0.1::6379 redis:8.4-alpine redis-server --save '' --appendonly no --maxmemory 64mb --requirepass rustable-redis-test-only >/dev/null
+docker run -d --name "$fixture" -p 127.0.0.1::6379 "${RUSTABLE_REDIS_PREVIEW_IMAGE:-redis:8.4-alpine}" redis-server --save '' --appendonly no --maxmemory 64mb --requirepass rustable-redis-test-only >/dev/null
 port="$(docker port "$fixture" 6379/tcp | sed 's/.*://')"
 ready=false
 for attempt in {1..40}; do

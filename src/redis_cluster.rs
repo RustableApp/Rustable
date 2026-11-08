@@ -1034,6 +1034,33 @@ mod tests {
         assert!(parse_redirect("attacker/path:6380", "host").is_err());
     }
     #[test]
+    fn capability_seed_batch_drains_denials_and_keeps_unknown_distinct() {
+        for denied in [false, true] {
+            let source = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = source.local_addr().unwrap().port();
+            let peer = std::thread::spawn(move || {
+                let (mut socket, _) = source.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut parser = redis::Parser::new();
+                handshake(&mut socket, &mut parser);
+                assert_eq!(read(&mut socket, &mut parser), [b"INFO".to_vec(), b"SERVER".to_vec()]);
+                let command = read(&mut socket, &mut parser);
+                assert_eq!(command[0], b"COMMAND"); assert_eq!(command.len(), 6);
+                // Both requests arrived before either response; denied INFO is not fatal.
+                socket.write_all(b"-NOPERM INFO denied\r\n").unwrap();
+                socket.write_all(if denied { b"-NOPERM COMMAND denied\r\n" } else { b"*4\r\n$-1\r\n$-1\r\n$-1\r\n$-1\r\n" }).unwrap();
+                assert_eq!(read(&mut socket, &mut parser)[0], b"PING");
+                socket.write_all(b"+PONG\r\n").unwrap();
+            });
+            let mut router = router(port);
+            let caps = router.capabilities().unwrap();
+            assert_eq!(caps.version, None);
+            assert_eq!(caps.commands, [if denied { None } else { Some(false) };4]);
+            assert!(router.query(&redis::cmd("PING")).is_ok());
+            peer.join().unwrap();
+        }
+    }
+    #[test]
     fn bounded_workbench_commands_preserve_errors_and_unknown_write_outcomes() {
         let source = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = source.local_addr().unwrap().port();

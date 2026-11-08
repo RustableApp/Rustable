@@ -159,7 +159,7 @@ def main():
         EXPECTED.update(f'redis/command-editor/{count}/{editing}' for count in (20, 200) for editing in ('false', 'true'))
     if args.redis_completion:
         BENCHMARKS += ('redis_completion_frame_benchmark',)
-        EXPECTED.update(f'redis/completion/{case}' for case in ('commands', 'arguments', 'after-idle'))
+        EXPECTED.update(f'redis/completion/{case}' for case in ('commands', 'arguments', 'after-idle', 'counted-keys', 'capability'))
     if args.runs < 5:
         parser.error('--runs must be at least 5')
     root = Path(run(['git', 'rev-parse', '--show-toplevel'], Path.cwd(), capture_output=True).stdout.strip())
@@ -207,6 +207,11 @@ def main():
                     with workspace.open('a') as output:
                         output.write('\n#[cfg(test)] impl Workspace { fn prepare_results_benchmark(&mut self, values: Vec<redis::Value>) { self.output = render_values(&values); } }\n')
                     metadata['results_baseline_adapter'] = 'Identical 100 reply values; baseline renders combined text, candidate renders individual command results. Preparation excluded from frame timings.'
+                editor = base_path / 'src' / 'redis_command_editor.rs'
+                if 'fn show_capability_benchmark(' not in editor.read_text():
+                    with editor.open('a') as output:
+                        output.write('\n#[cfg(test)] impl Editor { pub(crate) fn show_capability_benchmark(&mut self, ui: &mut egui::Ui, text: &mut String, enabled: bool) -> Option<String> { self.show(ui, text, enabled) } }\n')
+                    metadata['capability_baseline_adapter'] = 'Same focused command text; baseline shows ordinary completion, candidate adds advisory cached-version warning.'
                 metadata['redis_fixture'] = fixture.read_text()
                 (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.redis or args.redis_editor or args.redis_pages or args.redis_completion:

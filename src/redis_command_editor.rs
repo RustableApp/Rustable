@@ -10,6 +10,11 @@ pub(crate) struct Editor {
     last_context: Option<(u64, usize, usize)>,
 }
 impl Editor {
+    #[cfg(test)]
+    pub(crate) fn show_capability_benchmark(&mut self, ui: &mut egui::Ui, text: &mut String, enabled: bool) -> Option<String> {
+        let caps = crate::redis_capabilities::Capabilities { version: Some([6,2,0]), commands: [Some(false);4] };
+        self.show_with_context(ui, text, enabled, &crate::redis_completion::Context { capabilities: Some(&caps), ..Default::default() })
+    }
     pub fn focus(&mut self) {
         self.focus_requested = true;
     }
@@ -689,6 +694,33 @@ mod tests {
             },
         );
         (action, id)
+    }
+    #[test]
+    fn capability_refresh_updates_suggestions_without_text_edits() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::default();
+        let mut text = "LMP".to_owned();
+        let old = crate::redis_capabilities::Capabilities { version: Some([6,2,0]), ..Default::default() };
+        let new = crate::redis_capabilities::Capabilities { version: Some([7,2,0]), ..Default::default() };
+        for frame in 0..6 {
+            let caps = if frame < 3 { &old } else { &new };
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0,500.0))), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let id = ui.make_persistent_id("redis-command-editor");
+                    ui.memory_mut(|m| m.request_focus(id));
+                    if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, id) {
+                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(3))));
+                        state.store(ctx,id);
+                    }
+                    editor.show_with_context(ui, &mut text, true, &crate::redis_completion::Context { capabilities: Some(caps), ..Default::default() });
+                });
+            });
+            if frame >= 1 {
+                let item = editor.suggestions.items.iter().find(|i| i.label == "LMPOP").unwrap();
+                assert_eq!(item.warning.is_empty(), frame >= 3);
+            }
+            assert_eq!(text,"LMP");
+        }
     }
     #[test]
     fn shortcuts_are_focused_guarded_and_do_not_insert_newlines() {

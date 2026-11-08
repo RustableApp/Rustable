@@ -692,3 +692,27 @@ alignment (`/tmp/redis-capability-integration-tests.log`). The command metadata
 semantics were checked against https://redis.io/docs/latest/commands/command-info/.
 Cluster-specific capability coverage, UI capture, browser and completion performance
 validation remain open; the IntelliSense milestone is not yet complete.
+
+### IntelliSense capability validation and native captures
+
+Cluster-specific metadata coverage passed: both requests arrive before either
+response, denied INFO/COMMAND remains unknown, nil representatives remain known
+unavailable, and a following PING stays aligned. Four relevant capability tests
+passed (plus one unrelated matching test), log `/tmp/redis-capability-final-tests.log`.
+A focused editor test proves changing cached server version updates suggestions
+without text edits (`/tmp/redis-capability-cache-refresh-test.log`). The locked
+browser-package wasm32 check passed with 77 platform/dead-code warnings
+(`/tmp/redis-intellisense-browser-check.log`). Native QA build passed.
+
+Inspected actual native completion captures against a disposable ephemeral-port
+Redis 7.4 server, using real INFO/COMMAND metadata with JSON absent:
+`target/redis-capability-captures/command-editor.png` and
+`target/redis-capability-light-captures/command-editor.png`.
+The advisory warning is visible in both themes while the command remains insertable.
+No user's database or saved connection was used.
+
+Extended the identical release benchmark fixture with counted-key text edits and
+cached-version warning display; the baseline adapter displays the same prefix
+without capability annotations. Existing command, argument and after-idle cases
+remain. All eight runner unit checks passed. Performance comparison is the remaining
+milestone check; screenshots and functional tests do not establish its outcome.
