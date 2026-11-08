@@ -1154,7 +1154,7 @@ mod tests {
     fn settings() -> Settings {
         Settings {
             host: "127.0.0.1".into(),
-            port: 16379,
+            port: crate::redis_settings::fixture_port(false),
             tls: false,
             ..Default::default()
         }
@@ -1674,7 +1674,7 @@ mod tests {
     fn live_timeseries_pagination_retains_samples_and_detects_type_changes() {
         use crate::redis_value::{Cursor, PageRequest};
         let port: u16 = std::env::var("RUSTABLE_REDIS_JSON_PORT").expect("Use scripts/test-redis.sh").parse().unwrap();
-        assert_eq!(port, 16381);
+        assert_ne!(port, 0, "Use the disposable module fixture port");
         let mut session = Session::connect(&Settings { port, ..settings() }, "rustable-redis-test-only").unwrap();
         let key = format!("rustable:timeseries:{}", std::process::id());
         session.query(redis::cmd("DEL").arg(&key)).unwrap();
@@ -1732,7 +1732,7 @@ mod tests {
         session.query(redis::cmd("DEL").arg(&key)).unwrap();
     }
     #[test]
-    #[ignore = "requires disposable Redis on localhost:16379"]
+    #[ignore = "requires disposable Redis via scripts/test-redis.sh"]
     fn live_pagination_binary_empty_large_expiry_and_timeout() {
         let mut session = Session::connect(&settings(), "rustable-redis-test-only").unwrap();
         let prefix = format!("rustable-page-test:{}:", std::process::id());
@@ -1815,7 +1815,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires disposable Redis on localhost:16379"]
+    #[ignore = "requires disposable Redis via scripts/test-redis.sh"]
     fn live_acl_username_and_passwordless_identity() {
         let mut admin = Session::connect(&settings(), "rustable-redis-test-only").unwrap();
         let username = format!("rustable-test-{}", std::process::id());
@@ -1945,10 +1945,45 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires disposable Redis TLS fixture on localhost:16380"]
+    #[ignore = "requires disposable TLS fixture via scripts/test-redis.sh"]
+    fn live_bounded_tls_batch_errors_and_overflow_close_without_replay() {
+        use redis::ConnectionLike;
+        let settings = Settings {
+            port: crate::redis_settings::fixture_port(true),
+            tls: true,
+            root_certificate: Some(std::env::var_os("RUSTABLE_REDIS_TEST_CA").expect("fixture CA").into()),
+            ..settings()
+        };
+        let mut admin = Session::connect(&settings, "rustable-redis-test-only").unwrap();
+        let key = format!("bounded-tls:{}", std::process::id());
+        let counter = format!("{key}:counter");
+        let missing = format!("{key}:missing");
+        admin.query(redis::cmd("SET").arg(&key).arg(vec![b'x'; 4096])).unwrap();
+        admin.query(redis::cmd("SET").arg(&counter).arg(0)).unwrap();
+        let mut connection = Session::raw_node(&settings, "rustable-redis-test-only").unwrap();
+        let mut batch = redis::pipe();
+        batch.cmd("GET").arg(&missing).cmd("HGET").arg(&key).arg("field").cmd("PING");
+        let values = connection.req_packed_commands_bounded(&batch.get_packed_pipeline(), &[256; 3]).unwrap();
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], redis::Value::Nil);
+        assert!(values[1].clone().extract_error().is_err());
+        assert_eq!(values[2], redis::Value::SimpleString("PONG".into()));
+        assert_eq!(redis::cmd("PING").query::<String>(&mut connection).unwrap(), "PONG");
+        let mut oversized = redis::pipe();
+        oversized.cmd("GET").arg(&key).cmd("INCR").arg(&counter);
+        assert!(connection.req_packed_commands_bounded(&oversized.get_packed_pipeline(), &[128; 2]).is_err());
+        assert!(!connection.is_open());
+        assert!(connection.req_packed_commands_bounded(&redis::cmd("INCR").arg(&counter).get_packed_command(), &[128]).is_err());
+        // Redis received the original pipeline, including the later write. Its
+        // response was discarded with the oversized reply; nothing is replayed.
+        assert_eq!(admin.query(redis::cmd("GET").arg(&counter)).unwrap(), redis::Value::BulkString(b"1".to_vec()));
+        admin.query(redis::cmd("DEL").arg(&key).arg(&counter)).unwrap();
+    }
+    #[test]
+    #[ignore = "requires disposable TLS fixture via scripts/test-redis.sh"]
     fn live_verified_tls_rejects_untrusted_and_wrong_hostname() {
         let settings = Settings {
-            port: 16380,
+            port: crate::redis_settings::fixture_port(true),
             tls: true,
             root_certificate: Some(
                 std::env::var_os("RUSTABLE_REDIS_TEST_CA")
@@ -2006,7 +2041,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires disposable Redis on localhost:16379"]
+    #[ignore = "requires disposable Redis via scripts/test-redis.sh"]
     fn live_binary_types_expiry_guards_and_conflicts() {
         let mut session = Session::connect(&settings(), "rustable-redis-test-only").unwrap();
         let prefix = format!("rustable-test:{}:", std::process::id());

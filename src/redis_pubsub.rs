@@ -557,7 +557,7 @@ mod transport_tests {
         for tls in [false, true] {
             let settings = Settings {
                 host: "127.0.0.1".into(),
-                port: if tls { 16380 } else { 16379 },
+                port: crate::redis_settings::fixture_port(tls),
                 tls,
                 root_certificate: Some(
                     std::env::var_os("RUSTABLE_REDIS_TEST_CA")

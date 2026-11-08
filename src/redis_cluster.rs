@@ -1729,10 +1729,10 @@ mod tests {
     #[ignore = "disposable TLS fixtures via scripts/test-redis.sh"]
     fn discovered_nodes_preserve_tls_identity_and_never_fall_back_to_plaintext() {
         let ca = std::env::var_os("RUSTABLE_REDIS_TEST_CA").expect("disposable fixture CA");
-        for (host, port) in [("localhost", 16380), ("127.0.0.1", 16379)] {
+        for (host, port) in [("localhost", crate::redis_settings::fixture_port(true)), ("127.0.0.1", crate::redis_settings::fixture_port(false))] {
             let settings = Settings {
                 host: "127.0.0.1".into(),
-                port: 16380,
+                port: crate::redis_settings::fixture_port(true),
                 cluster: true,
                 tls: true,
                 root_certificate: Some(ca.clone().into()),

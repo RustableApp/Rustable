@@ -213,6 +213,15 @@ fn validate_identity(tls: bool, certificate: &Option<PathBuf>, key: &Option<Path
     Ok(())
 }
 
+// Live tests supply disposable ports. Port zero when absent keeps shared mock
+// settings construction harmless and never targets a user's local Redis.
+#[cfg(test)]
+pub(crate) fn fixture_port(tls: bool) -> u16 {
+    std::env::var(if tls { "RUSTABLE_REDIS_TLS_PORT" } else { "RUSTABLE_REDIS_TEST_PORT" })
+        .map(|port| port.parse().expect("valid disposable fixture port"))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

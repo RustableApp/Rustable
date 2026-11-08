@@ -133,18 +133,17 @@ The database-sidebar width, inspector width, and command-pane height use the app
 ## Reproduce integration tests
 
 Run `./scripts/test-redis.sh` with Docker, OpenSSL and mise installed. It starts
-local Redis 7.4 plaintext/TLS fixtures on ports 16379/16380 and a Redis 8.2
-JSON fixture on port 16381, runs the suite,
-and removes its containers and generated certificates on exit. All three ports
-must be free; it never reuses an existing server.
+Redis 7.4 plaintext/TLS and Redis 8.2 module fixtures on dynamically assigned
+localhost ports, runs their selected tests, and removes its own containers and
+certificates on exit. It does not use or stop an existing local Redis server.
 
-For manual fixture setup, the plaintext tests
-expect Redis 7.4 on 127.0.0.1:16379 with password
-'rustable-redis-test-only'. TLS tests expect port 16380 and a CA certificate at
-/tmp/rustable-redis-tls/ca.crt, with a server certificate whose SAN includes
-127.0.0.1 but not localhost. The fixtures must permit ACL administration.
-
-    mise exec -- cargo test --locked --lib redis_session::tests -- --include-ignored
+The harness exports `RUSTABLE_REDIS_TEST_PORT`, `RUSTABLE_REDIS_TLS_PORT`,
+`RUSTABLE_REDIS_JSON_PORT` and `RUSTABLE_REDIS_TEST_CA`. Manually invoked live tests
+must use equivalent disposable fixtures and explicit port/certificate variables;
+there is no default connection to the demo on port 16379. Fixtures use password
+`rustable-redis-test-only`, permit ACL administration, and the TLS certificate SAN
+contains 127.0.0.1 but not localhost. Other live test families have their own
+scripts and opt-in variables; do not run all ignored tests against one fixture.
 
 Tests create their own prefixed keys/users. Run only against disposable fixtures.
 

@@ -90,13 +90,13 @@ fn scan_and_preview_protocol_has_one_then_two_exchanges() {
 }
 
 #[test]
-#[ignore = "requires disposable Redis on localhost:16379"]
+#[ignore = "requires disposable Redis via scripts/test-redis.sh"]
 fn live_filtered_scan_and_delayed_browser_latency() {
     use std::io::Read;
     use std::net::TcpStream;
     let config = Settings {
         host: "127.0.0.1".into(),
-        port: 16379,
+        port: crate::redis_settings::fixture_port(false),
         tls: false,
         ..Default::default()
     };
@@ -130,7 +130,7 @@ fn live_filtered_scan_and_delayed_browser_latency() {
     let port = listener.local_addr().unwrap().port();
     let proxy = std::thread::spawn(move || {
         let (downstream, _) = listener.accept().unwrap();
-        let upstream = TcpStream::connect("127.0.0.1:16379").unwrap();
+        let upstream = TcpStream::connect(("127.0.0.1", crate::redis_settings::fixture_port(false))).unwrap();
         upstream.set_nodelay(true).unwrap();
         downstream.set_nodelay(true).unwrap();
         fn forward(mut source: TcpStream, mut target: TcpStream) {
@@ -398,13 +398,13 @@ fn inspector_uses_two_exchanges_then_one_per_page() {
 }
 
 #[test]
-#[ignore = "requires disposable Redis on localhost:16379"]
+#[ignore = "requires disposable Redis via scripts/test-redis.sh"]
 fn live_collection_pages_search_stream_ids_and_binary_strings() {
     use crate::redis_value::{Cursor, PageRequest};
     let mut session = Session::connect(
         &Settings {
             host: "127.0.0.1".into(),
-            port: 16379,
+            port: crate::redis_settings::fixture_port(false),
             tls: false,
             ..Default::default()
         },
@@ -540,13 +540,13 @@ fn live_collection_pages_search_stream_ids_and_binary_strings() {
 }
 
 #[test]
-#[ignore = "requires disposable Redis on localhost:16379"]
+#[ignore = "requires disposable Redis via scripts/test-redis.sh"]
 fn live_guarded_mutations_bulk_expiry_and_diagnostics() {
     use crate::redis_mutation::{Action, Mutation};
     let mut session = Session::connect(
         &Settings {
             host: "127.0.0.1".into(),
-            port: 16379,
+            port: crate::redis_settings::fixture_port(false),
             tls: false,
             ..Default::default()
         },
@@ -817,12 +817,12 @@ fn live_json_documents_preserve_ttl_and_reject_stale_edits() {
 }
 
 #[test]
-#[ignore = "requires disposable Redis on localhost:16379"]
+#[ignore = "requires disposable Redis via scripts/test-redis.sh"]
 fn live_mutation_acl_failures_do_not_leave_partial_edits() {
     use crate::redis_mutation::{Action, Mutation};
     let config = Settings {
         host: "127.0.0.1".into(),
-        port: 16379,
+        port: crate::redis_settings::fixture_port(false),
         tls: false,
         ..Default::default()
     };

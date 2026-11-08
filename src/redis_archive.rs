@@ -691,7 +691,7 @@ mod transport_tests {
     #[test]
     #[ignore = "disposable Redis fixtures via scripts/test-redis.sh"]
     fn live_large_denied_and_module_archives() {
-        let mut admin = redis::Client::open("redis://:rustable-redis-test-only@127.0.0.1:16379/9")
+        let mut admin = redis::Client::open(format!("redis://:rustable-redis-test-only@127.0.0.1:{}/9", crate::redis_settings::fixture_port(false)))
             .unwrap()
             .get_connection()
             .unwrap();
@@ -704,7 +704,7 @@ mod transport_tests {
             .unwrap();
         let settings = Settings {
             host: "127.0.0.1".into(),
-            port: 16379,
+            port: crate::redis_settings::fixture_port(false),
             tls: false,
             database: 9,
             ..Default::default()
@@ -741,7 +741,7 @@ mod transport_tests {
             .query::<i64>(&mut admin)
             .unwrap();
         let mut module_settings = settings;
-        module_settings.port = 16381;
+        module_settings.port = std::env::var("RUSTABLE_REDIS_JSON_PORT").expect("disposable module port").parse().unwrap();
         let mut modules = Session::connect(&module_settings, "rustable-redis-test-only").unwrap();
         modules
             .execute("JSON.SET archive:json $ '{\"ok\":true}'", false)
@@ -782,7 +782,7 @@ mod transport_tests {
         let mut session = Session::connect(
             &Settings {
                 host: "127.0.0.1".into(),
-                port: 16379,
+                port: crate::redis_settings::fixture_port(false),
                 tls: false,
                 database: 9,
                 ..Default::default()

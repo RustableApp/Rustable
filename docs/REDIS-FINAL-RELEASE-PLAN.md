@@ -37,7 +37,7 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
   Never expose connection/protocol-changing commands through the pooled editor.
   Document a concrete safety/platform blocker if a workflow cannot responsibly
   ship in this release; do not label it implemented or remove guards for parity.
-- [ ] Polish: Search, new-key forms, Pub/Sub composer alignment, Analyze table
+- [x] Polish: Search, new-key forms, Pub/Sub composer alignment, Analyze table
   visibility. Preserve the current browser layout and default value previews.
 
 ## Validation and release gates
@@ -1067,3 +1067,43 @@ comparison, using wheel input followed by idle frames. It deliberately compares
 the previously clipped layout with the corrected layout; the separate regression
 test, not this timing fixture, establishes reachability. Benchmark smoke and all
 eight runner checks pass. Release comparison remains pending before polish closure.
+
+### Final layout performance passed
+
+The five paired release runs against `9d5ad41`, candidate `65d3f55`, passed every
+comparison without threshold changes. Same M4 Max / macOS 27.2 arm64 / Rust 1.99.1,
+1200×760 page viewport, 20 warmups and 160 measured frames per run, default scale,
+synthetic 120 Hz timeline. Raw evidence: `target/redis-final-polish-performance/`.
+These are CPU layout/tessellation measurements, not display latency.
+
+- `redis/page/analysis`: p50 0.111458→0.110959 ms, p95 0.122458→0.120916 ms, p99 0.129458→0.130834 ms, max 0.132000→0.139708 ms, worst 0.152792→0.216041 ms.
+- `redis/page/analysis-scroll`: p50 0.114000→0.107625 ms, p95 0.124625→0.118125 ms, p99 0.132167→0.126417 ms, max 0.140500→0.131875 ms, worst 0.162625→0.219583 ms.
+- `redis/page/pubsub`: p50 0.030625→0.031334 ms, p95 0.034708→0.034958 ms, p99 0.040292→0.040500 ms, max 0.041333→0.041750 ms, worst 0.069917→0.057291 ms.
+
+Analyze scrolling p95 improved 5.2%; static analysis improved 1.3%; Pub/Sub changed
++0.7%. Shared Search, Workbench, JSON, grid, sidebar and workspace cases also passed.
+The scrolling fixture adds identical events on both revisions and includes an idle
+period. Separate reachability tests establish the corrected functionality. Final
+polish milestone is complete; remaining release gates are integration/full-suite,
+platform limitations, and artifact/publication verification.
+
+### Final standalone and bounded TLS gate
+
+Updated the older standalone harness to allocate ephemeral localhost ports for
+its own plaintext, TLS and module containers. Tests consume explicit environment
+ports (missing plain/TLS port resolves to zero, never the user's demo). Also narrowed
+the harness to its own live cases instead of accidentally invoking unrelated
+Cluster/mTLS/seeded-data fixtures. Two legacy fixed-port assertions/targets were
+caught and corrected during this migration. The final entire script passed:
+25 tests across 17 invocations, zero failures, log
+`/tmp/redis-final-standalone.log`. Its containers were removed on exit; the user's
+16379 demo was not used or stopped.
+
+New live verified-TLS coverage proves a nil/error/success batch fully drains,
+subsequent PING remains aligned, an oversized reply closes the transport, and a
+later write already in that pipeline executes once with no retry on the closed
+connection. Standalone pagination, delayed browsing, ACLs, type/expiry/conflict
+mutations, JSON, Search/aggregation/profile, time-series, Pub/Sub, monitor, archive
+and discovered-node TLS identity cases passed. No production driver sequence was
+changed; test-port plumbing and protocol assertions only. Cluster/Sentinel final
+runs and full locked/Clippy/browser gates remain outstanding.
