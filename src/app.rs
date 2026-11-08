@@ -6714,6 +6714,7 @@ impl Rustable {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(workspace) = &mut self.redis_workspace {
+            workspace.set_history_profile(self.active_profile.as_ref().map(|profile| profile.id.0));
             workspace.load_preferences(&self.prefs.redis_browser);
             if workspace.show(ctx, &self.label, self.active_profile.as_ref().map_or(egui::Color32::from_rgb(40, 83, 65), |profile| egui::Color32::from_rgb(profile.color[0], profile.color[1], profile.color[2])), &mut self.prefs.pane_sizes, &mut self.shared_preferences_dirty) { self.manager_requested = true; }
             self.shared_preferences_dirty |= workspace.store_preferences(&mut self.prefs.redis_browser);

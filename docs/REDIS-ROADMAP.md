@@ -49,8 +49,8 @@ Completed browser milestones:
   and whole-document conflict-checked editing.
 - [x] Saved tree/list preference and namespace separator. Named command snippets
   persist through the app's existing preference storage and window synchronization.
-  Command history stays in memory; saving a snippet is explicit.
-- [x] Command templates/help, bounded session history and snippet management.
+  Saved-connection command history persists with recording/clear controls; saving a snippet remains explicit.
+- [x] Command templates/help, bounded connection history and snippet management.
 - [x] On-demand server summary, slow log and sampled key-memory analysis.
 
 ## Limits and safeguards
@@ -96,7 +96,7 @@ only on request. Slow-log duration excludes client/network latency. These views 
 not change server configuration or poll while idle.
 
 Saved snippets are limited to 20 commands of at most 64 KiB each, with 80-character
-names. Session history retains at most 100 commands of at most 64 KiB each. Commands
+names. History retains at most 100 commands and 256 KiB per saved connection, for the 16 most recently updated connections. Unsaved/demo connections retain session-only history. Recording can be disabled globally and individual connection history cleared. Authentication/admin credential commands are excluded; normal commands
 may contain values; the save UI explains that saved snippets are local plaintext.
 The in-memory WASM demo explicitly rejects the desktop-only structured mutations
 and server diagnostics; its existing supported command subset remains available.

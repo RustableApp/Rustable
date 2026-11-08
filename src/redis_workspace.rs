@@ -153,6 +153,9 @@ pub(crate) struct Workspace {
     snippets_dirty: bool,
     snippet_name: String,
     command_history: std::collections::VecDeque<String>,
+    history_profile: Option<u64>,
+    history_recording: bool,
+    history_dirty: bool,
     bulk_mode: bool,
     bulk_selected: std::collections::BTreeSet<Vec<u8>>,
 }
@@ -388,11 +391,21 @@ impl Workspace {
             snippets_dirty: false,
             snippet_name: String::new(),
             command_history: Default::default(),
+            history_profile: None,
+            history_recording: true,
+            history_dirty: false,
             bulk_mode: false,
             bulk_selected: Default::default(),
         }
     }
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // Native multiwindow synchronization.
+    pub fn set_history_profile(&mut self, profile: Option<u64>) {
+        if self.history_profile != profile {
+            self.history_profile = profile;
+            self.command_history.clear(); self.history_recording = true; self.history_dirty = false;
+            self.preferences_loaded = false;
+        }
+    }
     pub fn reset_preferences(&mut self) {
         self.preferences_loaded = false;
     }
@@ -405,6 +418,12 @@ impl Workspace {
         self.tree_view = preferences.tree;
         self.separator = preferences.separator;
         self.snippets = preferences.snippets;
+        self.history_recording = preferences.record_history;
+        if let Some(profile) = self.history_profile {
+            let history = preferences.histories.remove(&profile).unwrap_or_default();
+            self.command_history = history.commands;
+            self.history_dirty = false;
+        }
         self.preferences_loaded = true;
         self.rebuild_tree();
     }
@@ -414,8 +433,19 @@ impl Workspace {
     ) -> bool {
         let changed = preferences.tree != self.tree_view
             || preferences.separator != self.separator
-            || self.snippets_dirty;
+            || self.snippets_dirty || self.history_dirty;
         if changed {
+            if self.history_dirty {
+                preferences.record_history = self.history_recording;
+                if let Some(profile) = self.history_profile {
+                    preferences.histories.insert(profile, crate::redis_history::History {
+                        commands: self.command_history.clone(),
+                        updated_ms: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                    });
+                    preferences.limit_profiles();
+                }
+                self.history_dirty = false;
+            }
             preferences.tree = self.tree_view;
             preferences.separator = self.separator.clone();
             if self.snippets_dirty {
@@ -553,13 +583,12 @@ impl Workspace {
             return;
         }
         if let Job::Execute(text, _) = &job
-            && text.len() <= 65536
+            && self.history_recording && crate::redis_history::eligible(text)
             && self.command_history.back() != Some(text)
         {
-            if self.command_history.len() >= 100 {
-                self.command_history.pop_front();
-            }
             self.command_history.push_back(text.clone());
+            crate::redis_history::trim(&mut self.command_history);
+            self.history_dirty = true;
         }
         self.browse_busy = matches!(&job, Job::Scan(..) | Job::Rows(..));
         let navigation = if let Job::ValuePage(_, nav) = &job {
@@ -1191,7 +1220,13 @@ impl Workspace {
                     .show(ctx, |ui| {
                         browser_style(ui);
                         ui.add_space(8.0); ui.strong("Query history");
-                        ui.weak("This session · last 100 commands"); ui.separator();
+                        ui.weak(if self.history_profile.is_some() { "Saved connection · last 100 commands" } else { "This session · last 100 commands" });
+                        if ui.checkbox(&mut self.history_recording, "Record history").on_hover_text("Applies to all Redis connections; existing history remains until cleared").changed() { self.history_dirty = true; }
+                        ui.weak("Command text may contain sensitive values.");
+                        if ui.add_enabled(!self.command_history.is_empty(), action_button("trash-2", "Clear history")).clicked() {
+                            self.command_history.clear(); self.history_dirty = true;
+                        }
+                        ui.separator();
                         egui::ScrollArea::vertical().show_rows(ui, 44.0, self.command_history.len(), |ui, range| {
                             for i in range {
                                 let command = &self.command_history[self.command_history.len() - 1 - i];
@@ -2244,7 +2279,9 @@ impl Workspace {
                 }
             });
             if self.section != Section::Workbench { ui.menu_button("History", |ui| {
-                ui.weak("This session only · last 100 commands");
+                ui.weak(if self.history_profile.is_some() {"Saved connection · last 100 commands"} else {"This session · last 100 commands"});
+                if ui.checkbox(&mut self.history_recording, "Record history").on_hover_text("Applies to all Redis connections; existing history remains until cleared").changed() { self.history_dirty = true; }
+                if ui.add_enabled(!self.command_history.is_empty(), action_button("trash-2", "Clear history")).clicked() { self.command_history.clear(); self.history_dirty = true; }
                 egui::ScrollArea::vertical()
                     .max_height(240.0)
                     .show(ui, |ui| {
@@ -3377,6 +3414,29 @@ mod tests {
         workspace.busy = false;
         workspace.connected = true;
         (workspace, responses, jobs)
+    }
+    #[test]
+    fn history_is_persisted_per_profile_and_clear_and_recording_survive_reload() {
+        let (mut workspace, _, jobs)=mock_workspace();
+        let mut preferences=crate::redis_preferences::Preferences::default();
+        workspace.set_history_profile(Some(11));workspace.load_preferences(&preferences);
+        workspace.send(Job::Execute("GET account".into(),true));assert!(matches!(jobs.try_recv().unwrap(),Job::Execute(..)));workspace.busy=false;
+        assert!(workspace.store_preferences(&mut preferences));
+        let bytes=serde_json::to_vec(&preferences).unwrap();
+        let mut restored:crate::redis_preferences::Preferences=serde_json::from_slice(&bytes).unwrap();
+        workspace.set_history_profile(Some(22));workspace.load_preferences(&restored);assert!(workspace.command_history.is_empty());
+        workspace.send(Job::Execute("GET other".into(),true));jobs.try_recv().unwrap();workspace.busy=false;workspace.store_preferences(&mut restored);
+        workspace.set_history_profile(Some(11));workspace.load_preferences(&restored);assert_eq!(workspace.command_history.back().unwrap(),"GET account");
+        workspace.history_recording=false;workspace.history_dirty=true;
+        workspace.send(Job::Execute("GET private".into(),true));jobs.try_recv().unwrap();workspace.busy=false;
+        assert_eq!(workspace.command_history.len(),1);
+        workspace.command_history.clear();workspace.history_dirty=true;workspace.store_preferences(&mut restored);
+        workspace.reset_preferences();workspace.load_preferences(&restored);
+        assert!(!workspace.history_recording);assert!(workspace.command_history.is_empty());
+        assert_eq!(restored.histories[&22].commands.back().unwrap(),"GET other");
+        workspace.set_history_profile(None);workspace.load_preferences(&restored);
+        workspace.send(Job::Execute("GET temporary".into(),true));jobs.try_recv().unwrap();workspace.busy=false;workspace.store_preferences(&mut restored);
+        assert_eq!(restored.histories.len(),2); // Unsaved sessions do not acquire another profile's history.
     }
     #[test]
     fn recovered_transport_preserves_drafts_and_warning_without_background_work() {

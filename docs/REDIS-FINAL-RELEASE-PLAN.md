@@ -495,3 +495,24 @@ checks and inspected native screenshots. Shared TLS/Cluster failure fixtures and
 full-suite/native-platform checks remain release-wide gates, not silently waived.
 Next deliverable: bounded per-connection persistent Workbench history and distinct
 per-command result sections.
+
+
+### Workbench checkpoint — bounded persistent history
+
+Saved connection profile IDs scope automatic command history through the existing
+shared preference store. Each history retains at most 100 entries and 256 KiB;
+the 16 most recently updated connections are retained. Unsaved connections and
+the WASM demo remain session-only. Recording is a global setting independent of
+history eviction; Clear removes the current connection's history. Authentication
+and administrative credential commands are excluded, including rejected attempts.
+Ordinary command values can still contain sensitive text; the controls disclose
+this. Named snippets and execution shortcuts are unchanged. No database requests
+were added (zero cold/warm exchange impact).
+
+Verified: five matching history tests passed, including saved-profile isolation,
+serialization/reload, clearing and disabled recording
+(`/tmp/redis-history-integration-tests.log`). Two preference tests passed, covering
+legacy loading, eviction and preserving recording opt-out across eviction/reload
+(`/tmp/redis-history-preferences-tests.log`). UI screenshots and release performance
+comparisons will cover the completed Workbench milestone together. Distinct
+per-command results remain unimplemented, so the milestone remains unchecked.
