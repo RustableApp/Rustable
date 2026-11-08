@@ -87,6 +87,8 @@ pub(crate) struct Workspace {
     rows: std::collections::HashMap<Vec<u8>, (String, String, i64)>,
     section: Section,
     analysis_server: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    analysis: crate::redis_analysis_view::View,
     commands_visible: bool,
     inspector_visible: bool,
     tree_view: bool,
@@ -169,6 +171,8 @@ impl Workspace {
     }
     pub fn new_with_sentinel(mut settings: Settings, password: String, sentinel_password: String, ctx: egui::Context) -> Self {
         let database = settings.database;
+        #[cfg(not(target_arch = "wasm32"))]
+        let analysis = crate::redis_analysis_view::View::new(settings.clone(), password.clone(), sentinel_password.clone());
         let cluster = settings.cluster;
         #[cfg(not(target_arch = "wasm32"))]
         let monitor = crate::redis_monitor::View::new(settings.clone(), password.clone(), sentinel_password.clone());
@@ -306,6 +310,8 @@ impl Workspace {
             rows: Default::default(),
             section: Section::Browse,
             analysis_server: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            analysis,
             commands_visible: cfg!(target_arch = "wasm32"),
             inspector_visible: false,
             tree_view: true,

@@ -403,3 +403,29 @@ Cluster SCAN test verifies a valid page and immediate rejection/connection stop
 on an oversized declared response (`/tmp/redis-analysis-scan-test.log`). Existing
 bounded-response cleanup regression also passed. Live Analyze integration, TLS
 coverage, UI and storage remain required; this milestone is still incomplete.
+
+### Analyze UI and local report integration checkpoint
+
+The native Analyze page now starts a dedicated verified Session per explicit
+report, with atomic progress/cancellation and a single-result worker channel.
+Browse's cursor and connection are untouched. Cancellation is checked between
+reads; the UI explains that an in-flight read must finish. Closing the workspace
+sets cancellation without joining on the UI thread. Redraws are scheduled only
+while report progress is active. Completion prepares table strings once.
+
+The page shows honest completion/partial status, generation time/database,
+measured-key/memory totals, type and expiry tables, top namespaces and top 15
+keys using shared styled report tables. Save/Open use worker-side native file
+dialogs, a versioned bounded 1 MiB report format and atomic temporary-file
+replacement. Reports contain names/statistics but no values or credentials.
+Save completion reports success; cancelled dialogs do not claim success.
+Failed collection/loading preserves the previous report. Seven targeted model
+and UI/storage tests pass (`/tmp/redis-analysis-view-tests.log`), including idle
+settling and file limits. `cargo check --locked` passed.
+
+Native preview now waits for an actual report worker result before capturing
+Analyze. QA build is running (`/tmp/redis-analysis-preview-build.log`). Still
+required: disposable live report checks, screenshots in both themes, a meaningful
+release UI comparison for the new report, cancellation under network delay, and
+reviewing the browser-demo presentation (it still uses the older loaded-key
+report path). Analyze remains unchecked until these are addressed.

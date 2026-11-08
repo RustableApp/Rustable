@@ -648,13 +648,6 @@ impl Router {
         }
         Ok(values)
     }
-    fn exchange(
-        &mut self,
-        groups: &[ReadGroup],
-        size: usize,
-    ) -> Result<(Vec<redis::Value>, Vec<Rejected>), String> {
-        self.exchange_limited(groups, size, None)
-    }
     fn exchange_limited(&mut self, groups: &[ReadGroup], size: usize, limit: Option<usize>) -> Result<(Vec<redis::Value>, Vec<Rejected>), String> {
         let mut values = vec![redis::Value::Nil; size];
         let mut rejected = Vec::new();
@@ -1539,7 +1532,7 @@ mod tests {
         let mut router = router(endpoints[0].port);
         let groups: Vec<ReadGroup> = endpoints.into_iter().enumerate().map(|(index, endpoint)| (endpoint, vec![64 - index], redis::cmd("GET").arg(index.to_string()).get_packed_command())).collect();
         let start = std::time::Instant::now();
-        let result = router.exchange(&groups, 65);
+        let result = router.exchange_limited(&groups, 65, None);
         if fail_first_wave {
             assert!(result.unwrap_err().contains("transport lost"));
             assert!(!router.is_connected());

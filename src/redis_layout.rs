@@ -65,20 +65,24 @@ impl Workspace {
     }
 
     fn analysis_pane(&mut self, ui: &mut egui::Ui) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.analysis.poll(ui.ctx());
         egui::Frame::new().inner_margin(16).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.selectable_label(!self.analysis_server, "Database analysis").clicked() { self.analysis_server = false; }
                 if ui.selectable_label(self.analysis_server, "Server / Slow log").clicked() { self.analysis_server = true; }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(self.connected && !self.busy && self.edit.is_none() && !self.value_dirty() && (self.analysis_server || !self.keys.is_empty()), action_button("refresh-cw", "New report")).clicked() {
+                if self.analysis_server || cfg!(target_arch = "wasm32") { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(self.connected && !self.busy && self.edit.is_none() && !self.value_dirty() && (self.analysis_server || (cfg!(target_arch = "wasm32") && !self.keys.is_empty())), action_button("refresh-cw", "New report")).clicked() {
                         let request = if self.analysis_server { crate::redis_diagnostics::Request::Server }
                             else { crate::redis_diagnostics::Request::Keys(self.keys.iter().take(1000).cloned().collect()) };
                         self.diagnostics_request = Some(request.clone()); self.diagnostics_report = None;
                         self.diagnostics_open = false; self.send(Job::Diagnostics(request));
                     }
-                });
+                }); }
             });
             ui.separator();
+            #[cfg(not(target_arch = "wasm32"))]
+            if !self.analysis_server { self.analysis.show(ui, self.database, self.connected); return; }
             egui::ScrollArea::vertical().id_salt("redis-analysis-page").show(ui, |ui| {
                 let report = self.diagnostics_report.as_ref().filter(|report| {
                     report.module_key.is_none() && !report.topology && report.vector_element.is_none() && report.vector_matches.is_none()
@@ -144,7 +148,7 @@ pub(crate) fn analysis_distribution(ui: &mut egui::Ui, rows: &[[String; 3]]) {
 
 #[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
 impl Workspace {
-    pub(crate) fn preview_layout(&mut self, step: usize) -> bool {
+    pub(crate) fn preview_layout(&mut self, ctx: &egui::Context, step: usize) -> bool {
         if !self.connected || self.busy { return false; }
         if !self.scan_started || self.cursor != 0 { self.auto_scan = true; return false; }
         self.preview_queue.clear();
@@ -176,9 +180,7 @@ impl Workspace {
             5 => { return self.preview_commands(); }
             6 => {
                 self.section = Section::Analyze; self.analysis_server = false;
-                let request = crate::redis_diagnostics::Request::Keys(self.keys.iter().take(1000).cloned().collect());
-                self.diagnostics_request = Some(request.clone()); self.diagnostics_report = None;
-                self.send(Job::Diagnostics(request));
+                return self.analysis.preview(ctx, self.database);
             }
             8 => { self.section = Section::Browse; self.send(Job::Inspect(b"app:catalog:camera".to_vec())); self.string_mode = StringMode::Json; }
             9 => {
