@@ -700,6 +700,59 @@ mod tests {
         drop(connection);
         assert!(!directory.exists());
         assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err());
+
+        crate::redis_settings::with_ssh_test_files(
+            c.known_hosts_file.clone().unwrap(), c.config_file.clone().unwrap(), || {
+                for mode in 0..3 {
+                    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                    let settings = crate::redis_settings::Settings {
+                        host: "127.0.0.1".into(), port: listener.local_addr().unwrap().port(), tls: false,
+                        ssh: Some(crate::connection_profiles::SshOptions { host: "fixture-alias".into(), ..Default::default() }),
+                        ..Default::default()
+                    };
+                    let responder = std::thread::spawn(move || {
+                        listener.set_nonblocking(true).unwrap();
+                        let started = Instant::now();
+                        let mut socket = loop {
+                            if let Ok((socket, _)) = listener.accept() { break socket; }
+                            assert!(started.elapsed() < Duration::from_secs(10));
+                            std::thread::sleep(Duration::from_millis(10));
+                        };
+                        socket.set_nonblocking(false).unwrap();
+                        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                        let mut parser = redis::Parser::new();
+                        let mut operations = 0;
+                        while let Ok(value) = parser.parse_value(&mut socket) {
+                            let command: Vec<Vec<u8>> = redis::from_redis_value(value).unwrap();
+                            match command[0].as_slice() {
+                                b"CLIENT" | b"SELECT" => socket.write_all(b"+OK\r\n").unwrap(),
+                                b"PING" => { operations += 1; socket.write_all(b"+PONG\r\n").unwrap(); }
+                                b"MONITOR" => { operations += 1; socket.write_all(b"+OK\r\n").unwrap(); }
+                                _ => panic!("unexpected tunneled operation"),
+                            }
+                        }
+                        operations
+                    });
+                    match mode {
+                        0 => {
+                            let mut session = crate::redis_session::Session::connect(&settings, "").unwrap();
+                            assert_eq!(session.execute("PING", true).unwrap(), vec![redis::Value::SimpleString("PONG".into())]);
+                        }
+                        1 => {
+                            let mut node = crate::redis_session::Session::cluster_node(&settings, "").unwrap();
+                            assert_eq!(redis::cmd("PING").query::<String>(&mut node).unwrap(), "PONG");
+                        }
+                        _ => {
+                            let control = crate::redis_stream::Control::default();
+                            let mut stream = control.start(&settings, "", "", &redis::cmd("MONITOR")).unwrap();
+                            assert_eq!(redis::Parser::new().parse_value(&mut stream).unwrap(), redis::Value::Okay);
+                            control.stop();
+                        }
+                    }
+                    assert!(responder.join().unwrap() >= 1);
+                }
+            },
+        );
     }
 
     #[test]

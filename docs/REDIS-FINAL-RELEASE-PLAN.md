@@ -180,3 +180,22 @@ incomplete output is retained but excluded. No thresholds or fixtures changed.
 These results cover the default form only, not newly expanded SSH/client-identity
 interactions or native input-to-display latency. Those checks remain outstanding;
 no overall UI/release gate is checked off from this narrow evidence.
+
+### SSH application-path verification
+
+The isolated live SSH test now also enters through `Session::connect`, the node
+constructor used by topology routing, and `Control::start` for MONITOR. It checks
+actual responses and drops/stops each transport. A test-only thread-local override
+supplies temporary SSH configuration/known-hosts files, restored even on unwind;
+gateway selection, credentials, forwarding and strict verification still run
+through production code. All seven SSH tests pass (`/tmp/redis-ssh-integration.log`).
+The first fixture attempt exposed inherited nonblocking mode on its accepted mock
+socket; setting that socket back to blocking fixed the fixture. No application
+transport workaround was needed. This is not a live SSH failover/resharding claim.
+
+Native QA build passed. Captured and inspected standalone Redis security options
+in dark/light themes at 1200×1080 logical points (2400×2160 pixels):
+`target/redis-security-captures/connection-dark.png` and `connection-light.png`.
+SSH uses the existing SQL gateway controls and action sizing; no clipping in these
+captures. Client-identity expansion, compact viewport and native interaction
+coverage remain open. Both isolated preview processes were stopped afterwards.

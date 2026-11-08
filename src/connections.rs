@@ -1772,7 +1772,14 @@ impl Rustable {
             let draft = app.connection_manager.draft.as_mut().unwrap();
             draft.name = "Production cache".into();
             if let ConnectionKind::Redis(settings) = &mut draft.connection {
-                if std::env::var_os("RUSTABLE_CLUSTER_SEEDS_CAPTURE").is_some() {
+                if std::env::var_os("RUSTABLE_REDIS_SECURITY_CAPTURE").is_some() {
+                    settings.host = "cache.internal.example.test".into();
+                    settings.client_certificate = Some("/certificates/redis-client.pem".into());
+                    settings.client_key = Some("/certificates/redis-client-key.pem".into());
+                    settings.ssh = Some(SshOptions {
+                        host: "gateway.example.test".into(), user: "database".into(), ..Default::default()
+                    });
+                } else if std::env::var_os("RUSTABLE_CLUSTER_SEEDS_CAPTURE").is_some() {
                     settings.cluster = true;
                     settings.host = "cache-1.example.test".into();
                     settings.cluster_seeds = vec![crate::redis_settings::SentinelSeed { host: "cache-2.example.test".into(), port: 6379 }];
