@@ -263,3 +263,28 @@ real catalog metadata plus a missing-index error and subsequent PING. Evidence:
 `/tmp/redis-search-catalog-tests.log`, `/tmp/redis-search-catalog-live.log`.
 Create/drop management, native captures and final Search performance comparison
 remain in progress; the Search milestone remains unchecked.
+
+### Search index management checkpoint
+
+Added inline create/drop controls using the existing button and icon conventions.
+Creation supports HASH/JSON, one optional key prefix and 1–32 TEXT/TAG/NUMERIC/GEO
+fields with aliases and sortable flags. JSON paths require aliases; duplicate
+aliases and invalid bounds are rejected. Empty prefix explicitly means all keys.
+Drop review displays the index name, explains query impact/document preservation,
+and requires typing DROP. Commands use argument encoding; FT.DROPINDEX never sends
+DD. Form drafts are cleared only on successful completion or explicit cancel.
+
+Mutation jobs carry safe mode to the worker, which validates before constructing
+or sending a command. Writes use the existing single-command path and never replay
+an uncertain result. Successful operations update the cached name list locally;
+the next visible metadata page uses the existing bounded batch. No preflight
+existence query or automatic replacement of an existing index was introduced.
+Validation borrows draft fields instead of cloning their text on every frame;
+full drafts clone only on submit. Input sizes and field counts are bounded.
+
+Nine targeted Search tests passed. The disposable Redis 8.4 fixture verified HASH
+and JSON creation, safe-mode rejection of create/drop, duplicate-create errors,
+and preservation of indexed documents after drop (`/tmp/redis-search-manage-live.log`).
+Separate browser-package locked WASM check passed with platform dead-code warnings
+(`/tmp/redis-search-manage-wasm.log`). Native Search captures, draft/error interaction
+coverage and comparative UI measurements remain pending; Search is not marked complete.

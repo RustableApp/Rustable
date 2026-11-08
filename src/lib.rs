@@ -69,6 +69,7 @@ mod redis_pubsub_frame;
 mod redis_pubsub_view;
 mod redis_search;
 mod redis_search_catalog;
+mod redis_search_manage;
 #[cfg(not(target_arch = "wasm32"))]
 mod redis_session;
 mod redis_settings;

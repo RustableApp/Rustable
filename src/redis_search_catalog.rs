@@ -87,6 +87,20 @@ mod tests {
         assert!(info.documents.is_some());
         assert!(rows[1].1.is_err());
         assert_eq!(session.execute("PING", true).unwrap(), vec![redis::Value::SimpleString("PONG".into())]);
+        use crate::redis_search_manage::{Create, Field, Kind, Mutation};
+        for json in [false, true] {
+            let name = if json { "idx:managed-json" } else { "idx:managed-hash" };
+            let create = Mutation::Create(Create { name: name.into(), json, prefix: "catalog:".into(), fields: vec![Field {
+                path: if json { "$.name" } else { "name" }.into(), alias: "name".into(), kind: Kind::Text, sortable: true,
+            }] });
+            assert!(session.search_mutate(create.clone(), true).is_err());
+            assert!(session.search_mutate(create.clone(), false).is_ok());
+            assert!(session.search_mutate(create, false).is_err(), "duplicate index must fail without replacing it");
+            let drop = Mutation::Drop(name.as_bytes().to_vec());
+            assert!(session.search_mutate(drop.clone(), true).is_err());
+            assert!(session.search_mutate(drop, false).is_ok());
+        }
+        assert_eq!(redis::cmd("EXISTS").arg("catalog:one").query::<i64>(&mut connection).unwrap(), 1, "dropping indexes must preserve documents");
     }
 
     #[test]

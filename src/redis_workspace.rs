@@ -17,6 +17,7 @@ enum Job {
     #[cfg(not(target_arch = "wasm32"))]
     Publish(crate::redis_pubsub_view::Publish, bool),
     Search(crate::redis_search::Request),
+    SearchMutation(crate::redis_search_manage::Mutation, bool),
     Diagnostics(crate::redis_diagnostics::Request),
     Mutate(crate::redis_mutation::Mutation, bool),
     Scan(u64, Vec<u8>, String),
@@ -216,6 +217,7 @@ impl Workspace {
                         session.value_page(&request).map(Box::new).map(Reply::Value)
                     }
                     Job::Search(request) => session.search(request).map(Reply::Search),
+                    Job::SearchMutation(mutation, safe) => session.search_mutate(mutation, safe).map(Reply::Search),
                     Job::Diagnostics(request) => session
                         .diagnostics(&request)
                         .map(Box::new)
@@ -584,6 +586,7 @@ impl Workspace {
                     .map(Box::new)
                     .map(Reply::Value),
                 Job::Search(request) => self.demo.search(request).map(Reply::Search),
+                Job::SearchMutation(mutation, safe) => mutation.validate(safe).and_then(|_| Err("Index management requires a desktop Redis Search connection.".into())),
                 Job::Diagnostics(request) => self
                     .demo
                     .diagnostics(&request)
@@ -1199,7 +1202,7 @@ impl Workspace {
                         Section::Search => {
                             egui::Frame::new().inner_margin(16).show(ui, |ui| {
                                 egui::ScrollArea::vertical().id_salt("redis-search-page").show(ui, |ui| {
-                                    if let Some(action) = self.search.pane(ui, self.connected && !self.busy && self.edit.is_none() && !self.value_dirty()) { self.search_action(action); }
+                                    self.search.writable = !self.read_only; if let Some(action) = self.search.pane(ui, self.connected && !self.busy && self.edit.is_none() && !self.value_dirty()) { self.search_action(action); }
                                 });
                             });
                         }

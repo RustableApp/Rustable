@@ -51,6 +51,12 @@ impl Workspace {
             crate::redis_search::Action::Request(request) => {
                 self.search.begin(); self.send(Job::Search(request));
             }
+            crate::redis_search::Action::Mutate(mutation) => {
+                match mutation.validate(self.read_only) {
+                    Ok(()) => { self.search.begin(); self.send(Job::SearchMutation(mutation, self.read_only)); }
+                    Err(error) => self.search.error = Some(error),
+                }
+            }
             crate::redis_search::Action::Inspect(key) => {
                 self.search.open = false; self.section = Section::Browse;
                 self.inspector_visible = true; self.send(Job::Inspect(key));

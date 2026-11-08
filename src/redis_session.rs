@@ -632,6 +632,12 @@ impl Session {
         let display = Display::new(&snapshot, &request.cursor);
         Ok(Inspection { snapshot, page: Page { cursor: request.cursor.clone(), next, pattern: request.pattern.clone(), display } })
     }
+    pub fn search_mutate(&mut self, mutation: crate::redis_search_manage::Mutation, read_only: bool) -> Result<crate::redis_search::Reply, String> {
+        let command = mutation.command(read_only)?;
+        let value = self.query(&command)?;
+        if value != redis::Value::Okay { return Err("Unexpected index-operation reply. Verify the index before retrying.".into()); }
+        Ok(crate::redis_search::Reply::MutationCompleted(mutation))
+    }
     pub fn search(
         &mut self,
         request: crate::redis_search::Request,

@@ -36,6 +36,7 @@ pub(crate) enum Request {
 }
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) enum Reply {
+    MutationCompleted(crate::redis_search_manage::Mutation),
     Aggregate(crate::redis_analytics::Report),
     Profile {
         reply: Box<Reply>,
@@ -54,6 +55,11 @@ pub(crate) enum Reply {
 #[derive(Default)]
 pub(crate) struct View {
     pub open: bool,
+    pub writable: bool,
+    create: Option<crate::redis_search_manage::Create>,
+    drop_index: Option<Vec<u8>>,
+    drop_confirmation: String,
+    notice: Option<String>,
     pub pending: bool,
     pub error: Option<String>,
     indexes: Vec<Vec<u8>>,
@@ -74,6 +80,7 @@ pub(crate) struct View {
     collapse_schema: bool,
 }
 pub(crate) enum Action {
+    Mutate(crate::redis_search_manage::Mutation),
     Request(Request),
     Inspect(Vec<u8>),
 }
@@ -146,6 +153,22 @@ impl View {
         self.pending = false;
         self.error = None;
         match reply {
+            Reply::MutationCompleted(mutation) => {
+                match mutation {
+                    crate::redis_search_manage::Mutation::Create(draft) => {
+                        let name = draft.name.into_bytes();
+                        if !self.indexes.contains(&name) { self.indexes.push(name); self.indexes.sort(); }
+                        self.create = None; self.notice = Some("Index created. Redis may still be indexing existing documents.".into());
+                    }
+                    crate::redis_search_manage::Mutation::Drop(name) => {
+                        self.indexes.retain(|index| index != &name);
+                        if self.index.as_ref() == Some(&name) { self.index = None; self.schema.clear(); self.results = None; }
+                        self.drop_index = None; self.drop_confirmation.clear();
+                        self.notice = Some("Index dropped. Documents were preserved.".into());
+                    }
+                }
+                self.catalog_page = 0; self.metadata.clear(); self.metadata_attempted.clear();
+            }
             Reply::Aggregate(report) => {
                 self.aggregate_report = Some(report);
                 self.aggregate_mode = true;
@@ -245,19 +268,54 @@ impl View {
         ui.horizontal(|ui| {
             ui.heading("Search indexes");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(enabled && self.writable && !self.pending, crate::redis_workspace::action_button("plus", "Create index")).clicked() {
+                    self.create.get_or_insert_with(Default::default); self.drop_index = None; self.notice = None;
+                }
                 if ui.add_enabled(enabled && !self.pending, crate::redis_workspace::action_button("refresh-cw", "Refresh")).clicked() {
                     action = Some(Action::Request(Request::Indexes));
                 }
             });
         });
-        ui.add_space(16.0);
+        ui.add_space(12.0);
+        if let Some(notice) = &self.notice { ui.label(notice); }
+        if let Some(draft) = &mut self.create {
+            let mut cancel = false;
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.heading("Create search index");
+                ui.add_enabled_ui(enabled && self.writable && !self.pending, |ui| draft.form(ui));
+                let validation = draft.validate(!self.writable);
+                if let Err(error) = &validation { ui.weak(error); }
+                ui.horizontal(|ui| {
+                    cancel = ui.add_enabled(!self.pending, crate::redis_workspace::action_button("x", "Cancel")).clicked();
+                    if ui.add_enabled(enabled && !self.pending && validation.is_ok(), crate::redis_workspace::action_button("check", "Create index")).clicked() { action = Some(Action::Mutate(crate::redis_search_manage::Mutation::Create(draft.clone()))); }
+                });
+            });
+            if cancel { self.create = None; }
+            ui.add_space(12.0);
+        }
+        if let Some(name) = &self.drop_index {
+            let mut cancel = false;
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.heading("Drop search index"); ui.monospace(label(name));
+                ui.label("Queries using this index will stop working. The indexed documents will be kept.");
+                ui.horizontal(|ui| { ui.label("Type DROP to confirm"); ui.text_edit_singleline(&mut self.drop_confirmation); });
+                ui.horizontal(|ui| {
+                    cancel = ui.add_enabled(!self.pending, crate::redis_workspace::action_button("x", "Cancel")).clicked();
+                    if ui.add_enabled(enabled && self.writable && !self.pending && self.drop_confirmation == "DROP", crate::redis_workspace::action_button("trash-2", "Drop index")).clicked() {
+                        action = Some(Action::Mutate(crate::redis_search_manage::Mutation::Drop(name.clone())));
+                    }
+                });
+            });
+            if cancel { self.drop_index = None; self.drop_confirmation.clear(); }
+            ui.add_space(12.0);
+        }
         use egui_extras::{Column, TableBuilder};
         let start = self.catalog_page * crate::redis_search_catalog::PAGE_SIZE;
         let end = (start + crate::redis_search_catalog::PAGE_SIZE).min(self.indexes.len());
         crate::controls::table_surface(ui, |ui| {
         TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("redis-index-catalog").striped(true)
             .column(Column::remainder().clip(true)).column(Column::remainder().clip(true))
-            .column(Column::initial(120.0).clip(true)).column(Column::exact(80.0)).column(Column::exact(60.0)).column(Column::exact(90.0))
+            .column(Column::initial(120.0).clip(true)).column(Column::exact(80.0)).column(Column::exact(60.0)).column(Column::exact(125.0))
             .header(32.0, |mut row| { for title in ["Index name", "Prefixes", "Field types", "Documents", "Fields", ""] {
                 row.col(|ui| { crate::controls::table_header(ui, title); });
             } })
@@ -276,6 +334,9 @@ impl View {
                         self.options = Options::default(); self.aggregate = Default::default();
                         self.aggregate_report = None; self.profile = None; self.profile_visible = false;
                         action = Some(Action::Request(Request::Schema(index.clone())));
+                    }
+                    if crate::redis_value_editor::icon(ui, "trash-2", "Drop index…", enabled && self.writable && !self.pending).clicked() {
+                        self.drop_index = Some(index.clone()); self.drop_confirmation.clear(); self.create = None; self.notice = None;
                     }
                 });
             }));
