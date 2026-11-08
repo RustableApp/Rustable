@@ -29,10 +29,10 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
 - [x] Vector search: support a supplied vector, attribute filter and bounded
   result/search settings in the existing similarity workflow. Preserve bounded
   transport and direct server background execution; no vector visualization suite.
-- [ ] Editing: JSON path operations with explicit conflict/safety semantics and
+- [x] Editing: JSON path operations with explicit conflict/safety semantics and
   multi-entry creation for supported collections. Keep existing size bounds and
   retained drafts on failure. No general-purpose JSON IDE.
-- [ ] Command workflows: evaluate explicit transaction and bounded blocking-command
+- [x] Command workflows: evaluate explicit transaction and bounded blocking-command
   support on isolated sessions with cancellation and unknown-outcome handling.
   Never expose connection/protocol-changing commands through the pooled editor.
   Document a concrete safety/platform blocker if a workflow cannot responsibly
@@ -1002,3 +1002,44 @@ The added visible path/mode and creation-entry controls are a likely fixed-cost
 source, but the regressions remain under review before milestone closure. These
 measurements cover CPU layout/tessellation, not native input-to-present latency.
 User-facing editing limits and conflict semantics are now documented in REDIS.md.
+
+### Editing milestone decision
+
+Accepted the narrowly measured visible-control overhead above: +0.004833 ms p95
+for entry creation and +0.007458 ms for JSON editing. This is a regression with a
+concrete benefit, not a performance pass: the requested add/remove-entry workflow
+and explicit path/set/remove controls are discoverable in the existing form.
+Source review confirms JSON highlighting retains its existing FrameCache;
+JSON/path parsing and duplicate/score validation occur on submission, not every
+frame. Collection rendering uses show_rows and only visits visible entries.
+No additional network exchange, background polling, or unconditional redraw was
+introduced. Alternatives considered were hiding these controls behind another
+popup (contrary to the inline workflow) or custom painting them (duplicating
+shared focus/accessibility behavior). Neither is justified for this measured cost.
+The absolute 100-entry workload remains bounded as recorded above. This acceptance
+does not waive unrelated sidebar noise or native presentation checks.
+
+Rechecked live editing, draft-interaction and mutation-validation logs. They retain
+passing evidence for atomic conflicts, integer preservation, expiry, missing paths,
+ACL expiry denial before creation, read-only controls, duplicate/score/byte bounds,
+failed draft retention and navigation protection. Both themes have native captures;
+no further visual iteration is needed. Editing milestone is complete; full release
+regression and native limitations remain separate gates below.
+
+### Command-workflow assessment completed — explicitly deferred
+
+See `docs/REDIS-COMMAND-WORKFLOWS.md` for the source-path assessment and concrete
+blockers. Transactions and blocking operations are **not implemented**. The shared
+worker has no isolated cancellable write lifecycle; the existing streaming helper
+has read-only startup/fallback assumptions and no selected-database initialization;
+Cluster routing does not own a transaction-pinned node. Removing guards or labeling
+socket cancellation as a confirmed write cancellation would be unsafe. A dedicated
+future implementation is possible, but these missing contracts are deferred under
+the checklist's explicit blocker allowance, not silently claimed as parity.
+
+Expanded the existing transport fixture to cover all guarded transaction and
+blocking command families, lowercase, finite timeouts and both read-only modes.
+It passed, proving the complete batch is rejected before a preceding SET reaches
+the peer (`/tmp/redis-command-workflow-guards.log`). Existing streaming boundary
+checks also passed (`/tmp/redis-command-stream-boundaries.log`). No production
+execution changes or extra exchanges were introduced by this assessment.

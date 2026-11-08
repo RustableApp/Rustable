@@ -2302,6 +2302,19 @@ mod analysis_transport_tests {
         let mut session=Session {connection:Some(Session::raw_node(&settings,"").unwrap()),..Session::disconnected()};
         // The peer expects GET first, proving rejected batches send no writes.
         assert!(session.execute_report("SET forbidden value\nAUTH secret",false).is_err());
+        for command in [
+            "MULTI", "EXEC", "DISCARD", "WATCH key", "UNWATCH",
+            "BLPOP key 1", "BRPOP key 1", "BRPOPLPUSH a b 1",
+            "BLMOVE a b LEFT RIGHT 1", "BLMPOP 1 1 key LEFT",
+            "BZPOPMIN key 1", "BZPOPMAX key 1", "BZMPOP 1 1 key MIN",
+            "XREAD BLOCK 1 STREAMS key $", "XREADGROUP GROUP g c BLOCK 1 STREAMS key >",
+            "WAIT 1 1", "WAITAOF 1 1 1",
+        ] {
+            // Even a finite timeout must not admit these into the shared session.
+            for read_only in [false, true] {
+                assert!(session.execute_report(&format!("SET forbidden value\n{}", command.to_ascii_lowercase()), read_only).is_err(), "{command}");
+            }
+        }
         let report=session.execute_report("GET first\nGET bad\nINCR never",false).unwrap();
         assert!(report.entries[0].output.contains("value"));
         assert!(matches!(report.entries[1].status,crate::redis_command_results::Status::Failed));

@@ -95,6 +95,10 @@ commands completed. A disconnect or timeout never automatically retries a write.
 A timed-out write may have completed: verify it before retrying. Reconnect is
 explicit.
 
+The [isolated command workflow assessment](REDIS-COMMAND-WORKFLOWS.md) records why
+transactions and blocking operations remain deferred in this release. They are
+not enabled by unlocking editing.
+
 ## Scope and verification
 
 The tested server is standalone Redis 7.4, including password and ACL
