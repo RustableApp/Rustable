@@ -72,21 +72,22 @@ impl Draft {
             });
         });
         let mut remove=None;
+        let columns=if paired {2.0}else{1.0};
+        let width=((ui.available_width()-48.0-8.0*columns)/columns).max(40.0);
         egui::ScrollArea::vertical().id_salt("creation-entries").max_height(240.0).show_rows(ui,34.0,self.extra_entries.len()+1,|ui,range| {
             for index in range {
                 ui.push_id(index,|ui| {
                     let (field,value)=if index==0 {(&mut self.field,&mut self.value)} else {let row=&mut self.extra_entries[index-1];(&mut row.0,&mut row.1)};
                     ui.horizontal(|ui| {
-                        let width=((ui.available_width()-36.0)/if paired {2.0}else{1.0}-8.0).max(40.0);
-                        if paired {ui.add(egui::TextEdit::singleline(field).desired_width(width).char_limit(65536).hint_text(if self.kind=="zset" {"Member"}else{"Field"}));}
-                        ui.add(egui::TextEdit::singleline(value).desired_width(width).char_limit(65536).hint_text(if self.kind=="zset" {"Score"}else{"Value"}));
+                        if paired {ui.add(egui::TextEdit::singleline(field).margin(egui::vec2(4.0,4.0)).desired_width(width).char_limit(65536).hint_text(if self.kind=="zset" {"Member"}else{"Field"}));}
+                        ui.add(egui::TextEdit::singleline(value).margin(egui::vec2(4.0,4.0)).desired_width(width).char_limit(65536).hint_text(if self.kind=="zset" {"Score"}else{"Value"}));
                         if crate::redis_value_editor::icon(ui,"trash-2","Remove entry",index>0).clicked() {remove=Some(index-1);}
                     });
                 });
             }
         });
         if let Some(index)=remove {self.extra_entries.remove(index);}
-        ui.weak("Up to 100 entries / 64 KiB total · plain text or quoted bytes · list order is preserved");
+        ui.add(egui::Label::new(egui::RichText::new("Up to 100 entries / 64 KiB total · plain text or quoted bytes · list order is preserved").weak()).wrap());
     }
     pub fn request(&self) -> Result<Mutation, String> {
         if self.action == Action::Create && self.key_text.is_empty() {
@@ -345,5 +346,45 @@ mod tests {
         changes.sort_by(f64::total_cmp);
         crate::ui_benchmark::report("redis/edit-dialog", &samples);
         crate::ui_benchmark::report("redis/edit-first-change", &changes);
+    }
+}
+
+#[cfg(test)]
+mod entry_interaction_tests {
+    use super::*;
+    fn frame(ctx:&egui::Context,draft:&mut Draft,pending:bool,events:Vec<egui::Event>)->(egui::FullOutput,(Option<Mutation>,bool)) {
+        let mut action=(None,false);
+        let output=ctx.run(egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(640.0,760.0))),events,..Default::default()},|ctx| {
+            egui::CentralPanel::default().show(ctx,|ui| {let right=ui.max_rect().right(); action=draft.pane(ui,!pending,pending,false,false); assert!(ui.min_rect().right()<=right+1.0,"form overflowed its pane");});
+        });(output,action)
+    }
+    fn click(ctx:&egui::Context,draft:&mut Draft,pending:bool,label:&str)->(Option<Mutation>,bool) {
+        fn find(shape:&egui::Shape,label:&str)->Option<egui::Pos2> {
+            match shape {egui::Shape::Text(text) if text.galley.text()==label=>Some(text.pos+text.galley.size()*0.5),egui::Shape::Vec(shapes)=>shapes.iter().find_map(|shape|find(shape,label)),_=>None}
+        }
+        let (output,_)=frame(ctx,draft,pending,vec![]);
+        let pos=output.shapes.iter().find_map(|shape|find(&shape.shape,label)).expect("visible control");
+        let mut result=(None,false);
+        for pressed in [true,false] {let (_,action)=frame(ctx,draft,pending,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::NONE}]);if action.0.is_some()||action.1 {result=action;}}
+        result
+    }
+    #[test]
+    fn creation_form_adds_rows_validates_before_submit_and_retains_failed_drafts() {
+        let ctx=egui::Context::default();
+        let mut draft=Draft::new(Action::Create,vec![],"hash".into());
+        draft.key_text="new:key".into();draft.field="name".into();draft.value="Avery".into();
+        assert!(click(&ctx,&mut draft,false,"Add entry").0.is_none());
+        assert_eq!(draft.extra_entries.len(),1);
+        draft.extra_entries[0]=("name".into(),"Sam".into());
+        assert!(click(&ctx,&mut draft,false,"Create key").0.is_none());
+        assert!(draft.error.as_ref().unwrap().contains("repeat"));
+        draft.extra_entries[0].0="colleague".into();
+        assert!(click(&ctx,&mut draft,true,"Create key").0.is_none());
+        let request=click(&ctx,&mut draft,false,"Create key").0.unwrap();
+        assert_eq!(request.entries,vec![(b"colleague".to_vec(),b"Sam".to_vec())]);
+        draft.error=Some("Key already exists".into());
+        assert!(frame(&ctx,&mut draft,false,vec![]).1.0.is_none());
+        assert_eq!(draft.extra_entries[0],("colleague".into(),"Sam".into()));
+        assert!(click(&ctx,&mut draft,false,"Cancel").1);
     }
 }

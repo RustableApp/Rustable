@@ -926,3 +926,27 @@ invalid-entry/no-key behavior and denied expiry permission leaving no created ke
 
 Editing remains unchecked pending native captures, interaction/performance/browser
 validation and a final safety review of the combined workflow.
+
+### Editing UI validation checkpoint
+
+Locked browser-package wasm32 compilation passed with 77 existing warnings
+(`/tmp/redis-editing-browser-check.log`). Native QA build passed. Added an ephemeral
+fixture capture script, `scripts/preview-redis-editing.sh`, covering collection
+creation, inline JSON set and remove. Actual dark/light captures are retained in
+`target/redis-editing-captures/` and `target/redis-editing-light-captures/` at 1200×760
+logical pixels (2400×1520 capture). Reviewed dark creation/set/remove and light JSON
+set. The initial capture harness waited on the intentional JSON dirty state; its
+QA-only readiness condition was corrected without weakening application draft guards.
+
+Visual inspection caught cumulative entry-width overflow. Entry widths now derive
+once from the pane width and include text margins/icon/spacing; helper text wraps.
+The final capture shows aligned rows and visible footer controls. Remove-path mode
+hides the irrelevant replacement-value editor while retaining its draft for switching
+back. These are functional layout/clarity fixes, not a browser redesign.
+
+The focused creation-form interaction test passed after the fix: adding a row,
+invalid duplicate feedback, disabled submission while pending, explicit valid submit,
+retained failed draft and cancel. It also asserts the form stays within its pane
+(`/tmp/redis-editing-interaction-tests.log`). Release CPU comparison, focused JSON
+interaction coverage and remaining safety review are still open. No native display
+latency or mixed-DPI claim follows from these captures.

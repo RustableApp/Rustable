@@ -493,6 +493,36 @@ impl Workspace {
         true
     }
     #[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
+    pub(crate) fn preview_editing(&mut self, step: usize) -> bool {
+        if self.busy || !self.connected || !self.scan_started || self.cursor != 0 { return false; }
+        self.auto_scan = false;
+        self.preview_queue.clear();
+        self.read_only = false;
+        self.section = Section::Browse;
+        self.inspector_visible = true;
+        if step == 0 {
+            let mut draft = crate::redis_edit::Draft::new(crate::redis_mutation::Action::Create, vec![], "hash".into());
+            draft.key_text = "app:users:1004".into(); draft.field = "name".into(); draft.value = "Jordan Lee".into();
+            draft.extra_entries = vec![("plan".into(), "Pro".into()), ("country".into(), "Canada".into())];
+            self.edit = Some(draft);
+        } else {
+            if self.snapshot.as_ref().is_none_or(|snapshot| snapshot.key != b"app:catalog:camera") {
+                self.edit = None;
+                self.send(Job::Inspect(b"app:catalog:camera".to_vec()));
+                return false;
+            }
+            let snapshot = self.snapshot.as_ref().unwrap();
+            let redis::Value::BulkString(original) = &snapshot.value else { return false; };
+            let mut draft = crate::redis_edit::Draft::new(crate::redis_mutation::Action::Update, vec![snapshot.key.clone()], "ReJSON-RL".into());
+            draft.expected = original.clone();
+            draft.field = if step == 1 {"$.price"} else {"$.tags[1]"}.into();
+            draft.value = "199.95".into();
+            draft.json_remove = step == 2;
+            self.edit = Some(draft);
+        }
+        true
+    }
+    #[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
     pub(crate) fn preview_vectors(&mut self, step: usize) -> bool {
         if self.busy || !self.connected { return false; }
         if self.selected_key.as_deref() != Some(b"search:product:embeddings") {
@@ -1962,9 +1992,11 @@ impl Workspace {
                 if draft.json_remove {
                     ui.colored_label(ui.visuals().warn_fg_color, "Removes this path and its children when you confirm. Use Delete key for the whole document.");
                 }
+                if !draft.json_remove {
                 let mut layouter = crate::redis_value_editor::layout;
-                ui.add_enabled(!self.busy && !self.read_only && !draft.json_remove, egui::TextEdit::multiline(&mut draft.value)
+                ui.add_enabled(!self.busy && !self.read_only, egui::TextEdit::multiline(&mut draft.value)
                     .code_editor().layouter(&mut layouter).desired_rows(14).desired_width(f32::INFINITY));
+                }
                 if let Some(error) = &draft.error { ui.colored_label(ui.visuals().error_fg_color, error); }
                 let mut cancel = false;
                 ui.horizontal(|ui| {
