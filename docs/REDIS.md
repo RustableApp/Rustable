@@ -126,7 +126,7 @@ counts, highlighted JSON/Text/Hex previews, and text/hex publishing guarded by
 read-only mode. Streams use separate connections and bounded message retention.
 Open Search from the Actions menu. See
 [REDIS-ROADMAP.md](REDIS-ROADMAP.md) for exact limits, protocol budgets and validation.
-Snippet persistence is explicit. Unreleased Workbench history persists by saved connection identity, with a global recording toggle and per-connection clear control. It retains at most 100 entries/256 KiB per connection across 16 recently updated connections. Unsaved connections and the demo keep session-only history. Command text can contain sensitive values and is stored in local preferences; authentication/admin credential commands are excluded.
+Snippet persistence is explicit. Workbench history persists by saved connection identity, with a global recording toggle and per-connection clear control. It retains at most 100 entries/256 KiB per connection across 16 recently updated connections. Unsaved connections and the demo keep session-only history. Command text can contain sensitive values and is stored in local preferences; authentication/admin credential commands are excluded.
 
 The database-sidebar width, inspector width, and command-pane height use the app's saved pane preferences.
 

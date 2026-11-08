@@ -42,17 +42,17 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
 
 ## Validation and release gates
 
-- [ ] Targeted disposable Cluster/Sentinel abrupt-loss and resharding coverage;
+- [x] Targeted disposable Cluster/Sentinel abrupt-loss and resharding coverage;
   bounded RESP TLS and batch-error cases. Never replay uncertain writes.
-- [ ] Preserve established exchange budgets; count real sequential protocol
+- [x] Preserve established exchange budgets; count real sequential protocol
   dependencies and run applicable fixtures. SQL sequencing stays unchanged.
-- [ ] Same-machine release UI comparisons for changed rendering/input paths,
+- [x] Same-machine release UI comparisons for changed rendering/input paths,
   including meaningful new workloads. Investigate >10% repeatable p95 regressions;
   retain raw evidence and concrete justifications without weakening thresholds.
-- [ ] Native screenshots in both themes and realistic sizes; exercise focus,
+- [x] Native screenshots in both themes and realistic sizes; exercise focus,
   copy feedback, draft retention and available platform/display checks. Record
   unavailable checks without treating them as passes.
-- [ ] Full locked tests, strict Clippy, browser-package locked WASM build and
+- [x] Full locked tests, strict Clippy, browser-package locked WASM build and
   relevant fixture runs. Update capabilities, roadmap and user-facing release notes.
 - [ ] Follow docs/RELEASES.md: promote verified source, bump/tag the next available
   version, inspect signed/notarized artifacts and update feed, publish the release,
@@ -1126,3 +1126,40 @@ but they do not establish input-to-present latency, 60/120 Hz behavior, mixed-DP
 multiple monitor disconnect/reconnect or macOS snapping. Those remain explicitly
 unverified, alongside native Windows/Linux/Intel macOS GUI and installed Sparkle
 old-to-new acceptance; no release claim will imply those checks passed.
+
+### Topology gates passed and candidate preparation
+
+Final disposable Cluster run passed 27 tests: discovery/all-slot coverage, real
+ASK→MOVED resharding without duplicate writes, routed/bounded operations, vector
+pages and reconnection after seed shutdown (`/tmp/redis-final-cluster.log`). The
+six-node promotion test passed with replicated data preserved after all original
+primaries stop (`/tmp/redis-final-cluster-failover.log`). Sentinel passed its initial
+eight checks, planned-failover revalidation, abrupt-primary-shutdown recovery and
+workspace demotion recovery without replay (`/tmp/redis-final-sentinel.log`). These
+are targeted fault cases, not exhaustive partition/concurrent-resharding proofs.
+
+Network budgets are accounted per milestone above: explicit capability and metadata
+batches are bounded/pipelined; analysis is opt-in on an independent worker; JSON and
+collection changes remain one atomic exchange; ordinary SQL paths are untouched.
+Delayed browsing/cancellation and protocol fixtures passed. The performance gate is
+closed with the documented narrow accepted feature costs and final layout passes;
+native availability limits above remain unverified, not passes.
+
+Prepared v0.4.20 and both root/browser Rustable lock entries. Release notes describe
+implemented capabilities and explicit module/demo/transaction/Windows SSH limits.
+Final versioned tests/Clippy/browser check and release publication remain pending.
+
+### v0.4.20 source candidate accepted for packaging
+
+The versioned candidate passed 786 tests with 204 explicitly ignored opt-in cases
+(`/tmp/redis-0420-tests.log`), strict locked all-target Clippy including QA features
+(`/tmp/redis-0420-clippy.log`), and the separate browser-package locked WASM check
+(`/tmp/redis-0420-browser.log`, 77 existing warnings). Both lockfiles match 0.4.20.
+Reviewed earlier connection evidence remains present and passing: real SSH gateway,
+standalone/Sentinel/Cluster mutual TLS and Search catalog fixture logs. No additional
+features or driver changes followed these checks. Release notes and roadmap reflect
+implemented scope, measured performance costs and explicit deferrals/limitations.
+
+Ready for signed packaging. The final release checkbox remains open until CI,
+signing/notarization/checksums/updater verification, exact-tag WASM deployment,
+live startup/provenance/download checks and publication are complete.
