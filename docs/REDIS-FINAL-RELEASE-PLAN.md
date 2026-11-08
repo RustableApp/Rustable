@@ -12,7 +12,7 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
   paired configuration validation and no saved key bytes. Cover applicable
   discovery/data credentials separately. Keep unsupported platform/topology
   combinations explicit rather than silently weakening identity verification.
-- [ ] Search: enrich the index catalog with existing index metadata; provide a
+- [x] Search: enrich the index catalog with existing index metadata; provide a
   practical create/drop index workflow with explicit destructive-action review.
   Compact schema/options controls and use the available editor/results space.
   Avoid implementing a general schema designer or every Search clause.
@@ -309,3 +309,39 @@ names. A release comparison against `dc417bf` is running under
 no performance pass is claimed yet. A separate create-eight-fields/drop-review
 CPU workload was added and remains to be run. Light-theme native capture and
 final release-wide platform checks remain open.
+
+### Search performance decision
+
+The five-pair same-machine release comparison finished (exit 1, explicitly a
+regression result, not a pass). Search median p95 rose 0.063208 → 0.126250 ms
+(+99.7%, +0.063042 ms). Median p50 was 0.057208 → 0.116709 ms; median p99
+0.066042 → 0.135208 ms; worst recorded sample 0.087208 → 0.162667 ms.
+All other measured scenarios passed. Full hardware/toolchain/sample metadata and
+raw distributions are retained in `target/redis-search-final-performance/`.
+
+Accepted narrowly for the requested richer catalog: the previous two-column
+name/action table becomes six columns with prefixes, field types, document/field
+counts and a reviewed drop action. Both use virtualized TableBuilder rows;
+metadata is cached outside rendering and fetched once per bounded page. The
+comparison keeps the same 200 index names, viewport and workload; candidate
+paginates 50 names. This is additional useful visible work, not a hidden network
+wait. Hiding the metadata behind per-index dialogs would defeat the requested
+catalog; reducing row visibility just to pass would change the workload. Caching
+formatted numeric labels would not remove the additional layout/hit-test cells;
+replacing shared controls with custom painting is disproportionate at the
+measured 0.063 ms cost and would risk interaction/accessibility consistency.
+The 10% threshold remains unchanged. This is not a native FPS/input-latency claim.
+
+The new release-only management workload ran from the exact Cargo-reported head
+test executable (no rebuild), 20 warmups + 160 samples at 1000×760 with a simulated
+idle gap. Create-eight-fields p50/p95/p99/max: 0.057917/0.067916/0.071750/0.071834 ms;
+drop-review: 0.023041/0.028917/0.029250/0.029292 ms. Raw results and executable path
+are in `target/redis-search-management-performance/`. These new interactions have
+no prior implementation baseline; results are absolute CPU evidence only.
+
+Search functional milestone complete: light-theme capture of all six states also
+succeeded against the disposable fixture, with create and query views visually
+inspected (`target/redis-search-management-light-captures/`). This completes the
+functional milestone and targeted validation, including the explicitly accepted
+rendering cost above; it does not close release-wide native/platform or full-suite
+gates. Next milestone is bounded database-wide Analyze.
