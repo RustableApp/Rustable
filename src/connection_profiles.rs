@@ -309,6 +309,7 @@ impl ConnectionProfiles {
         }
         copy.id = ProfileId(0);
         copy.remember_password = false;
+        if let ConnectionKind::Redis(settings) = &mut copy.connection && let Some(sentinel) = &mut settings.sentinel { sentinel.remember_password = false; }
         copy.name = name;
         self.add_profile(copy)
     }
@@ -466,6 +467,7 @@ impl ConnectionProfiles {
         for (profile, original) in self.profiles.iter_mut().zip(original_profile_ids) {
             if profile.id != original {
                 profile.remember_password = false;
+                if let ConnectionKind::Redis(settings) = &mut profile.connection && let Some(sentinel) = &mut settings.sentinel { sentinel.remember_password = false; }
             }
         }
         let groups: HashSet<GroupId> = self.groups.iter().map(|group| group.id).collect();
@@ -752,6 +754,9 @@ mod tests {
         storage.0.insert("old-profile".into(), legacy);
         let restored: Profile = eframe::get_value(&storage, "old-profile").unwrap();
         assert!(!restored.remember_password);
+        model.profiles[0].connection = ConnectionKind::Redis(crate::redis_settings::Settings {
+            sentinel: Some(crate::redis_settings::Sentinel { remember_password: true, ..Default::default() }), ..Default::default()
+        });
         model.profiles[0].id = ProfileId(0);
         eframe::set_value(&mut storage, "repaired", &model);
         let repaired: ConnectionProfiles = eframe::get_value(&storage, "repaired").unwrap();
@@ -759,6 +764,8 @@ mod tests {
             !repaired.profiles[0].remember_password,
             "reassigned identities must not inherit secure-store references"
         );
+        let ConnectionKind::Redis(settings) = &repaired.profiles[0].connection else { panic!() };
+        assert!(!settings.sentinel.as_ref().unwrap().remember_password);
     }
 
     #[test]

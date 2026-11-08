@@ -4,6 +4,10 @@ use redis::{ConnectionLike, IntoConnectionInfo};
 
 pub(crate) struct Session {
     connection: Option<redis::Connection>,
+    cluster: Option<Box<crate::redis_cluster::Router>>,
+    source_host: String,
+    tls: bool,
+    sentinel_primary: bool,
 }
 #[derive(Debug)]
 pub(crate) struct ConnectFailure {
@@ -34,17 +38,69 @@ pub(crate) struct Snapshot {
 }
 impl Session {
     pub fn disconnected() -> Self {
-        Self { connection: None }
+        Self { connection: None, cluster: None, source_host: String::new(), tls: false, sentinel_primary: false }
     }
     pub fn connect(settings: &Settings, password: &str) -> Result<Self, String> {
         Self::connect_diagnostic(settings, password).map_err(|error| error.message)
     }
     pub fn is_connected(&self) -> bool {
-        self.connection
+        self.cluster.as_ref().map_or_else(|| self.connection
             .as_ref()
-            .is_some_and(ConnectionLike::is_open)
+            .is_some_and(ConnectionLike::is_open), |router|router.is_connected())
     }
     pub fn connect_diagnostic(settings: &Settings, password: &str) -> Result<Self, ConnectFailure> {
+        if !settings.cluster || settings.cluster_seeds.is_empty() { return Self::connect_inner(settings,password,true,false); }
+        use crate::connection_probe::ProbeField::{Host, Port};
+        settings.validate().map_err(|message| ConnectFailure { passed: vec![], failed: vec![Host, Port], message })?;
+        let deadline = std::time::Instant::now() + settings.connect_timeout;
+        let addresses = std::iter::once((settings.host.as_str(), settings.port)).chain(settings.cluster_seeds.iter().map(|seed| (seed.host.as_str(), seed.port)));
+        let mut last = ConnectFailure { passed: vec![], failed: vec![Host, Port], message: "Cluster seed connection deadline reached".into() };
+        for (index, (host, port)) in addresses.enumerate() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() { break; }
+            let budget = remaining / (settings.cluster_seeds.len() + 1 - index) as u32;
+            let candidate = Settings { host: host.into(), port, cluster_seeds: vec![], connect_timeout: budget, read_timeout: settings.read_timeout.min(budget), ..settings.clone() };
+            match Self::connect_inner(&candidate, password, true, false) {
+                Ok(mut session) => {
+                    if std::time::Instant::now() >= deadline { last.message = "Cluster seed connection deadline reached after discovery".into(); break; }
+                    if let Some(router) = &mut session.cluster {
+                        router.restore_timeouts(settings).map_err(|message| ConnectFailure { passed: vec![], failed: vec![Host, Port], message })?;
+                        router.remember_seeds(settings);
+                    }
+                    return Ok(session);
+                }
+                Err(error) => last = error,
+            }
+        }
+        last.message = format!("No configured Cluster seed connected: {}", last.message);
+        Err(last)
+    }
+    pub(crate) fn cluster_node(settings: &Settings, password: &str) -> Result<redis::Connection,String> {
+        Self::connect_inner(settings,password,false,false).map_err(|e|e.message)?.connection.ok_or("Redis node did not connect".into())
+    }
+    pub fn connect_with_sentinel(settings: &Settings, password: &str, sentinel_password: &str) -> Result<Self, String> {
+        if settings.sentinel.is_some() {
+            crate::redis_sentinel::connect(settings, password, sentinel_password)
+        } else { Self::connect(settings, password) }
+    }
+    pub fn reconnect(&mut self, settings: &Settings, password: &str, sentinel_password: &str) -> Result<(), String> {
+        if let Some(router) = &mut self.cluster {
+            let endpoint = router.reconnect()?;
+            self.source_host = endpoint.host;
+            Ok(())
+        } else {
+            *self = Self::connect_with_sentinel(settings, password, sentinel_password)?;
+            Ok(())
+        }
+    }
+    pub(crate) fn raw_node(settings: &Settings, password: &str) -> Result<redis::Connection, String> {
+        Self::connect_inner(settings, password, false, true).map_err(|e| e.message)?.connection.ok_or("Redis transport did not connect".into())
+    }
+    // Only the Sentinel resolver calls this after ROLE and SELECT succeed.
+    pub(crate) fn verified_primary(connection: redis::Connection, settings: &Settings) -> Self {
+        Self { connection: Some(connection), cluster: None, source_host: settings.host.clone(), tls: settings.tls, sentinel_primary: true }
+    }
+    fn connect_inner(settings: &Settings, password: &str, discover: bool, setup_only: bool) -> Result<Self, ConnectFailure> {
         use crate::connection_probe::ProbeField::*;
         let failure = |passed: Vec<_>, failed: Vec<_>, message: String| ConnectFailure {
             passed,
@@ -54,6 +110,11 @@ impl Session {
         settings
             .validate()
             .map_err(|message| failure(vec![], vec![Host, Port], message))?;
+        // Password-only callers cannot supply independent discovery credentials.
+        // Never reinterpret a Sentinel profile as a direct data-node connection.
+        if settings.sentinel.is_some() {
+            return Err(failure(vec![], vec![Host], "This Sentinel profile requires the discovery-credential connection path.".into()));
+        }
         let address = if settings.tls {
             redis::ConnectionAddr::TcpTls {
                 host: settings.host.clone(),
@@ -125,19 +186,35 @@ impl Session {
             .map_err(|e| failure(vec![], transport.clone(), e.to_string()))?;
         let mut session = Self {
             connection: Some(connection),
+            cluster: None,
+            source_host: settings.host.clone(),
+            tls: settings.tls,
+            sentinel_primary: false,
         };
+        if setup_only { return Ok(session); }
         // PING detects missing credentials even when a server does not require an
         // explicit AUTH exchange. Redis ACLs must permit PING for this workspace.
         session
             .query(&redis::cmd("PING"))
             .map_err(|message| failure(transport.clone(), vec![User, Password], message))?;
         transport.extend([User, Password]);
-        session
-            .query(redis::cmd("SELECT").arg(settings.database))
-            .map_err(|message| failure(transport.clone(), vec![Database], message))?;
+        if !settings.cluster {
+            session.query(redis::cmd("SELECT").arg(settings.database))
+                .map_err(|message| failure(transport.clone(),vec![Database],message))?;
+        } else if discover {
+            let value=session.query(redis::cmd("CLUSTER").arg("SHARDS"))
+                .map_err(|message|failure(transport.clone(),vec![Database],message))?;
+            let topology=crate::redis_topology::Cluster::decode(value,&settings.host,settings.tls)
+                .map_err(|message|failure(transport.clone(),vec![Database],message))?;
+            let connection=session.connection.take().unwrap();
+            let mut router = crate::redis_cluster::Router::new(settings.clone(),password.to_owned(),connection,topology.routes());
+            router.remember_discovery(&topology);
+            session.cluster=Some(Box::new(router));
+        }
         Ok(session)
     }
     fn query(&mut self, command: &redis::Cmd) -> Result<redis::Value, String> {
+        if let Some(router)=&mut self.cluster {return router.query(command);}
         let conn = self
             .connection
             .as_mut()
@@ -145,7 +222,11 @@ impl Session {
         match command.query(conn) {
             Ok(value) => Ok(value),
             Err(error) => {
-                if error.is_io_error() || !conn.is_open() {
+                if self.sentinel_primary && error.code() == Some("READONLY") {
+                    self.connection = None;
+                    return Err("Sentinel primary is now read-only. Reconnect to discover the current primary. The rejected command was not replayed.".into());
+                }
+                if error.is_io_error() || error.kind() == redis::ErrorKind::Parse || !conn.is_open() {
                     self.connection = None;
                     Err(format!(
                         "Redis connection lost: {error}. A submitted write may have completed; verify before retrying."
@@ -159,10 +240,32 @@ impl Session {
             }
         }
     }
+    fn query_bounded(&mut self, command: &redis::Cmd) -> Result<redis::Value, String> {
+        const LIMIT: usize = 1024 * 1024;
+        if let Some(router) = &mut self.cluster { return router.query_bounded(command, LIMIT); }
+        let conn = self.connection.as_mut().ok_or("Redis connection closed. Reconnect before continuing.")?;
+        let result = conn.req_packed_commands_bounded(&command.get_packed_command(), &[LIMIT]).and_then(|mut values| values.remove(0).extract_error());
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) if error.is_io_error() || error.kind() == redis::ErrorKind::Parse || !conn.is_open() => { self.connection = None; Err(format!("Redis search connection closed: {error}. Reconnect before retrying. Nothing was replayed.")) }
+            Err(error) => Err(error.to_string()),
+        }
+    }
     fn typed<T: redis::FromRedisValue>(&mut self, command: &redis::Cmd) -> Result<T, String> {
         redis::from_redis_value(self.query(command)?).map_err(|e| e.to_string())
     }
+    #[cfg(test)]
     pub fn scan(&mut self, cursor: u64, pattern: &[u8], count: usize) -> Result<KeyPage, String> {
+        self.scan_filtered(cursor, pattern, count, "")
+    }
+    pub fn scan_filtered(
+        &mut self,
+        cursor: u64,
+        pattern: &[u8],
+        count: usize,
+        kind: &str,
+    ) -> Result<KeyPage, String> {
+        if let Some(router)=&mut self.cluster {return router.scan(cursor,pattern,count,kind);}
         let mut command = redis::cmd("SCAN");
         command
             .arg(cursor)
@@ -170,11 +273,15 @@ impl Session {
             .arg(pattern)
             .arg("COUNT")
             .arg(count.clamp(1, 1000));
+        if !kind.is_empty() {
+            command.arg("TYPE").arg(kind);
+        }
         let (cursor, keys) = self.typed(&command)?;
         Ok(KeyPage { cursor, keys })
     }
 
     fn pipeline(&mut self, pipeline: &redis::Pipeline) -> Result<Vec<redis::Value>, String> {
+        if let Some(router)=&mut self.cluster {return router.read_pipeline(pipeline);}
         let connection = self
             .connection
             .as_mut()
@@ -182,7 +289,7 @@ impl Session {
         match pipeline.query(connection) {
             Ok(values) => Ok(values),
             Err(error) => {
-                if error.is_io_error() || !connection.is_open() {
+                if error.is_io_error() || error.kind() == redis::ErrorKind::Parse || !connection.is_open() || (self.sentinel_primary && error.code() == Some("READONLY")) {
                     self.connection = None;
                 }
                 Err(format!("Redis preview: {error}"))
@@ -226,6 +333,8 @@ impl Session {
                             .arg(3)
                             .arg("WITHSCORES");
                     }
+                    "TSDB-TYPE" => { previews.cmd("TS.GET").arg(key); }
+                    "vectorset" => { previews.cmd("VCARD").arg(key); }
                     "stream" => {
                         previews
                             .cmd("XRANGE")
@@ -266,86 +375,574 @@ impl Session {
         }
         Ok(rows)
     }
+    #[cfg(test)]
     pub fn inspect(&mut self, key: &[u8]) -> Result<Snapshot, String> {
-        let kind: String = self.typed(redis::cmd("TYPE").arg(key))?;
-        let ttl_ms: i64 = self.typed(redis::cmd("PTTL").arg(key))?;
-        let (length, mut value, mut truncated) = match kind.as_str() {
-            "none" => (Some(0), redis::Value::Nil, false),
-            "string" => {
-                let length: u64 = self.typed(redis::cmd("STRLEN").arg(key))?;
-                let value = self.query(redis::cmd("GETRANGE").arg(key).arg(0).arg(65535))?;
-                (Some(length), value, length > 65536)
-            }
-            "list" => {
-                let length: u64 = self.typed(redis::cmd("LLEN").arg(key))?;
-                (
-                    Some(length),
-                    self.query(redis::cmd("LRANGE").arg(key).arg(0).arg(199))?,
-                    length > 200,
-                )
-            }
-            "zset" => {
-                let length: u64 = self.typed(redis::cmd("ZCARD").arg(key))?;
-                (
-                    Some(length),
-                    self.query(
-                        redis::cmd("ZRANGE")
-                            .arg(key)
-                            .arg(0)
-                            .arg(199)
-                            .arg("WITHSCORES"),
-                    )?,
-                    length > 200,
-                )
-            }
-            "hash" | "set" => {
-                let length: u64 =
-                    self.typed(redis::cmd(if kind == "hash" { "HLEN" } else { "SCARD" }).arg(key))?;
-                let (cursor, values): (u64, Vec<redis::Value>) = self.typed(
-                    redis::cmd(if kind == "hash" { "HSCAN" } else { "SSCAN" })
-                        .arg(key)
-                        .arg(0)
-                        .arg("COUNT")
-                        .arg(200),
-                )?;
-                (Some(length), redis::Value::Array(values), cursor != 0)
-            }
-            "stream" => {
-                let length: u64 = self.typed(redis::cmd("XLEN").arg(key))?;
-                (
-                    Some(length),
-                    self.query(
-                        redis::cmd("XRANGE")
-                            .arg(key)
-                            .arg("-")
-                            .arg("+")
-                            .arg("COUNT")
-                            .arg(200),
-                    )?,
-                    length > 200,
-                )
-            }
-            _ => {
+        self.inspect_view(key).map(|v| v.snapshot)
+    }
+    pub fn inspect_view(&mut self, key: &[u8]) -> Result<crate::redis_value::Inspection, String> {
+        use crate::redis_value::{Cursor, PageRequest};
+        let mut meta = redis::pipe();
+        meta.cmd("TYPE").arg(key).cmd("PTTL").arg(key);
+        let values = self.pipeline(&meta)?;
+        let kind: String = redis::from_redis_value(values[0].clone()).map_err(|e| e.to_string())?;
+        let ttl_ms: i64 = redis::from_redis_value(values[1].clone()).map_err(|e| e.to_string())?;
+        if kind == "none" {
+            return Ok(crate::redis_value::Inspection {
+                snapshot: Snapshot {
+                    key: key.to_vec(),
+                    kind,
+                    ttl_ms,
+                    length: Some(0),
+                    value: redis::Value::Nil,
+                    truncated: false,
+                },
+                page: crate::redis_value::Page {
+                    cursor: Cursor::Offset(0),
+                    next: None,
+                    pattern: b"*".to_vec(),
+                    display: Default::default(),
+                },
+            });
+        }
+        let request = PageRequest {
+            key: key.to_vec(),
+            cursor: Cursor::first(&kind, b"*"),
+            kind,
+            pattern: b"*".to_vec(),
+        };
+        self.read_value_page(&request, Some(ttl_ms))
+    }
+    pub fn value_page(
+        &mut self,
+        request: &crate::redis_value::PageRequest,
+    ) -> Result<crate::redis_value::Inspection, String> {
+        self.read_value_page(request, None)
+    }
+    // First read: length + data in one pipeline after TYPE/PTTL. Subsequent
+    // reads include TYPE/PTTL/length/data in one exchange; never a preflight.
+    fn read_value_page(
+        &mut self,
+        request: &crate::redis_value::PageRequest,
+        known_ttl: Option<i64>,
+    ) -> Result<crate::redis_value::Inspection, String> {
+        if request.kind == "TSDB-TYPE" { return self.read_timeseries_page(request, known_ttl); }
+        if request.kind == "vectorset" { return self.read_vectors_page(request, known_ttl); }
+        use crate::redis_value::{Cursor, Display, Inspection, PAGE_SIZE, Page, STRING_PAGE};
+        let key = &request.key;
+        let mut pipe = redis::pipe();
+        if known_ttl.is_none() {
+            pipe.cmd("TYPE").arg(key).cmd("PTTL").arg(key);
+        }
+        let json = request.kind == "ReJSON-RL";
+        let length_command = match request.kind.as_str() {
+            "ReJSON-RL" => "JSON.GET",
+            "string" => "STRLEN",
+            "hash" => "HLEN",
+            "set" => "SCARD",
+            "list" => "LLEN",
+            "zset" => "ZCARD",
+            "stream" => "XLEN",
+            kind => {
                 return Err(format!(
                     "Key type {kind} is not supported by the value inspector."
                 ));
             }
         };
-        truncated |= bound_preview(&mut value, &mut (256 * 1024), &mut 1000);
-        Ok(Snapshot {
-            key: key.to_vec(),
-            kind,
+        pipe.cmd(length_command).arg(key);
+        match (&request.cursor, request.kind.as_str()) {
+            (Cursor::Offset(0), "ReJSON-RL") => {}
+            (Cursor::Scan(cursor), "hash" | "set" | "zset") => {
+                pipe.cmd(match request.kind.as_str() {
+                    "hash" => "HSCAN",
+                    "set" => "SSCAN",
+                    _ => "ZSCAN",
+                })
+                .arg(key)
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&request.pattern)
+                .arg("COUNT")
+                .arg(PAGE_SIZE);
+            }
+            (Cursor::Offset(offset), "string" | "list" | "zset") => {
+                let count = if request.kind == "string" {
+                    STRING_PAGE
+                } else {
+                    PAGE_SIZE
+                };
+                let end = offset
+                    .checked_add(count - 1)
+                    .filter(|end| *end <= i64::MAX as u64)
+                    .ok_or("Page offset is out of range.")?;
+                pipe.cmd(match request.kind.as_str() {
+                    "string" => "GETRANGE",
+                    "list" => "LRANGE",
+                    _ => "ZRANGE",
+                })
+                .arg(key)
+                .arg(offset)
+                .arg(end);
+                if request.kind == "zset" {
+                    pipe.arg("WITHSCORES");
+                }
+            }
+            (Cursor::Stream(start), "stream") => {
+                pipe.cmd("XRANGE")
+                    .arg(key)
+                    .arg(start)
+                    .arg("+")
+                    .arg("COUNT")
+                    .arg(PAGE_SIZE + 1);
+            }
+            _ => {
+                return Err(
+                    "This page cursor does not match the key type. Refresh the key.".into(),
+                );
+            }
+        }
+        let mut values = self.pipeline(&pipe)?;
+        let ttl_ms = if let Some(ttl) = known_ttl {
+            ttl
+        } else {
+            let actual: String =
+                redis::from_redis_value(values.remove(0)).map_err(|e| e.to_string())?;
+            let ttl: i64 = redis::from_redis_value(values.remove(0)).map_err(|e| e.to_string())?;
+            if actual != request.kind {
+                return Err("The key expired or changed type. Refresh before continuing.".into());
+            }
+            ttl
+        };
+        let length: u64 = if json {
+            match values.first() {
+                Some(redis::Value::BulkString(bytes)) => bytes.len() as u64,
+                _ => return Err("JSON key disappeared. Refresh before continuing.".into()),
+            }
+        } else {
+            redis::from_redis_value(values.remove(0)).map_err(|e| e.to_string())?
+        };
+        let mut value = values.remove(0);
+        let next = match &request.cursor {
+            Cursor::Timestamp { .. } => return Err("Timestamp cursor requires a time-series key.".into()),
+            Cursor::Lex(_) => return Err("Lexical cursor requires a vector-set key.".into()),
+            Cursor::Scan(_) => {
+                let (cursor, rows): (u64, Vec<redis::Value>) =
+                    redis::from_redis_value(value).map_err(|e| e.to_string())?;
+                value = redis::Value::Array(rows);
+                (cursor != 0).then_some(Cursor::Scan(cursor))
+            }
+            Cursor::Offset(offset) => {
+                let count = match &value {
+                    redis::Value::BulkString(b) => b.len(),
+                    redis::Value::Array(v) => v.len() / if request.kind == "zset" { 2 } else { 1 },
+                    _ => 0,
+                } as u64;
+                (count > 0 && offset + count < length).then_some(Cursor::Offset(offset + count))
+            }
+            Cursor::Stream(_) => {
+                if let redis::Value::Array(rows) = &mut value {
+                    let more = rows.len() > PAGE_SIZE as usize;
+                    rows.truncate(PAGE_SIZE as usize);
+                    if more {
+                        let id = rows.last().and_then(|row| {
+                            if let redis::Value::Array(v) = row {
+                                v.first()
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(redis::Value::BulkString(id)) = id {
+                            let mut start = vec![b'('];
+                            start.extend_from_slice(id);
+                            Some(Cursor::Stream(start))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+        let limited = bound_preview(&mut value, &mut (256 * 1024), &mut 8192);
+        // Do not imply the skipped tail of an oversized response was displayed.
+        let snapshot = Snapshot {
+            key: key.clone(),
+            kind: request.kind.clone(),
             ttl_ms,
-            length,
+            length: Some(length),
             value,
-            truncated,
+            truncated: limited
+                || (request.kind == "string" && (next.is_some() || request.cursor.offset() != 0)),
+        };
+        let display = Display::new(&snapshot, &request.cursor);
+        Ok(Inspection {
+            snapshot,
+            page: Page {
+                cursor: request.cursor.clone(),
+                next,
+                pattern: request.pattern.clone(),
+                display,
+            },
         })
+    }
+    fn read_vectors_page(&mut self, request: &crate::redis_value::PageRequest, known_ttl: Option<i64>) -> Result<crate::redis_value::Inspection, String> {
+        use crate::redis_value::{Display, Inspection, Page};
+        let boundary = crate::redis_vectors::boundary(&request.cursor)?;
+        let mut pipe = redis::pipe();
+        if known_ttl.is_none() { pipe.cmd("TYPE").arg(&request.key).cmd("PTTL").arg(&request.key); }
+        pipe.cmd("VCARD").arg(&request.key);
+        pipe.cmd("EVAL_RO").arg(crate::redis_vectors::PAGE_SCRIPT).arg(1).arg(&request.key).arg(boundary);
+        let mut values = self.pipeline(&pipe)?;
+        let ttl_ms = if let Some(ttl) = known_ttl { ttl } else {
+            if values.len() != 4 { return Err("Invalid vector page response count.".into()); }
+            let actual: String = redis::from_redis_value(values.remove(0)).map_err(|e| e.to_string())?;
+            let ttl = redis::from_redis_value(values.remove(0)).map_err(|e| e.to_string())?;
+            if actual != "vectorset" { return Err("The key expired or changed type. Refresh before continuing.".into()); }
+            ttl
+        };
+        if values.len() != 2 { return Err("Invalid vector page response count.".into()); }
+        let length = redis::from_redis_value(values.remove(0)).map_err(|e| e.to_string())?;
+        let (value, next) = crate::redis_vectors::page(values.remove(0), &request.cursor)?;
+        let snapshot = Snapshot { key: request.key.clone(), kind: request.kind.clone(), ttl_ms, length: Some(length), value, truncated: false };
+        let display = Display::new(&snapshot, &request.cursor);
+        Ok(Inspection { snapshot, page: Page { cursor: request.cursor.clone(), next, pattern: request.pattern.clone(), display } })
+    }
+    fn read_timeseries_page(&mut self, request: &crate::redis_value::PageRequest, known_ttl: Option<i64>) -> Result<crate::redis_value::Inspection, String> {
+        use crate::redis_value::{Cursor, Display, Inspection, Page, PAGE_SIZE};
+        let Cursor::Timestamp { start, end } = request.cursor else { return Err("Invalid time-series cursor. Refresh the key.".into()); };
+        if start > i64::MAX as u64 || end.is_some_and(|end| end > i64::MAX as u64 || end < start) { return Err("Time-series timestamp exceeds Redis range.".into()); }
+        let mut pipe = redis::pipe();
+        if known_ttl.is_none() { pipe.cmd("TYPE").arg(&request.key).cmd("PTTL").arg(&request.key); }
+        pipe.cmd("TS.RANGE").arg(&request.key).arg(start).arg(end.map_or_else(|| "+".into(), |end| end.to_string())).arg("COUNT").arg(PAGE_SIZE + 1);
+        let mut replies = self.pipeline(&pipe)?;
+        let ttl_ms = if let Some(ttl) = known_ttl { ttl } else {
+            if replies.len() != 3 { return Err("Invalid time-series page response.".into()); }
+            let actual: String = redis::from_redis_value(replies.remove(0)).map_err(|e| e.to_string())?;
+            let ttl = redis::from_redis_value(replies.remove(0)).map_err(|e| e.to_string())?;
+            if actual != "TSDB-TYPE" { return Err("The key expired or changed type. Refresh before continuing.".into()); }
+            ttl
+        };
+        if replies.len() != 1 { return Err("Invalid time-series response count.".into()); }
+        let (value, next) = timeseries_page(replies.remove(0), start, end)?;
+        let snapshot = Snapshot { key: request.key.clone(), kind: request.kind.clone(), ttl_ms, length: None, value, truncated: false };
+        let display = Display::new(&snapshot, &request.cursor);
+        Ok(Inspection { snapshot, page: Page { cursor: request.cursor.clone(), next, pattern: request.pattern.clone(), display } })
+    }
+    pub fn search(
+        &mut self,
+        request: crate::redis_search::Request,
+    ) -> Result<crate::redis_search::Reply, String> {
+        let command = request.command()?;
+        let started = std::time::Instant::now();
+        let value = self.query(&command)?;
+        let mut reply = request.decode(value)?;
+        if let crate::redis_search::Reply::Profile { profile, .. } = &mut reply {
+            profile.client_ms = started.elapsed().as_secs_f64() * 1000.0;
+        }
+        Ok(reply)
+    }
+    pub fn diagnostics(
+        &mut self,
+        request: &crate::redis_diagnostics::Request,
+    ) -> Result<crate::redis_diagnostics::Report, String> {
+        let mut pipe = redis::pipe();
+        match request {
+            crate::redis_diagnostics::Request::VectorSimilar { key, element } => {
+                if key.len() > 4096 || element.len() > 65536 { return Err("Vector search supports keys up to 4 KiB and element names up to 64 KiB.".into()); }
+                let value = self.query_bounded(redis::cmd("VSIM").arg(key).arg("ELE").arg(element).arg("WITHSCORES").arg("COUNT").arg(20).arg("EF").arg(100))?;
+                Ok(crate::redis_diagnostics::Report { vector_matches: Some(Box::new(crate::redis_vector_matches::Matches::decode(value, key, element)?)), ..Default::default() })
+            }
+            crate::redis_diagnostics::Request::VectorElement { key, element } => {
+                if key.len() > 4096 || element.len() > 65536 { return Err("Vector inspection supports keys up to 4 KiB and element names up to 64 KiB.".into()); }
+                let value = self.query(redis::cmd("EVAL_RO").arg(crate::redis_vector_element::SCRIPT).arg(1).arg(key).arg(element))?;
+                Ok(crate::redis_diagnostics::Report { vector_element: Some(Box::new(crate::redis_vector_element::Element::decode(value, element)?)), ..Default::default() })
+            }
+            crate::redis_diagnostics::Request::TimeSeries(key) => {
+                if key.len() > 4096 { return Err("Metadata inspection supports keys up to 4,096 bytes.".into()); }
+                let value = self.query(redis::cmd("EVAL_RO").arg(crate::redis_module_info::TIMESERIES_SCRIPT).arg(1).arg(key))?;
+                crate::redis_module_info::timeseries(value, key)
+            }
+            crate::redis_diagnostics::Request::Cluster => {
+                let value = self.query(redis::cmd("CLUSTER").arg("SHARDS"))?;
+                let mut report=crate::redis_topology::Cluster::decode(value, &self.source_host, self.tls)?.report();
+                if self.cluster.is_some() {report.footer="Topology reported by the connected node. Key browsing scans primaries from the routing snapshot; reconnect to reload topology after changes.".into();}
+                Ok(report)
+            }
+            crate::redis_diagnostics::Request::Server => {
+                pipe.cmd("INFO").cmd("SLOWLOG").arg("GET").arg(50);
+                crate::redis_diagnostics::server(self.pipeline(&pipe)?)
+            }
+            crate::redis_diagnostics::Request::Keys(keys) => {
+                if keys.is_empty() || keys.len() > 1000 {
+                    return Err("Select 1–1,000 loaded keys for analysis.".into());
+                }
+                for key in keys {
+                    pipe.cmd("MEMORY")
+                        .arg("USAGE")
+                        .arg(key)
+                        .arg("SAMPLES")
+                        .arg(5);
+                }
+                crate::redis_diagnostics::keys(keys, self.pipeline(&pipe)?)
+            }
+        }
+    }
+    pub fn bulk_mutate(&mut self, mutation: &crate::redis_mutation::Mutation, read_only: bool,
+        cancel: &std::sync::atomic::AtomicBool) -> Result<crate::redis_cluster::WriteReport<bool>, String> {
+        self.cluster.as_mut().ok_or("Cluster bulk routing requires a Cluster connection.")?.bulk(mutation, read_only, cancel)
+    }
+    pub fn mutate(
+        &mut self,
+        mutation: &crate::redis_mutation::Mutation,
+        read_only: bool,
+    ) -> Result<u64, String> {
+        mutation.validate(read_only)?;
+        let mut command = redis::cmd("EVAL");
+        let rename = mutation.action == crate::redis_mutation::Action::Rename;
+        // Declare every accessed key, including the destination. Cluster routing
+        // can then reject CROSSSLOT before the script executes any operation.
+        command.arg(crate::redis_mutation::SCRIPT)
+            .arg(mutation.keys.len() + usize::from(rename))
+            .arg(&mutation.keys);
+        if rename { command.arg(&mutation.field); }
+        command.arg(mutation.action_name())
+            .arg(&mutation.kind)
+            .arg(&mutation.field)
+            .arg(&mutation.value)
+            .arg(&mutation.expected)
+            .arg(mutation.length)
+            .arg(mutation.ttl_ms.map(|n| n.to_string()).unwrap_or_default());
+        self.typed(&command)
+    }
+    pub fn review_archive(
+        &mut self,
+        archive: &crate::redis_archive::Archive,
+        database: u32,
+    ) -> Result<crate::redis_archive::Review, String> {
+        archive.validate()?;
+        if self.cluster.is_some() {
+            crate::redis_archive::require_database(0, database)?;
+            let mut pipe = redis::pipe();
+            for entry in &archive.entries {
+                pipe.cmd("EVAL_RO").arg(crate::redis_archive::REVIEW_SCRIPT).arg(1).arg(&entry.key);
+            }
+            let values = self.pipeline(&pipe)?;
+            let mut review = crate::redis_archive::Review {
+                database, server_now_ms: 0, targets: Vec::with_capacity(values.len()), existing: 0, expired: 0,
+            };
+            for (entry, value) in archive.entries.iter().zip(values) {
+                let part = crate::redis_archive::review_reply(value, database, 1)?;
+                review.server_now_ms = review.server_now_ms.max(part.server_now_ms);
+                review.expired += usize::from(entry.expires_at_ms.is_some_and(|n| n <= part.server_now_ms));
+                review.existing += part.existing;
+                review.targets.extend(part.targets);
+            }
+            return Ok(review);
+        }
+        let mut command = redis::cmd("EVAL_RO");
+        command
+            .arg(crate::redis_archive::REVIEW_SCRIPT)
+            .arg(archive.entries.len());
+        for entry in &archive.entries {
+            command.arg(&entry.key);
+        }
+        let mut review = crate::redis_archive::review_reply(
+            self.query(&command)?,
+            database,
+            archive.entries.len(),
+        )?;
+        review.expired = archive
+            .entries
+            .iter()
+            .filter(|e| e.expires_at_ms.is_some_and(|n| n <= review.server_now_ms))
+            .count();
+        Ok(review)
+    }
+    pub fn export_archive(
+        &mut self,
+        keys: &[Vec<u8>],
+        database: u32,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::redis_archive::ExportReport, String> {
+        use crate::redis_archive::*;
+        use std::sync::atomic::Ordering;
+        if keys.is_empty()
+            || keys.len() > MAX_KEYS
+            || keys.iter().any(|k| k.len() > 4096)
+            || keys.iter().map(Vec::len).sum::<usize>() > 1024 * 1024
+        {
+            return Err("Select 1–1,000 keys, up to 4 KiB each and 1 MiB of names.".into());
+        }
+        if self.cluster.is_some() {
+            require_database(0, database)?;
+        }
+        let mut report = ExportReport {
+            archive: Archive {
+                created_at_ms: 0,
+                database,
+                entries: Vec::new(),
+            },
+            skipped: Vec::new(),
+        };
+        for batch in keys.chunks(16) {
+            if cancel.load(Ordering::Acquire) {
+                return Err("Export cancelled; no archive was saved.".into());
+            }
+            let ExportBatch { timestamp, entries, skipped } = if self.cluster.is_some() {
+                // Sixteen per-key atomic scripts, fanned out in one read exchange.
+                // Cross-slot Lua is forbidden even when keys share a primary.
+                let mut pipe = redis::pipe();
+                for key in batch {
+                    pipe.cmd("EVAL_RO").arg(EXPORT_SCRIPT).arg(1).arg(key);
+                }
+                let mut combined = ExportBatch { timestamp: 0, entries: Vec::new(), skipped: Vec::new() };
+                for (key, value) in batch.iter().zip(self.pipeline(&pipe)?) {
+                    let part = export_reply(value, std::slice::from_ref(key))?;
+                    combined.timestamp = combined.timestamp.max(part.timestamp);
+                    combined.entries.extend(part.entries);
+                    combined.skipped.extend(part.skipped);
+                }
+                combined
+            } else {
+                let mut command = redis::cmd("EVAL_RO");
+                command.arg(EXPORT_SCRIPT).arg(batch.len());
+                for key in batch { command.arg(key); }
+                export_reply(self.query(&command)?, batch)?
+            };
+            if report.archive.created_at_ms == 0 {
+                report.archive.created_at_ms = timestamp;
+            }
+            report.archive.entries.extend(entries);
+            report.skipped.extend(skipped);
+            if !report.archive.entries.is_empty() {
+                report.archive.validate()?;
+            }
+        }
+        Ok(report)
+    }
+    pub fn import_archive(
+        &mut self,
+        archive: &crate::redis_archive::Archive,
+        collision: crate::redis_archive::Collision,
+        expiry: crate::redis_archive::Expiry,
+        read_only: bool,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::redis_archive::ImportReport, String> {
+        use crate::redis_archive::*;
+        use std::sync::atomic::Ordering;
+        if read_only {
+            return Err("Read-only mode prevents importing Redis keys.".into());
+        }
+        archive.validate()?;
+        let mut report = ImportReport {
+            outcomes: archive
+                .entries
+                .iter()
+                .map(|entry| Outcome {
+                    key: entry.key.clone(),
+                    state: State::NotAttempted,
+                    message: String::new(),
+                })
+                .collect(),
+            stopped: None,
+        };
+        for (index, batch) in archive.entries.chunks(16).enumerate() {
+            if cancel.load(Ordering::Acquire) {
+                report.stopped = Some("Cancelled; remaining keys were not attempted.".into());
+                break;
+            }
+            if let Some(router) = &mut self.cluster {
+                let batch_report = router.import_batch(batch, collision, expiry);
+                let offset = index * 16;
+                for (target, outcome) in report.outcomes[offset..offset + batch.len()].iter_mut().zip(batch_report.outcomes) {
+                    *target = outcome;
+                }
+                if let Some(error) = batch_report.stopped {
+                    report.stopped = Some(error);
+                    break;
+                }
+                continue;
+            }
+            let mut command = redis::cmd("EVAL");
+            command.arg(IMPORT_SCRIPT).arg(batch.len());
+            for entry in batch {
+                command.arg(&entry.key);
+            }
+            command
+                .arg(if collision == Collision::Replace {
+                    "replace"
+                } else {
+                    "skip"
+                })
+                .arg(if expiry == Expiry::Persistent {
+                    "persistent"
+                } else {
+                    "preserve"
+                });
+            for entry in batch {
+                command
+                    .arg(entry.expires_at_ms.unwrap_or(-1))
+                    .arg(&entry.dump);
+            }
+            let result = self
+                .query(&command)
+                .and_then(|value| import_reply(value, batch.len()));
+            let offset = index * 16;
+            match result {
+                Ok(outcomes) => {
+                    for (row, (state, message)) in report.outcomes[offset..offset + batch.len()]
+                        .iter_mut()
+                        .zip(outcomes)
+                    {
+                        row.state = state;
+                        row.message = message;
+                    }
+                }
+                Err(error) => {
+                    for row in &mut report.outcomes[offset..offset + batch.len()] {
+                        row.state = State::Unknown;
+                        row.message =
+                            "Submitted batch outcome is unconfirmed. Inspect before retrying."
+                                .into();
+                    }
+                    report.stopped = Some(error);
+                    break;
+                }
+            }
+        }
+        Ok(report)
+    }
+    pub fn publish(
+        &mut self,
+        channel: &[u8],
+        payload: &[u8],
+        read_only: bool,
+    ) -> Result<u64, String> {
+        if read_only {
+            return Err("Read-only mode prevents publishing.".into());
+        }
+        if channel.is_empty() || channel.len() > 4096 || payload.len() > 65536 {
+            return Err("Publish exceeds the channel or payload limit.".into());
+        }
+        match self.query(redis::cmd("PUBLISH").arg(channel).arg(payload))? {
+            redis::Value::Int(count) => {
+                u64::try_from(count).map_err(|_| "Invalid PUBLISH receiver count".into())
+            }
+            _ => Err("Invalid PUBLISH response".into()),
+        }
     }
     pub fn execute(&mut self, text: &str, read_only: bool) -> Result<Vec<redis::Value>, String> {
         let commands = crate::redis_commands::parse(text)?;
         // Validate the entire batch before its first write.
         for args in &commands {
             crate::redis_commands::validate(args, read_only)?;
+            if self.cluster.is_some() {
+                let name=std::str::from_utf8(&args[0]).map_err(|_|"Command name must be UTF-8.")?;
+                let mut command=redis::cmd(name);command.arg(&args[1..]);
+                crate::redis_cluster::command_slot(&command)?;
+            }
         }
         let mut results = Vec::new();
         for args in commands {
@@ -460,6 +1057,34 @@ fn bound_preview(value: &mut redis::Value, bytes: &mut usize, nodes: &mut usize)
     }
 }
 
+fn timeseries_page(value: redis::Value, start: u64, end: Option<u64>) -> Result<(redis::Value, Option<crate::redis_value::Cursor>), String> {
+    use crate::redis_value::{Cursor, PAGE_SIZE};
+    let redis::Value::Array(mut rows) = value else { return Err("Invalid time-series samples.".into()); };
+    if rows.len() > PAGE_SIZE as usize + 1 { return Err("Time-series response exceeds the requested page limit.".into()); }
+    let mut previous = None;
+    for row in &rows {
+        let redis::Value::Array(pair) = row else { return Err("Invalid time-series sample.".into()); };
+        if pair.len() != 2 { return Err("Invalid time-series sample width.".into()); }
+        let redis::Value::Int(timestamp) = pair[0] else { return Err("Invalid time-series timestamp.".into()); };
+        if timestamp < 0 || (timestamp as u64) < start || end.is_some_and(|end| timestamp as u64 > end) || previous.is_some_and(|n| timestamp <= n) { return Err("Time-series timestamps are outside the requested range or unordered.".into()); }
+        match &pair[1] {
+            redis::Value::BulkString(bytes) if bytes.len() <= 128 && std::str::from_utf8(bytes).ok().and_then(|s| s.parse::<f64>().ok()).is_some() => {},
+            redis::Value::SimpleString(value) if value.len() <= 128 && value.parse::<f64>().is_ok() => {},
+            redis::Value::Double(_) => {},
+            _ => return Err("Invalid time-series sample value.".into()),
+        }
+        previous = Some(timestamp);
+    }
+    let more = rows.len() > PAGE_SIZE as usize;
+    rows.truncate(PAGE_SIZE as usize);
+    let next = if more {
+        let redis::Value::Array(pair) = rows.last().unwrap() else { unreachable!() };
+        let redis::Value::Int(timestamp) = pair[0] else { unreachable!() };
+        Some(Cursor::Timestamp { start: timestamp as u64 + 1, end })
+    } else { None };
+    Ok((redis::Value::Array(rows), next))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +1097,561 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cluster_startup_falls_back_and_restores_normal_operation_timeout() {
+        use std::{io::Write, net::TcpListener, time::Duration};
+        let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_port = unavailable.local_addr().unwrap().port();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(unavailable);
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut parser = redis::Parser::new();
+            loop {
+                let command: Vec<Vec<u8>> = redis::from_redis_value(parser.parse_value(&mut socket).unwrap()).unwrap();
+                match command[0].as_slice() {
+                    b"CLIENT" => socket.write_all(b"+OK\r\n").unwrap(),
+                    b"PING" => socket.write_all(b"+PONG\r\n").unwrap(),
+                    b"CLUSTER" => { assert_eq!(command[1], b"SHARDS"); break; }
+                    _ => panic!("unexpected connection command"),
+                }
+            }
+            write!(socket, "*1\r\n*4\r\n+slots\r\n*2\r\n:0\r\n:16383\r\n+nodes\r\n*1\r\n*10\r\n+id\r\n+{}\r\n+role\r\n+master\r\n+health\r\n+online\r\n+endpoint\r\n+127.0.0.1\r\n+port\r\n:{port}\r\n", "a".repeat(40)).unwrap();
+            let command: Vec<Vec<u8>> = redis::from_redis_value(parser.parse_value(&mut socket).unwrap()).unwrap();
+            assert_eq!(command, [b"GET".to_vec(), b"key".to_vec()]);
+            std::thread::sleep(Duration::from_millis(500));
+            socket.write_all(b"$5\r\nvalue\r\n").unwrap();
+        });
+        let mut settings = Settings { host: "127.0.0.1".into(), port: dead_port, cluster: true, tls: false,
+            connect_timeout: Duration::from_millis(300), read_timeout: Duration::from_secs(2),
+            cluster_seeds: vec![crate::redis_settings::SentinelSeed { host: "127.0.0.1".into(), port: dead_port }], ..Default::default() };
+        assert!(Session::connect(&settings, "").err().unwrap().contains("duplicate"));
+        settings.cluster_seeds[0].port = port;
+        let mut session = Session::connect(&settings, "").unwrap();
+        assert_eq!(session.query(redis::cmd("GET").arg("key")).unwrap(), redis::Value::BulkString(b"value".to_vec()));
+        peer.join().unwrap();
+    }
+    #[test]
+    #[ignore = "disposable Redis 8.4 scripts/test-redis-vectors.sh fixture"]
+    fn live_vector_pages_preserve_binary_elements_and_enforce_byte_limits() {
+        use crate::redis_value::{Cursor, PageRequest};
+        assert_eq!(std::env::var("RUSTABLE_REDIS_VECTOR_QA").as_deref(), Ok("1"));
+        let mut session = Session::connect(&Settings { host: "127.0.0.1".into(), port: 16382, tls: false, ..Default::default() }, "rustable-vector-test-only").unwrap();
+        let similarity_key = b"rustable:vector:similarity";
+        for (name, x, y) in [(vec![0,255], 1, 0), (b"side".to_vec(), 0, 1), (b"opposite".to_vec(), -1, 0)] {
+            session.query(redis::cmd("VADD").arg(similarity_key).arg("VALUES").arg(2).arg(x).arg(y).arg(name)).unwrap();
+        }
+        let request = crate::redis_diagnostics::Request::VectorSimilar { key: similarity_key.to_vec(), element: vec![0,255] };
+        let result = session.diagnostics(&request).unwrap().vector_matches.unwrap();
+        assert_eq!(result.rows.iter().map(|row| row.score.as_str()).collect::<Vec<_>>(), ["1.0000", "0.5000", "0.0000"]);
+        assert_eq!(result.rows[0].element, [0,255]);
+        session.query(redis::cmd("DEL").arg(similarity_key)).unwrap();
+        assert!(session.diagnostics(&request).unwrap().vector_matches.unwrap().rows.is_empty());
+        let key = b"rustable:vector:pages";
+        let mut names: Vec<Vec<u8>> = (0..435).map(|i| format!("member:{i:04}").into_bytes()).collect();
+        names.extend([vec![], vec![0], vec![255, 0]]);
+        let mut setup = redis::pipe();
+        for name in &names { setup.cmd("VADD").arg(key).arg("VALUES").arg(3).arg(1).arg(0).arg(0).arg(name); }
+        setup.query::<Vec<redis::Value>>(session.connection.as_mut().unwrap()).unwrap();
+        names.sort();
+        let mut page = session.inspect_view(key).unwrap();
+        assert_eq!(page.snapshot.kind, "vectorset");
+        assert_eq!(page.snapshot.length, Some(names.len() as u64));
+        let mut seen = Vec::new();
+        loop {
+            let rows: Vec<Vec<u8>> = redis::from_redis_value(page.snapshot.value).unwrap();
+            assert!(rows.len() <= 200);
+            seen.extend(rows);
+            let Some(cursor) = page.page.next else { break; };
+            page = session.value_page(&PageRequest { key: key.to_vec(), kind: "vectorset".into(), cursor, pattern: b"*".to_vec() }).unwrap();
+        }
+        assert_eq!(seen, names);
+        let similar = session.diagnostics(&crate::redis_diagnostics::Request::VectorSimilar { key: key.to_vec(), element: vec![255,0] }).unwrap().vector_matches.unwrap();
+        assert_eq!(similar.rows.len(), 20);
+        assert!(similar.rows.iter().all(|row| row.score == "1.0000"));
+        assert!(session.diagnostics(&crate::redis_diagnostics::Request::VectorSimilar { key: key.to_vec(), element: b"missing".to_vec() }).err().unwrap().contains("element not found"));
+
+        let detail_request = crate::redis_diagnostics::Request::VectorElement { key: key.to_vec(), element: vec![255, 0] };
+        let detail = session.diagnostics(&detail_request).unwrap().vector_element.unwrap();
+        assert_eq!(detail.components, ["1", "0", "0"]);
+        assert!(detail.attributes.is_none());
+        let attributes = br#"{"id":9007199254740993,"active":true,"label":"Camera"}"#;
+        session.query(redis::cmd("VSETATTR").arg(key).arg([255u8, 0].as_slice()).arg(attributes)).unwrap();
+        let detail = session.diagnostics(&detail_request).unwrap().vector_element.unwrap();
+        let json = detail.attributes.unwrap();
+        assert!(json.json_source.unwrap().contains("9007199254740993"));
+        assert!(!json.json_tokens.is_empty());
+        session.query(redis::cmd("VSETATTR").arg(key).arg([255u8, 0].as_slice()).arg(format!("\"{}\"", "x".repeat(65536)))).unwrap();
+        assert!(session.diagnostics(&detail_request).err().unwrap().contains("64 KiB"));
+        assert!(session.diagnostics(&crate::redis_diagnostics::Request::VectorElement { key: key.to_vec(), element: b"missing".to_vec() }).err().unwrap().contains("no longer exists"));
+
+        session.query(redis::cmd("VADD").arg(key).arg("VALUES").arg(3).arg(1).arg(0).arg(0).arg(vec![b'z';65537])).unwrap();
+        let request = PageRequest { key: key.to_vec(), kind: "vectorset".into(), cursor: Cursor::Lex(Some(b"member:9999".to_vec())), pattern: b"*".to_vec() };
+        assert!(session.value_page(&request).err().unwrap().contains("64 KiB"));
+        session.query(redis::cmd("DEL").arg(key)).unwrap();
+        session.query(redis::cmd("SET").arg(key).arg("changed")).unwrap();
+        assert!(session.value_page(&request).is_err());
+        session.query(redis::cmd("DEL").arg(key)).unwrap();
+    }
+    #[test]
+    fn malformed_ordinary_replies_cannot_leak_into_bounded_searches() {
+        use std::{io::{Read, Write}, net::TcpListener, time::Duration};
+        for pipeline in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut parser = redis::Parser::new();
+                loop {
+                    let command: Vec<Vec<u8>> = redis::from_redis_value(parser.parse_value(&mut socket).unwrap()).unwrap();
+                    match command[0].as_slice() {
+                        b"CLIENT" | b"SELECT" => socket.write_all(b"+OK\r\n").unwrap(),
+                        b"PING" => socket.write_all(b"+PONG\r\n").unwrap(),
+                        b"GET" => break,
+                        _ => panic!("unexpected command"),
+                    }
+                }
+                socket.write_all(b"?malformed\r\n").unwrap();
+                let mut byte = [0];
+                assert_eq!(socket.read(&mut byte).unwrap(), 0);
+            });
+            let mut session = Session::connect(&Settings { host: "127.0.0.1".into(), port, tls: false, ..Default::default() }, "").unwrap();
+            if pipeline { let mut pipe = redis::pipe(); pipe.cmd("GET").arg("key"); assert!(session.pipeline(&pipe).is_err()); }
+            else { assert!(session.query(redis::cmd("GET").arg("key")).is_err()); }
+            assert!(session.connection.is_none());
+            assert!(session.query_bounded(redis::cmd("VSIM").arg("key").arg("ELE").arg("source")).is_err());
+            server.join().unwrap();
+        }
+    }
+    #[test]
+    fn bounded_responses_preserve_one_exchange_and_close_on_limit() {
+        use std::{io::{Read, Write}, net::TcpListener, time::Duration};
+        let exact = b"$3\r\nabc\r\n";
+        assert_eq!(redis::Parser::new().parse_value_bounded(exact.as_slice(), exact.len()).unwrap(), redis::Value::BulkString(b"abc".to_vec()));
+        assert!(redis::Parser::new().parse_value_bounded(exact.as_slice(), exact.len()-1).unwrap_err().to_string().contains("byte limit"));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut parser = redis::Parser::new();
+            let read = |socket: &mut std::net::TcpStream, parser: &mut redis::Parser| -> Vec<Vec<u8>> { redis::from_redis_value(parser.parse_value(socket).unwrap()).unwrap() };
+            loop {
+                let command = read(&mut socket, &mut parser);
+                match command[0].as_slice() {
+                    b"CLIENT" | b"SELECT" => socket.write_all(b"+OK\r\n").unwrap(),
+                    b"ASKING" => break,
+                    _ => panic!("unexpected startup command"),
+                }
+            }
+            assert_eq!(read(&mut socket, &mut parser)[0], b"VSIM");
+            // Both requests arrive before either response, even with read limits.
+            socket.write_all(b"+OK\r\n*2\r\n$3\r\none\r\n$3\r\n0.9\r\n").unwrap();
+            assert_eq!(read(&mut socket, &mut parser)[0], b"PING");
+            socket.write_all(b"+PONG\r\n").unwrap();
+            assert_eq!(read(&mut socket, &mut parser)[0], b"VSIM");
+            socket.write_all(b"-NOPERM search denied\r\n").unwrap();
+            assert_eq!(read(&mut socket, &mut parser)[0], b"VSIM");
+            socket.write_all(b"$1000000\r\n").unwrap();
+            let _ = socket.write_all(&[b'x';256]);
+            // No attempt to reuse the partially consumed reply or replay VSIM.
+            let mut byte = [0];
+            match socket.read(&mut byte) { Ok(0) => {}, Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof) => {}, result => panic!("unexpected request after limit: {result:?}") }
+        });
+        let mut connection = Session::raw_node(&Settings { host: "127.0.0.1".into(), port, tls: false, ..Default::default() }, "").unwrap();
+        let mut pipeline = redis::pipe();
+        pipeline.cmd("ASKING").cmd("VSIM").arg("vectors").arg("ELE").arg("one").arg("COUNT").arg(20);
+        let replies = connection.req_packed_commands_bounded(&pipeline.get_packed_pipeline(), &[128,1024]).unwrap();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0], redis::Value::Okay);
+        assert_eq!(redis::cmd("PING").query::<String>(&mut connection).unwrap(), "PONG");
+        let command = redis::cmd("VSIM").arg("vectors").arg("ELE").arg("one").get_packed_command();
+        let error = connection.req_packed_commands_bounded(&command, &[128]).unwrap().pop().unwrap().extract_error().unwrap_err();
+        assert!(error.to_string().contains("search denied"), "{error}");
+        let error = connection.req_packed_commands_bounded(&command, &[128]).unwrap_err();
+        assert!(error.to_string().contains("byte limit"));
+        assert!(!redis::ConnectionLike::is_open(&connection));
+        server.join().unwrap();
+    }
+    #[test]
+    fn vector_page_requests_preserve_pipelined_exchange_budget() {
+        use std::{io::Write, net::TcpListener, time::Duration};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut parser = redis::Parser::new();
+            let read = |socket: &mut std::net::TcpStream, parser: &mut redis::Parser| -> Vec<Vec<u8>> { redis::from_redis_value(parser.parse_value(socket).unwrap()).unwrap() };
+            loop {
+                let command = read(&mut socket, &mut parser);
+                match command[0].as_slice() {
+                    b"CLIENT" | b"SELECT" => socket.write_all(b"+OK\r\n").unwrap(),
+                    b"PING" => socket.write_all(b"+PONG\r\n").unwrap(),
+                    b"TYPE" => break,
+                    _ => panic!("unexpected startup command"),
+                }
+            }
+            assert_eq!(read(&mut socket, &mut parser)[0], b"PTTL");
+            socket.write_all(b"$9\r\nvectorset\r\n:-1\r\n").unwrap();
+            for (index, boundary) in [b"-".as_slice(), b"(a".as_slice()].into_iter().enumerate() {
+                if index == 1 {
+                    assert_eq!(read(&mut socket, &mut parser)[0], b"TYPE");
+                    assert_eq!(read(&mut socket, &mut parser)[0], b"PTTL");
+                }
+                assert_eq!(read(&mut socket, &mut parser), [b"VCARD".to_vec(), b"series".to_vec()]);
+                let command = read(&mut socket, &mut parser);
+                assert_eq!(command, [b"EVAL_RO".to_vec(), crate::redis_vectors::PAGE_SCRIPT.as_bytes().to_vec(), b"1".to_vec(), b"series".to_vec(), boundary.to_vec()]);
+                // The complete page pipeline must arrive before any response.
+                if index == 1 { socket.write_all(b"$9\r\nvectorset\r\n:-1\r\n").unwrap(); }
+                socket.write_all(b":1\r\n*2\r\n*1\r\n$1\r\nb\r\n:0\r\n").unwrap();
+            }
+            let detail = read(&mut socket, &mut parser);
+            assert_eq!(detail, [b"EVAL_RO".to_vec(), crate::redis_vector_element::SCRIPT.as_bytes().to_vec(), b"1".to_vec(), b"series".to_vec(), vec![0,255]]);
+            socket.write_all(b"-NOPERM vector detail denied\r\n").unwrap();
+            assert_eq!(read(&mut socket, &mut parser)[0], b"PING");
+            socket.write_all(b"+PONG\r\n").unwrap();
+        });
+        let mut session = Session::connect(&Settings { host: "127.0.0.1".into(), port, tls: false, ..Default::default() }, "").unwrap();
+        assert_eq!(session.inspect_view(b"series").unwrap().page.display.rows.len(), 1);
+        assert_eq!(session.value_page(&crate::redis_value::PageRequest { key: b"series".to_vec(), kind: "vectorset".into(), cursor: crate::redis_value::Cursor::Lex(Some(b"a".to_vec())), pattern: b"*".to_vec() }).unwrap().page.display.rows.len(), 1);
+        let error = session.diagnostics(&crate::redis_diagnostics::Request::VectorElement { key: b"series".to_vec(), element: vec![0,255] }).err().unwrap();
+        assert!(error.contains("NOPERM"));
+        session.query(&redis::cmd("PING")).unwrap();
+        server.join().unwrap();
+    }
+    #[test]
+    fn timeseries_page_requests_preserve_pipelined_exchange_budget() {
+        use std::{io::Write, net::TcpListener, time::Duration};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut parser = redis::Parser::new();
+            let read = |socket: &mut std::net::TcpStream, parser: &mut redis::Parser| -> Vec<Vec<u8>> { redis::from_redis_value(parser.parse_value(socket).unwrap()).unwrap() };
+            loop {
+                let command = read(&mut socket, &mut parser);
+                match command[0].as_slice() {
+                    b"CLIENT" | b"SELECT" => socket.write_all(b"+OK\r\n").unwrap(),
+                    b"PING" => socket.write_all(b"+PONG\r\n").unwrap(),
+                    b"TYPE" => break,
+                    _ => panic!("unexpected startup command"),
+                }
+            }
+            assert_eq!(read(&mut socket, &mut parser)[0], b"PTTL");
+            socket.write_all(b"$9\r\nTSDB-TYPE\r\n:-1\r\n").unwrap();
+            assert_eq!(read(&mut socket, &mut parser), ["TS.RANGE", "series", "0", "+", "COUNT", "201"].map(|s| s.as_bytes().to_vec()));
+            socket.write_all(b"*1\r\n*2\r\n:0\r\n$1\r\n1\r\n").unwrap();
+            assert_eq!(read(&mut socket, &mut parser)[0], b"TYPE");
+            assert_eq!(read(&mut socket, &mut parser)[0], b"PTTL");
+            assert_eq!(read(&mut socket, &mut parser), ["TS.RANGE", "series", "1", "+", "COUNT", "201"].map(|s| s.as_bytes().to_vec()));
+            // All three follow-up requests arrive before any reply.
+            socket.write_all(b"$9\r\nTSDB-TYPE\r\n:-1\r\n*0\r\n").unwrap();
+            let metadata = read(&mut socket, &mut parser);
+            assert_eq!(metadata[0], b"EVAL_RO");
+            assert_eq!(metadata[1], crate::redis_module_info::TIMESERIES_SCRIPT.as_bytes());
+            assert_eq!(&metadata[2..], &[b"1".to_vec(), b"series".to_vec()]);
+            socket.write_all(b"-NOPERM metadata denied\r\n").unwrap();
+            // Permission errors must not trigger an uncapped TS.INFO fallback.
+            assert_eq!(read(&mut socket, &mut parser)[0], b"PING");
+            socket.write_all(b"+PONG\r\n").unwrap();
+        });
+        let mut session = Session::connect(&Settings { host: "127.0.0.1".into(), port, tls: false, ..Default::default() }, "").unwrap();
+        assert_eq!(session.inspect_view(b"series").unwrap().page.display.rows.len(), 1);
+        assert!(session.value_page(&crate::redis_value::PageRequest { key: b"series".to_vec(), kind: "TSDB-TYPE".into(), cursor: crate::redis_value::Cursor::Timestamp { start: 1, end: None }, pattern: b"*".to_vec() }).unwrap().page.display.rows.is_empty());
+        let denied = session.diagnostics(&crate::redis_diagnostics::Request::TimeSeries(b"series".to_vec())).err().unwrap();
+        assert!(denied.contains("NOPERM"));
+        session.query(&redis::cmd("PING")).unwrap();
+        server.join().unwrap();
+    }
+    #[test]
+    fn timeseries_pages_validate_order_bounds_and_lookahead() {
+        use crate::redis_value::{Cursor, PAGE_SIZE};
+        let row = |timestamp| redis::Value::Array(vec![redis::Value::Int(timestamp), redis::Value::BulkString(b"1.25".to_vec())]);
+        let (value, next) = timeseries_page(redis::Value::Array((0..=PAGE_SIZE).map(|n| row((n * 10) as i64)).collect()), 0, None).unwrap();
+        assert!(matches!(value, redis::Value::Array(rows) if rows.len() == PAGE_SIZE as usize));
+        assert_eq!(next, Some(Cursor::Timestamp { start: 1991, end: None }));
+        assert!(timeseries_page(redis::Value::Array(vec![row(1), row(1)]), 0, None).is_err());
+        assert!(timeseries_page(redis::Value::Array(vec![row(0)]), 1, None).is_err());
+        assert!(timeseries_page(redis::Value::Array(vec![row(-1)]), 0, None).is_err());
+        assert!(timeseries_page(redis::Value::Array((0..=PAGE_SIZE+1).map(|n| row(n as i64)).collect()), 0, None).is_err());
+        assert_eq!(timeseries_page(redis::Value::Array(vec![row(i64::MAX)]), i64::MAX as u64, None).unwrap().1, None);
+        assert_eq!(timeseries_page(redis::Value::Array(vec![]), 0, None).unwrap().1, None);
+    }
+    #[test]
+    #[ignore = "disposable six-node scripts/test-redis-cluster-failover.sh fixture"]
+    fn live_cluster_replica_promotion_recovers_after_all_old_primaries_stop() {
+        use std::time::{Duration, Instant};
+        assert_eq!(std::env::var("RUSTABLE_REDIS_CLUSTER_FAILOVER_QA").as_deref(), Ok("1"));
+        let password = "rustable-cluster-test-only";
+        let settings = Settings { host: "127.0.0.1".into(), port: 16600, tls: false, cluster: true, ..Default::default() };
+        let mut nodes: Vec<_> = (16600..=16605).map(|port| Session::raw_node(&Settings { port, ..settings.clone() }, password).unwrap()).collect();
+        let mut replicas = Vec::new();
+        for (index, node) in nodes.iter_mut().enumerate() {
+            let role: Vec<redis::Value> = redis::cmd("ROLE").query(node).unwrap();
+            if role[0] == redis::Value::BulkString(b"slave".to_vec()) {
+                let primary: u16 = redis::from_redis_value(role[2].clone()).unwrap();
+                assert!((16600..=16602).contains(&primary));
+                replicas.push((primary, index));
+            } else { assert!(index < 3); }
+        }
+        assert_eq!(replicas.len(), 3);
+        let mut session = Session::connect(&settings, password).unwrap();
+        let topology = crate::redis_topology::Cluster::decode(redis::cmd("CLUSTER").arg("SHARDS").query(&mut nodes[0]).unwrap(), "127.0.0.1", false).unwrap();
+        let routes = topology.routes();
+        let key = (0..10000).map(|i| format!("rustable:promotion:{i}")).find(|key| {
+            let slot = crate::redis_cluster::command_slot(redis::cmd("GET").arg(key)).unwrap().unwrap();
+            routes[slot as usize].as_ref().is_some_and(|e| e.port == 16600)
+        }).unwrap();
+        redis::cmd("SET").arg(&key).arg(0).query::<()>(&mut nodes[0]).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let replicated: u64 = redis::cmd("WAIT").arg(1).arg(1000).query(&mut nodes[0]).unwrap();
+            if replicated >= 1 { break; }
+            assert!(Instant::now() < deadline, "fixture replica did not catch up");
+        }
+        let data_replica = replicas.iter().find(|(primary, _)| *primary == 16600).unwrap().1;
+        redis::cmd("READONLY").query::<()>(&mut nodes[data_replica]).unwrap();
+        assert_eq!(redis::cmd("GET").arg(&key).query::<redis::Value>(&mut nodes[data_replica]).unwrap(), redis::Value::BulkString(b"0".to_vec()), "replicated value before promotion");
+        for &(primary, replica) in &replicas {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let role: Vec<redis::Value> = redis::cmd("ROLE").query(&mut nodes[replica]).unwrap();
+                if role.get(3) == Some(&redis::Value::BulkString(b"connected".to_vec())) { break; }
+                assert!(Instant::now() < deadline, "replica link not ready for planned promotion");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let representative_slot = routes.iter().position(|e| e.as_ref().is_some_and(|e| e.port == primary)).unwrap();
+            redis::cmd("CLUSTER").arg("FAILOVER").query::<()>(&mut nodes[replica]).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let role: Vec<redis::Value> = redis::cmd("ROLE").query(&mut nodes[replica]).unwrap();
+                let old_role: Vec<redis::Value> = redis::cmd("ROLE").query(&mut nodes[(primary - 16600) as usize]).unwrap();
+                if role[0] == redis::Value::BulkString(b"master".to_vec()) && old_role[0] == redis::Value::BulkString(b"slave".to_vec()) {
+                    let agreed = nodes.iter_mut().all(|node| {
+                        let topology = crate::redis_topology::Cluster::decode(redis::cmd("CLUSTER").arg("SHARDS").query(node).unwrap(), "127.0.0.1", false);
+                        topology.is_ok_and(|topology| topology.routes()[representative_slot].as_ref().is_some_and(|e| e.port == 16600 + replica as u16))
+                    });
+                    if agreed { break; }
+                }
+                assert!(Instant::now() < deadline, "manual promotion did not complete: primary {primary}, replica {}, roles {role:?} / {old_role:?}", 16600 + replica);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let converged = nodes.iter_mut().all(|node| {
+                let topology = crate::redis_topology::Cluster::decode(redis::cmd("CLUSTER").arg("SHARDS").query(node).unwrap(), "127.0.0.1", false);
+                topology.is_ok_and(|topology| topology.routes().iter().all(|e| e.as_ref().is_some_and(|e| (16603..=16605).contains(&e.port))))
+            });
+            if converged { break; }
+            assert!(Instant::now() < deadline, "promoted routes did not converge");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(redis::cmd("GET").arg(&key).query::<redis::Value>(&mut nodes[data_replica]).unwrap(), redis::Value::BulkString(b"0".to_vec()), "promoted owner before old-primary shutdown");
+        for node in &mut nodes[..3] { let _ = redis::cmd("SHUTDOWN").arg("NOSAVE").query::<redis::Value>(node); }
+        assert_eq!(redis::cmd("GET").arg(&key).query::<redis::Value>(&mut nodes[data_replica]).unwrap(), redis::Value::BulkString(b"0".to_vec()), "promoted owner after old-primary shutdown");
+        assert!(session.query(redis::cmd("INCR").arg(&key)).is_err());
+        session.reconnect(&settings, password, "").unwrap();
+        assert_eq!(session.query(redis::cmd("GET").arg(&key)).unwrap(), redis::Value::BulkString(b"0".to_vec()));
+        assert_eq!(session.query(redis::cmd("INCR").arg(&key)).unwrap(), redis::Value::Int(1));
+        session.query(redis::cmd("DEL").arg(&key)).unwrap();
+    }
+    #[test]
+    #[ignore = "destructive final check in disposable scripts/test-redis-cluster.sh fixture"]
+    fn live_cluster_reconnect_uses_discovered_node_after_seed_shutdown() {
+        assert_eq!(std::env::var("RUSTABLE_REDIS_CLUSTER_RECOVERY_QA").as_deref(), Ok("1"));
+        let settings = Settings { host: "127.0.0.1".into(), port: 16400, tls: false, cluster: true, ..Default::default() };
+        let mut session = Session::connect(&settings, "rustable-cluster-test-only").unwrap();
+        let mut shutdown = Session::raw_node(&settings, "rustable-cluster-test-only").unwrap();
+        let _ = redis::cmd("SHUTDOWN").arg("NOSAVE").query::<redis::Value>(&mut shutdown);
+        assert!(session.query(&redis::cmd("PING")).is_err());
+        assert!(!session.is_connected());
+        session.reconnect(&settings, "rustable-cluster-test-only", "").unwrap();
+        assert!(session.is_connected());
+        assert_eq!(session.query(&redis::cmd("PING")).unwrap(), redis::Value::SimpleString("PONG".into()));
+        let startup = Settings { cluster_seeds: vec![crate::redis_settings::SentinelSeed { host: "127.0.0.1".into(), port: 16401 }], ..settings };
+        let mut fresh = Session::connect(&startup, "rustable-cluster-test-only").unwrap();
+        assert_eq!(fresh.query(&redis::cmd("PING")).unwrap(), redis::Value::SimpleString("PONG".into()));
+        for name in ["MONITOR", "SUBSCRIBE", "PSUBSCRIBE", "PUBSUB"] {
+            let control = crate::redis_stream::Control::default();
+            let mut command = redis::cmd(name);
+            if name != "MONITOR" { command.arg(if name == "PUBSUB" { "CHANNELS" } else { "rustable:seed-fallback" }); }
+            let mut reader = control.start(&startup, "rustable-cluster-test-only", "", &command).unwrap();
+            let reply = redis::Parser::new().parse_value(&mut reader).unwrap();
+            if name == "MONITOR" { assert_eq!(reply, redis::Value::Okay); }
+            else { assert!(matches!(reply, redis::Value::Array(_))); }
+            drop(reader);
+            control.release();
+        }
+        // This establishes a transport through a surviving node, not replica failover.
+    }
+    #[test]
+    #[ignore = "RUSTABLE_REDIS_CLUSTER_VECTOR_QA=1 scripts/test-redis-cluster.sh"]
+    fn live_cluster_vectors_route_previews_and_pages_across_primaries() {
+        use crate::redis_value::PageRequest;
+        assert_eq!(std::env::var("RUSTABLE_REDIS_CLUSTER_VECTOR_QA").as_deref(), Ok("1"));
+        let settings = Settings { host: "127.0.0.1".into(), port: 16400, tls: false, cluster: true, ..Default::default() };
+        let mut seed = Session::raw_node(&Settings { cluster: false, ..settings.clone() }, "rustable-cluster-test-only").unwrap();
+        let topology = crate::redis_topology::Cluster::decode(redis::cmd("CLUSTER").arg("SHARDS").query(&mut seed).unwrap(), &settings.host, false).unwrap();
+        let routes = topology.routes();
+        let mut keys = Vec::new();
+        let mut ports = std::collections::HashSet::new();
+        for index in 0..1000 {
+            let key = format!("rustable:vector-cluster:{}:{index}", std::process::id()).into_bytes();
+            let slot = crate::redis_cluster::command_slot(redis::cmd("VCARD").arg(&key)).unwrap().unwrap();
+            let endpoint = routes[slot as usize].as_ref().unwrap();
+            assert_eq!(endpoint.host, "127.0.0.1");
+            assert!([16400, 16401, 16402].contains(&endpoint.port));
+            if !ports.insert(endpoint.port) { continue; }
+            let mut owner = Session::raw_node(&Settings { port: endpoint.port, cluster: false, ..settings.clone() }, "rustable-cluster-test-only").unwrap();
+            let mut setup = redis::pipe();
+            for index in 0..205 { setup.cmd("VADD").arg(&key).arg("VALUES").arg(3).arg(1).arg(0).arg(0).arg(format!("member:{index:04}")); }
+            setup.query::<Vec<redis::Value>>(&mut owner).unwrap();
+            keys.push(key);
+            if ports.len() == 3 { break; }
+        }
+        assert_eq!(ports.len(), 3);
+        let mut session = Session::connect(&settings, "rustable-cluster-test-only").unwrap();
+        for _ in 0..2 {
+            let previews = session.key_rows(&keys).unwrap();
+            assert_eq!(previews.len(), 3);
+            for (row, key) in previews.iter().zip(&keys) {
+                assert_eq!(&row.key, key);
+                assert_eq!(row.kind, "vectorset");
+                assert_eq!(row.value, redis::Value::Int(205));
+                let similar = session.diagnostics(&crate::redis_diagnostics::Request::VectorSimilar { key: key.clone(), element: b"member:0000".to_vec() }).unwrap().vector_matches.unwrap();
+                assert_eq!(similar.rows.len(), 20);
+
+                let detail = session.diagnostics(&crate::redis_diagnostics::Request::VectorElement { key: key.clone(), element: b"member:0000".to_vec() }).unwrap().vector_element.unwrap();
+                assert_eq!(detail.components, ["1", "0", "0"]);
+
+                let first = session.inspect_view(key).unwrap();
+                assert_eq!(first.page.display.rows.len(), 200);
+                let second = session.value_page(&PageRequest { key: key.clone(), kind: "vectorset".into(), cursor: first.page.next.unwrap(), pattern: b"*".to_vec() }).unwrap();
+                assert_eq!(second.page.display.rows.len(), 5);
+                assert_eq!(second.page.display.rows[0].cells[0], "member:0200");
+                assert!(second.page.next.is_none());
+            }
+        }
+        for key in &keys { session.delete(key, false).unwrap(); }
+    }
+    #[test]
+    #[ignore = "RUSTABLE_REDIS_CLUSTER_MODULE_QA=1 scripts/test-redis-cluster.sh"]
+    fn live_cluster_timeseries_routes_previews_pages_and_ranges_across_primaries() {
+        use crate::redis_value::{Cursor, PageRequest};
+        assert_eq!(std::env::var("RUSTABLE_REDIS_CLUSTER_MODULE_QA").as_deref(), Ok("1"));
+        let settings = Settings { host: "127.0.0.1".into(), port: 16400, tls: false, cluster: true, ..Default::default() };
+        let mut seed = Session::raw_node(&Settings { cluster: false, ..settings.clone() }, "rustable-cluster-test-only").unwrap();
+        let topology = crate::redis_topology::Cluster::decode(redis::cmd("CLUSTER").arg("SHARDS").query(&mut seed).unwrap(), &settings.host, false).unwrap();
+        let routes = topology.routes();
+        let mut keys = Vec::new();
+        let mut ports = std::collections::HashSet::new();
+        for index in 0..1000 {
+            let key = format!("rustable:ts-cluster:{}:{index}", std::process::id()).into_bytes();
+            let slot = crate::redis_cluster::command_slot(redis::cmd("TS.GET").arg(&key)).unwrap().unwrap();
+            let endpoint = routes[slot as usize].as_ref().unwrap();
+            assert_eq!(endpoint.host, "127.0.0.1");
+            assert!([16400, 16401, 16402].contains(&endpoint.port));
+            if !ports.insert(endpoint.port) { continue; }
+            let mut owner = Session::raw_node(&Settings { port: endpoint.port, cluster: false, ..settings.clone() }, "rustable-cluster-test-only").unwrap();
+            let mut setup = redis::pipe();
+            for timestamp in 0..205 { setup.cmd("TS.ADD").arg(&key).arg(timestamp).arg(timestamp as f64 / 10.0); }
+            setup.query::<Vec<redis::Value>>(&mut owner).unwrap();
+            keys.push(key);
+            if ports.len() == 3 { break; }
+        }
+        assert_eq!(ports.len(), 3);
+        let mut session = Session::connect(&settings, "rustable-cluster-test-only").unwrap();
+        for _ in 0..2 {
+            let previews = session.key_rows(&keys).unwrap();
+            assert_eq!(previews.len(), 3);
+            for (row, key) in previews.iter().zip(&keys) {
+                assert_eq!(&row.key, key);
+                assert_eq!(row.kind, "TSDB-TYPE");
+                assert!(matches!(&row.value, redis::Value::Array(sample) if sample[0] == redis::Value::Int(204)));
+                let first = session.inspect_view(key).unwrap();
+                assert_eq!(first.page.display.rows.len(), 200);
+                let info = session.diagnostics(&crate::redis_diagnostics::Request::TimeSeries(key.clone())).unwrap();
+                assert!(info.summary.contains(&("Total samples".into(), "205".into())));
+                let second = session.value_page(&PageRequest { key: key.clone(), kind: "TSDB-TYPE".into(), cursor: first.page.next.unwrap(), pattern: b"*".to_vec() }).unwrap();
+                assert_eq!(second.page.display.rows.len(), 5);
+                assert_eq!(second.page.display.rows[0].cells[0], "200");
+                assert!(second.page.next.is_none());
+                let ranged = session.value_page(&PageRequest { key: key.clone(), kind: "TSDB-TYPE".into(), cursor: Cursor::Timestamp { start: 50, end: Some(100) }, pattern: b"*".to_vec() }).unwrap();
+                assert_eq!(ranged.page.display.rows.len(), 51);
+                assert_eq!(ranged.page.display.rows.last().unwrap().cells[0], "100");
+                assert!(ranged.page.next.is_none());
+            }
+        }
+        for key in &keys { session.delete(key, false).unwrap(); }
+    }
+    #[test]
+    #[ignore = "requires disposable Redis 8.2 fixture on RUSTABLE_REDIS_JSON_PORT"]
+    fn live_timeseries_pagination_retains_samples_and_detects_type_changes() {
+        use crate::redis_value::{Cursor, PageRequest};
+        let port: u16 = std::env::var("RUSTABLE_REDIS_JSON_PORT").expect("Use scripts/test-redis.sh").parse().unwrap();
+        assert_eq!(port, 16381);
+        let mut session = Session::connect(&Settings { port, ..settings() }, "rustable-redis-test-only").unwrap();
+        let key = format!("rustable:timeseries:{}", std::process::id());
+        session.query(redis::cmd("DEL").arg(&key)).unwrap();
+        let compacted = format!("{key}:rollup");
+        session.query(redis::cmd("DEL").arg(&compacted)).unwrap();
+        let mut create = redis::cmd("TS.CREATE");
+        create.arg(&key).arg("RETENTION").arg(10000).arg("LABELS");
+        for index in 0..70 { create.arg(format!("label-{index}")).arg("x".repeat(400)); }
+        session.query(&create).unwrap();
+        session.query(redis::cmd("TS.CREATE").arg(&compacted)).unwrap();
+        session.query(redis::cmd("TS.CREATERULE").arg(&key).arg(&compacted).arg("AGGREGATION").arg("avg").arg(1000)).unwrap();
+        let mut setup = redis::pipe();
+        for index in 0..435 { setup.cmd("TS.ADD").arg(&key).arg(index * 10).arg(index as f64 / 10.0); }
+        setup.query::<Vec<redis::Value>>(session.connection.as_mut().unwrap()).unwrap();
+        let info = session.diagnostics(&crate::redis_diagnostics::Request::TimeSeries(key.as_bytes().to_vec())).unwrap();
+        assert!(info.summary.contains(&("Total samples".into(), "435".into())));
+        assert!(info.summary.contains(&("Retention (ms)".into(), "10000".into())));
+        assert_eq!(info.rows.iter().filter(|row| row[0] == "Label").count(), 64);
+        assert!(info.rows.iter().any(|row| row[0] == "Rule" && row[1] == compacted && row[2].contains("1000 ms")));
+        assert!(info.footer.contains("Omitted: 6 labels"));
+        assert!(info.footer.contains("64 shortened fields"));
+        assert!(info.rows.iter().all(|row| row.iter().all(|cell| cell.len() <= 1024)));
+        session.query(redis::cmd("DEL").arg(&compacted)).unwrap();
+        let mut page = session.inspect_view(key.as_bytes()).unwrap();
+        assert_eq!(page.snapshot.kind, "TSDB-TYPE");
+        assert_eq!(page.page.display.headers, vec!["TIMESTAMP (ms)", "VALUE"]);
+        let mut timestamps = Vec::new();
+        loop {
+            assert!(page.page.display.rows.len() <= 200);
+            timestamps.extend(page.page.display.rows.iter().map(|row| row.cells[0].parse::<u64>().unwrap()));
+            let Some(cursor) = page.page.next else { break; };
+            page = session.value_page(&PageRequest { key: key.as_bytes().to_vec(), kind: "TSDB-TYPE".into(), cursor, pattern: b"*".to_vec() }).unwrap();
+        }
+        assert_eq!(timestamps, (0..435).map(|index| index * 10).collect::<Vec<_>>());
+        let mut request = PageRequest { key: key.as_bytes().to_vec(), kind: "TSDB-TYPE".into(), cursor: Cursor::Timestamp { start: 1001, end: Some(4000) }, pattern: b"*".to_vec() };
+        let mut ranged = Vec::new();
+        loop {
+            let page = session.value_page(&request).unwrap();
+            ranged.extend(page.page.display.rows.iter().map(|row| row.cells[0].parse::<u64>().unwrap()));
+            let Some(next) = page.page.next else { break; };
+            assert!(matches!(next, Cursor::Timestamp { end: Some(4000), .. }));
+            request.cursor = next;
+        }
+        assert_eq!(ranged, (101..=400).map(|index| index * 10).collect::<Vec<_>>());
+        let rows = session.key_rows(&[key.as_bytes().to_vec()]).unwrap();
+        assert!(matches!(&rows[0].value, redis::Value::Array(sample) if sample.first() == Some(&redis::Value::Int(4340))));
+        session.query(redis::cmd("DEL").arg(&key)).unwrap();
+        session.query(redis::cmd("TS.CREATE").arg(&key)).unwrap();
+        let empty = session.inspect_view(key.as_bytes()).unwrap();
+        assert!(empty.page.display.rows.is_empty());
+        assert!(empty.page.next.is_none());
+        session.query(redis::cmd("DEL").arg(&key)).unwrap();
+        session.query(redis::cmd("SET").arg(&key).arg("changed type")).unwrap();
+        assert!(session.value_page(&PageRequest { key: key.as_bytes().to_vec(), kind: "TSDB-TYPE".into(), cursor: Cursor::Timestamp { start: 0, end: None }, pattern: b"*".to_vec() }).is_err());
+        session.query(redis::cmd("DEL").arg(&key)).unwrap();
+    }
     #[test]
     #[ignore = "requires disposable Redis on localhost:16379"]
     fn live_pagination_binary_empty_large_expiry_and_timeout() {
@@ -792,3 +1972,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "redis_browser_tests.rs"]
+mod browser_tests;

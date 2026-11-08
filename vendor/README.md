@@ -254,3 +254,40 @@ See `docs/QUERY-RESULT-EDITING.md` for latency costs and regression coverage.
 The PostgreSQL cancellation tokens expose `process_id()` from the existing startup
 handshake. The query monitor uses it to select this workspace’s running query;
 this accessor performs no network I/O and does not expose the cancellation secret.
+
+# Redis native TLS handshake deadline
+
+`redis/` is the crates.io source of `redis 1.8.1` from
+[redis-rs](https://github.com/redis-rs/redis-rs), retaining its BSD-3-Clause license.
+The only upstream source change is in `src/connection.rs`: native TLS wraps its
+TCP stream during connection establishment with an absolute I/O deadline. Each
+handshake read/write receives the remaining socket timeout; TCP address attempts
+in the native TLS branch share that deadline. The wrapper disables its deadline
+after the handshake, leaving the existing authentication deadline and established
+connection read/write timeouts in control. Certificate/hostname verification is
+unchanged. No extra command, preflight, retry, or network exchange is added.
+
+Upstream applied the connection timeout only after `ActualConnection::new`, which
+could wait indefinitely inside the native TLS handshake. Reproduced while a
+cluster connection tried TLS against the disposable plaintext Redis fixture.
+Tests: `redis_cluster::tests::stalled_native_tls_handshake_obeys_connection_deadline`
+and `discovered_nodes_preserve_tls_identity_and_never_fall_back_to_plaintext`.
+DNS resolution remains the platform's synchronous resolver and is not made
+interruptible by this patch. The separate streaming transport is unchanged.
+
+### Opt-in bounded synchronous Redis replies
+
+`Connection::req_packed_commands_bounded` accepts a packed RESP2 batch and one
+byte budget per expected reply. It sends the batch once, consumes every server
+error value normally, and closes the connection on parse/transport failure.
+Callers must provide a clean request boundary and the exact response count;
+RESP3, Pub/Sub and outstanding timed-out responses are rejected. Limits include
+decoder read-ahead bytes, so they are conservative. Ordinary request methods are
+unchanged. The bounded parser uses the existing nesting restriction and combine's
+capped collection preallocation; its byte budget bounds input before full decoding.
+Do not retry writes after an uncertain outcome. Initial protocol coverage lives
+in `redis_session::tests::bounded_responses_preserve_one_exchange_and_close_on_limit`.
+Element-based similarity search now uses this API, including pipelined ASKING
+and VSIM. Application sessions discard ordinary parse-failed connections before
+a later bounded request. Redirect, overflow and parser-cleanup tests pass; bounded
+TLS and further batch-error coverage remain in progress.

@@ -23,3 +23,5 @@ Completion criteria:
 
 Cluster and Sentinel discovery are separate from direct standalone connections.
 Do not silently follow redirects or describe unsupported topologies as supported.
+
+The browser-parity continuation is tracked in [REDIS-ROADMAP.md](REDIS-ROADMAP.md).

@@ -525,3 +525,91 @@ SSH hosts, and rejected database CAs. This fixture does not verify Windows SSH
 RUSTABLE_SSH_FIXTURE_DIR=/tmp/rustable-ssh-fixture \
   docker compose -f tools/database-fixtures/ssh.compose.yaml down
 ```
+
+
+## Disposable Redis Sentinel fixture
+
+Run `bash scripts/test-redis-sentinel.sh` from the repository root. It uses
+`redis:7.4-alpine`, publishes data ports 16410–16412 and Sentinel ports
+26410–26412 on loopback, uses public test-only credentials, and removes its own
+uniquely named container on exit. It never reads saved connections. Existing
+listeners cause Docker port binding to fail rather than being reused.
+
+The smoke check verifies a three-Sentinel quorum, discovery and unknown service
+behavior, replicated data, manual promotion of a replica, and demotion of the old
+primary. Sentinel and data nodes use different passwords. Rustable discovery tests
+run before and after promotion, verifying the current target, independent auth,
+database selection and failed-seed fallback. It also stops the promoted primary
+and repeats the live session, probe and streaming checks after Sentinel performs
+automatic recovery. A final test keeps a workspace open through another primary
+handoff. It leaves the workspace socket untouched, verifies automatic recovery,
+checks that the failed INCR was not replayed, and then submits a fresh explicit
+INCR. Its separate fixture observer reconnects if Redis closes it during demotion.
+This tests recovery after the new primary is available; it does not cover every
+outage timing or network partition.
+
+`bash scripts/test-redis-sentinel-tls.sh` uses separate ephemeral certificate
+authorities for the TLS-only data endpoint (16420) and Sentinel (26420). It tests
+successful session/stream startup and rejection of wrong/missing trust anchors
+and the wrong discovery hostname. It requires OpenSSL, uses the same disposable
+Redis image, and removes its own container/certificate directory. TLS fixture
+execution is separate from the plaintext failover fixture.
+
+Network partitions and in-flight failover/write outcome coverage remain pending.
+
+## Disposable Redis Cluster and module fixtures
+
+`bash scripts/test-redis-cluster.sh` creates three Redis 7.4 primaries inside its
+own uniquely named container. Only data ports 16400–16402 are published on
+loopback; cluster bus traffic stays inside the container. The script requires
+those ports to be free and removes only its own container on exit. It uses
+public test credentials and never reads saved connections or user databases.
+
+`RUSTABLE_REDIS_CLUSTER_MODULE_QA=1 bash scripts/test-redis-cluster.sh` uses Redis
+8.2 and explicitly loads RedisTimeSeries on each primary. It runs the existing
+routing/topology checks plus `redis_session::tests::live_cluster_timeseries`.
+That test chooses one key owned by each primary, checks latest-sample previews,
+multiple pages and inclusive time ranges, and repeats the reads with cached
+connections. It does not claim module resharding/failover or cluster-wide query
+aggregation coverage. Standalone `scripts/test-redis.sh` excludes this Cluster-only
+case and still runs the standalone time-series inspection test on its Redis 8.2
+fixture.
+
+The Redis Cluster fixture now ends with a seed-loss recovery check: it shuts down
+only its disposable primary at 16400 after the other cases, then reconnects using
+a surviving discovered node. The test requires `RUSTABLE_REDIS_CLUSTER_RECOVERY_QA=1`
+and is invoked by `scripts/test-redis-cluster.sh`; do not run it against a shared
+Cluster. It validates transport rediscovery, not replica promotion or slot recovery.
+
+The Cluster fixture also performs a controlled live slot migration before seed
+shutdown. It uses only an initially empty slot, checks ASK and MOVED with exact
+counter increments and mixed-owner reads, then deletes its keys and restores slot
+ownership. This test runs only with `RUSTABLE_REDIS_CLUSTER_QA=1` in the fixture.
+
+For planned Cluster replica promotion and recovery with all original primaries
+stopped, run `bash scripts/test-redis-cluster-failover.sh`. It owns a separate
+six-node Redis 7.4 container on loopback ports 16600–16605, waits for replication
+and converged topology, and removes the container on exit. It sets the explicit
+`RUSTABLE_REDIS_CLUSTER_FAILOVER_QA=1` opt-in; the standalone Redis fixture excludes
+this test. For a native post-promotion topology capture, set
+`RUSTABLE_REDIS_TOPOLOGY_CAPTURE=1 RUSTABLE_REDIS_CAPTURE=target/redis-cluster-promotion-screenshots`
+before invoking the script; stop the preview after capture to clean up the fixture.
+
+Each Cluster fixture process has an isolated working directory, including its
+replication snapshot files. The six-node test waits for replica links and each
+promotion's topology to converge on every node before the next promotion. It also
+checks the replicated value before promotion and before/after primary shutdown;
+these correctness checks must not be removed to make a flaky fixture pass.
+
+### Redis vector sets
+
+Run `bash scripts/test-redis-vectors.sh` for an isolated Redis 8.4 container on
+loopback port 16382. It exercises ordered binary-safe pages and output limits,
+uses public fixture-only credentials, and removes its container on exit.
+For native screenshots use `RUSTABLE_REDIS_PREVIEW_IMAGE=redis:8.4-alpine
+RUSTABLE_REDIS_VECTOR_CAPTURE=1 RUSTABLE_REDIS_CAPTURE=target/redis-vectors-screenshots
+bash scripts/preview-redis-browser.sh` (environment assignments on one line).
+
+`RUSTABLE_REDIS_CLUSTER_VECTOR_QA=1 bash scripts/test-redis-cluster.sh` selects
+Redis 8.4 and additionally validates vector counts and pages across all three
+primary owners, before the final seed-shutdown recovery test.

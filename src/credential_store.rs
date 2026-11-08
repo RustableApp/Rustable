@@ -13,8 +13,18 @@ pub const SERVICE: &str = if cfg!(feature = "qa") {
 } else {
     "dev.rustable.app"
 };
-fn account(id: ProfileId) -> String {
-    format!("connection-{}-password", id.0)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Purpose {
+    #[default]
+    Database,
+    RedisSentinel,
+}
+fn account(id: ProfileId, purpose: Purpose) -> String {
+    match purpose {
+        // Preserve existing keychain accounts; no migration or overwrite.
+        Purpose::Database => format!("connection-{}-password", id.0),
+        Purpose::RedisSentinel => format!("connection-{}-redis-sentinel-password", id.0),
+    }
 }
 
 pub trait Backend: Send + Sync + 'static {
@@ -61,6 +71,7 @@ pub struct Response {
 struct Request {
     token: u64,
     id: ProfileId,
+    purpose: Purpose,
     operation: Operation,
 }
 pub struct Worker {
@@ -87,7 +98,7 @@ impl Worker {
         let (sender, responses) = mpsc::channel();
         std::thread::spawn(move || {
             while let Ok(request) = receiver.recv() {
-                let name = account(request.id);
+                let name = account(request.id, request.purpose);
                 let result = match request.operation {
                     Operation::Read => backend.read(&name),
                     Operation::Write(password) => backend.write(&name, &password).map(|()| None),
@@ -111,17 +122,21 @@ impl Worker {
         Self { backend, results, responses, next_token: 0 }
     }
     pub fn request(&mut self, id: ProfileId, operation: Operation) -> u64 {
+        self.request_for(id, Purpose::Database, operation)
+    }
+    pub fn request_for(&mut self, id: ProfileId, purpose: Purpose, operation: Operation) -> u64 {
         self.next_token = self.next_token.wrapping_add(1);
         let token = self.next_token;
         #[cfg(not(target_arch = "wasm32"))]
         let _ = self.requests.send(Request {
             token,
             id,
+            purpose,
             operation,
         });
         #[cfg(target_arch = "wasm32")]
         {
-            let name = account(id);
+            let name = account(id, purpose);
             let result = match operation {
                 Operation::Read => self.backend.read(&name),
                 Operation::Write(password) => self.backend.write(&name, &password).map(|()| None),
@@ -170,6 +185,28 @@ mod tests {
             assert!(start.elapsed() < std::time::Duration::from_secs(2));
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+    #[test]
+    fn sentinel_and_database_passwords_are_independent_and_keep_legacy_accounts() {
+        let backend = Arc::new(MemoryBackend::default());
+        backend.write("connection-7-password", "legacy-data").unwrap();
+        let mut worker = Worker::with_backend(backend.clone());
+        let save = worker.request_for(ProfileId(7), Purpose::RedisSentinel, Operation::Write("discovery-only".into()));
+        let read = worker.request(ProfileId(7), Operation::Read);
+        assert_eq!(result(&worker).token, save);
+        let response = result(&worker);
+        assert_eq!(response.token, read);
+        assert_eq!(response.result.unwrap().as_deref(), Some("legacy-data"));
+        worker.request(ProfileId(7), Operation::Delete);
+        worker.request_for(ProfileId(7), Purpose::RedisSentinel, Operation::Read);
+        assert!(result(&worker).result.is_ok());
+        assert_eq!(result(&worker).result.unwrap().as_deref(), Some("discovery-only"));
+        // A later scoped delete is ordered after an earlier save in the same worker.
+        worker.request_for(ProfileId(7), Purpose::RedisSentinel, Operation::Write("replacement".into()));
+        worker.request_for(ProfileId(7), Purpose::RedisSentinel, Operation::Delete);
+        for _ in 0..2 { assert!(result(&worker).result.is_ok()); }
+        assert_eq!(backend.read("connection-7-password").unwrap(), None);
+        assert_eq!(backend.read("connection-7-redis-sentinel-password").unwrap(), None);
     }
     #[test]
     fn serial_worker_keeps_profiles_isolated_and_delete_follows_pending_save() {

@@ -137,13 +137,34 @@ def measure(binary, source, logs, label, iteration):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--redis', action='store_true', help='Compare the same Redis grid fixture on both revisions')
+    parser.add_argument('--redis-connections', action='store_true', help='Include the shared Redis connection profile workload')
+    parser.add_argument('--redis-pages', action='store_true', help='Include Search, Analyze and Pub/Sub page workloads')
+    parser.add_argument('--redis-editor', action='store_true', help='Include Redis command editor idle/edit workloads')
+    parser.add_argument('--redis-tools', action='store_true', help='Include shared Redis diagnostics and topology workloads')
     parser.add_argument('--base', required=True, help='Git revision to compare against')
     parser.add_argument('--output', default='target/ui-performance')
     parser.add_argument('--runs', type=int, default=5)
     args = parser.parse_args()
+    global BENCHMARKS
+    if args.redis:
+        BENCHMARKS += ('redis_key_grid_frame_benchmark', 'redis_hash_inspector_frame_benchmark', 'redis_string_inspector_frame_benchmark', 'redis_browser_chrome_frame_benchmark')
+        EXPECTED.update(('redis/grid', 'redis/hash-inspector', 'redis/string-inspector', 'redis/browser-chrome'))
+    if args.redis_pages:
+        BENCHMARKS += ('redis_tool_pages_frame_benchmark',)
+        EXPECTED.update(f'redis/page/{page}' for page in ('search', 'analysis', 'pubsub', 'workbench-history', 'json-edit'))
+    if args.redis_editor:
+        BENCHMARKS += ('redis_command_pane_frame_benchmark',)
+        EXPECTED.update(f'redis/command-editor/{count}/{editing}' for count in (20, 200) for editing in ('false', 'true'))
     if args.runs < 5:
         parser.error('--runs must be at least 5')
     root = Path(run(['git', 'rev-parse', '--show-toplevel'], Path.cwd(), capture_output=True).stdout.strip())
+    if args.redis_connections:
+        BENCHMARKS += ('redis_connection_profile_frame_benchmark',)
+        EXPECTED.add('redis/connection-profile')
+    if args.redis_tools:
+        BENCHMARKS += ('redis_diagnostics_frame_benchmark', 'redis_topology_frame_benchmark')
+        EXPECTED.update(('redis/diagnostics', 'redis/topology'))
     base_sha = run(['git', 'rev-parse', '--verify', args.base + '^{commit}'], root, capture_output=True).stdout.strip()
     head_sha = run(['git', 'rev-parse', 'HEAD'], root, capture_output=True).stdout.strip()
     logs = (root / args.output).resolve()
@@ -152,7 +173,9 @@ def main():
     logs.mkdir(parents=True, exist_ok=True)
     metadata = dict(base_commit=base_sha, head_commit=head_sha,
                     working_tree=run(['git', 'status', '--porcelain'], root, capture_output=True).stdout,
-                    platform=platform.platform(), machine=platform.machine(), cpu=platform.processor(),
+                    platform=platform.platform(), machine=platform.machine(),
+                    cpu=(run(['sysctl', '-n', 'machdep.cpu.brand_string'], root, capture_output=True).stdout.strip()
+                         if platform.system() == 'Darwin' else platform.processor()),
                     rustc=run(['mise', 'exec', '--', 'rustc', '-Vv'], root, capture_output=True).stdout,
                     started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     build_profile='release', runs=args.runs, p95_threshold_percent=10,
@@ -163,6 +186,17 @@ def main():
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
+            if args.redis or args.redis_editor or args.redis_pages:
+                # New workload, identical source on each side; never change the
+                # workload in just the candidate and call it a comparison.
+                fixture = root / 'src' / 'redis_browser_benchmark.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                workspace = base_path / 'src' / 'redis_workspace.rs'
+                source = workspace.read_text()
+                if 'include!("redis_browser_benchmark.rs")' not in source:
+                    workspace.write_text(source + '\ninclude!("redis_browser_benchmark.rs");\n')
+                metadata['redis_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             # Both builds finish before any timing. Separate saved executables
             # prevent the second build from replacing the first benchmark binary.
             # Vendored crates can share Cargo package IDs across worktrees.

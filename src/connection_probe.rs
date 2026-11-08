@@ -34,7 +34,7 @@ pub struct Probe {
 }
 impl Probe {
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn start(connection: ConnectionKind, password: String, ctx: eframe::egui::Context) -> Self {
+    pub fn start_with_sentinel(connection: ConnectionKind, password: String, sentinel_password: String, ctx: eframe::egui::Context) -> Self {
         let (sender, receiver) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
@@ -45,13 +45,13 @@ impl Probe {
                     ctx.request_repaint();
                 }
             };
-            native::run(connection, password, &stop, &emit);
+            native::run_with_sentinel(connection, password, sentinel_password, &stop, &emit);
             emit(Event::Finished);
         });
         Self { receiver, cancel }
     }
     #[cfg(target_arch = "wasm32")]
-    pub fn start(_connection: ConnectionKind, _password: String, ctx: eframe::egui::Context) -> Self {
+    pub fn start_with_sentinel(_connection: ConnectionKind, _password: String, _sentinel_password: String, ctx: eframe::egui::Context) -> Self {
         let (sender, receiver) = mpsc::channel();
         let _ = sender.send(Event::Failed(vec![], "Connection testing requires the desktop app.".into()));
         let _ = sender.send(Event::Finished);

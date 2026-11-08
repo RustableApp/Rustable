@@ -4,7 +4,7 @@ use crate::connection_probe::{Event as ProbeEvent, Probe, ProbeField};
 use crate::connection_profiles::{
     ConnectionKind, GroupId, PostgresProfile, Profile, ProfileId, SshOptions,
 };
-use crate::credential_store::{Operation as CredentialOperation, Worker as CredentialWorker};
+use crate::credential_store::{Operation as CredentialOperation, Purpose as CredentialPurpose, Worker as CredentialWorker};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ListSelection {
@@ -21,6 +21,10 @@ pub(super) struct Manager {
     draft: Option<Profile>,
     new_connection: Option<crate::icons::DatabaseEngine>,
     password: String,
+    sentinel_password: String,
+    sentinel_password_revision: u64,
+    sentinel_saved_password_revision: Option<u64>,
+    sentinel_saved_feedback_revision: Option<u64>,
     generation: u64,
     focus_group_name: bool,
     search: String,
@@ -30,13 +34,13 @@ pub(super) struct Manager {
     error: Option<String>,
     saved_feedback: Option<(Profile, u64)>,
     probe: Option<Probe>,
-    probe_snapshot: Option<(Profile, String)>,
+    probe_snapshot: Option<(Profile, String, String)>,
     probe_status: Vec<(ProbeField, FieldStatus)>,
     probe_message: Option<String>,
     credentials: Option<CredentialWorker>,
     credential_pending: Vec<CredentialPending>,
-    credential_latest: std::collections::HashMap<ProfileId, u64>,
-    credential_delete_retry: std::collections::HashSet<ProfileId>,
+    credential_latest: std::collections::HashMap<(ProfileId, CredentialPurpose), u64>,
+    credential_delete_retry: std::collections::HashSet<(ProfileId, CredentialPurpose)>,
     password_revision: u64,
     saved_password_revision: Option<u64>,
 }
@@ -49,6 +53,7 @@ enum CredentialKind {
 struct CredentialPending {
     token: u64,
     id: ProfileId,
+    purpose: CredentialPurpose,
     generation: u64,
     kind: CredentialKind,
 }
@@ -58,6 +63,18 @@ enum FieldStatus {
     Success,
     Failed(String),
 }
+fn remembers(profile: &Profile, purpose: CredentialPurpose) -> bool {
+    match purpose {
+        CredentialPurpose::Database => profile.remember_password,
+        CredentialPurpose::RedisSentinel => matches!(&profile.connection, ConnectionKind::Redis(settings) if settings.sentinel.as_ref().is_some_and(|s| s.remember_password)),
+    }
+}
+fn set_remember(profile: &mut Profile, purpose: CredentialPurpose, value: bool) {
+    match purpose {
+        CredentialPurpose::Database => profile.remember_password = value,
+        CredentialPurpose::RedisSentinel => if let ConnectionKind::Redis(settings) = &mut profile.connection && let Some(sentinel) = &mut settings.sentinel { sentinel.remember_password = value; },
+    }
+}
 impl Manager {
     pub(super) fn reveal_profile(&mut self, id: ProfileId, profiles: &crate::connection_profiles::ConnectionProfiles) {
         let Some(profile) = profiles.profile(id) else {
@@ -65,7 +82,7 @@ impl Manager {
             return;
         };
         let already_selected = self.draft.as_ref().is_some_and(|draft| draft.id == id);
-        if !already_selected && (self.dirty(profiles) || !self.password.is_empty()) {
+        if !already_selected && (self.dirty(profiles) || !self.password.is_empty() || !self.sentinel_password.is_empty()) {
             self.error = Some("Save or discard the current connection form before selecting the active connection.".into());
             return;
         }
@@ -78,25 +95,32 @@ impl Manager {
         self.scroll_to_profile = Some(id);
     }
     fn queue_credential(&mut self, id: ProfileId, operation: CredentialOperation) {
+        self.queue_credential_for(id, CredentialPurpose::Database, operation);
+    }
+    fn password_revision_for(&self, purpose: CredentialPurpose) -> u64 {
+        match purpose { CredentialPurpose::Database => self.password_revision, CredentialPurpose::RedisSentinel => self.sentinel_password_revision }
+    }
+    fn queue_credential_for(&mut self, id: ProfileId, purpose: CredentialPurpose, operation: CredentialOperation) {
         let kind = match &operation {
-            CredentialOperation::Read => CredentialKind::Read(self.password_revision),
+            CredentialOperation::Read => CredentialKind::Read(self.password_revision_for(purpose)),
             CredentialOperation::Write(_) => CredentialKind::Write,
             CredentialOperation::Delete => CredentialKind::Delete,
         };
         let worker = self.credentials.get_or_insert_with(CredentialWorker::new);
-        let token = worker.request(id, operation);
+        let token = match purpose { CredentialPurpose::Database => worker.request(id, operation), CredentialPurpose::RedisSentinel => worker.request_for(id, purpose, operation) };
         if !matches!(kind, CredentialKind::Read(_)) {
-            self.credential_latest.insert(id, token);
+            self.credential_latest.insert((id, purpose), token);
         }
         self.credential_pending.push(CredentialPending {
             token,
             id,
+            purpose,
             generation: self.generation,
             kind,
         });
     }
     fn loading_password(&self) -> bool {
-        self.credential_pending.iter().any(|pending| pending.generation == self.generation && matches!(pending.kind, CredentialKind::Read(revision) if revision == self.password_revision))
+        self.credential_pending.iter().any(|pending| pending.generation == self.generation && matches!(pending.kind, CredentialKind::Read(revision) if revision == self.password_revision_for(pending.purpose)))
     }
 
     fn invalidate_probe(&mut self) {
@@ -109,8 +133,8 @@ impl Manager {
         if self
             .probe_snapshot
             .as_ref()
-            .is_some_and(|(profile, password)| {
-                self.draft.as_ref() != Some(profile) || &self.password != password
+            .is_some_and(|(profile, password, sentinel_password)| {
+                self.draft.as_ref() != Some(profile) || &self.password != password || &self.sentinel_password != sentinel_password
             })
         {
             self.invalidate_probe();
@@ -160,10 +184,11 @@ impl Manager {
     fn start_probe(&mut self, ctx: &egui::Context) {
         self.invalidate_probe();
         if let Some(profile) = &self.draft {
-            self.probe_snapshot = Some((profile.clone(), self.password.clone()));
-            self.probe = Some(Probe::start(
+            self.probe_snapshot = Some((profile.clone(), self.password.clone(), self.sentinel_password.clone()));
+            self.probe = Some(Probe::start_with_sentinel(
                 profile.connection.clone(),
                 self.password.clone(),
+                self.sentinel_password.clone(),
                 ctx.clone(),
             ));
         }
@@ -174,15 +199,20 @@ impl Manager {
         self.invalidate_probe();
         self.generation = self.generation.wrapping_add(1);
         self.password.clear();
+        self.sentinel_password.clear();
+        self.sentinel_password_revision = self.sentinel_password_revision.wrapping_add(1);
+        self.sentinel_saved_password_revision = Some(self.sentinel_password_revision);
         self.password_revision = self.password_revision.wrapping_add(1);
         self.saved_password_revision = Some(self.password_revision);
         let load = profile.remember_password && profile.id.0 != 0;
+        let load_sentinel = remembers(&profile, CredentialPurpose::RedisSentinel) && profile.id.0 != 0;
         let id = profile.id;
         self.draft = Some(profile);
         self.error = None;
         if load {
             self.queue_credential(id, CredentialOperation::Read);
         }
+        if load_sentinel { self.queue_credential_for(id, CredentialPurpose::RedisSentinel, CredentialOperation::Read); }
     }
     pub(super) fn set_path(&mut self, generation: u64, key: bool, path: PathBuf) {
         if self.generation != generation {
@@ -207,7 +237,8 @@ impl Manager {
         self.draft
             .as_ref()
             .is_some_and(|draft| profiles.profile(draft.id) != Some(draft)
-                || self.saved_password_revision != Some(self.password_revision))
+                || self.saved_password_revision != Some(self.password_revision)
+                || self.sentinel_saved_password_revision != Some(self.sentinel_password_revision))
     }
 }
 
@@ -384,6 +415,68 @@ fn form_text(
     changed
 }
 
+fn cluster_seeds_form(ui: &mut egui::Ui, seeds: &mut Vec<crate::redis_settings::SentinelSeed>, generation: u64) -> bool {
+    let mut valid = true;
+    let mut remove = None;
+    let row_id = ui.make_persistent_id(("cluster-seed-ids", generation));
+    let (mut ids, mut next) = ui.ctx().data_mut(|data| data.get_temp::<(Vec<u64>, u64)>(row_id)).unwrap_or_default();
+    ids.truncate(seeds.len());
+    while ids.len() < seeds.len() { ids.push(next); next += 1; }
+    for (index, seed) in seeds.iter_mut().enumerate() {
+        ui.push_id(("cluster-seed", ids[index]), |ui| {
+            form_text(ui, &format!("Alternate {}", index + 1), &mut seed.host, false, None);
+            ui.horizontal(|ui| {
+                valid &= form_port(ui, &mut seed.port, ProbeField::Port, generation);
+                if ui.button("Remove").clicked() { remove = Some(index); }
+            });
+        });
+    }
+    if let Some(index) = remove { seeds.remove(index); ids.remove(index); }
+    form_row(ui, "", |ui| {
+        if ui.add_enabled(seeds.len() < 7, egui::Button::new("Add alternate seed")).clicked() {
+            seeds.push(crate::redis_settings::SentinelSeed { host: String::new(), port: 6379 });
+        }
+    });
+    if !seeds.is_empty() { ui.weak("Connect and Test use the first available seed. All seeds share the credentials and TLS settings below."); }
+    ui.ctx().data_mut(|data| data.insert_temp(row_id, (ids, next)));
+    valid
+}
+
+fn sentinel_form(ui: &mut egui::Ui, config: &mut crate::redis_settings::Sentinel, password: &mut String, revision: &mut u64, generation: u64) -> bool {
+    form_section(ui, "Sentinel discovery");
+    form_text(ui, "Service", &mut config.service, false, None);
+    let mut valid = true;
+    let mut remove = None;
+    let can_remove = config.seeds.len() > 1;
+    // Stable row IDs keep partially typed ports attached to their own seed after removal.
+    let row_id = ui.make_persistent_id(("sentinel-seed-ids", generation));
+    let (mut row_ids, mut next_id) = ui.ctx().data_mut(|data| data.get_temp::<(Vec<u64>, u64)>(row_id)).unwrap_or_default();
+    row_ids.truncate(config.seeds.len());
+    while row_ids.len() < config.seeds.len() { row_ids.push(next_id); next_id += 1; }
+    for (index, seed) in config.seeds.iter_mut().enumerate() {
+        ui.push_id(("sentinel-seed", row_ids[index]), |ui| {
+            form_text(ui, &format!("Sentinel {}", index + 1), &mut seed.host, false, None);
+            ui.horizontal(|ui| {
+                valid &= form_port(ui, &mut seed.port, ProbeField::Port, generation);
+                if ui.add_enabled(can_remove, egui::Button::new("Remove")).on_hover_text("Remove this Sentinel address").clicked() { remove = Some(index); }
+            });
+        });
+    }
+    if let Some(index) = remove { config.seeds.remove(index); row_ids.remove(index); }
+    form_row(ui, "", |ui| {
+        if ui.add_enabled(config.seeds.len() < 8, egui::Button::new("Add Sentinel")).clicked() {
+            config.seeds.push(crate::redis_settings::SentinelSeed { host: String::new(), port: 26379 });
+        }
+    });
+    ui.ctx().data_mut(|data| data.insert_temp(row_id, (row_ids, next_id)));
+    form_text(ui, "User", &mut config.username, false, None);
+    if form_text(ui, "Password", password, true, None) { *revision = revision.wrapping_add(1); }
+    form_row(ui, "TLS", |ui| { form_checkbox(ui, &mut config.tls, "Verify certificate and hostname"); });
+    let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
+    if form_text(ui, "CA file", &mut ca, false, None) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
+    valid
+}
+
 #[derive(Clone)]
 struct PortEdit {
     text: String,
@@ -434,35 +527,44 @@ impl Rustable {
             };
             let pending = self.connection_manager.credential_pending.remove(index);
             let manager = &mut self.connection_manager;
+            let credential_label = match pending.purpose { CredentialPurpose::Database => "password", CredentialPurpose::RedisSentinel => "Sentinel password" };
             match pending.kind {
                 CredentialKind::Read(revision) => {
                     if pending.generation != manager.generation
-                        || revision != manager.password_revision
+                        || revision != manager.password_revision_for(pending.purpose)
                         || !manager.draft.as_ref().is_some_and(|profile| {
-                            profile.id == pending.id && profile.remember_password
+                            profile.id == pending.id && remembers(profile, pending.purpose)
                         })
                     {
                         continue;
                     }
                     match response.result {
                         Ok(Some(password)) => {
-                            manager.password = password;
-                            manager.password_revision = manager.password_revision.wrapping_add(1);
-                            manager.saved_password_revision = Some(manager.password_revision);
+                            match pending.purpose {
+                                CredentialPurpose::Database => {
+                                    manager.password = password;
+                                    manager.password_revision = manager.password_revision.wrapping_add(1);
+                                    manager.saved_password_revision = Some(manager.password_revision);
+                                }
+                                CredentialPurpose::RedisSentinel => {
+                                    manager.sentinel_password = password;
+                                    manager.sentinel_password_revision = manager.sentinel_password_revision.wrapping_add(1);
+                                    manager.sentinel_saved_password_revision = Some(manager.sentinel_password_revision);
+                                }
+                            }
                         }
                         Ok(None) => manager.error = Some(
-                            "Saved password was not found. Enter it again to use this connection."
-                                .into(),
+                            format!("Saved {credential_label} was not found. Enter it again to use this connection."),
                         ),
                         Err(error) => {
                             manager.error = Some(format!(
-                                "Cannot read the secure credential store: {error}. Enter the password for this session."
+                                "Cannot read the secure credential store: {error}. Enter the {credential_label} for this session."
                             ))
                         }
                     }
                 }
                 CredentialKind::Write | CredentialKind::Delete => {
-                    if manager.credential_latest.get(&pending.id) != Some(&pending.token) {
+                    if manager.credential_latest.get(&(pending.id, pending.purpose)) != Some(&pending.token) {
                         continue;
                     }
                     if let Err(error) = response.result {
@@ -475,27 +577,27 @@ impl Rustable {
                                 .iter_mut()
                                 .find(|profile| profile.id == pending.id)
                             {
-                                profile.remember_password = false;
+                                set_remember(profile, pending.purpose, false);
                                 profiles_changed = true;
                             }
                             if let Some(draft) = &mut manager.draft
                                 && draft.id == pending.id
                                 && pending.generation == manager.generation
                             {
-                                draft.remember_password = false;
-                                manager.saved_password_revision = None;
+                                set_remember(draft, pending.purpose, false);
+                                match pending.purpose { CredentialPurpose::Database => manager.saved_password_revision = None, CredentialPurpose::RedisSentinel => manager.sentinel_saved_password_revision = None }
                             }
                             manager.error = Some(format!(
-                                "Password remains session-only; the secure store could not save it: {error}"
+                                "The {credential_label} remains session-only; the secure store could not save it: {error}"
                             ));
                         } else {
-                            manager.credential_delete_retry.insert(pending.id);
+                            manager.credential_delete_retry.insert((pending.id, pending.purpose));
                             manager.error = Some(format!(
-                                "The secure store could not remove the saved password: {error}. The credential may still remain in the system credential store."
+                                "The secure store could not remove the saved {credential_label}: {error}. The credential may still remain in the system credential store."
                             ));
                         }
                     } else if matches!(pending.kind, CredentialKind::Delete) {
-                        manager.credential_delete_retry.remove(&pending.id);
+                        manager.credential_delete_retry.remove(&(pending.id, pending.purpose));
                     }
                 }
             }
@@ -892,10 +994,29 @@ impl Rustable {
                         form_section(ui, "Database");
                         match &mut draft.connection {
                             ConnectionKind::Redis(config) => {
-                                ui.weak("Standalone Redis · key browser and command editor · desktop only");
-                                form_text(ui, "Host", &mut config.host, false, Some(ProbeField::Host));
-                                ports_valid &= form_port(ui, &mut config.port, ProbeField::Port, self.connection_manager.generation);
-                                status_row(ui, "Database", Some(ProbeField::Database), |ui| { ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut config.database).range(0..=u32::MAX)); });
+                                ui.weak("Redis · key browser and command editor · desktop only");
+                                let mut deployment = if config.sentinel.is_some() { 2 } else { u8::from(config.cluster) };
+                                form_row(ui, "Deployment", |ui| {
+                                    egui::ComboBox::from_id_salt("redis-deployment").width(ui.available_width()).selected_text(["Standalone", "Cluster", "Sentinel"][deployment as usize]).show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut deployment, 0, "Standalone");
+                                        ui.selectable_value(&mut deployment, 1, "Cluster");
+                                        ui.selectable_value(&mut deployment, 2, "Sentinel");
+                                    });
+                                });
+                                config.cluster = deployment == 1;
+                                if deployment == 2 {
+                                    let sentinel = config.sentinel.get_or_insert_with(Default::default);
+                                    ports_valid &= sentinel_form(ui, sentinel, &mut self.connection_manager.sentinel_password, &mut self.connection_manager.sentinel_password_revision, self.connection_manager.generation);
+                                    form_section(ui, "Primary database");
+                                    ui.weak("Connects to the primary discovered by Sentinel.");
+                                } else {
+                                    config.sentinel = None;
+                                    if config.cluster { config.database = 0; ui.weak("Scans all primary nodes. Atomic multi-key operations require matching hash slots."); }
+                                    form_text(ui, "Host", &mut config.host, false, Some(ProbeField::Host));
+                                    ports_valid &= form_port(ui, &mut config.port, ProbeField::Port, self.connection_manager.generation);
+                                    if config.cluster { ports_valid &= cluster_seeds_form(ui, &mut config.cluster_seeds, self.connection_manager.generation); }
+                                }
+                                status_row(ui, "Database", Some(ProbeField::Database), |ui| { ui.add_enabled_ui(!config.cluster, |ui| {ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut config.database).range(0..=u32::MAX));}); });
                                 form_text(ui, "User", &mut config.username, false, Some(ProbeField::User));
                                 if form_text(ui, "Password", &mut self.connection_manager.password, true, Some(ProbeField::Password)) { self.connection_manager.password_revision = self.connection_manager.password_revision.wrapping_add(1); }
                                 status_row(ui, "TLS", Some(ProbeField::Tls), |ui| { form_checkbox(ui, &mut config.tls, "Verify certificate and hostname"); });
@@ -973,14 +1094,15 @@ impl Rustable {
                         ui.add(egui::Label::new(RichText::new(message).small()).truncate()).on_hover_text(message);
                     }
                     let has_changes = self.prefs.saved_connections.profile(draft.id) != Some(draft)
-                        || self.connection_manager.saved_password_revision != Some(self.connection_manager.password_revision);
+                        || self.connection_manager.saved_password_revision != Some(self.connection_manager.password_revision)
+                        || self.connection_manager.sentinel_saved_password_revision != Some(self.connection_manager.sentinel_password_revision);
                     let valid = draft.validate().is_ok() && ports_valid;
                     if !ports_valid { ui.colored_label(ui.visuals().error_fg_color, "Port must be between 1 and 65535."); }
-                    let password_loading = self.connection_manager.credential_pending.iter().any(|pending| pending.generation == self.connection_manager.generation && matches!(pending.kind, CredentialKind::Read(revision) if revision == self.connection_manager.password_revision));
+                    let password_loading = self.connection_manager.credential_pending.iter().any(|pending| pending.generation == self.connection_manager.generation && matches!(pending.kind, CredentialKind::Read(revision) if revision == match pending.purpose { CredentialPurpose::Database => self.connection_manager.password_revision, CredentialPurpose::RedisSentinel => self.connection_manager.sentinel_password_revision }));
                     if password_loading { ui.weak("Reading saved password…"); }
                     ui.horizontal(|ui| {
                         if ui.button("Discard").clicked() { action = Some(Action::Discard); }
-                        if self.connection_manager.saved_feedback.as_ref().is_some_and(|(saved, revision)| saved == draft && *revision == self.connection_manager.password_revision) {
+                        if self.connection_manager.saved_feedback.as_ref().is_some_and(|(saved, revision)| saved == draft && *revision == self.connection_manager.password_revision && self.connection_manager.sentinel_saved_feedback_revision == Some(self.connection_manager.sentinel_password_revision)) {
                             let credentials_pending = self.connection_manager.credential_pending.iter().any(|pending| pending.id == draft.id && !matches!(pending.kind, CredentialKind::Read(_)));
                             ui.label(RichText::new(if credentials_pending { "Connection saved · updating password…" } else { "Connection saved" }).color(ui.visuals().hyperlink_color));
                         }
@@ -1183,7 +1305,7 @@ impl Rustable {
                     .as_ref()
                     .ok_or("Choose a connection first.")?;
                 let connection = match &profile.connection {
-                    ConnectionKind::Redis(settings) => crate::session_windows::WindowConnection::Redis { settings: settings.clone(), password: self.connection_manager.password.clone() },
+                    ConnectionKind::Redis(settings) => crate::session_windows::WindowConnection::Redis { settings: Box::new(settings.clone()), password: self.connection_manager.password.clone(), sentinel_password: self.connection_manager.sentinel_password.clone() },
                     ConnectionKind::SQLite { path } => {
                         crate::session_windows::WindowConnection::Sqlite(path.clone())
                     }
@@ -1219,7 +1341,9 @@ impl Rustable {
                     .clone()
                     .ok_or("Choose a connection first.")?;
                 // This persisted flag tracks secure-store lookup, not a user preference.
+                let had_sentinel = self.prefs.saved_connections.profile(profile.id).is_some_and(|saved| remembers(saved, CredentialPurpose::RedisSentinel));
                 profile.remember_password = !matches!(profile.connection, ConnectionKind::SQLite { .. });
+                set_remember(&mut profile, CredentialPurpose::RedisSentinel, true);
                 if profile.id.0 == 0 {
                     profile.id = self.prefs.saved_connections.add_profile(profile.clone())?;
                 } else {
@@ -1233,15 +1357,25 @@ impl Rustable {
                 self.profiles_changed();
                 self.connection_manager.error = None;
                 self.connection_manager.saved_password_revision = Some(self.connection_manager.password_revision);
+                self.connection_manager.sentinel_saved_password_revision = Some(self.connection_manager.sentinel_password_revision);
+                self.connection_manager.sentinel_saved_feedback_revision = Some(self.connection_manager.sentinel_password_revision);
                 self.connection_manager.saved_feedback = self.connection_manager.draft.clone().map(|saved| (saved, self.connection_manager.password_revision));
                 if matches!(profile.connection, ConnectionKind::Postgres(_) | ConnectionKind::Mysql(_) | ConnectionKind::MariaDb(_) | ConnectionKind::Redis(_)) {
-                    if self.connection_manager.credential_delete_retry.contains(&profile.id) {
+                    if self.connection_manager.credential_delete_retry.contains(&(profile.id, CredentialPurpose::Database)) {
                         self.connection_manager.queue_credential(profile.id, CredentialOperation::Delete);
                     }
                     self.connection_manager.queue_credential(
                         profile.id,
                         CredentialOperation::Write(self.connection_manager.password.clone()),
                     );
+                }
+                if remembers(&profile, CredentialPurpose::RedisSentinel) {
+                    if self.connection_manager.credential_delete_retry.contains(&(profile.id, CredentialPurpose::RedisSentinel)) {
+                        self.connection_manager.queue_credential_for(profile.id, CredentialPurpose::RedisSentinel, CredentialOperation::Delete);
+                    }
+                    self.connection_manager.queue_credential_for(profile.id, CredentialPurpose::RedisSentinel, CredentialOperation::Write(self.connection_manager.sentinel_password.clone()));
+                } else if had_sentinel {
+                    self.connection_manager.queue_credential_for(profile.id, CredentialPurpose::RedisSentinel, CredentialOperation::Delete);
                 }
             }
             Action::Discard => {
@@ -1256,6 +1390,7 @@ impl Rustable {
                 } else {
                     self.connection_manager.draft = None;
                     self.connection_manager.password.clear();
+                    self.connection_manager.sentinel_password.clear();
                     self.connection_manager.generation =
                         self.connection_manager.generation.wrapping_add(1);
                 }
@@ -1277,10 +1412,13 @@ impl Rustable {
             Action::Delete(id) => {
                 let removed = self.prefs.saved_connections.remove_profile(id)?;
                 if removed.remember_password
-                    || self.connection_manager.credential_latest.contains_key(&id)
+                    || self.connection_manager.credential_latest.contains_key(&(id, CredentialPurpose::Database))
                 {
                     self.connection_manager
                         .queue_credential(id, CredentialOperation::Delete);
+                }
+                if remembers(&removed, CredentialPurpose::RedisSentinel) || self.connection_manager.credential_latest.contains_key(&(id, CredentialPurpose::RedisSentinel)) {
+                    self.connection_manager.queue_credential_for(id, CredentialPurpose::RedisSentinel, CredentialOperation::Delete);
                 }
                 self.profiles_changed();
                 if self.connection_manager.selection == Some(ListSelection::Profile(id)) {
@@ -1294,6 +1432,7 @@ impl Rustable {
                 {
                     self.connection_manager.draft = None;
                     self.connection_manager.password.clear();
+                    self.connection_manager.sentinel_password.clear();
                 }
             }
             Action::AddGroup => {
@@ -1578,6 +1717,56 @@ fn ssh_form(ui: &mut egui::Ui, options: &mut Option<SshOptions>, generation: u64
     ports_valid
 }
 
+#[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
+impl Rustable {
+    pub(crate) fn run_sentinel_preview() -> eframe::Result {
+        struct Preview { app: Rustable, frames: u32, requested: bool }
+        impl eframe::App for Preview {
+            fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+                self.app.connections_window(ctx);
+                self.frames += 1;
+                for event in ctx.input(|i| i.events.clone()) {
+                    if let egui::Event::Screenshot { image, .. } = event {
+                        let path = std::env::var_os("RUSTABLE_SENTINEL_CAPTURE").unwrap();
+                        std::thread::spawn(move || {
+                            let mut bytes = format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+                            for pixel in &image.pixels { bytes.extend_from_slice(&pixel.to_array()[..3]); }
+                            std::fs::write(path, bytes).unwrap();
+                        });
+                    }
+                }
+                if self.frames == 12 && !self.requested {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+                    self.requested = true;
+                }
+                if self.frames < 20 { ctx.request_repaint_after(std::time::Duration::from_millis(50)); }
+            }
+        }
+        eframe::run_native("Rustable Sentinel Preview", eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_inner_size(if std::env::var_os("RUSTABLE_SENTINEL_COMPACT").is_some() { [1000.0, 760.0] } else { [1200.0, 1080.0] }), ..Default::default()
+        }, Box::new(|cc| {
+            crate::fonts::install(&cc.egui_ctx);
+            let mut app = Rustable::with_launcher_preferences(&cc.egui_ctx, Preferences::default());
+            crate::app::apply_preview_theme(&cc.egui_ctx);
+            app.connection_action(Action::NewRedis).unwrap();
+            app.connections = true;
+            app.child_window = false;
+            let draft = app.connection_manager.draft.as_mut().unwrap();
+            draft.name = "Production cache".into();
+            if let ConnectionKind::Redis(settings) = &mut draft.connection {
+                if std::env::var_os("RUSTABLE_CLUSTER_SEEDS_CAPTURE").is_some() {
+                    settings.cluster = true;
+                    settings.host = "cache-1.example.test".into();
+                    settings.cluster_seeds = vec![crate::redis_settings::SentinelSeed { host: "cache-2.example.test".into(), port: 6379 }];
+                } else {
+                settings.sentinel = Some(crate::redis_settings::Sentinel { service: "primary-cache".into(), seeds: vec![crate::redis_settings::SentinelSeed { host: "sentinel-1.example.test".into(), port: 26379 }], ..Default::default() });
+                }
+            }
+            Ok(Box::new(Preview { app, frames: 0, requested: false }))
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1660,6 +1849,7 @@ mod tests {
             assert!(app.pending.is_none());
         }
     }
+    include!("redis_connection_benchmark.rs");
     fn app() -> Rustable {
         let mut app = Rustable::with_preferences(&egui::Context::default(), Preferences::default());
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
@@ -1780,6 +1970,85 @@ mod tests {
         }
     }
     #[test]
+    fn sentinel_keychain_failures_only_disable_the_failed_credential_scope() {
+        use crate::credential_store::{Backend, MemoryBackend};
+        struct SelectiveFailure { inner: MemoryBackend, fail_sentinel: bool }
+        impl Backend for SelectiveFailure {
+            fn read(&self, account: &str) -> Result<Option<String>, String> { self.inner.read(account) }
+            fn write(&self, account: &str, password: &str) -> Result<(), String> {
+                if account.contains("-redis-sentinel-") == self.fail_sentinel { Err("simulated secure-store failure".into()) }
+                else { self.inner.write(account, password) }
+            }
+            fn delete(&self, account: &str) -> Result<(), String> { self.inner.delete(account) }
+        }
+        for fail_sentinel in [false, true] {
+            let mut app = app();
+            app.connection_manager.credentials = Some(CredentialWorker::with_backend(std::sync::Arc::new(SelectiveFailure { inner: MemoryBackend::default(), fail_sentinel })));
+            app.connection_action(Action::NewRedis).unwrap();
+            let profile = app.connection_manager.draft.as_mut().unwrap();
+            profile.name = "Scoped failure".into();
+            let ConnectionKind::Redis(settings) = &mut profile.connection else { panic!() };
+            settings.sentinel = Some(Default::default());
+            app.connection_manager.password = "DATA_ONLY_IN_MEMORY_ON_FAILURE".into();
+            app.connection_manager.sentinel_password = "SENTINEL_ONLY_IN_MEMORY_ON_FAILURE".into();
+            app.connection_action(Action::Save(false)).unwrap();
+            settle_credentials(&mut app);
+            let profile = app.connection_manager.draft.as_ref().unwrap();
+            assert_eq!(remembers(profile, CredentialPurpose::Database), fail_sentinel);
+            assert_eq!(remembers(profile, CredentialPurpose::RedisSentinel), !fail_sentinel);
+            assert_eq!(app.prefs.saved_connections.profile(profile.id), Some(profile));
+            assert_eq!(app.connection_manager.password, "DATA_ONLY_IN_MEMORY_ON_FAILURE");
+            assert_eq!(app.connection_manager.sentinel_password, "SENTINEL_ONLY_IN_MEMORY_ON_FAILURE");
+            assert!(app.connection_manager.error.as_ref().unwrap().contains("session-only"));
+            assert!(app.connection_manager.saved_feedback.is_none());
+        }
+    }
+    #[test]
+    fn sentinel_credentials_survive_scoped_edits_and_private_window_handoff() {
+        use crate::credential_store::{Backend, MemoryBackend};
+        let backend = std::sync::Arc::new(MemoryBackend::default());
+        let mut app = app();
+        app.connection_manager.credentials = Some(CredentialWorker::with_backend(backend.clone()));
+        app.connection_action(Action::NewRedis).unwrap();
+        let profile = app.connection_manager.draft.as_mut().unwrap();
+        profile.name = "Sentinel profile".into();
+        let ConnectionKind::Redis(settings) = &mut profile.connection else { panic!() };
+        settings.sentinel = Some(Default::default());
+        app.connection_manager.password = "REDIS_DATA_SECRET_A".into();
+        app.connection_manager.sentinel_password = "SENTINEL_SECRET_A".into();
+        app.connection_action(Action::Save(false)).unwrap();
+        settle_credentials(&mut app);
+        let profile = app.connection_manager.draft.clone().unwrap();
+        let id = profile.id;
+        assert!(remembers(&profile, CredentialPurpose::Database));
+        assert!(remembers(&profile, CredentialPurpose::RedisSentinel));
+        app.connection_manager.select(profile);
+        // Only the discovery read becomes stale; the data password still loads.
+        app.connection_manager.sentinel_password = "SENTINEL_TYPED_SECRET".into();
+        app.connection_manager.sentinel_password_revision += 1;
+        settle_credentials(&mut app);
+        assert_eq!(app.connection_manager.password, "REDIS_DATA_SECRET_A");
+        assert_eq!(app.connection_manager.sentinel_password, "SENTINEL_TYPED_SECRET");
+        app.connection_action(Action::OpenWindow).unwrap();
+        settle_credentials(&mut app);
+        let crate::session_windows::WindowConnection::Redis { password, sentinel_password, .. } = &app.window_requests.last().unwrap().connection else { panic!() };
+        assert_eq!(password, "REDIS_DATA_SECRET_A");
+        assert_eq!(sentinel_password, "SENTINEL_TYPED_SECRET");
+        let mut storage = Storage::default();
+        app.save_with_window_documents(&mut storage, vec![]);
+        assert!(!storage.0["workspace"].contains("SECRET"));
+        let copied = app.prefs.saved_connections.duplicate_profile(id).unwrap();
+        let copied = app.prefs.saved_connections.profile(copied).unwrap();
+        assert!(!remembers(copied, CredentialPurpose::Database));
+        assert!(!remembers(copied, CredentialPurpose::RedisSentinel));
+        app.connection_action(Action::Delete(id)).unwrap();
+        settle_credentials(&mut app);
+        assert!(backend.read(&format!("connection-{}-password", id.0)).unwrap().is_none());
+        assert!(backend.read(&format!("connection-{}-redis-sentinel-password", id.0)).unwrap().is_none());
+        assert!(app.connection_manager.password.is_empty());
+        assert!(app.connection_manager.sentinel_password.is_empty());
+    }
+    #[test]
     fn saving_automatically_remembers_and_updates_password_without_serializing_it() {
         for action in [Action::New(true), Action::NewMysql(false), Action::NewMysql(true), Action::NewRedis] {
             let mut app = app();
@@ -1874,7 +2143,7 @@ mod tests {
         app.connection_manager
             .queue_credential(id, CredentialOperation::Delete);
         settle_credentials(&mut app);
-        assert!(app.connection_manager.credential_delete_retry.contains(&id));
+        assert!(app.connection_manager.credential_delete_retry.contains(&(id, CredentialPurpose::Database)));
         app.connection_action(Action::Save(false)).unwrap();
         assert!(
             app.connection_manager
@@ -1942,7 +2211,7 @@ mod tests {
             "Test".into(),
             ConnectionKind::Postgres(PostgresProfile::default()),
         ));
-        manager.probe_snapshot = Some((manager.draft.clone().unwrap(), manager.password.clone()));
+        manager.probe_snapshot = Some((manager.draft.clone().unwrap(), manager.password.clone(), manager.sentinel_password.clone()));
         manager.apply_probe_event(ProbeEvent::Success(vec![
             ProbeField::SshHost,
             ProbeField::SshIdentity,
@@ -2174,7 +2443,7 @@ mod tests {
         app.connection_manager.draft.as_mut().unwrap().name = "Keyboard connect".into();
         app.connection_manager.search = "Keyboard".into();
         app.connection_manager.credential_pending.push(CredentialPending {
-            token: 0, id, generation: app.connection_manager.generation,
+            token: 0, id, purpose: CredentialPurpose::Database, generation: app.connection_manager.generation,
             kind: CredentialKind::Read(app.connection_manager.password_revision),
         });
         enter(&mut app);
@@ -2462,6 +2731,47 @@ mod tests {
                     .map(|(id, _)| *id),
                 Some(group)
             );
+        }
+    }
+    #[test]
+    fn cluster_seed_form_keeps_actions_visible_and_ports_independent() {
+        for count in [0, 7] {
+            let ctx = egui::Context::default();
+            let mut app = app();
+            app.connection_action(Action::NewRedis).unwrap();
+            app.connections = true;
+            if let ConnectionKind::Redis(settings) = &mut app.connection_manager.draft.as_mut().unwrap().connection {
+                settings.cluster = true;
+                settings.cluster_seeds = (0..count).map(|index| crate::redis_settings::SentinelSeed { host: format!("seed-{index}.example.test"), port: 6379 + index as u16 }).collect();
+            }
+            for _ in 0..5 { let _ = manager_frame(&ctx, &mut app, vec![]); }
+            let output = manager_frame(&ctx, &mut app, vec![]);
+            for label in ["Cluster", "Test", "Connect"] { assert!(painted_text(&output, label).is_some(), "missing {label}"); }
+            let (content, rect) = ctx.data(|data| data.get_temp::<(egui::Vec2, egui::Rect)>(egui::Id::new("connection-form-geometry"))).unwrap();
+            assert!(content.x <= rect.width() + 1.0);
+            let ConnectionKind::Redis(settings) = &app.connection_manager.draft.as_ref().unwrap().connection else { panic!() };
+            for (index, seed) in settings.cluster_seeds.iter().enumerate() { assert_eq!(seed.port, 6379 + index as u16); }
+        }
+    }
+    #[test]
+    fn sentinel_form_keeps_actions_visible_and_seed_ports_independent() {
+        for count in [1, 8] {
+            let ctx = egui::Context::default();
+            let mut app = app();
+            app.connection_action(Action::NewRedis).unwrap();
+            app.connections = true;
+            if let ConnectionKind::Redis(settings) = &mut app.connection_manager.draft.as_mut().unwrap().connection {
+                settings.sentinel = Some(crate::redis_settings::Sentinel { seeds: (0..count).map(|index| crate::redis_settings::SentinelSeed { host: format!("sentinel-{index}.example.test"), port: 26379 + index as u16 }).collect(), ..Default::default() });
+            }
+            for _ in 0..5 { let _ = manager_frame(&ctx, &mut app, vec![]); }
+            let output = manager_frame(&ctx, &mut app, vec![]);
+            for label in ["Sentinel discovery", "Service", "Test", "Connect"] {
+                assert!(painted_text(&output, label).is_some(), "missing {label}");
+            }
+            let (content, rect) = ctx.data(|data| data.get_temp::<(egui::Vec2, egui::Rect)>(egui::Id::new("connection-form-geometry"))).unwrap();
+            assert!(content.x <= rect.width() + 1.0, "horizontal overflow: {content:?} {rect:?}");
+            let ConnectionKind::Redis(settings) = &app.connection_manager.draft.as_ref().unwrap().connection else { panic!() };
+            for (index, seed) in settings.sentinel.as_ref().unwrap().seeds.iter().enumerate() { assert_eq!(seed.port, 26379 + index as u16); }
         }
     }
     #[test]

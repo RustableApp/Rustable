@@ -61,6 +61,38 @@ fn bulk(s: impl AsRef<[u8]>) -> Value {
     Value::BulkString(s.as_ref().to_vec())
 }
 impl Session {
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn search(
+        &mut self,
+        _request: crate::redis_search::Request,
+    ) -> Result<crate::redis_search::Reply, String> {
+        Err("Search indexes require a desktop connection with Redis Search support.".into())
+    }
+    pub fn diagnostics(
+        &mut self,
+        request: &crate::redis_diagnostics::Request,
+    ) -> Result<crate::redis_diagnostics::Report, String> {
+        if let crate::redis_diagnostics::Request::Keys(keys) = request
+            && (keys.is_empty() || keys.len() > 1000)
+        {
+            return Err("Choose 1–1,000 keys.".into());
+        }
+        if let crate::redis_diagnostics::Request::TimeSeries(key) = request
+            && key.len() > 4096
+        {
+            return Err("Time-series metadata key exceeds 4 KiB.".into());
+        }
+        Err("Server diagnostics require a desktop Redis connection.".into())
+    }
+    pub fn mutate(
+        &mut self,
+        mutation: &crate::redis_mutation::Mutation,
+        safe: bool,
+    ) -> Result<u64, String> {
+        mutation.validate(safe)?;
+        Err("Structured collection editing requires a desktop Redis connection. The in-memory demo supports its documented command subset.".into())
+    }
+
     pub fn new() -> Self {
         let mut s = Self {
             databases: vec![BTreeMap::new(); 16],
@@ -197,6 +229,86 @@ impl Session {
             truncated: false,
         })
     }
+    pub fn inspect_view(&mut self, key: &[u8]) -> Result<crate::redis_value::Inspection, String> {
+        let snapshot = self.inspect(key)?;
+        let request = crate::redis_value::PageRequest {
+            key: key.to_vec(),
+            cursor: crate::redis_value::Cursor::first(&snapshot.kind, b"*"),
+            kind: snapshot.kind.clone(),
+            pattern: b"*".to_vec(),
+        };
+        self.value_page(&request)
+    }
+    pub fn value_page(
+        &mut self,
+        request: &crate::redis_value::PageRequest,
+    ) -> Result<crate::redis_value::Inspection, String> {
+        use crate::redis_value::{Cursor, Display, Inspection, PAGE_SIZE, Page, STRING_PAGE};
+        let mut snapshot = self.inspect(&request.key)?;
+        if snapshot.kind != request.kind {
+            return Err("The key expired or changed type. Refresh before continuing.".into());
+        }
+        let mut next = None;
+        match (&request.cursor, &mut snapshot.value) {
+            (Cursor::Offset(start), Value::BulkString(bytes)) => {
+                let start = usize::try_from(*start).map_err(|_| "Page offset is out of range.")?;
+                let end = start.saturating_add(STRING_PAGE as usize).min(bytes.len());
+                if end < bytes.len() {
+                    next = Some(Cursor::Offset(end as u64));
+                }
+                *bytes = bytes.get(start..end).unwrap_or_default().to_vec();
+                snapshot.truncated = start != 0 || next.is_some();
+            }
+            (Cursor::Offset(start) | Cursor::Scan(start), Value::Array(values)) => {
+                let step = if matches!(snapshot.kind.as_str(), "hash" | "zset") {
+                    2
+                } else {
+                    1
+                };
+                let start = usize::try_from(*start).map_err(|_| "Page offset is out of range.")?;
+                let rows: Vec<_> = values
+                    .chunks(step)
+                    .filter(|row| {
+                        if matches!(request.cursor, Cursor::Scan(_))
+                            && let Value::BulkString(bytes) = &row[0]
+                        {
+                            return glob(&request.pattern, bytes);
+                        }
+                        true
+                    })
+                    .collect();
+                let end = start.saturating_add(PAGE_SIZE as usize).min(rows.len());
+                if end < rows.len() {
+                    next = Some(if matches!(request.cursor, Cursor::Scan(_)) {
+                        Cursor::Scan(end as u64)
+                    } else {
+                        Cursor::Offset(end as u64)
+                    });
+                }
+                *values = rows
+                    .get(start..end)
+                    .unwrap_or_default()
+                    .iter()
+                    .flat_map(|row| row.iter().cloned())
+                    .collect();
+            }
+            (Cursor::Stream(_), Value::Array(_)) => {
+                return Err("Streams are not available in the in-memory demo.".into());
+            }
+            (_, Value::Nil) => {}
+            _ => return Err("Unsupported page cursor.".into()),
+        }
+        let display = Display::new(&snapshot, &request.cursor);
+        Ok(Inspection {
+            snapshot,
+            page: Page {
+                cursor: request.cursor.clone(),
+                next,
+                pattern: request.pattern.clone(),
+                display,
+            },
+        })
+    }
     pub fn scan(&mut self, cursor: u64, pattern: &[u8], count: u32) -> Result<KeyPage, String> {
         if pattern.len() > 1024 {
             return Err("Demo search patterns are limited to 1 KiB.".into());
@@ -215,6 +327,20 @@ impl Session {
             cursor: if end < keys.len() { end as u64 } else { 0 },
             keys: keys.get(start..end).unwrap_or_default().to_vec(),
         })
+    }
+    pub fn scan_filtered(
+        &mut self,
+        cursor: u64,
+        pattern: &[u8],
+        count: u32,
+        kind: &str,
+    ) -> Result<KeyPage, String> {
+        let mut page = self.scan(cursor, pattern, count)?;
+        if !kind.is_empty() {
+            page.keys
+                .retain(|key| self.inspect(key).is_ok_and(|s| s.kind == kind));
+        }
+        Ok(page)
     }
     pub fn key_rows(&mut self, keys: &[Vec<u8>]) -> Result<Vec<KeyRow>, String> {
         keys.iter()
@@ -443,7 +569,9 @@ impl Session {
                         let Value::Array(v) = s.value else {
                             return Ok(Value::Nil);
                         };
-                        Ok(v.as_chunks::<2>().0.iter()
+                        Ok(v.as_chunks::<2>()
+                            .0
+                            .iter()
                             .find(|v| matches!(&v[0], Value::BulkString(k) if k == &a[2]))
                             .map_or(Value::Nil, |v| v[1].clone()))
                     }
@@ -571,12 +699,94 @@ mod tests {
                 .is_err()
         );
         for i in 0..248 {
-            s.execute(&format!("SET key:{i} value"), false)
-                .unwrap();
+            s.execute(&format!("SET key:{i} value"), false).unwrap();
         }
         assert!(s.execute("SET overflow value", false).is_err());
         s.execute("DEL binary", false).unwrap();
         s.execute("SET available value", false).unwrap();
+    }
+    #[test]
+    fn filtered_scan_preserves_cursor_and_types() {
+        let mut s = Session::new();
+        let mut cursor = 0;
+        loop {
+            let page = s.scan_filtered(cursor, b"*", 1, "hash").unwrap();
+            for key in page.keys {
+                assert_eq!(s.inspect(&key).unwrap().kind, "hash");
+            }
+            cursor = page.cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+    }
+    #[test]
+    fn inspector_pages_and_pattern_search_match_demo_values() {
+        use crate::redis_value::{Cursor, PageRequest};
+        let mut session = Session::new();
+        session.databases[0].insert(
+            b"large-list".to_vec(),
+            Entry {
+                kind: "list",
+                expires: None,
+                value: Value::Array((0..250).map(|i| bulk(format!("item:{i}"))).collect()),
+            },
+        );
+        let view = session.inspect_view(b"large-list").unwrap();
+        assert_eq!(view.page.display.rows.len(), 200);
+        let next = session
+            .value_page(&PageRequest {
+                key: b"large-list".to_vec(),
+                kind: "list".into(),
+                cursor: view.page.next.unwrap(),
+                pattern: b"*".to_vec(),
+            })
+            .unwrap();
+        assert_eq!(next.page.display.rows.len(), 50);
+        assert_eq!(next.page.display.rows[0].cells[0], "200");
+        let page = session
+            .value_page(&PageRequest {
+                key: b"user:42".to_vec(),
+                kind: "hash".into(),
+                cursor: Cursor::Scan(0),
+                pattern: b"name".to_vec(),
+            })
+            .unwrap();
+        assert_eq!(page.page.display.rows.len(), 1);
+        assert_eq!(page.page.display.rows[0].cells[0], "name");
+    }
+    #[test]
+    fn desktop_only_tools_are_explicit_in_demo() {
+        let mut session = Session::new();
+        assert!(
+            session
+                .diagnostics(&crate::redis_diagnostics::Request::Server)
+                .err()
+                .unwrap()
+                .contains("desktop")
+        );
+        let request = crate::redis_mutation::Mutation {
+            action: crate::redis_mutation::Action::Create,
+            keys: vec![b"new".to_vec()],
+            kind: "string".into(),
+            field: vec![],
+            value: vec![],
+            expected: vec![],
+            length: 0,
+            ttl_ms: None,
+        };
+        assert!(
+            session
+                .mutate(&request, false)
+                .unwrap_err()
+                .contains("desktop")
+        );
+        assert!(
+            session
+                .mutate(&request, true)
+                .unwrap_err()
+                .contains("Unlock")
+        );
     }
     #[test]
     fn scan_and_ranges() {

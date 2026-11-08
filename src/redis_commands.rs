@@ -162,7 +162,12 @@ pub(crate) fn validate(args: &[Vec<u8>], read_only: bool) -> Result<(), String> 
     {
         return Err("Blocking stream reads are not supported. Omit BLOCK.".into());
     }
+    let diagnostic_read = args.get(1).is_some_and(|subcommand| {
+        (name == "MEMORY" && subcommand.eq_ignore_ascii_case(b"USAGE"))
+            || (name == "SLOWLOG" && subcommand.eq_ignore_ascii_case(b"GET"))
+    });
     if read_only
+        && !diagnostic_read
         && !matches!(
             name.as_str(),
             "PING"
@@ -180,6 +185,18 @@ pub(crate) fn validate(args: &[Vec<u8>], read_only: bool) -> Result<(), String> 
                 | "SCAN"
                 | "DBSIZE"
                 | "INFO"
+                | "FT._LIST"
+                | "FT.INFO"
+                | "FT.SEARCH"
+                | "FT.AGGREGATE"
+                | "FT.PROFILE"
+                | "VCARD" | "VRANGE" | "TS.RANGE" | "TS.REVRANGE" | "TS.GET" | "TS.INFO"
+                | "JSON.GET"
+                | "JSON.TYPE"
+                | "JSON.OBJLEN"
+                | "JSON.OBJKEYS"
+                | "JSON.ARRLEN"
+                | "JSON.STRLEN"
                 | "TIME"
                 | "HGET"
                 | "HMGET"
@@ -253,10 +270,31 @@ mod tests {
     }
     #[test]
     fn session_and_write_guards_cannot_be_bypassed_by_case() {
-        for text in ["set a b", "EVAL 'return 1' 0", "FLUSHALL", "CONFIG SET x y"] {
+        for text in [
+            "set a b",
+            "MEMORY PURGE",
+            "SLOWLOG RESET",
+            "MEMORY",
+            "SLOWLOG",
+            "EVAL 'return 1' 0",
+            "FLUSHALL",
+            "CONFIG SET x y",
+            "FT.CREATE idx SCHEMA name TEXT",
+            "FT.DROPINDEX idx",
+            "FT.CONFIG SET TIMEOUT 0",
+        ] {
             assert!(validate(&parse(text).unwrap()[0], true).is_err());
         }
-        for text in ["gEt a", "SCAN 0 COUNT 100", "XRANGE s - + COUNT 10"] {
+        for text in [
+            "gEt a",
+            "mEmOrY uSaGe key SAMPLES 5",
+            "sLoWlOg gEt 50",
+            "SCAN 0 COUNT 100",
+            "XRANGE s - + COUNT 10",
+            "FT.AGGREGATE idx * GROUPBY 0 REDUCE COUNT 0",
+            "FT.PROFILE idx SEARCH QUERY * LIMIT 0 10",
+            "FT.INFO idx",
+        ] {
             assert!(validate(&parse(text).unwrap()[0], true).is_ok());
         }
         for text in [

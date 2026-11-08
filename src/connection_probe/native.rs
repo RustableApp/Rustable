@@ -1,13 +1,24 @@
 use super::*;
 use std::error::Error;
 
-pub(super) fn run(connection: ConnectionKind, password: String, cancel: &AtomicBool, emit: &impl Fn(Event)) {
+#[cfg(test)]
+fn run(connection: ConnectionKind, password: String, cancel: &AtomicBool, emit: &impl Fn(Event)) {
+    run_with_sentinel(connection, password, String::new(), cancel, emit)
+}
+pub(super) fn run_with_sentinel(connection: ConnectionKind, password: String, sentinel_password: String, cancel: &AtomicBool, emit: &impl Fn(Event)) {
     use ProbeField::*;
     match connection {
         ConnectionKind::Redis(settings) => {
             let mut fields = vec![Host, Port, Database, User, Password];
             if settings.tls { fields.push(Tls); }
             emit(Event::Running(fields.clone()));
+            if settings.sentinel.is_some() {
+                match crate::redis_session::Session::connect_with_sentinel(&settings, &password, &sentinel_password) {
+                    Ok(_) => emit(Event::Success(fields)),
+                    Err(error) => emit(Event::Failed(fields, error)),
+                }
+                return;
+            }
             match crate::redis_session::Session::connect_diagnostic(&settings, &password) {
                 Ok(_) => emit(Event::Success(fields)),
                 Err(error) => {

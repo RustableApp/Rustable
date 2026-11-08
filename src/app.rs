@@ -1,3 +1,4 @@
+use crate::controls::rounded_action_buttons;
 use web_time::Instant;
 #[path = "query_library.rs"]
 mod query_library;
@@ -132,6 +133,7 @@ struct Preferences {
     sidebar_hidden: bool,
     column_widths: crate::column_widths::ColumnWidths,
     pane_sizes: crate::pane_sizes::PaneSizes,
+    redis_browser: crate::redis_preferences::Preferences,
     page_size: usize,
 }
 
@@ -722,6 +724,10 @@ impl Rustable {
         child.prefs.query_history = self.prefs.query_history.clone();
         child.prefs.column_widths = self.prefs.column_widths.clone();
         child.prefs.pane_sizes = self.prefs.pane_sizes;
+        if child.prefs.redis_browser != self.prefs.redis_browser {
+            child.prefs.redis_browser = self.prefs.redis_browser.clone();
+            if let Some(workspace)=&mut child.redis_workspace {workspace.reset_preferences();}
+        }
         child.prefs.activity_visible = self.prefs.activity_visible;
         child.prefs.page_size = self.prefs.page_size;
         child.shared_preferences_revision = self.shared_preferences_revision;
@@ -739,6 +745,10 @@ impl Rustable {
         self.prefs.query_history = child.prefs.query_history.clone();
         self.prefs.column_widths = child.prefs.column_widths.clone();
         self.prefs.pane_sizes = child.prefs.pane_sizes;
+        if self.prefs.redis_browser != child.prefs.redis_browser {
+            self.prefs.redis_browser = child.prefs.redis_browser.clone();
+            if let Some(workspace)=&mut self.redis_workspace {workspace.reset_preferences();}
+        }
         self.prefs.activity_visible = child.prefs.activity_visible;
         self.prefs.page_size = child.prefs.page_size;
         self.prefs.history.truncate(100);
@@ -762,11 +772,12 @@ impl Rustable {
             activity_visible: self.prefs.activity_visible,
             column_widths: self.prefs.column_widths.clone(),
             pane_sizes: self.prefs.pane_sizes,
+            redis_browser: self.prefs.redis_browser.clone(),
             page_size: self.prefs.page_size,
             connections_migrated: true,
             ..Default::default()
         };
-        if let crate::session_windows::WindowConnection::Redis { settings, password } = request.connection {
+        if let crate::session_windows::WindowConnection::Redis { settings, password, sentinel_password } = request.connection {
             let mut app = Self::with_optional_connection(ctx, prefs, None, None);
             app.active_profile = request.identity;
             app.child_window = true;
@@ -775,9 +786,9 @@ impl Rustable {
             app.profiles_revision = self.profiles_revision;
             #[cfg(not(target_arch = "wasm32"))]
             { app.engine = "Redis".into(); app.label = request.title;
-              app.redis_workspace = Some(crate::redis_workspace::Workspace::new(settings, password, ctx.clone())); }
+              app.redis_workspace = Some(crate::redis_workspace::Workspace::new_with_sentinel(*settings, password, sentinel_password, ctx.clone())); }
             #[cfg(target_arch = "wasm32")]
-            { let _ = (settings, password); app.error = Some("Redis connections require the desktop app.".into()); }
+            { let _ = (settings, password, sentinel_password); app.error = Some("Redis connections require the desktop app.".into()); }
             return app;
         }
         let command = match request.connection {
@@ -6681,15 +6692,19 @@ impl Rustable {
         if self.redis_demo_active {
             if self.connections { self.connections_window(ctx); return; }
             if let Some(workspace) = &mut self.redis_workspace {
+                workspace.load_preferences(&self.prefs.redis_browser);
                 if workspace.show(ctx, "Redis demo · in memory", egui::Color32::from_rgb(140, 50, 45), &mut self.prefs.pane_sizes, &mut self.shared_preferences_dirty) {
                     self.connections = true;
                 }
+                self.shared_preferences_dirty |= workspace.store_preferences(&mut self.prefs.redis_browser);
             }
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(workspace) = &mut self.redis_workspace {
+            workspace.load_preferences(&self.prefs.redis_browser);
             if workspace.show(ctx, &self.label, self.active_profile.as_ref().map_or(egui::Color32::from_rgb(40, 83, 65), |profile| egui::Color32::from_rgb(profile.color[0], profile.color[1], profile.color[2])), &mut self.prefs.pane_sizes, &mut self.shared_preferences_dirty) { self.manager_requested = true; }
+            self.shared_preferences_dirty |= workspace.store_preferences(&mut self.prefs.redis_browser);
             return;
         }
         let start = Instant::now();
@@ -6765,6 +6780,9 @@ impl eframe::App for Rustable {
     }
 }
 
+#[cfg(feature="qa")]
+pub(crate) fn apply_preview_theme(ctx:&egui::Context) {apply_theme(ctx, if std::env::var_os("RUSTABLE_REDIS_LIGHT_CAPTURE").is_some() {Appearance::Light} else {Appearance::Dark});}
+
 fn apply_theme(ctx: &egui::Context, appearance: Appearance) {
     for theme in [egui::Theme::Light, egui::Theme::Dark] {
         let dark = theme == egui::Theme::Dark;
@@ -6802,9 +6820,7 @@ fn apply_theme(ctx: &egui::Context, appearance: Appearance) {
         let mut style = (*ctx.style_of(theme)).clone();
         style.visuals = visuals;
         {
-            style.spacing.item_spacing = egui::vec2(6.0, 3.0);
-            style.spacing.button_padding = egui::vec2(8.0, 4.0);
-            style.spacing.interact_size.y = 23.0;
+            crate::controls::base_spacing(&mut style.spacing);
             style.animation_time = 0.12;
         }
         ctx.set_style_of(theme, style);
@@ -7100,63 +7116,9 @@ fn table_view_switch(ui: &mut egui::Ui, current: &mut View) {
         (View::Indexes, "Index", 54.0),
         (View::Triggers, "Triggers", 66.0),
     ];
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(248.0, 28.0), egui::Sense::hover());
-    ui.painter()
-        .rect_filled(rect, 6.0, ui.visuals().widgets.inactive.weak_bg_fill);
-    let mut x = rect.left();
-    for (index, (view, title, width)) in segments.iter().enumerate() {
-        let segment =
-            egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(*width, rect.height()));
-        let response = ui.interact(
-            segment,
-            ui.id().with(("table-view", index)),
-            egui::Sense::click(),
-        );
-        if response.clicked() {
-            *current = *view;
-        }
-        if *current == *view {
-            ui.painter()
-                .rect_filled(segment.shrink(1.0), 5.0, ui.visuals().selection.bg_fill);
-        }
-        if index > 0 && *current != *view && *current != segments[index - 1].0 {
-            ui.painter().line_segment(
-                [
-                    egui::pos2(x, rect.top() + 6.0),
-                    egui::pos2(x, rect.bottom() - 6.0),
-                ],
-                Stroke::new(1.0_f32, ui.visuals().weak_text_color().gamma_multiply(0.7)),
-            );
-        }
-        let color = if *current == *view {
-            ui.visuals().selection.stroke.color
-        } else {
-            ui.visuals().text_color()
-        };
-        ui.painter().text(
-            segment.center(),
-            egui::Align2::CENTER_CENTER,
-            *title,
-            egui::FontId::proportional(13.0),
-            color,
-        );
-        x += width;
-    }
+    crate::controls::segments(ui, "table-view", current, &segments);
 }
 
-/// Match the custom pagination controls across every interaction state.
-fn rounded_action_buttons(ui: &mut egui::Ui) {
-    let widgets = &mut ui.visuals_mut().widgets;
-    for widget in [
-        &mut widgets.noninteractive,
-        &mut widgets.inactive,
-        &mut widgets.hovered,
-        &mut widgets.active,
-        &mut widgets.open,
-    ] {
-        widget.corner_radius = egui::CornerRadius::same(5);
-    }
-}
 
 fn filter_button(selected: bool) -> impl egui::Widget {
     move |ui: &mut egui::Ui| {
@@ -11990,6 +11952,9 @@ mod session_window_tests {
         root.sync_window_preferences(&mut child);
         child.prefs.appearance = Appearance::Dark;
         child.prefs.favorites.push("SELECT 'favorite'".into());
+        child.prefs.redis_browser.tree = false;
+        child.prefs.redis_browser.separator = "/".into();
+        child.prefs.redis_browser.snippets.push(crate::redis_preferences::Snippet {name:"Profile".into(),command:"GET profile".into()});
         child.prefs.history.insert(0, "SELECT 'latest'".into());
         child.shared_preferences_dirty = true;
         assert!(root.merge_window_preferences(&mut child));
@@ -11997,10 +11962,14 @@ mod session_window_tests {
         assert_eq!(root.prefs.appearance, Appearance::Dark);
         assert_eq!(sibling.prefs.appearance, Appearance::Dark);
         assert_eq!(sibling.prefs.favorites, child.prefs.favorites);
+        assert!(!sibling.prefs.redis_browser.tree);
+        assert_eq!(sibling.prefs.redis_browser.separator, "/");
+        assert_eq!(root.prefs.redis_browser.snippets[0].command, "GET profile");
         assert_eq!(root.prefs.history.len(), 100);
         assert_eq!(root.prefs.history[0], "SELECT 'latest'");
         assert!(!root.prefs.history.contains(&"old 99".into()));
         child.prefs.favorites.clear();
+        child.prefs.redis_browser.snippets.clear();
         child.shared_preferences_dirty = true;
         root.merge_window_preferences(&mut child);
         // Stale sibling snapshot cannot resurrect removed favorites during save/close.
@@ -12008,6 +11977,7 @@ mod session_window_tests {
         assert!(root.prefs.favorites.is_empty());
         root.sync_window_preferences(&mut sibling);
         assert!(sibling.prefs.favorites.is_empty());
+        assert!(sibling.prefs.redis_browser.snippets.is_empty());
         let file = tempfile::NamedTempFile::new().unwrap();
         let new_child = root.new_window(
             &ctx,
