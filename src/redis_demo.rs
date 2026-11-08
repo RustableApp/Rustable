@@ -410,6 +410,7 @@ impl Session {
         }
         Ok(crate::redis_command_results::execute(&commands, |args| self.command(args)))
     }
+    #[cfg(test)]
     pub fn execute(&mut self, text: &str, safe: bool) -> Result<Vec<Value>, String> {
         let commands = crate::redis_commands::parse(text)?;
         for args in &commands {

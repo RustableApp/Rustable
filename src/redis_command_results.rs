@@ -1,4 +1,6 @@
 //! Bounded display results; execute sequentially and stop after the first error.
+#[cfg(target_arch = "wasm32")]
+use crate::redis_demo as redis;
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -62,7 +64,13 @@ pub(crate) fn execute(
             if !command.is_empty() {
                 command.push(' ');
             }
-            command.push_str(&crate::redis_commands::quote(&arg[..arg.len().min(256)]));
+            let bytes = &arg[..arg.len().min(256)];
+            if bytes.iter().all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'"' | b'\\')) {
+                command.push_str(std::str::from_utf8(bytes).unwrap());
+            } else {
+                command.push_str(&crate::redis_commands::quote(bytes));
+            }
+            if arg.len() > bytes.len() { command.push('…'); }
         }
         let mut elapsed = Duration::ZERO;
         let (status, mut output) = if failed {

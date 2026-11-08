@@ -972,6 +972,7 @@ impl Session {
             self.query_bounded(&command)
         }))
     }
+    #[cfg(test)]
     pub fn execute(&mut self, text: &str, read_only: bool) -> Result<Vec<redis::Value>, String> {
         let commands = crate::redis_commands::parse(text)?;
         // Validate the entire batch before its first write.

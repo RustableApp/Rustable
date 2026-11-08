@@ -542,3 +542,24 @@ the connection without allocating the declared body. Logs:
 This is an implementation checkpoint, not milestone completion: native screenshots,
 interaction/performance validation, browser compilation and affected topology
 regressions remain to be run. UI result layout has not yet been visually verified.
+
+### Workbench visual and browser checkpoint
+
+Fixed the report module's WASM value alias after the browser-package check exposed
+it. The locked wasm32 browser-package check passed (78 existing/platform dead-code
+warnings, not a warning-free build). Native QA build passed. Added an ephemeral-port
+`preview-redis-workbench.sh` fixture and inspected real native captures at 1200×760
+logical points in both themes:
+`target/redis-workbench-captures/command-editor.png` and
+`target/redis-workbench-light-captures/command-editor.png`.
+Per-command copy icons now share the header row; the common copy-feedback helper
+is reused. This visual capture is not an automated proof of click/focus behavior.
+
+The shared Workbench benchmark now supplies identical 100 reply values on both
+revisions: the old version renders combined output; the candidate renders sections.
+Setup is excluded from frame measurements. An explicit baseline adapter preserves
+that comparison. All eight performance-runner unit checks passed. The actual
+release comparison remains pending; do not infer a performance pass from captures
+or fixture checks. Logs: `/tmp/redis-workbench-browser-check.log`,
+`/tmp/redis-workbench-preview-build.log`, `/tmp/redis-workbench-preview.log`,
+`/tmp/redis-workbench-light-preview.log`, `/tmp/redis-workbench-runner-tests.log`.

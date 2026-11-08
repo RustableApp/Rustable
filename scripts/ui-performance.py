@@ -203,6 +203,10 @@ def main():
                     with workspace.open('a') as output:
                         output.write('\n#[cfg(test)] impl Workspace { fn prepare_analysis_benchmark(&mut self) {} }\n')
                     metadata['analysis_baseline_adapter'] = 'Same 1,000 names and memory values; candidate adds full report metadata and expiry/type tables.'
+                if 'fn prepare_results_benchmark(' not in source:
+                    with workspace.open('a') as output:
+                        output.write('\n#[cfg(test)] impl Workspace { fn prepare_results_benchmark(&mut self, values: Vec<redis::Value>) { self.output = render_values(&values); } }\n')
+                    metadata['results_baseline_adapter'] = 'Identical 100 reply values; baseline renders combined text, candidate renders individual command results. Preparation excluded from frame timings.'
                 metadata['redis_fixture'] = fixture.read_text()
                 (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.redis or args.redis_editor or args.redis_pages or args.redis_completion:

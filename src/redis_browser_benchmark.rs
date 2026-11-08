@@ -380,6 +380,7 @@ mod redis_tool_pages_benchmark {
                 "workbench-history" => {
                     workspace.section = Section::Workbench;
                     workspace.command_history = (0..100).map(|i| format!("GET app:users:{i:04}")).collect();
+                    workspace.prepare_results_benchmark((0..100).map(|i| redis::Value::BulkString(format!("User {i}: {}", "profile value\n".repeat(20)).into_bytes())).collect());
                 }
                 "json-edit" => {
                     workspace.section = Section::Browse;

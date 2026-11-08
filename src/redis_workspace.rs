@@ -2382,11 +2382,14 @@ impl Workspace {
                         } else if !self.command_results.entries.is_empty() {
                             for (index, entry) in self.command_results.entries.iter().enumerate() {
                                 ui.push_id(index, |ui| {
-                                    egui::CollapsingHeader::new(format!("{}. {} · {} · {:.2} ms", index + 1, entry.command, entry.status.label(), entry.elapsed.as_secs_f64() * 1000.0))
-                                        .default_open(true).show(ui, |ui| {
-                                            crate::redis_value_editor::copy(ui, "command-result", Some("Copy"), true, || entry.output.clone());
-                                            ui.monospace(&entry.output);
-                                        });
+                                    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.id().with("result"), true)
+                                        .show_header(ui, |ui| {
+                                            ui.label(format!("{}. {}", index + 1, entry.command));
+                                            ui.weak(format!("{} · {:.2} ms", entry.status.label(), entry.elapsed.as_secs_f64() * 1000.0));
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                crate::redis_value_editor::copy(ui, "command-result", None, true, || entry.output.clone());
+                                            });
+                                        }).body(|ui| { ui.monospace(&entry.output); });
                                     ui.separator();
                                 });
                             }
@@ -4478,3 +4481,13 @@ fn collection_draft(
 }
 
 include!("redis_layout.rs");
+
+#[cfg(test)]
+impl Workspace {
+    fn prepare_results_benchmark(&mut self, values: Vec<redis::Value>) {
+        let commands = (0..values.len()).map(|i| vec![b"GET".to_vec(), format!("app:users:{i:04}").into_bytes()]).collect::<Vec<_>>();
+        let mut values = values.into_iter();
+        self.command_results = crate::redis_command_results::execute(&commands, |_| Ok(values.next().unwrap()));
+        self.output = self.command_results.text();
+    }
+}
