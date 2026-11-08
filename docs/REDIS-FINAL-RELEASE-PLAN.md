@@ -69,9 +69,7 @@ Do not release early merely because the remaining work is inconvenient.
 
 Initial audit: working tree clean at `405149e`; latest desktop release v0.4.19.
 Existing roadmap documents contain historical pending items superseded by later
-entries, so verify the implementation before adding work. The existing persistent
-Redis goal was reported paused by the goal API on this request; that API supports
-creation and completion/pause/block status updates but no resume operation. The
-user's instruction authorizes resuming; the runtime control must resume automatic
-continuation. No implementation or validation checkbox is complete yet for this
-new batch.
+entries, so verify the implementation before adding work. The user deleted the old
+paused goal and explicitly requested a new goal using this checklist and its scope
+boundaries. A fresh persistent goal now tracks this batch. No implementation or
+validation checkbox is complete yet for this new batch.
