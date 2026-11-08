@@ -1320,3 +1320,15 @@ Clippy passes, and the browser release build succeeds (78 known warnings):
 Added a candidate-only JSON-string typing/idle/after-idle CPU workload and first-frame
 logging; the existing comparable inspector/editor workloads remain unchanged.
 No public deployment has occurred; live BUILD.txt still identifies v0.4.19/405149e.
+
+
+Final follow-up CPU review completed for d9876f1 versus e3372d3. Standard five-pair
+results plus seven serial repeats and full tail metrics are recorded in
+`docs/UI-PERFORMANCE.md`, `target/redis-value-final-performance` and
+`target/redis-value-final-repeat`. The repeat passes 36 scenarios; four ranked
+completion scenarios retain a justified 0.006–0.013 ms p95 cost for requested
+matching/whole-row behavior, after normalized-name caching removed most of the initial
+regression. These are accepted measured costs, not threshold passes. New JSON-string
+editor and completion cold-use absolute measurements are also recorded there.
+Cross-platform CI run 42506585821 is checking the exact d9876f1 candidate; publication
+and exact-tag WASM deployment remain open.

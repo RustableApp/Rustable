@@ -252,3 +252,74 @@ manual keyboard/mouse, mixed-DPI, resize/tiling, 60/120 Hz presentation and
 input-to-display latency remain unverified. Automated egui input tests cover
 completion acceptance/dismissal, execution shortcut ownership and copy feedback.
 CPU measurements and screenshots do not close those native validation gaps.
+
+
+## Final Redis UI follow-up: d9876f1 versus e3372d3
+
+The initial standard five-pair comparison is retained in
+`target/redis-value-final-performance` (command: `python3 scripts/ui-performance.py
+--base e3372d361f20e6243d55bcf55585812de2f037e7 --redis --redis-pages --redis-editor
+--redis-completion --output target/redis-value-final-performance`). It detected
+four completion regressions and five inconclusive cases. Do not describe it as a pass.
+
+Seven additional alternating serial pairs reused those exact compiled executables
+and unchanged workloads through the script's `measure`/`compare` functions, with
+no competing builds or benchmarks. Raw samples, executable paths/SHA-256/mtime,
+original environment and repeat scope are in `target/redis-value-final-repeat`;
+runner `/tmp/redis-repeat-measurements.py`. The removed baseline worktree meant both
+executables ran from the root checkout for this repeat; these workloads use embedded
+or in-memory fixtures, not files relative to cwd. Thresholds and fixtures were not
+changed. All 36 non-completion-regression scenarios pass in the repeat; four
+completion cases remain measured regressions, explicitly accepted below.
+
+Machine: Apple M4 Max, macOS 27.2 arm64, Rust 1.99.1, release/thin LTO. Redis
+fixtures use 1200×760 logical pixels at default egui scale, 20 warmups plus 160
+samples per run; standard SQL grid/workspace/sidebar fixtures retain their original
+sizes and sample settings. Completion alternates GE/GET for changed text, navigates
+suggestions, and includes an after-idle time jump. Pub/Sub renders/scrolls 1,000
+retained messages. These are CPU layout/tessellation measurements, not native
+input-to-display latency, sustained FPS or a 120 Hz display test.
+
+All values below are milliseconds; pairs are baseline→candidate. Maximum is the
+median per-run maximum, followed by the worst single sample across the seven runs.
+
+| Scenario | p50 | p95 | p99 | Median max | Worst max |
+| --- | --- | --- | --- | --- | --- |
+| redis/completion/commands | 0.012958→0.018125 | 0.014125→0.020125 | 0.022417→0.025208 | 0.032458→0.026292 | 0.034416→0.044833 |
+| redis/completion/after-idle | 0.013416→0.018750 | 0.014375→0.020708 | 0.016208→0.022542 | 0.016917→0.024542 | 0.018583→0.049417 |
+| redis/completion/capability | 0.012000→0.015833 | 0.012459→0.022459 | 0.014958→0.024750 | 0.019000→0.026583 | 0.023333→0.027541 |
+| redis/completion/typing | 0.033666→0.044583 | 0.035167→0.048000 | 0.039041→0.052292 | 0.040250→0.054292 | 0.044667→0.071875 |
+| redis/page/search | 0.116666→0.126417 | 0.124500→0.134584 | 0.127125→0.137875 | 0.130750→0.139459 | 0.147750→0.151667 |
+| redis/pubsub-messages | 0.051833→0.055750 | 0.055125→0.060083 | 0.059250→0.063666 | 0.060500→0.065750 | 0.088125→0.091541 |
+| redis/page/analysis-scroll | 0.107042→0.091666 | 0.115417→0.097250 | 0.117542→0.101625 | 0.119834→0.105208 | 0.146667→0.141334 |
+
+Accepted completion cost: p95 increases 0.006–0.013 ms, with the tail measurements
+shown above. The old prefix-only list excluded exact GET and did not offer inner/fuzzy
+name matches. The requested shared ranking evaluates the bounded static catalog;
+matching command/subcommand names are normalized once, suggestions remain capped at
+50 and results recompute only when editor context changes. The initial uncached
+implementation cost about 0.10 ms extra while typing; preparing names removed most
+of that cost. Keeping the old exclusion/prefix-only scan would preserve speed but
+fail the requested matching behavior. The popup now shows six complete rows instead
+of clipping the last row, and fuzzy matching fills previously sparse lists; this
+accounts for the small idle/navigation rendering increase. Avoiding those rows would
+reduce visible suggestions. No extra database exchange, permanent repaint, unbounded
+cache or whole-result cloning was added. This is an explicit feature/correctness
+tradeoff, not a claim that the regressions passed the threshold.
+
+Candidate-only new JSON-string editing workload (`redis_json_string_edit_frame_benchmark`)
+uses a 100-item document, 700×760 viewport, idle and alternating edits, including an
+after-idle clock jump. `/tmp/redis-json-string-performance.log`: idle p50/p95/p99/max
+0.052916/0.059833/0.062208/0.062291 ms; editing
+0.118125/0.135000/0.136875/0.137125 ms. First cold UI frame including font/layout setup
+was 2.483750 ms; first editing frame 0.133708 ms. These absolute costs do not assert
+parity against a nonexistent old pretty editor. Existing string-inspector comparison
+passes (+1.6% p95). `/tmp/redis-completion-first-use.log` records first cold command
+suggestion 0.333583 ms (including static-name preparation), warm matching p95 0.028333
+ms; full completion UI costs are in the paired table above. Both manual workloads ran
+serially using the exact candidate release test executable.
+
+Native screenshots and local WASM editing/save/validation/copy checks passed as
+recorded in the release checklist. High-refresh input-to-present, mixed-DPI,
+multiple-monitor and native Windows/Linux/Intel Mac interactive checks remain
+unverified; no claim about those is inferred from CPU timing or browser screenshots.
