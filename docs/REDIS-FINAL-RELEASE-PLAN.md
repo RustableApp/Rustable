@@ -54,7 +54,7 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
   unavailable checks without treating them as passes.
 - [x] Full locked tests, strict Clippy, browser-package locked WASM build and
   relevant fixture runs. Update capabilities, roadmap and user-facing release notes.
-- [ ] Follow docs/RELEASES.md: promote verified source, bump/tag the next available
+- [x] Follow docs/RELEASES.md: promote verified source, bump/tag the next available
   version, inspect signed/notarized artifacts and update feed, publish the release,
   update the website with the exact tagged WASM bundle, verify SQL and Redis-first
   startup, download links, provenance, headers and live checksums.
@@ -1347,3 +1347,16 @@ Immutable annotated tag `v0.4.21` resolves to that exact commit.
 [Signed release 42508380169](https://github.com/RustableApp/Rustable/actions/runs/42508380169)
 is building packages and the matching WASM archive. Artifact inspection, website
 deployment and publication remain pending; the release gate above stays open.
+
+
+### Final release complete
+
+v0.4.21 was published at 2026-11-08 18:20:06 UTC after every tagged build and
+artifact verification passed. The matching website bundle is live; SQL and
+Redis-first startup, Redis PING, exact provenance/hash, isolation/CSP headers,
+all public download URLs and updater feed were verified. The requirement-by-
+requirement completion audit, release/deployment IDs, screenshots, raw evidence
+and explicit verification limits are recorded in
+[RELEASE-0.4.21-VERIFICATION.md](RELEASE-0.4.21-VERIFICATION.md).
+The bounded goal is complete. Deferred isolated workflows remain explicitly
+unimplemented; historical broader roadmap aspirations are not additional scope.

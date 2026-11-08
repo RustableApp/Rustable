@@ -2086,3 +2086,12 @@ accepted completion costs of 0.006–0.013 ms p95; see UI-PERFORMANCE.md for tai
 metrics and limits. All main CI jobs passed. v0.4.21 is tagged at `16e53fa`; signed
 package inspection, matching live demo and publication are still pending in the
 [release checklist](REDIS-FINAL-RELEASE-PLAN.md).
+
+
+### Final bounded Redis release published
+
+[v0.4.21 verification](RELEASE-0.4.21-VERIFICATION.md) records the completed
+bounded checklist, signed/notarized packages and matching deployed WASM demo.
+Live SQL, Redis-first startup/PING, provenance/checksum/headers, public downloads
+and updater feed passed. Transactions/blocking workflows remain explicitly
+deferred for the documented safety requirements; this is not exhaustive parity.
