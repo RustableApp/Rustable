@@ -12,6 +12,7 @@ pub(crate) enum Action {
 #[derive(Clone, Debug)]
 pub(crate) struct Mutation {
     pub action: Action,
+    pub entries: Vec<(Vec<u8>, Vec<u8>)>,
     pub keys: Vec<Vec<u8>>,
     pub kind: String,
     pub field: Vec<u8>,
@@ -24,6 +25,25 @@ impl Mutation {
     pub fn validate(&self, read_only: bool) -> Result<(), String> {
         if read_only {
             return Err("Unlock editing before changing Redis data.".into());
+        }
+        if !self.entries.is_empty() {
+            if self.action != Action::Create || !matches!(self.kind.as_str(), "hash" | "list" | "set" | "zset") {
+                return Err("Multiple entries are supported when creating hashes, lists, sets or sorted sets.".into());
+            }
+            if self.entries.len() >= 100 { return Err("Create at most 100 entries at once.".into()); }
+            let mut total = self.field.len().saturating_add(self.value.len());
+            let mut names = std::collections::HashSet::new();
+            if self.kind != "list" { names.insert(if self.kind == "set" { self.value.as_slice() } else { self.field.as_slice() }); }
+            for (field, value) in &self.entries {
+                total = total.saturating_add(field.len()).saturating_add(value.len());
+                if total > 65536 { return Err("Combined creation entries are limited to 64 KiB.".into()); }
+                if self.kind != "list" && !names.insert(if self.kind == "set" { value.as_slice() } else { field.as_slice() }) {
+                    return Err("Creation entries must not repeat a field or member.".into());
+                }
+                if self.kind == "zset" && !std::str::from_utf8(value).ok().and_then(|s|s.parse::<f64>().ok()).is_some_and(f64::is_finite) {
+                    return Err("Every score must be a finite number.".into());
+                }
+            }
         }
         if self.keys.is_empty()
             || self.keys.len() > 1000
@@ -123,10 +143,17 @@ if op=='create' then
  if actual~='none' then return redis.error_reply('Key already exists; choose another name.') end
  if ttl~='' and not redis.acl_check_cmd('PEXPIRE',key,ttl) then return redis.error_reply('Expiry permission denied; key was not created.') end
  if kind=='string' then redis.call('SET',key,value)
- elseif kind=='hash' then redis.call('HSET',key,field,value)
- elseif kind=='list' then redis.call('RPUSH',key,value)
- elseif kind=='set' then redis.call('SADD',key,value)
- elseif kind=='zset' then redis.call('ZADD',key,value,field)
+ elseif kind=='hash' or kind=='list' or kind=='set' or kind=='zset' then
+  local args={key}; local count=tonumber(ARGV[8]) or 0
+  local function append(f,v)
+   if kind=='hash' then args[#args+1]=f; args[#args+1]=v
+   elseif kind=='zset' then args[#args+1]=v; args[#args+1]=f
+   else args[#args+1]=v end
+  end
+  append(field,value)
+  for i=1,count do append(ARGV[8+i*2-1],ARGV[8+i*2]) end
+  local command=({hash='HSET',list='RPUSH',set='SADD',zset='ZADD'})[kind]
+  redis.call(command,unpack(args))
  elseif kind=='stream' then redis.call('XADD',key,'*',field,value)
  elseif kind=='ReJSON-RL' then redis.call('JSON.SET',key,'$',value)
  else return redis.error_reply('Unsupported key type') end

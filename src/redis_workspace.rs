@@ -2487,7 +2487,7 @@ impl Workspace {
             self.edit = Some(crate::redis_edit::Draft::new(crate::redis_mutation::Action::ExpireKeys, keys, String::new()));
         } else {
             self.edit = None;
-            let mutation = crate::redis_mutation::Mutation {
+            let mutation = crate::redis_mutation::Mutation { entries: Vec::new(),
                 action: crate::redis_mutation::Action::ExpireKeys, keys, kind: String::new(),
                 field: vec![], value: vec![], expected: vec![], length: 0, ttl_ms: None,
             };

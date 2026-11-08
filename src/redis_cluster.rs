@@ -2008,7 +2008,7 @@ mod tests {
         session
             .execute("SET {rename}:source original", false)
             .unwrap();
-        let mut rename = crate::redis_mutation::Mutation {
+        let mut rename = crate::redis_mutation::Mutation { entries: Vec::new(),
             action: crate::redis_mutation::Action::Rename,
             keys: vec![b"{rename}:source".to_vec()],
             kind: "string".into(),
@@ -2105,7 +2105,7 @@ mod tests {
             redis::Value::BulkString(b"value".to_vec())
         );
 
-        let mut bulk = crate::redis_mutation::Mutation {
+        let mut bulk = crate::redis_mutation::Mutation { entries: Vec::new(),
             action: crate::redis_mutation::Action::ExpireKeys,
             keys: archive.entries.iter().map(|e| e.key.clone()).collect(),
             kind: String::new(),

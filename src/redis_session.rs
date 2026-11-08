@@ -757,7 +757,9 @@ impl Session {
             .arg(&mutation.value)
             .arg(&mutation.expected)
             .arg(mutation.length)
-            .arg(mutation.ttl_ms.map(|n| n.to_string()).unwrap_or_default());
+            .arg(mutation.ttl_ms.map(|n| n.to_string()).unwrap_or_default())
+            .arg(mutation.entries.len());
+        for (field, value) in &mutation.entries { command.arg(field).arg(value); }
         self.typed(&command)
     }
     pub fn review_archive(

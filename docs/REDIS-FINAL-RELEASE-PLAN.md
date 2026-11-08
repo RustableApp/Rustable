@@ -899,3 +899,30 @@ the conflict rejection itself was already occurring.
 This is partial editing implementation. Multi-entry creation, native captures,
 interaction/performance/browser validation and additional safety coverage remain;
 the editing milestone stays unchecked.
+
+### Editing checkpoint — multi-entry collection creation
+
+The new-key form now uses virtualized entry rows with Add entry/remove controls for
+hashes, lists, sets and sorted sets. It retains drafts and the existing explicit
+confirmation. Creation supports 1–100 entries, 64 KiB combined data for multi-entry
+requests, binary quoted values and list order. Duplicate hash fields/set members/
+sorted-set members and non-finite scores are rejected before a request. Existing
+single-value/stream/JSON creation stays available; this does not add stream batch
+creation or bulk edits to existing collections.
+
+Mutation requests now carry typed additional entries. The worker revalidates type,
+action, count, byte totals, duplicates and scores. One atomic EVAL checks key absence
+and expiry permission, then issues one variadic HSET/RPUSH/SADD/ZADD and optional
+PEXPIRE. This preserves the existing one-exchange creation budget, cold and warm;
+there is no per-entry request. Existing keys are never replaced. No partial per-entry
+loop or automatic write replay was introduced.
+
+Four editor tests passed (one manual benchmark ignored), including byte parsing,
+count/total limits, duplicates, score validation and idle drafts
+(`/tmp/redis-multi-create-tests.log`). Both disposable Redis 8.4 editing fixtures
+passed (`/tmp/redis-editing-live-tests.log`): prior JSON path checks plus all four
+collection types, binary values, list order, TTL, safe mode, existing-key rejection,
+invalid-entry/no-key behavior and denied expiry permission leaving no created key.
+
+Editing remains unchecked pending native captures, interaction/performance/browser
+validation and a final safety review of the combined workflow.

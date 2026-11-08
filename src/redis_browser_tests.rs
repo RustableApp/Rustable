@@ -555,7 +555,7 @@ fn live_guarded_mutations_bulk_expiry_and_diagnostics() {
     .unwrap();
     let prefix = format!("rustable-mutation-{}:", std::process::id());
     let mut all = Vec::new();
-    let mut request = Mutation {
+    let mut request = Mutation { entries: Vec::new(),
         action: Action::Create,
         keys: vec![],
         kind: String::new(),
@@ -644,7 +644,7 @@ fn live_guarded_mutations_bulk_expiry_and_diagnostics() {
                 .arg(&["a", "same", "same", "z"]),
         )
         .unwrap();
-    request = Mutation {
+    request = Mutation { entries: Vec::new(),
         action: Action::Remove,
         keys: vec![list.clone()],
         kind: "list".into(),
@@ -745,7 +745,7 @@ fn mutations_use_one_exchange_without_preflight_or_replay() {
         "",
     )
     .unwrap();
-    let request = Mutation {
+    let request = Mutation { entries: Vec::new(),
         action: Action::Create,
         keys: vec![b"key".to_vec()],
         kind: "string".into(),
@@ -787,7 +787,7 @@ fn live_json_documents_preserve_ttl_and_reject_stale_edits() {
     )
     .unwrap();
     let key = format!("rustable-json-{}", std::process::id()).into_bytes();
-    let mut request = Mutation {
+    let mut request = Mutation { entries: Vec::new(),
         action: Action::Create,
         keys: vec![key.clone()],
         kind: "ReJSON-RL".into(),
@@ -850,7 +850,7 @@ fn live_mutation_acl_failures_do_not_leave_partial_edits() {
     )
     .unwrap();
     let key = format!("rustable-{name}").into_bytes();
-    let mut request = Mutation {
+    let mut request = Mutation { entries: Vec::new(),
         action: Action::Create,
         keys: vec![key.clone()],
         kind: "string".into(),
@@ -1324,7 +1324,7 @@ fn live_json_path_edits_preserve_conflicts_precision_and_expiry() {
     let key=b"json:path:test";
     session.query(redis::cmd("JSON.SET").arg(key).arg("$").arg(r#"{"name":"Avery","items":[1,2,3],"n":1234567890123456789}"#)).unwrap();
     session.query(redis::cmd("PEXPIRE").arg(key).arg(60000)).unwrap();
-    let mut mutation=Mutation {action:Action::Update,keys:vec![key.to_vec()],kind:"ReJSON-RL".into(),field:b"$.name".to_vec(),value:br#""Sam""#.to_vec(),expected:session.typed(redis::cmd("JSON.GET").arg(key)).unwrap(),length:0,ttl_ms:None};
+    let mut mutation=Mutation { entries: Vec::new(),action:Action::Update,keys:vec![key.to_vec()],kind:"ReJSON-RL".into(),field:b"$.name".to_vec(),value:br#""Sam""#.to_vec(),expected:session.typed(redis::cmd("JSON.GET").arg(key)).unwrap(),length:0,ttl_ms:None};
     assert!(session.mutate(&mutation,true).is_err());
     session.mutate(&mutation,false).unwrap();
     let error=session.mutate(&mutation,false).unwrap_err();
@@ -1356,4 +1356,48 @@ fn live_json_path_edits_preserve_conflicts_precision_and_expiry() {
     let ttl:i64=session.typed(redis::cmd("PTTL").arg(key)).unwrap();
     assert!(ttl>0 && ttl<=60000);
     session.query(redis::cmd("DEL").arg(key)).unwrap();
+}
+
+#[test]
+#[ignore = "disposable ephemeral fixture scripts/test-redis-json-edits.sh"]
+fn live_collection_creation_entries_are_bounded_ordered_and_never_replace_keys() {
+    use crate::redis_mutation::{Action,Mutation};
+    assert_eq!(std::env::var("RUSTABLE_REDIS_JSON_EDIT_QA").as_deref(),Ok("1"));
+    let mut session=Session::connect(&Settings {host:"127.0.0.1".into(),port:std::env::var("RUSTABLE_REDIS_JSON_EDIT_PORT").unwrap().parse().unwrap(),tls:false,..Default::default()},"rustable-json-test-only").unwrap();
+    session.query(redis::cmd("ACL").arg("SETUSER").arg("create-no-expiry").arg("on").arg(">fixture-only").arg("~*").arg("+@all").arg("-pexpire")).unwrap();
+    let mut restricted=Session::connect(&Settings {host:"127.0.0.1".into(),port:std::env::var("RUSTABLE_REDIS_JSON_EDIT_PORT").unwrap().parse().unwrap(),username:"create-no-expiry".into(),tls:false,..Default::default()},"fixture-only").unwrap();
+    let denied=Mutation {action:Action::Create,keys:vec![b"create:denied".to_vec()],kind:"hash".into(),field:b"a".to_vec(),value:b"1".to_vec(),expected:vec![],length:0,ttl_ms:Some(60000),entries:vec![(b"b".to_vec(),b"2".to_vec())]};
+    assert!(restricted.mutate(&denied,false).is_err());
+    let exists:bool=session.typed(redis::cmd("EXISTS").arg("create:denied")).unwrap();assert!(!exists);
+    for kind in ["hash","list","set","zset"] {
+        let key=format!("create:{kind}").into_bytes();
+        let mut request=Mutation {action:Action::Create, keys:vec![key.clone()],kind:kind.into(), field:vec![0,255],value:if kind=="zset" {b"1.25".to_vec()}else{vec![0,255]},expected:vec![],length:0,ttl_ms:Some(60000),entries:vec![(b"second".to_vec(),if kind=="zset" {b"2.5".to_vec()}else{b"second".to_vec()})]};
+        assert!(session.mutate(&request,true).is_err());
+        session.mutate(&request,false).unwrap();
+        assert!(session.mutate(&request,false).is_err());
+        match kind {
+            "hash" => {
+                let value:Vec<u8>=session.typed(redis::cmd("HGET").arg(&key).arg(&[0u8,255][..])).unwrap();assert_eq!(value,[0,255]);
+                let count:u64=session.typed(redis::cmd("HLEN").arg(&key)).unwrap();assert_eq!(count,2);
+            }
+            "list" => {
+                let values:Vec<Vec<u8>>=session.typed(redis::cmd("LRANGE").arg(&key).arg(0).arg(-1)).unwrap();assert_eq!(values,vec![vec![0,255],b"second".to_vec()]);
+            }
+            "set" => {let count:u64=session.typed(redis::cmd("SCARD").arg(&key)).unwrap();assert_eq!(count,2);}
+            "zset" => {let score:f64=session.typed(redis::cmd("ZSCORE").arg(&key).arg("second")).unwrap();assert_eq!(score,2.5);}
+            _=>unreachable!(),
+        }
+        let ttl:i64=session.typed(redis::cmd("PTTL").arg(&key)).unwrap();assert!(ttl>0 && ttl<=60000);
+        session.query(redis::cmd("DEL").arg(&key)).unwrap();
+        if kind!="list" {
+            request.entries[0]=(request.field.clone(),request.value.clone());
+            assert!(session.mutate(&request,false).is_err());
+            let exists:bool=session.typed(redis::cmd("EXISTS").arg(&key)).unwrap();assert!(!exists);
+        }
+        if kind=="zset" {
+            request.entries[0]=(b"second".to_vec(),b"NaN".to_vec());
+            assert!(session.mutate(&request,false).is_err());
+            let exists:bool=session.typed(redis::cmd("EXISTS").arg(&key)).unwrap();assert!(!exists);
+        }
+    }
 }

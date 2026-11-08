@@ -786,7 +786,7 @@ mod tests {
                 .unwrap()
                 .contains("desktop")
         );
-        let request = crate::redis_mutation::Mutation {
+        let request = crate::redis_mutation::Mutation { entries: Vec::new(),
             action: crate::redis_mutation::Action::Create,
             keys: vec![b"new".to_vec()],
             kind: "string".into(),

@@ -15,6 +15,7 @@ pub(crate) struct Draft {
     pub ttl: u64,
     pub error: Option<String>,
     pub json_remove: bool,
+    pub extra_entries: Vec<(String, String)>,
 }
 fn bytes(text: &str) -> Result<Vec<u8>, String> {
     if text.starts_with('"') || text.starts_with('\'') {
@@ -54,7 +55,38 @@ impl Draft {
             ttl: 3600,
             error: None,
             json_remove: false,
+            extra_entries: Vec::new(),
         }
+    }
+    fn multi_create(&self) -> bool {
+        self.action == Action::Create && matches!(self.kind.as_str(),"hash"|"list"|"set"|"zset")
+    }
+    fn creation_entries(&mut self, ui: &mut egui::Ui) {
+        let paired = matches!(self.kind.as_str(),"hash"|"zset");
+        ui.horizontal(|ui| {
+            ui.strong(format!("{} entries",self.extra_entries.len()+1));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui| {
+                if ui.add_enabled(self.extra_entries.len()<99,crate::redis_workspace::action_button("plus","Add entry")).clicked() {
+                    self.extra_entries.push((String::new(),String::new()));
+                }
+            });
+        });
+        let mut remove=None;
+        egui::ScrollArea::vertical().id_salt("creation-entries").max_height(240.0).show_rows(ui,34.0,self.extra_entries.len()+1,|ui,range| {
+            for index in range {
+                ui.push_id(index,|ui| {
+                    let (field,value)=if index==0 {(&mut self.field,&mut self.value)} else {let row=&mut self.extra_entries[index-1];(&mut row.0,&mut row.1)};
+                    ui.horizontal(|ui| {
+                        let width=((ui.available_width()-36.0)/if paired {2.0}else{1.0}-8.0).max(40.0);
+                        if paired {ui.add(egui::TextEdit::singleline(field).desired_width(width).char_limit(65536).hint_text(if self.kind=="zset" {"Member"}else{"Field"}));}
+                        ui.add(egui::TextEdit::singleline(value).desired_width(width).char_limit(65536).hint_text(if self.kind=="zset" {"Score"}else{"Value"}));
+                        if crate::redis_value_editor::icon(ui,"trash-2","Remove entry",index>0).clicked() {remove=Some(index-1);}
+                    });
+                });
+            }
+        });
+        if let Some(index)=remove {self.extra_entries.remove(index);}
+        ui.weak("Up to 100 entries / 64 KiB total · plain text or quoted bytes · list order is preserved");
     }
     pub fn request(&self) -> Result<Mutation, String> {
         if self.action == Action::Create && self.key_text.is_empty() {
@@ -73,11 +105,13 @@ impl Draft {
         } else {
             None
         };
-        let request = Mutation {
+        let request = Mutation { entries: if self.multi_create() {
+            self.extra_entries.iter().map(|(field,value)| Ok((if matches!(self.kind.as_str(),"hash"|"zset") {bytes(field)?} else {vec![]},bytes(value)?))).collect::<Result<Vec<_>,String>>()?
+        } else { vec![] },
             action: if self.kind == "ReJSON-RL" && self.action == Action::Update && self.json_remove { Action::Remove } else { self.action },
             keys,
             kind: self.kind.clone(),
-            field: if self.kind == "ReJSON-RL" { self.field.as_bytes().to_vec() } else { bytes(&self.field)? },
+            field: if self.multi_create() && matches!(self.kind.as_str(), "list"|"set") { vec![] } else if self.kind == "ReJSON-RL" { self.field.as_bytes().to_vec() } else { bytes(&self.field)? },
             value: if self.kind == "ReJSON-RL" {
                 self.value.as_bytes().to_vec()
             } else {
@@ -131,7 +165,7 @@ impl Draft {
             crate::redis_workspace::browser_style(ui);
             ui.spacing_mut().item_spacing=egui::vec2(8.0,10.0);
 
-            ui.label(egui::RichText::new(if self.action==Action::Create {"Start with one value. Existing keys are never replaced."} else {"Changes apply only when you confirm below."}).color(ui.visuals().weak_text_color()));
+            ui.label(egui::RichText::new(if self.action==Action::Create {"Existing keys are never replaced. Confirm to create the key."} else {"Changes apply only when you confirm below."}).color(ui.visuals().weak_text_color()));
             if self.action==Action::Create {
                 ui.label("Key name");ui.add(egui::TextEdit::singleline(&mut self.key_text).margin(egui::vec2(6.0,4.0)).desired_width(f32::INFINITY).char_limit(65536));
                 ui.horizontal(|ui| { ui.label("Type");egui::ComboBox::from_id_salt("redis-create-type").selected_text(crate::redis_workspace::type_label(&self.kind)).show_ui(ui,|ui| {
@@ -146,6 +180,8 @@ impl Draft {
             if self.action==Action::Rename {
                 ui.label("New name");ui.add(egui::TextEdit::singleline(&mut self.field).margin(egui::vec2(6.0,4.0)).desired_width(f32::INFINITY).char_limit(65536));
                 ui.weak("Expiry is preserved. An existing destination is never overwritten.");
+            } else if self.multi_create() {
+                self.creation_entries(ui);
             } else if matches!(self.action,Action::Create|Action::Add|Action::Update) {
                 if matches!(self.kind.as_str(),"hash"|"zset"|"stream") {
                     ui.label(if self.kind=="zset" {"Member"} else {"Field"});
@@ -187,6 +223,20 @@ impl Draft {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn creation_entries_validate_counts_duplicates_scores_and_bytes() {
+        let mut draft=Draft::new(Action::Create,vec![],"hash".into());
+        draft.key_text="created".into(); draft.field="first".into(); draft.value="value".into();
+        draft.extra_entries.push(("second".into(),r#""\x00\xff""#.into()));
+        assert_eq!(draft.request().unwrap().entries[0].1,[0,255]);
+        draft.extra_entries[0].0="first".into(); assert!(draft.request().is_err());
+        draft.kind="list".into(); assert!(draft.request().is_ok());
+        draft.extra_entries=vec![(String::new(),"x".into());99]; assert!(draft.request().is_ok());
+        draft.extra_entries.push((String::new(),"x".into())); assert!(draft.request().is_err());
+        draft.extra_entries=vec![(String::new(),"x".repeat(65536))]; assert!(draft.request().is_err());
+        draft.kind="zset".into(); draft.value="1".into(); draft.extra_entries=vec![("second".into(),"NaN".into())];assert!(draft.request().is_err());
+        draft.extra_entries[0].1="2.5".into();assert!(draft.request().is_ok());
+    }
     #[test]
     fn json_path_drafts_preserve_input_and_require_explicit_nonroot_removal() {
         let mut draft=Draft::new(Action::Update,vec![b"json".to_vec()],"ReJSON-RL".into());

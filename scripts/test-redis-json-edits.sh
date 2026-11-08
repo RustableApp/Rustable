@@ -12,3 +12,4 @@ done
 port=$(docker port "$fixture" 6379/tcp)
 export RUSTABLE_REDIS_JSON_EDIT_PORT=${port##*:}
 RUSTABLE_REDIS_JSON_EDIT_QA=1 mise exec -- cargo test --locked --lib live_json_path_edits -- --ignored --nocapture --test-threads=1
+RUSTABLE_REDIS_JSON_EDIT_QA=1 mise exec -- cargo test --locked --lib live_collection_creation_entries -- --ignored --nocapture --test-threads=1
