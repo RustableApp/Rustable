@@ -474,7 +474,20 @@ fn sentinel_form(ui: &mut egui::Ui, config: &mut crate::redis_settings::Sentinel
     form_row(ui, "TLS", |ui| { form_checkbox(ui, &mut config.tls, "Verify certificate and hostname"); });
     let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
     if form_text(ui, "CA file", &mut ca, false, None) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
+    redis_identity_form(ui, &mut config.client_certificate, &mut config.client_key);
     valid
+}
+
+fn redis_identity_form(ui: &mut egui::Ui, certificate: &mut Option<PathBuf>, key: &mut Option<PathBuf>) {
+    ui.collapsing("Client certificate (optional)", |ui| {
+        for (label, path) in [("Certificate PEM", certificate), ("Private key PEM", key)] {
+            let mut text = path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+            if form_text(ui, label, &mut text, false, Some(ProbeField::Tls)) {
+                *path = (!text.is_empty()).then(|| PathBuf::from(text));
+            }
+        }
+        ui.weak("Both files are required. Only paths are saved; private key contents are never stored in the profile.");
+    });
 }
 
 #[derive(Clone)]
@@ -1022,6 +1035,7 @@ impl Rustable {
                                 status_row(ui, "TLS", Some(ProbeField::Tls), |ui| { form_checkbox(ui, &mut config.tls, "Verify certificate and hostname"); });
                                 let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
                                 if form_text(ui, "CA file", &mut ca, false, Some(ProbeField::Tls)) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
+                                redis_identity_form(ui, &mut config.client_certificate, &mut config.client_key);
                                 form_row(ui, "Connect timeout", |ui| { let mut seconds = config.connect_timeout.as_secs_f64(); if ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut seconds).range(0.1..=300.0).speed(0.1).suffix(" s")).changed() { config.connect_timeout = std::time::Duration::from_secs_f64(seconds); } });
                                 form_row(ui, "Read timeout", |ui| { let mut seconds = config.read_timeout.as_secs_f64(); if ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut seconds).range(0.1..=300.0).speed(0.1).suffix(" s")).changed() { config.read_timeout = std::time::Duration::from_secs_f64(seconds); } });
                             }

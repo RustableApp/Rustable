@@ -65,6 +65,8 @@ pub(crate) fn with_primary<T>(
                 username: sentinel.username.clone(),
                 tls: sentinel.tls,
                 root_certificate: sentinel.root_certificate.clone(),
+                client_certificate: sentinel.client_certificate.clone(),
+                client_key: sentinel.client_key.clone(),
                 connect_timeout: budget.min(Duration::from_millis(500)),
                 read_timeout: budget.min(Duration::from_millis(500)),
                 ..Default::default()

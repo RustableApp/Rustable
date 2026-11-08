@@ -138,23 +138,26 @@ impl Session {
             .into_connection_info()
             .map_err(|e| failure(vec![], vec![Host, Port], e.to_string()))?
             .set_redis_settings(auth);
-        let client = if let Some(certificate) =
-            settings.root_certificate.as_ref().filter(|_| settings.tls)
-        {
-            let pem = std::fs::read(certificate).map_err(|e| {
-                failure(
-                    vec![],
-                    vec![Tls],
-                    format!("Cannot read Redis CA certificate: {e}"),
-                )
-            })?;
-            redis::Client::build_with_tls(
-                info,
-                redis::TlsCertificates {
-                    client_tls: None,
-                    root_cert: Some(pem),
-                },
-            )
+        let client = if settings.tls && (settings.root_certificate.is_some() || settings.client_certificate.is_some()) {
+            let read_pem = |path: &std::path::Path, label: &str| -> Result<Vec<u8>, ConnectFailure> {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                let result = std::fs::File::open(path).and_then(|file| file.take(1024 * 1024 + 1).read_to_end(&mut bytes));
+                result.map_err(|e| failure(vec![], vec![Tls], format!("Cannot read Redis {label}: {e}")))?;
+                if bytes.len() > 1024 * 1024 {
+                    return Err(failure(vec![], vec![Tls], format!("Redis {label} exceeds the 1 MiB limit.")));
+                }
+                Ok(bytes)
+            };
+            let root_cert = settings.root_certificate.as_deref().map(|path| read_pem(path, "CA certificate")).transpose()?;
+            let client_tls = match (&settings.client_certificate, &settings.client_key) {
+                (Some(cert), Some(key)) => Some(redis::ClientTlsConfig {
+                    client_cert: read_pem(cert, "client certificate")?,
+                    client_key: read_pem(key, "client private key")?,
+                }),
+                _ => None, // Settings validation enforces paired identity paths.
+            };
+            redis::Client::build_with_tls(info, redis::TlsCertificates { client_tls, root_cert })
         } else {
             redis::Client::open(info)
         }

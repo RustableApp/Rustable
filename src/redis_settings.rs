@@ -15,6 +15,8 @@ pub(crate) struct Sentinel {
     pub username: String,
     pub tls: bool,
     pub root_certificate: Option<PathBuf>,
+    pub client_certificate: Option<PathBuf>,
+    pub client_key: Option<PathBuf>,
     pub remember_password: bool,
 }
 impl Default for Sentinel {
@@ -28,12 +30,15 @@ impl Default for Sentinel {
             username: String::new(),
             tls: true,
             root_certificate: None,
+            client_certificate: None,
+            client_key: None,
             remember_password: false,
         }
     }
 }
 impl Sentinel {
     fn validate(&self) -> Result<(), String> {
+        validate_identity(self.tls, &self.client_certificate, &self.client_key)?;
         if self.service.trim().is_empty() || self.service.len() > 256 || self.service.contains('\0')
         {
             return Err(
@@ -72,6 +77,8 @@ pub(crate) struct Settings {
     pub username: String,
     pub tls: bool,
     pub root_certificate: Option<PathBuf>,
+    pub client_certificate: Option<PathBuf>,
+    pub client_key: Option<PathBuf>,
     pub connect_timeout: Duration,
     pub read_timeout: Duration,
 }
@@ -87,6 +94,8 @@ impl Default for Settings {
             username: String::new(),
             tls: true,
             root_certificate: None,
+            client_certificate: None,
+            client_key: None,
             connect_timeout: Duration::from_secs(5),
             read_timeout: Duration::from_secs(5),
         }
@@ -94,6 +103,7 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn validate(&self) -> Result<(), String> {
+        validate_identity(self.tls, &self.client_certificate, &self.client_key)?;
         if let Some(sentinel) = &self.sentinel {
             if self.cluster {
                 return Err("Choose either Cluster or Sentinel deployment.".into());
@@ -135,9 +145,44 @@ impl Settings {
     }
 }
 
+fn validate_identity(tls: bool, certificate: &Option<PathBuf>, key: &Option<PathBuf>) -> Result<(), String> {
+    if certificate.is_some() != key.is_some() {
+        return Err("Configure both the Redis client certificate and private key.".into());
+    }
+    if !tls && certificate.is_some() {
+        return Err("Redis client certificates require verified TLS.".into());
+    }
+    if certificate.iter().chain(key.iter()).any(|p| p.as_os_str().is_empty()) {
+        return Err("Redis client certificate and key paths cannot be empty.".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn client_identity_requires_verified_tls_and_paired_paths() {
+        let mut settings: Settings = serde_json::from_str(r#"{"host":"legacy"}"#).unwrap();
+        assert!(settings.client_certificate.is_none());
+        assert!(settings.client_key.is_none());
+        settings.client_certificate = Some("client.pem".into());
+        assert!(settings.validate().unwrap_err().contains("both"));
+        settings.client_key = Some("client.key".into());
+        assert!(settings.validate().is_ok());
+        let encoded = serde_json::to_string(&settings).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&encoded).unwrap(), settings);
+        settings.tls = false;
+        assert!(settings.validate().unwrap_err().contains("verified TLS"));
+        settings.tls = true;
+        settings.sentinel = Some(Sentinel { client_key: Some("sentinel.key".into()), ..Default::default() });
+        assert!(settings.validate().unwrap_err().contains("both"));
+        settings.sentinel.as_mut().unwrap().client_certificate = Some("sentinel.pem".into());
+        assert!(settings.validate().is_ok());
+        settings.sentinel.as_mut().unwrap().tls = false;
+        assert!(settings.validate().unwrap_err().contains("verified TLS"));
+    }
+
     #[test]
     fn cluster_seed_profiles_are_bounded_validated_and_backward_compatible() {
         let old: Settings = serde_json::from_str(r#"{"cluster":true,"host":"legacy"}"#).unwrap();

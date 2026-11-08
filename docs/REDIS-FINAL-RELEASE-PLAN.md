@@ -73,3 +73,23 @@ entries, so verify the implementation before adding work. The user deleted the o
 paused goal and explicitly requested a new goal using this checklist and its scope
 boundaries. A fresh persistent goal now tracks this batch. No implementation or
 validation checkbox is complete yet for this new batch.
+
+### Connection milestone — client identity plumbing
+
+Implemented paired client-certificate/private-key path settings for Redis data
+connections and independent Sentinel discovery. The existing shared TLS connector
+loads PEM files on its worker with a 1 MiB per-file limit and passes them to the
+Redis driver's existing verified TLS identity configuration. Cluster endpoints
+inherit the data identity through cloned settings; Sentinel seed settings copy
+only the discovery identity. No commands or sequential protocol exchanges were
+added (cold/warm setup sequences unchanged; certificate authentication belongs to
+the existing TLS handshake). Only filesystem paths serialize into profiles.
+The connection forms expose optional certificate/key paths in a collapsed section.
+
+Evidence so far: `cargo check --locked` passed; all four Redis settings tests
+passed, including old-profile compatibility, paired identity validation, TLS
+requirement, serialization and independently configured Sentinel identity.
+Logs: `/tmp/redis-mtls-check.log`, `/tmp/redis-mtls-settings-tests.log`.
+This is partial implementation: live mutual-TLS acceptance/rejection, UI capture
+and performance checks are still required. SSH remains unimplemented. The parent
+connection milestone remains unchecked until those requirements are verified.
