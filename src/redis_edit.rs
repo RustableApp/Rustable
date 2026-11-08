@@ -14,6 +14,7 @@ pub(crate) struct Draft {
     pub expiry: bool,
     pub ttl: u64,
     pub error: Option<String>,
+    pub json_remove: bool,
 }
 fn bytes(text: &str) -> Result<Vec<u8>, String> {
     if text.starts_with('"') || text.starts_with('\'') {
@@ -52,6 +53,7 @@ impl Draft {
             expiry: false,
             ttl: 3600,
             error: None,
+            json_remove: false,
         }
     }
     pub fn request(&self) -> Result<Mutation, String> {
@@ -72,10 +74,10 @@ impl Draft {
             None
         };
         let request = Mutation {
-            action: self.action,
+            action: if self.kind == "ReJSON-RL" && self.action == Action::Update && self.json_remove { Action::Remove } else { self.action },
             keys,
             kind: self.kind.clone(),
-            field: bytes(&self.field)?,
+            field: if self.kind == "ReJSON-RL" { self.field.as_bytes().to_vec() } else { bytes(&self.field)? },
             value: if self.kind == "ReJSON-RL" {
                 self.value.as_bytes().to_vec()
             } else {
@@ -185,6 +187,25 @@ impl Draft {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn json_path_drafts_preserve_input_and_require_explicit_nonroot_removal() {
+        let mut draft=Draft::new(Action::Update,vec![b"json".to_vec()],"ReJSON-RL".into());
+        draft.value="1234567890123456789".into();
+        draft.field="$[\"name.with.dots\"]".into();
+        draft.expected=br#"{"original":true}"#.to_vec();
+        let request=draft.request().unwrap();
+        assert_eq!(request.field,draft.field.as_bytes());
+        assert_eq!(request.value,b"1234567890123456789");
+        draft.json_remove=true;
+        draft.value="unfinished invalid JSON".into();
+        assert_eq!(draft.request().unwrap().action,Action::Remove);
+        draft.field="$".into();
+        assert!(draft.request().is_err());
+        assert_eq!(draft.value,"unfinished invalid JSON");
+        assert_eq!(draft.expected,br#"{"original":true}"#);
+        draft.json_remove=false;
+        assert!(draft.request().is_err());
+    }
     #[test]
     fn drafts_preserve_binary_and_validate_before_submission() {
         let mut draft = Draft::new(Action::Create, vec![], "hash".into());

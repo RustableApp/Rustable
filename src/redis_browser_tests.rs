@@ -1312,3 +1312,48 @@ fn analytics_and_profiles_have_no_preflight_or_cleanup_exchange() {
     }
     peer.join().unwrap();
 }
+
+#[test]
+#[ignore = "disposable ephemeral Redis JSON fixture scripts/test-redis-json-edits.sh"]
+fn live_json_path_edits_preserve_conflicts_precision_and_expiry() {
+    use crate::redis_mutation::{Action, Mutation};
+    assert_eq!(std::env::var("RUSTABLE_REDIS_JSON_EDIT_QA").as_deref(),Ok("1"));
+    let mut session=Session::connect(&Settings {
+        host:"127.0.0.1".into(), port:std::env::var("RUSTABLE_REDIS_JSON_EDIT_PORT").unwrap().parse().unwrap(),tls:false,..Default::default()
+    },"rustable-json-test-only").unwrap();
+    let key=b"json:path:test";
+    session.query(redis::cmd("JSON.SET").arg(key).arg("$").arg(r#"{"name":"Avery","items":[1,2,3],"n":1234567890123456789}"#)).unwrap();
+    session.query(redis::cmd("PEXPIRE").arg(key).arg(60000)).unwrap();
+    let mut mutation=Mutation {action:Action::Update,keys:vec![key.to_vec()],kind:"ReJSON-RL".into(),field:b"$.name".to_vec(),value:br#""Sam""#.to_vec(),expected:session.typed(redis::cmd("JSON.GET").arg(key)).unwrap(),length:0,ttl_ms:None};
+    assert!(session.mutate(&mutation,true).is_err());
+    session.mutate(&mutation,false).unwrap();
+    let error=session.mutate(&mutation,false).unwrap_err();
+    assert!(error.contains("changed. Refresh before editing."),"{error}");
+    mutation.expected=session.typed(redis::cmd("JSON.GET").arg(key)).unwrap();
+    assert!(std::str::from_utf8(&mutation.expected).unwrap().contains("1234567890123456789"));
+    mutation.field=b"$[\"new.property\"]".to_vec();
+    mutation.value=b"true".to_vec();
+    session.mutate(&mutation,false).unwrap();
+    mutation.expected=session.typed(redis::cmd("JSON.GET").arg(key)).unwrap();
+    mutation.field=b"$.missing.child".to_vec();
+    assert!(session.mutate(&mutation,false).is_err());
+    let unchanged:Vec<u8>=session.typed(redis::cmd("JSON.GET").arg(key)).unwrap();
+    assert_eq!(unchanged,mutation.expected);
+    mutation.action=Action::Remove;
+    mutation.field=b"$.items[1]".to_vec();
+    session.mutate(&mutation,false).unwrap();
+    let values:String=session.typed(redis::cmd("JSON.GET").arg(key).arg("$.items")).unwrap();
+    assert_eq!(values,"[[1,3]]");
+    mutation.expected=session.typed(redis::cmd("JSON.GET").arg(key)).unwrap();
+    mutation.field=b"$.absent".to_vec();
+    assert!(session.mutate(&mutation,false).unwrap_err().contains("does not exist"));
+    for path in ["$", "$..name", "$.items[*]"] {
+        mutation.field=path.as_bytes().to_vec();
+        assert!(session.mutate(&mutation,false).is_err());
+    }
+    let unchanged:Vec<u8>=session.typed(redis::cmd("JSON.GET").arg(key)).unwrap();
+    assert_eq!(unchanged,mutation.expected);
+    let ttl:i64=session.typed(redis::cmd("PTTL").arg(key)).unwrap();
+    assert!(ttl>0 && ttl<=60000);
+    session.query(redis::cmd("DEL").arg(key)).unwrap();
+}

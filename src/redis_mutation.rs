@@ -63,6 +63,9 @@ impl Mutation {
                 return Err("Score must be a finite number.".into());
             }
         }
+        if self.kind == "ReJSON-RL" && matches!(self.action, Action::Update | Action::Remove) {
+            crate::redis_json_path::validate(&self.field, self.action == Action::Remove)?;
+        }
         if self.kind == "ReJSON-RL" && self.action != Action::Remove {
             use serde::Deserialize;
             let mut parser = serde_json::Deserializer::from_slice(&self.value);
@@ -183,9 +186,15 @@ elseif kind=='stream' then
  elseif op=='remove' then
   if redis.call('XDEL',key,field)==0 then return redis.error_reply('Entry disappeared. Refresh before editing.') end
  else return redis.error_reply('Stream entries are immutable.') end
-elseif kind=='ReJSON-RL' and op=='update' then
+elseif kind=='ReJSON-RL' and (op=='update' or op=='remove') then
  if redis.call('JSON.GET',key)~=expected then return redis.error_reply('JSON changed. Refresh before editing.') end
- redis.call('JSON.SET',key,'$',value)
+ local path=field; if path=='' then path='$' end
+ if op=='remove' then
+  if path=='$' then return redis.error_reply('Use Delete key to remove the whole document.') end
+  if redis.call('JSON.DEL',key,path)==0 then return redis.error_reply('JSON path does not exist; nothing changed.') end
+ else
+  if not redis.call('JSON.SET',key,path,value) then return redis.error_reply('JSON parent path does not exist; nothing changed.') end
+ end
 else return redis.error_reply('Unsupported edit for this key type.') end
 return 1
 "#;

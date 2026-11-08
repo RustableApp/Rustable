@@ -863,3 +863,39 @@ All unrelated measured scenarios passed. This is not a blanket performance pass.
 Functional/live/protocol, explicit-input/draft, browser and both-theme native capture
 evidence above complete the bounded vector milestone. Existing one-exchange direct
 VSIM and 1 MiB response budget remain. Next: JSON path editing and multi-entry creation.
+
+### Editing checkpoint — inline JSON path operations
+
+The existing inline JSON editor now accepts a single property/array-index path and
+Set value or Remove path. Set replaces an existing value or creates a property when
+its parent exists. Missing parents fail without changes; remove requires an existing
+non-root path. Whole-document replacement remains the default. Root removal stays
+with explicit Delete key. The syntax-highlighted value draft remains retained when
+switching modes, on validation errors and on server failures.
+
+A bounded local path validator accepts root, ASCII dot properties, JSON-quoted bracket
+properties (including Unicode/escaped names), and nonnegative array indices. It
+rejects recursive descent, wildcards, slices, unions, filters and paths over 4 KiB
+or 128 segments. The worker validates again. JSON values/expected documents remain
+limited to 64 KiB and are not decoded through floating-point JSON values.
+
+The existing atomic mutation script compares the full original JSON document before
+JSON.SET/JSON.DEL. Any concurrent document change rejects the operation; expiry is
+preserved. The established mutation path stays one EVAL exchange, cold and warm,
+with no added metadata/path fetch. Existing post-save refresh behavior is unchanged.
+No write is replayed on uncertain outcomes. Command semantics checked against
+https://redis.io/docs/latest/commands/json.set/ and
+https://redis.io/docs/latest/commands/json.del/.
+
+Two focused unit tests passed (one live test ignored in that run), covering single
+location grammar and draft/action/value preservation (`/tmp/redis-json-path-unit-tests.log`).
+The new ephemeral-port Redis 8.4 fixture passed safe-mode rejection, stale document
+conflicts, large-integer precision, dotted property creation, missing-parent/no-change,
+array removal, missing/root/multi-target rejection and TTL preservation
+(`/tmp/redis-json-path-live-tests.log`; `scripts/test-redis-json-edits.sh`).
+An initial assertion was corrected for the Redis client's error-code formatting;
+the conflict rejection itself was already occurring.
+
+This is partial editing implementation. Multi-entry creation, native captures,
+interaction/performance/browser validation and additional safety coverage remain;
+the editing milestone stays unchecked.

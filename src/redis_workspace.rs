@@ -1948,15 +1948,29 @@ impl Workspace {
             }
             if let Some(draft) = &mut self.edit
                 && draft.action == crate::redis_mutation::Action::Update && draft.kind == "ReJSON-RL" {
+                ui.add_enabled_ui(!self.busy && !self.read_only, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Path");
+                        ui.add(egui::TextEdit::singleline(&mut draft.field).hint_text("$ · whole document").desired_width(f32::INFINITY).char_limit(4096));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut draft.json_remove, false, "Set value");
+                        ui.selectable_value(&mut draft.json_remove, true, "Remove path");
+                    });
+                });
+                ui.weak("One property or array index · any document change causes a conflict · expiry preserved");
+                if draft.json_remove {
+                    ui.colored_label(ui.visuals().warn_fg_color, "Removes this path and its children when you confirm. Use Delete key for the whole document.");
+                }
                 let mut layouter = crate::redis_value_editor::layout;
-                ui.add_enabled(!self.busy && !self.read_only, egui::TextEdit::multiline(&mut draft.value)
+                ui.add_enabled(!self.busy && !self.read_only && !draft.json_remove, egui::TextEdit::multiline(&mut draft.value)
                     .code_editor().layouter(&mut layouter).desired_rows(14).desired_width(f32::INFINITY));
                 if let Some(error) = &draft.error { ui.colored_label(ui.visuals().error_fg_color, error); }
                 let mut cancel = false;
                 ui.horizontal(|ui| {
-                    ui.weak("JSON document · Save preserves expiry");
+                    ui.weak(if draft.json_remove { "Confirm path removal" } else { "JSON value · missing parent paths are not created" });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::redis_value_editor::icon(ui, "check", "Save JSON document", self.connected && !self.busy && !self.read_only).clicked() {
+                        if crate::redis_value_editor::icon(ui, "check", if draft.json_remove { "Confirm JSON path removal" } else { "Save JSON value" }, self.connected && !self.busy && !self.read_only).clicked() {
                             match draft.request() { Ok(request) => *job = Some(Job::Mutate(request, self.read_only)), Err(error) => draft.error = Some(error) }
                         }
                         cancel = crate::redis_value_editor::icon(ui, "x", "Discard JSON edits", !self.busy).clicked();

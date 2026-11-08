@@ -63,6 +63,7 @@ mod redis_edit;
 #[cfg(not(target_arch = "wasm32"))]
 mod redis_monitor;
 mod redis_mutation;
+mod redis_json_path;
 mod redis_preferences;
 mod redis_history;
 mod redis_command_results;
