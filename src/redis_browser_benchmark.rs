@@ -412,3 +412,38 @@ mod redis_tool_pages_benchmark {
         }
     }
 }
+
+#[cfg(test)]
+mod redis_completion_ui_benchmark {
+    use eframe::egui;
+    #[test]
+    #[ignore = "manual focused command completion UI comparison"]
+    fn redis_completion_frame_benchmark() {
+        for scenario in ["commands", "arguments", "after-idle"] {
+            let ctx=egui::Context::default();
+            let mut editor=crate::redis_command_editor::Editor::default();
+            let mut text=if scenario=="arguments" {"SET app:theme dark N"} else {"HG"}.to_owned();
+            let mut samples=Vec::new();
+            for frame in 0..180 {
+                let start=std::time::Instant::now();
+                let output=ctx.run(egui::RawInput {
+                    screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1200.0,760.0))),
+                    time:Some(frame as f64/120.0+if scenario=="after-idle" && frame>=100 {30.0}else{0.0}),
+                    events:if frame>0 && frame%2==0 {vec![egui::Event::Key{key:egui::Key::ArrowDown,physical_key:None,pressed:true,repeat:false,modifiers:egui::Modifiers::NONE}]}else{vec![]},
+                    ..Default::default()
+                },|ctx| {
+                    egui::CentralPanel::default().show(ctx,|ui| {
+                        let id=ui.make_persistent_id("redis-command-editor");ui.memory_mut(|m|m.request_focus(id));
+                        if let Some(mut state)=egui::text_edit::TextEditState::load(ctx,id) {
+                            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(text.chars().count()))));state.store(ctx,id);
+                        }
+                        editor.show(ui,&mut text,true);
+                    });
+                });
+                let _=ctx.tessellate(output.shapes,output.pixels_per_point);
+                if frame>=20 {samples.push(start.elapsed().as_secs_f64()*1000.0);}
+            }
+            samples.sort_by(f64::total_cmp);crate::ui_benchmark::report(&format!("redis/completion/{scenario}"),&samples);
+        }
+    }
+}

@@ -66,7 +66,7 @@ impl Element {
             self.components.len()
         ));
         ui.weak("Approximate values after normalization and quantization.");
-        TableBuilder::new(ui)
+        TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .id_salt("vector-components")
             .striped(true)
             .max_scroll_height(200.0)
@@ -91,16 +91,7 @@ impl Element {
                     });
                 })
             });
-        if ui
-            .add(crate::redis_workspace::action_button(
-                "clipboard",
-                "Copy vector",
-            ))
-            .clicked()
-        {
-            ui.ctx()
-                .copy_text(format!("[{}]", self.components.join(", ")));
-        }
+        crate::redis_value_editor::copy(ui, "vector", Some("Copy vector"), true, || format!("[{}]", self.components.join(", ")));
         ui.add_space(8.0);
         ui.strong("JSON attributes");
         if let Some(attributes) = &self.attributes {
@@ -114,16 +105,7 @@ impl Element {
                 180.0,
                 Some(&attributes.json_tokens),
             );
-            if ui
-                .add_enabled(
-                    attributes.json_source.is_some(),
-                    crate::redis_workspace::action_button("clipboard", "Copy attributes"),
-                )
-                .clicked()
-            {
-                ui.ctx()
-                    .copy_text(attributes.json_source.clone().unwrap_or_default());
-            }
+            crate::redis_value_editor::copy(ui, "attributes", Some("Copy attributes"), attributes.json_source.is_some(), || attributes.json_source.clone().unwrap_or_default());
         } else {
             ui.weak("No attributes stored for this element.");
         }

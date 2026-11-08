@@ -123,3 +123,11 @@ budgets: improving one does not justify degrading the other.
   cases. Any accepted regression needs a concrete user benefit/correctness reason,
   alternatives considered and the measured cost. Existing speed is worth preserving
   even when both versions fit within a display frame budget.
+
+## UI consistency and completion
+
+Follow [the UI style guide](docs/UI-STYLE-GUIDE.md) for all UI changes. Review the
+whole affected view rather than only the requested control. Tables and lists must
+have intentional styling, alignment, empty states and bounded rendering. Copy
+controls must provide temporary in-place confirmation. Reuse shared controls and
+SQL viewer conventions; inspect actual screenshots before calling visual work done.

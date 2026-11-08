@@ -38,6 +38,7 @@ with tempfile.TemporaryDirectory(prefix='.rustable-demo-', dir=destination.paren
         shutil.copy2(package/'web'/name,out/name)
     licenses = out/'Licenses'
     licenses.mkdir(exist_ok=True)
+    shutil.copytree(root/'assets/redis', licenses/'redis-command-metadata', dirs_exist_ok=True)
     metadata=json.loads(subprocess.check_output(['mise','exec','--','cargo','metadata','--locked','--format-version','1','--filter-platform','wasm32-unknown-unknown','--manifest-path',str(package/'Cargo.toml')]))
     font_notices=licenses/'NotoEmoji'
     font_notices.mkdir()

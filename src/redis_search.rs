@@ -73,6 +73,7 @@ pub(crate) enum Action {
     Inspect(Vec<u8>),
 }
 impl View {
+    pub fn loaded_indexes(&self) -> &[Vec<u8>] { &self.indexes }
     #[cfg(feature = "qa")]
     pub fn preview_request(&mut self, step: usize) -> Request {
         self.open = true;
@@ -244,9 +245,10 @@ impl View {
         });
         ui.add_space(16.0);
         use egui_extras::{Column, TableBuilder};
-        TableBuilder::new(ui).id_salt("redis-index-catalog").striped(true)
+        crate::controls::table_surface(ui, |ui| {
+        TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("redis-index-catalog").striped(true)
             .column(Column::remainder().clip(true)).column(Column::exact(90.0))
-            .header(32.0, |mut row| { row.col(|ui| { ui.strong("Index name"); }); row.col(|_| {}); })
+            .header(32.0, |mut row| { row.col(|ui| { crate::controls::table_header(ui, "Index name"); }); row.col(|ui| {crate::controls::table_header(ui, "");}); })
             .body(|body| body.rows(32.0, self.indexes.len(), |mut row| {
                 let index = &self.indexes[row.index()];
                 row.col(|ui| { ui.monospace(label(index)); });
@@ -260,6 +262,7 @@ impl View {
                     }
                 });
             }));
+        });
         if self.pending { ui.spinner(); }
         if let Some(error) = &self.error { ui.colored_label(ui.visuals().error_fg_color, error); }
         if self.indexes.is_empty() && !self.pending { ui.weak("No search indexes loaded. Refresh to discover indexes on this connection."); }
@@ -294,9 +297,9 @@ impl View {
                     let close_schema=self.collapse_schema;self.collapse_schema=false;
                     egui::CollapsingHeader::new("View index schema").default_open(false).open(close_schema.then_some(false)).show(ui, |ui| {
                         use egui_extras::{Column, TableBuilder};
-                        TableBuilder::new(ui).id_salt("search-schema").striped(true).max_scroll_height(130.0)
+                        TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("search-schema").striped(true).max_scroll_height(130.0)
                             .column(Column::remainder().clip(true)).column(Column::remainder().clip(true)).column(Column::exact(110.0))
-                            .header(25.0, |mut r| { for s in ["FIELD", "PATH", "TYPE"] { r.col(|ui| { ui.weak(s); }); } })
+                            .header(25.0, |mut r| { for s in ["FIELD", "PATH", "TYPE"] { r.col(|ui| { crate::controls::table_header(ui, s); }); } })
                             .body(|body| body.rows(23.0, self.schema.len(), |mut r| {
                                 let field=&self.schema[r.index()];
                                 for v in [label(&field.name),field.path.clone(),format!("{}{}",field.kind,if field.sortable {" ↕"}else{""})] { r.col(|ui| { ui.add(egui::Label::new(&v).truncate()).on_hover_text(v); }); }
@@ -390,7 +393,7 @@ impl View {
                     if keys.is_empty() { ui.add_space(16.0); ui.strong("No matching documents"); ui.weak("Try * to see indexed keys, or adjust the query."); }
                     use egui_extras::{Column, TableBuilder};
                     egui::ScrollArea::horizontal().id_salt("search-columns").show(ui,|ui| {
-                        let mut table=TableBuilder::new(ui).id_salt(("search-results",&options.fields)).striped(true).max_scroll_height(270.0).column(Column::initial(260.0).clip(true));
+                        let mut table=TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt(("search-results",&options.fields)).striped(true).max_scroll_height(270.0).column(Column::initial(260.0).clip(true));
                         for _ in &options.fields {table=table.column(Column::initial(130.0).clip(true));}
                         table
                             .header(26.0, |mut row| {

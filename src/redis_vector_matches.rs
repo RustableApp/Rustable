@@ -64,7 +64,7 @@ impl Matches {
         ui.add(egui::Label::new(egui::RichText::new(&self.source).monospace()).truncate());
         ui.weak("Top 20 approximate matches · higher scores mean more similar");
         let mut action = None;
-        TableBuilder::new(ui)
+        TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .id_salt("vector-matches")
             .striped(true)
             .max_scroll_height(360.0)
@@ -74,7 +74,7 @@ impl Matches {
             .header(28.0, |mut row| {
                 for name in ["ELEMENT", "SCORE", ""] {
                     row.col(|ui| {
-                        ui.weak(name);
+                        crate::controls::table_header(ui, name);
                     });
                 }
             })

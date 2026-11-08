@@ -141,6 +141,7 @@ def main():
     parser.add_argument('--redis-connections', action='store_true', help='Include the shared Redis connection profile workload')
     parser.add_argument('--redis-pages', action='store_true', help='Include Search, Analyze and Pub/Sub page workloads')
     parser.add_argument('--redis-editor', action='store_true', help='Include Redis command editor idle/edit workloads')
+    parser.add_argument('--redis-completion', action='store_true', help='Compare focused command completion frames using the identical fixture')
     parser.add_argument('--redis-tools', action='store_true', help='Include shared Redis diagnostics and topology workloads')
     parser.add_argument('--base', required=True, help='Git revision to compare against')
     parser.add_argument('--output', default='target/ui-performance')
@@ -156,6 +157,9 @@ def main():
     if args.redis_editor:
         BENCHMARKS += ('redis_command_pane_frame_benchmark',)
         EXPECTED.update(f'redis/command-editor/{count}/{editing}' for count in (20, 200) for editing in ('false', 'true'))
+    if args.redis_completion:
+        BENCHMARKS += ('redis_completion_frame_benchmark',)
+        EXPECTED.update(f'redis/completion/{case}' for case in ('commands', 'arguments', 'after-idle'))
     if args.runs < 5:
         parser.error('--runs must be at least 5')
     root = Path(run(['git', 'rev-parse', '--show-toplevel'], Path.cwd(), capture_output=True).stdout.strip())
@@ -186,7 +190,7 @@ def main():
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
-            if args.redis or args.redis_editor or args.redis_pages:
+            if args.redis or args.redis_editor or args.redis_pages or args.redis_completion:
                 # New workload, identical source on each side; never change the
                 # workload in just the candidate and call it a comparison.
                 fixture = root / 'src' / 'redis_browser_benchmark.rs'

@@ -423,6 +423,9 @@ impl Workspace {
         self.section = Section::Workbench;
         self.inspector_visible = false;
         self.command = "GET app:config:theme\nHGETALL app:users:1001\nZRANGE leaderboard:weekly 0 5 WITHSCORES\nSCAN 0 MATCH \"app:*\" COUNT 100".into();
+        if let Ok(text)=std::env::var("RUSTABLE_REDIS_COMPLETION_CAPTURE") {
+            self.command=text; self.command_editor.focus();
+        }
         self.send(Job::Execute("PING\nGET app:config:theme".into(), true));
         true
     }
@@ -1181,7 +1184,7 @@ impl Workspace {
                             for i in range {
                                 let command = &self.command_history[self.command_history.len() - 1 - i];
                                 let preview: String = command.lines().next().unwrap_or_default().chars().take(100).collect();
-                                if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(egui::RichText::new(preview).monospace()).frame(false).truncate()).clicked() { self.command = command.clone(); }
+                                if ui.add_sized([ui.available_width(), 40.0], egui::Button::new(egui::RichText::new(preview).monospace()).frame(false).truncate()).clicked() { self.command = command.clone(); self.command_editor.focus(); }
                             }
                         });
                         if self.command_history.is_empty() { ui.weak("Executed commands appear here."); }
@@ -2140,9 +2143,7 @@ impl Workspace {
                     });
                 }
                 value_lines(ui, "redis-selected-value", &row.detail, 180.0);
-                if ui.add(action_button("clipboard", "Copy item")).clicked() {
-                    ui.ctx().copy_text(row.detail.join("\n"));
-                }
+                crate::redis_value_editor::copy(ui, "item", Some("Copy item"), true, || row.detail.join("\n"));
             }
         } else {
             ui.monospace(&self.preview);
@@ -2203,7 +2204,7 @@ impl Workspace {
     fn command_pane(&mut self, ui: &mut egui::Ui) {
         if self.cluster {ui.weak("Key commands route to their primary. Server-level commands and command-line scans use the seed node; the key browser scans all primaries.");}
         let enabled = !self.busy && self.connected && self.edit.is_none();
-        let mut command_to_run = self.command_editor.show(ui, &mut self.command, enabled);
+        let mut command_to_run = self.command_editor.show_with_context(ui, &mut self.command, enabled, &crate::redis_completion::Context {keys:&self.keys,indexes:self.search.loaded_indexes(),snapshot:self.snapshot.as_ref()});
         ui.add_space(6.0);
         egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)).show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -2240,7 +2241,7 @@ impl Workspace {
                                 .button(command.chars().take(80).collect::<String>())
                                 .clicked()
                             {
-                                self.command = command.clone();
+                                self.command = command.clone(); self.command_editor.focus();
                                 ui.close();
                             }
                         }
@@ -2817,10 +2818,7 @@ impl Workspace {
                             }
                         }
                         response.context_menu(|ui| {
-                            if !folder && ui.button("Copy key").clicked() {
-                                ui.ctx().copy_text(display_key(key));
-                                ui.close();
-                            }
+                            if !folder { crate::redis_value_editor::copy(ui, "tree-key", Some("Copy key"), true, || display_key(key)); }
                             if !folder && ui.button("Inspect key").clicked() {
                                 inspect = Some(key.clone());
                                 ui.close();
@@ -2961,10 +2959,7 @@ impl Workspace {
                                 inspect = Some(key.clone());
                                 ui.close();
                             }
-                            if ui.button("Copy key").clicked() {
-                                ui.ctx().copy_text(display_key(key));
-                                ui.close();
-                            }
+                            crate::redis_value_editor::copy(ui, "list-key", Some("Copy key"), true, || display_key(key));
                             if ui
                                 .add_enabled(
                                     !self.read_only && !self.busy,
@@ -3096,7 +3091,7 @@ fn ttl_label(ttl: i64) -> String {
         n => format!("{}s", n / 1000),
     }
 }
-fn display_key(key: &[u8]) -> String {
+pub(crate) fn display_key(key: &[u8]) -> String {
     if key.len() > 512 {
         return format!(
             "{}… ({} bytes)",

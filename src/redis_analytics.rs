@@ -215,7 +215,7 @@ impl Report {
         egui::ScrollArea::horizontal()
             .id_salt("aggregate-columns")
             .show(ui, |ui| {
-                let mut table = TableBuilder::new(ui)
+                let mut table = TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                     .id_salt(("aggregate-results", &self.columns))
                     .striped(true)
                     .max_scroll_height(270.0);
@@ -254,7 +254,7 @@ impl Profile {
             "Server time fields are milliseconds; counts are operations. Client elapsed includes transport and decoding.",
         );
         use egui_extras::{Column, TableBuilder};
-        TableBuilder::new(ui)
+        TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .id_salt("search-profile")
             .striped(true)
             .max_scroll_height(220.0)
@@ -264,7 +264,7 @@ impl Profile {
             .header(26.0, |mut row| {
                 for s in ["PROFILE DETAIL", "VALUE"] {
                     row.col(|ui| {
-                        ui.weak(s);
+                        crate::controls::table_header(ui, s);
                     });
                 }
             })

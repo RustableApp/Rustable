@@ -21,6 +21,7 @@ pub(crate) fn copy(
         .data(|d| d.get_temp::<f64>(id))
         .is_some_and(|until| now < until);
     let response = if let Some(label) = label {
+        let width=ui.painter().layout_no_wrap(label.into(),egui::TextStyle::Button.resolve(ui.style()),ui.visuals().text_color()).size().x+40.0;
         ui.add_enabled(
             enabled,
             crate::redis_workspace::action_button(
@@ -28,7 +29,7 @@ pub(crate) fn copy(
                 if copied { "Copied" } else { label },
             )
             .min_size(egui::vec2(
-                if label == "Copy value" { 110.0 } else { 80.0 },
+                width.max(80.0),
                 crate::controls::BUTTON_HEIGHT,
             )),
         )

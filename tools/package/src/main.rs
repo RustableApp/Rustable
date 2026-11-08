@@ -220,6 +220,7 @@ fn notices(root: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)?;
     font_notices(root, destination)?;
     icon_notices(root, destination)?;
+    copy_tree(&root.join("assets/redis"), &destination.join("redis-command-metadata"))?;
     for name in [
         "UPSTREAM.md",
         "postgres-language-server-0.28.1-MIT.txt",

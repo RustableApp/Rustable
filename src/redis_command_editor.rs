@@ -3,9 +3,23 @@ use eframe::egui::{self, Color32, FontId, TextFormat, text::LayoutJob};
 #[derive(Default)]
 pub(crate) struct Editor {
     cursor: std::ops::Range<usize>,
+    suggestions: crate::redis_completion::Suggestions,
+    selected: usize,
+    dismissed: bool,
+    focus_requested: bool,
+    last_context: Option<(u64, usize, usize)>,
 }
 impl Editor {
-    pub fn toolbar(&mut self, ui: &mut egui::Ui, text: &str, enabled: bool, busy: bool) -> Option<String> {
+    pub fn focus(&mut self) {
+        self.focus_requested = true;
+    }
+    pub fn toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        text: &str,
+        enabled: bool,
+        busy: bool,
+    ) -> Option<String> {
         let mut run = None;
         let can_run = enabled && !text.trim().is_empty() && text.len() <= 1024 * 1024;
         if ui
@@ -40,9 +54,71 @@ impl Editor {
         }
         run.and_then(|all| target(text, self.cursor.clone(), all))
     }
+    #[cfg(test)]
     pub fn show(&mut self, ui: &mut egui::Ui, text: &mut String, enabled: bool) -> Option<String> {
+        self.show_with_context(
+            ui,
+            text,
+            enabled,
+            &crate::redis_completion::Context::default(),
+        )
+    }
+    pub fn show_with_context(
+        &mut self,
+        ui: &mut egui::Ui,
+        text: &mut String,
+        enabled: bool,
+        context: &crate::redis_completion::Context<'_>,
+    ) -> Option<String> {
         let id = ui.make_persistent_id("redis-command-editor");
-        let focused = ui.memory(|m| m.has_focus(id));
+        if self.focus_requested {
+            self.focus_requested = false;
+            self.dismissed = false;
+            let caret = text.chars().count();
+            self.cursor = caret..caret;
+            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(caret),
+                )));
+            state.store(ui.ctx(), id);
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        let focused = ui.is_enabled() && ui.memory(|m| m.has_focus(id));
+        let explicit =
+            focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Space));
+        if explicit {
+            self.dismissed = false;
+            self.last_context = None;
+        }
+        if focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.dismissed = true;
+        }
+        let selection_before = self.selected;
+        let mut accept = None;
+        if focused && !self.dismissed && !self.suggestions.items.is_empty() {
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                    self.dismissed = true;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    self.selected = (self.selected + 1) % self.suggestions.items.len();
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    self.selected = (self.selected + self.suggestions.items.len() - 1)
+                        % self.suggestions.items.len();
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                {
+                    accept = Some(self.selected);
+                }
+            });
+        }
+        if let Some(index) = accept {
+            self.accept(ui.ctx(), id, text, index);
+        }
         let run = if focused {
             ui.input_mut(|i| {
                 if i.consume_key(
@@ -59,52 +135,179 @@ impl Editor {
         } else {
             None
         };
+        if run.is_some() {
+            self.dismissed = true;
+        }
         let can_run = enabled && !text.trim().is_empty() && text.len() <= 1024 * 1024;
         let height = (ui.available_height() * 0.55).clamp(54.0, 220.0);
+        let mut anchor = ui.cursor().min;
+        let mut changed = false;
+        let mut has_focus = focused;
         panel(ui, 8, |ui| {
-                crate::editor::selection_style(ui.visuals_mut());
-                egui::ScrollArea::vertical()
-                    .id_salt("redis-command-editor-scroll")
-                    .max_height(height)
-                    .show(ui, |ui| {
-                        ui.horizontal_top(|ui| {
-                            let (gutter, _) = ui.allocate_exact_size(
-                                egui::vec2(
-                                    (text.len().max(1).ilog10() as f32 * 8.5 + 16.5).max(32.0),
-                                    90.0,
-                                ),
-                                egui::Sense::hover(),
-                            );
-                            let output = egui::TextEdit::multiline(text)
-                                .id(id)
-                                .code_editor()
-                                .frame(false)
-                                .desired_rows(5)
-                                .min_size(egui::vec2(0.0, height))
-                                .desired_width(ui.available_width())
-                                .layouter(&mut layout)
-                                .show(ui);
-                            if let Some(cursor) = output.cursor_range {
-                                self.cursor = cursor.as_sorted_char_range();
-                            }
-                            let visual_row = output
-                                .galley
-                                .layout_from_cursor(egui::text::CCursor::new(self.cursor.start))
-                                .row;
-                            let current_line = 1 + output
-                                .galley
-                                .rows
-                                .iter()
-                                .take(visual_row)
-                                .filter(|row| row.ends_with_newline)
-                                .count();
-                            crate::editor::paint_line_numbers(ui, gutter, &output, current_line);
-                        });
+            crate::editor::selection_style(ui.visuals_mut());
+            egui::ScrollArea::vertical()
+                .id_salt("redis-command-editor-scroll")
+                .max_height(height)
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        let (gutter, _) = ui.allocate_exact_size(
+                            egui::vec2(
+                                (text.len().max(1).ilog10() as f32 * 8.5 + 16.5).max(32.0),
+                                90.0,
+                            ),
+                            egui::Sense::hover(),
+                        );
+                        let output = egui::TextEdit::multiline(text)
+                            .id(id)
+                            .code_editor()
+                            .frame(false)
+                            .desired_rows(5)
+                            .min_size(egui::vec2(0.0, height))
+                            .desired_width(ui.available_width())
+                            .layouter(&mut layout)
+                            .show(ui);
+                        changed = output.response.changed();
+                        has_focus = ui.is_enabled() && output.response.has_focus();
+                        if let Some(cursor) = output.cursor_range {
+                            self.cursor = cursor.as_sorted_char_range();
+                        }
+                        let visual_row = output
+                            .galley
+                            .layout_from_cursor(egui::text::CCursor::new(self.cursor.start))
+                            .row;
+                        let current_line = 1 + output
+                            .galley
+                            .rows
+                            .iter()
+                            .take(visual_row)
+                            .filter(|row| row.ends_with_newline)
+                            .count();
+                        let caret = output
+                            .galley
+                            .pos_from_cursor(egui::text::CCursor::new(self.cursor.end));
+                        anchor = output.galley_pos + caret.left_bottom().to_vec2();
+                        crate::editor::paint_line_numbers(ui, gutter, &output, current_line);
                     });
-            });
+                });
+        });
+        if (has_focus || focused) && self.cursor.is_empty() {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut h);
+            let stamp = (
+                h.finish(),
+                self.cursor.end,
+                context.keys.len() + context.indexes.len(),
+            );
+            if self.last_context != Some(stamp) {
+                self.suggestions =
+                    crate::redis_completion::suggest_with_context(text, self.cursor.end, context);
+                self.selected = 0;
+                self.last_context = Some(stamp);
+                if changed {
+                    self.dismissed = false;
+                }
+            }
+            if !self.dismissed
+                && (!self.suggestions.items.is_empty() || !self.suggestions.signature.is_empty())
+            {
+                let bounds = ui.ctx().content_rect();
+                let width = 480.0_f32.min(bounds.width() - 16.0);
+                let pos = egui::pos2(
+                    anchor
+                        .x
+                        .min(bounds.right() - width - 8.0)
+                        .max(bounds.left() + 8.0),
+                    (anchor.y + 4.0)
+                        .min(bounds.bottom() - 280.0)
+                        .max(bounds.top() + 8.0),
+                );
+                let mut clicked = None;
+                egui::Area::new(id.with("intellisense"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(pos)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style())
+                            .inner_margin(8)
+                            .show(ui, |ui| {
+                                ui.set_width(width);
+                                let selected = self.suggestions.items.get(self.selected);
+                                let signature =
+                                    selected.map_or(self.suggestions.signature, |i| i.signature);
+                                if !signature.is_empty() {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(signature).monospace().strong(),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(signature);
+                                    ui.add(
+                                        egui::Label::new(
+                                            selected.map_or(self.suggestions.summary, |i| i.detail),
+                                        )
+                                        .wrap(),
+                                    );
+                                    if !self.suggestions.argument.is_empty() {
+                                        ui.weak(format!("Expected: {}", self.suggestions.argument));
+                                    }
+                                }
+                                if !self.suggestions.items.is_empty() {
+                                    let mut list = egui::ScrollArea::vertical()
+                                        .id_salt("redis-completions")
+                                        .max_height(176.0);
+                                    if selection_before != self.selected || changed || explicit {
+                                        list = list.vertical_scroll_offset(
+                                            self.selected.saturating_sub(5) as f32 * 25.0,
+                                        );
+                                    }
+                                    list.show_rows(
+                                        ui,
+                                        25.0,
+                                        self.suggestions.items.len(),
+                                        |ui, range| {
+                                            for i in range {
+                                                let item = &self.suggestions.items[i];
+                                                let r = ui.add_sized(
+                                                    [width, 25.0],
+                                                    egui::Button::selectable(
+                                                        i == self.selected,
+                                                        egui::RichText::new(&item.label)
+                                                            .monospace(),
+                                                    )
+                                                    .shortcut_text(
+                                                        if item.detail.starts_with("Loaded") {
+                                                            "name"
+                                                        } else if item
+                                                            .signature
+                                                            .starts_with(&item.label)
+                                                        {
+                                                            "command"
+                                                        } else {
+                                                            "option"
+                                                        },
+                                                    ),
+                                                );
+                                                if r.clicked() {
+                                                    clicked = Some(i);
+                                                }
+                                                r.on_hover_text(item.detail);
+                                            }
+                                        },
+                                    );
+                                    ui.separator();
+                                    ui.weak("↑ ↓ Navigate   Tab / Enter Insert   Esc Dismiss");
+                                }
+                            });
+                    });
+                if let Some(index) = clicked {
+                    self.accept(ui.ctx(), id, text, index);
+                }
+            }
+        }
         ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.weak("One command per line · quote values containing spaces · \\xHH for binary bytes");
+            ui.add_space(8.0);
+            ui.weak("One command per line · Ctrl+Space for suggestions · \\xHH for binary bytes");
         });
         if text.len() > 1024 * 1024 {
             ui.colored_label(
@@ -118,9 +321,40 @@ impl Editor {
             None
         }
     }
+    fn accept(&mut self, ctx: &egui::Context, id: egui::Id, text: &mut String, index: usize) {
+        let Some(item) = self.suggestions.items.get(index) else {
+            return;
+        };
+        let range = self.suggestions.replace.clone();
+        if range.end > text.len()
+            || !text.is_char_boundary(range.start)
+            || !text.is_char_boundary(range.end)
+        {
+            return;
+        }
+        let caret = text[..range.start].chars().count() + item.insert.chars().count();
+        text.replace_range(range, &item.insert);
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, id) {
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(caret),
+                )));
+            state.store(ctx, id);
+        }
+        self.cursor = caret..caret;
+        self.dismissed = false;
+        self.last_context = None;
+        self.suggestions = Default::default();
+        ctx.memory_mut(|m| m.request_focus(id));
+    }
 }
 /// Full-width editor/result surface with horizontal dividers only.
-pub(crate) fn panel<R>(ui: &mut egui::Ui, padding: i8, contents: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+pub(crate) fn panel<R>(
+    ui: &mut egui::Ui,
+    padding: i8,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
     let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
     let response = egui::Frame::new()
         .fill(ui.visuals().extreme_bg_color)
@@ -130,8 +364,10 @@ pub(crate) fn panel<R>(ui: &mut egui::Ui, padding: i8, contents: impl FnOnce(&mu
             contents(ui)
         });
     let rect = response.response.rect;
-    ui.painter().line_segment([rect.left_top(), rect.right_top()], stroke);
-    ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], stroke);
+    ui.painter()
+        .line_segment([rect.left_top(), rect.right_top()], stroke);
+    ui.painter()
+        .line_segment([rect.left_bottom(), rect.right_bottom()], stroke);
     response
 }
 pub(crate) fn target(text: &str, cursor: std::ops::Range<usize>, all: bool) -> Option<String> {
@@ -178,7 +414,11 @@ impl egui::cache::ComputerMut<(&str, bool), LayoutJob> for Highlighter {
         highlight(code, dark)
     }
 }
-pub(crate) fn layout(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32) -> std::sync::Arc<egui::Galley> {
+pub(crate) fn layout(
+    ui: &egui::Ui,
+    text: &dyn egui::TextBuffer,
+    width: f32,
+) -> std::sync::Arc<egui::Galley> {
     type Cache = egui::cache::FrameCache<LayoutJob, Highlighter>;
     let mut job = ui.ctx().memory_mut(|m| {
         m.caches
@@ -349,7 +589,72 @@ mod tests {
             );
         }
         assert_eq!(highlight(&"x".repeat(65537), true).sections.len(), 1);
-        assert_eq!(highlight("", true).sections[0].format.font_id, FontId::monospace(14.0));
+        assert_eq!(
+            highlight("", true).sections[0].format.font_id,
+            FontId::monospace(14.0)
+        );
+    }
+    #[test]
+    fn completion_keyboard_acceptance_and_dismissal() {
+        let ctx = egui::Context::default();
+        let mut editor = Editor::default();
+        let mut text = "HG".to_owned();
+        let (_, id) = frame(&ctx, &mut editor, &mut text, vec![], true, true);
+        let mut state = egui::text_edit::TextEditState::load(&ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(2),
+            )));
+        state.store(&ctx, id);
+        frame(&ctx, &mut editor, &mut text, vec![], true, true);
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert!(!editor.suggestions.items.is_empty());
+        let expected = editor.suggestions.items[1].insert.clone();
+        frame(
+            &ctx,
+            &mut editor,
+            &mut text,
+            vec![key(egui::Key::ArrowDown)],
+            true,
+            true,
+        );
+        assert_eq!(editor.selected, 1);
+        let action = frame(
+            &ctx,
+            &mut editor,
+            &mut text,
+            vec![key(egui::Key::Tab)],
+            true,
+            true,
+        )
+        .0;
+        assert!(action.is_none());
+        assert_eq!(text, expected);
+        frame(
+            &ctx,
+            &mut editor,
+            &mut text,
+            vec![key(egui::Key::Escape)],
+            true,
+            true,
+        );
+        let before = text.clone();
+        frame(
+            &ctx,
+            &mut editor,
+            &mut text,
+            vec![key(egui::Key::Enter)],
+            true,
+            true,
+        );
+        assert_eq!(text, format!("{before}\n"));
     }
     fn frame(
         ctx: &egui::Context,

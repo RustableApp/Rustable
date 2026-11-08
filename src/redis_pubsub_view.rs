@@ -255,9 +255,9 @@ impl View {
             }else{
                 use egui_extras::{Column, TableBuilder};
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    TableBuilder::new(ui).id_salt("pubsub-messages").striped(true).max_scroll_height(320.0).stick_to_bottom(self.follow)
+                    TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("pubsub-messages").striped(true).max_scroll_height(320.0).stick_to_bottom(self.follow)
                         .column(Column::exact(110.0)).column(Column::initial(220.0).clip(true)).column(Column::remainder().clip(true))
-                        .header(32.0, |mut row| { for name in ["Received (local)", "Channel", "Message"] { row.col(|ui| { ui.strong(name); }); } })
+                        .header(32.0, |mut row| { for name in ["Received (local)", "Channel", "Message"] { row.col(|ui| { crate::controls::table_header(ui, name); }); } })
                         .body(|body| body.rows(28.0, self.messages.len(), |mut table_row| {
                             let row = &self.messages[table_row.index()];
                             table_row.col(|ui| { ui.label(&row.received_at); });

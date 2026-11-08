@@ -6,7 +6,8 @@ pub(crate) fn run() -> eframe::Result {
     eframe::run_native(
         "Rustable Redis Preview",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 760.0]),
+            persist_window: false,
+            viewport: egui::ViewportBuilder::default().with_inner_size([std::env::var("RUSTABLE_REDIS_PREVIEW_WIDTH").ok().and_then(|s|s.parse::<f32>().ok()).unwrap_or(1200.0).clamp(700.0,1800.0), 760.0]),
             ..Default::default()
         },
         Box::new(|cc| {

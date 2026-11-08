@@ -79,7 +79,6 @@ impl Workspace {
                         && report.analysis != self.analysis_server
                 });
                 if let Some(report) = report {
-                    if report.analysis { analysis_distribution(ui, &report.rows); }
                     report.show(ui);
                 } else {
                     ui.add_space(70.0);
@@ -94,7 +93,7 @@ impl Workspace {
     }
 }
 
-fn analysis_distribution(ui: &mut egui::Ui, rows: &[[String; 3]]) {
+pub(crate) fn analysis_distribution(ui: &mut egui::Ui, rows: &[[String; 3]]) {
     // The report is bounded to 50 rows; these charts describe those rows only.
     let mut groups = std::collections::BTreeMap::<&str, (u64, u64)>::new();
     for row in rows.iter().take(50) {
@@ -108,9 +107,9 @@ fn analysis_distribution(ui: &mut egui::Ui, rows: &[[String; 3]]) {
     ui.columns(2, |columns| {
         for (index, title) in ["Memory", "Keys"].into_iter().enumerate() {
             let ui = &mut columns[index];
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 220.0), egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 140.0), egui::Sense::hover());
             let center = rect.center();
-            let radius = 70.0;
+            let radius = 50.0;
             let total: u64 = groups.values().map(|v| if index == 0 { v.0 } else { v.1 }).sum();
             ui.painter().circle_stroke(center, radius, egui::Stroke::new(12.0_f32, ui.visuals().faint_bg_color));
             let mut angle = -std::f32::consts::FRAC_PI_2;
@@ -124,7 +123,7 @@ fn analysis_distribution(ui: &mut egui::Ui, rows: &[[String; 3]]) {
                 angle += span;
             }
             ui.painter().text(center - egui::vec2(0.0, 12.0), egui::Align2::CENTER_CENTER, title, egui::FontId::proportional(15.0), ui.visuals().weak_text_color());
-            ui.painter().text(center + egui::vec2(0.0, 12.0), egui::Align2::CENTER_CENTER, if index == 0 { format!("{:.1} KiB", total as f64 / 1024.0) } else { total.to_string() }, egui::FontId::proportional(20.0), ui.visuals().text_color());
+            ui.painter().text(center + egui::vec2(0.0, 12.0), egui::Align2::CENTER_CENTER, if index == 0 { format!("{:.1} KiB", total as f64 / 1024.0) } else { total.to_string() }, egui::FontId::proportional(16.0), ui.visuals().text_color());
         }
     });
     ui.horizontal_wrapped(|ui| {

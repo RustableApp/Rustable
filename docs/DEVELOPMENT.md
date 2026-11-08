@@ -87,3 +87,8 @@ history are temporary for the current connection session. Save additional
 scripts to files to keep them. Recovery never executes SQL and retains file
 baselines for conflict detection. Older multi-tab snapshots restore only their
 first editor per connection/database.
+
+UI changes follow [UI-STYLE-GUIDE.md](UI-STYLE-GUIDE.md): shared SQL-style controls,
+intentional table/list surfaces, copy confirmation, visual review and performance
+validation are part of completion. Redis editor behavior and metadata provenance
+are documented in [REDIS-INTELLISENSE.md](REDIS-INTELLISENSE.md).

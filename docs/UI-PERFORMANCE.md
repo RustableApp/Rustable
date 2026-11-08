@@ -191,3 +191,64 @@ input-to-present latency. Mixed-DPI, multiple displays, monitor reconnection,
 60/120 Hz presentation and native first-input-after-idle timing were not measured.
 No database execution/protocol sequencing changed: before/after request counts
 are identical; namespace aggregation uses existing MEMORY USAGE responses.
+
+## Redis table polish and IntelliSense — 2026-11-07
+
+Compared against `5311d86376eee8d77f1b2d65c88ac9a5f5b14456` on Apple M4 Max,
+macOS 27.2 arm64, rustc 1.99.1 / LLVM 23.1.1, release profile. The shared Redis
+fixture was compiled into both revisions. Five alternating pairs ran serially;
+Redis cases use 20 warmups and 160 samples per run, 1200×760 logical viewport,
+default egui scale (1×). The provider-only typing workload uses 50 warmups and
+500 samples. Fixture source, source hashes, environment, all sorted samples and
+pair-level results are retained in `target/redis-polish-performance-verified/`.
+
+Reproduction: `python3 scripts/ui-performance.py --base 5311d86 --redis
+--redis-pages --redis-editor --redis-completion --output <new-directory>` (one line).
+Two exploratory runs were superseded. The final run rebuilt the frozen candidate
+and reused the exact baseline release executable from the preceding runner build;
+all timings were freshly measured. Its binary SHA and provenance are in
+`environment.json`. No thresholds or fixtures were weakened. There were no
+competing builds/benchmarks during measurement.
+
+31 of 35 comparisons passed the unchanged 10% p95 gate. Four repeatable increases
+are retained and explicitly justified below; this is not a blanket performance pass.
+Values below are milliseconds; p50/p95/p99 are medians across five runs and maximum
+is the largest observed sample.
+
+| Scenario | Base p50/p95/p99/max | Candidate p50/p95/p99/max |
+| --- | --- | --- |
+| redis/page/analysis | 0.04850/0.05133/0.05679/0.06088 | 0.06521/0.06887/0.08650/0.09654 |
+| redis/completion/commands | 0.00450/0.00567/0.00675/0.02571 | 0.01292/0.01462/0.01771/0.04767 |
+| redis/completion/arguments | 0.00479/0.00504/0.00513/0.00713 | 0.01196/0.01225/0.01425/0.01575 |
+| redis/completion/after-idle | 0.00475/0.00504/0.00600/0.00667 | 0.01342/0.01396/0.01717/0.01767 |
+
+Analyze adds 0.0176 ms p95 (+34.2%) for structured table surfaces, headers,
+aligned metrics and memory bars. Removing these would restore the unstyled report
+that this change corrects. Rows remain virtualized and bounded; using a raw grid
+or pre-rendered image would respectively lose the requested hierarchy or text
+selection/hover/theme behavior. No database work was added to rendering.
+
+Completion adds approximately 0.007–0.009 ms p95 (+143–177%) for the visible
+suggestion menu, syntax/help and keyboard selection that the baseline lacks.
+The same input workload runs on both; the visible output necessarily differs.
+An external completion service would add latency/deployment cost, while a static
+keyword list would lose argument context. The chosen local grammar is generated
+once at build time, cached between edits and capped at 50 virtualized suggestions.
+Ordinary 20/200-line editor workloads stayed within 3.6%; no idle polling or
+per-keystroke database exchange was introduced (before/after: zero exchanges).
+These are accepted costs for concrete added behavior, not threshold exemptions.
+
+Candidate-only provider typing p50/p95/p99/max (ms): commands
+0.00550/0.00621/0.00688/0.00788; options 0.00742/0.00763/0.00938/0.00971;
+1,000 loaded keys 0.01108/0.01146/0.01412/0.01592. These are new-workload
+measurements, not baseline passes. Binary-prefix lookup supports the full loaded
+10,000-key cache without a full per-keystroke scan; correctness tests cover names
+past the first 1,000 and escaped binary prefixes.
+
+Native captures were reviewed in dark/light themes at 1200×760 logical pixels
+(2× capture scale). The attempted 800-wide native capture retained the wider
+window size, so it does **not** verify narrow native layout. The Mac was locked:
+manual keyboard/mouse, mixed-DPI, resize/tiling, 60/120 Hz presentation and
+input-to-display latency remain unverified. Automated egui input tests cover
+completion acceptance/dismissal, execution shortcut ownership and copy feedback.
+CPU measurements and screenshots do not close those native validation gaps.

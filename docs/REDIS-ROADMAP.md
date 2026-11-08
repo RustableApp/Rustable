@@ -1980,3 +1980,33 @@ The 26-case shared release comparison is running in
 `redis_vector_matches_frame_benchmark` from its candidate executable afterward
 for the new 20-result scrolling view. No similarity UI performance pass is
 claimed yet. Bounded TLS and additional batch-error coverage are still pending.
+
+## Table polish and local IntelliSense — 2026-11-07
+
+Analyze now groups summary metrics and namespace charts above styled top-namespace
+and top-15-key tables, with aligned human-readable memory, exact-byte hover,
+restrained striping and memory bars. The same table/header conventions cover
+Search, Pub/Sub, vector results and diagnostics. Remaining Redis copy actions use
+stable-width, temporary in-place confirmation. `UI-STYLE-GUIDE.md`, linked from
+AGENTS.md, makes table/list treatment, action feedback and whole-view visual review
+required conventions.
+
+CLI/Workbench now offer command/subcommand completion, argument-aware options,
+syntax/help, loaded-key/index and matching-inspector field/member suggestions,
+keyboard/mouse acceptance and token-safe replacement. The catalog contains 427
+commands/subcommands including module/vector signatures. See
+`REDIS-INTELLISENSE.md` for shortcuts, provenance and limits: advanced module clauses
+and count-dependent grammar are not exhaustive, and this is not full Insight parity.
+No driver/execution path or network round-trip budget changed.
+
+Validation: 743 tests passed (192 ignored), strict all-target Clippy passed,
+browser locked WASM check passed with 61 existing warnings, packaging helper check
+passed, and performance-runner tests passed (8). Final release CPU comparison:
+31/35 cases passed; four justified visible-work increases and all raw results are
+recorded in `UI-PERFORMANCE.md`. No blanket performance or native-input claim.
+
+Actual captures: `target/redis-polish/verified-dark/`, `verified-light/`,
+`verified-completion/command-editor.png` and `verified-keys/command-editor.png`.
+The attempted narrow capture retained 1200 logical pixels and is not narrow-layout
+evidence. Desktop lock prevented manual native interaction/display checks.
+This increment is local implementation work, not a new release.
