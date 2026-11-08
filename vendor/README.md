@@ -278,9 +278,13 @@ interruptible by this patch. The separate streaming transport is unchanged.
 ### Opt-in bounded synchronous Redis replies
 
 `Connection::req_packed_commands_bounded` accepts a packed RESP2 batch and one
-byte budget per expected reply (1–50 replies, at most 16 MiB each and 64 MiB
-aggregate input budget). The 50-reply limit supports one full Search metadata
-page without introducing serialized sub-batches. It sends the batch once, consumes every server
+byte budget per expected reply (1–1,000 replies, at most 16 MiB each and 64 MiB
+aggregate input budget). The reply-count limit supports a 200-key Analyze metadata pipeline (600
+scalar replies) and a full 50-index Search metadata page without serialized
+sub-batches. `recv_response_bounded` exposes the same parser/close behavior for
+Cluster fan-out: send all node requests first, then receive each bounded reply.
+Ordinary Cluster reads retain their existing path; Analyze opts into limits,
+including redirected metadata reads. It sends the batch once, consumes every server
 error value normally, and closes the connection on parse/transport failure.
 Callers must provide a clean request boundary and the exact response count;
 RESP3, Pub/Sub and outstanding timed-out responses are rejected. Limits include

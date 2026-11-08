@@ -1994,36 +1994,44 @@ impl Connection {
     /// Server error values are returned normally so every reply can be consumed.
     pub fn req_packed_commands_bounded(&mut self, command: &[u8], limits: &[usize]) -> RedisResult<Vec<Value>> {
         if self.pubsub || self.protocol.supports_resp3() || self.messages_to_skip != 0
-            || limits.is_empty() || limits.len() > 50
+            || limits.is_empty() || limits.len() > 1000
             || limits.iter().try_fold(0usize, |sum, limit| sum.checked_add(*limit)).is_none_or(|sum| sum > 64 * 1024 * 1024)
             || limits.iter().any(|limit| *limit == 0 || *limit > 16 * 1024 * 1024) {
-            return Err((ErrorKind::InvalidClientConfig, "Bounded requests require a clean RESP2 connection and 1–50 valid reply limits totaling at most 64 MiB").into());
+            return Err((ErrorKind::InvalidClientConfig, "Bounded requests require a clean RESP2 connection and 1–1,000 valid reply limits totaling at most 64 MiB").into());
         }
         if let Err(error) = self.send_bytes(command) {
             self.close_connection();
             return Err(error);
         }
-        let mut values = Vec::with_capacity(limits.len());
-        for &limit in limits {
-            let result = match self.con {
-                ActualConnection::Tcp(TcpConnection { ref mut reader, .. }) => self.parser.parse_value_bounded(reader, limit),
-                #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
-                ActualConnection::TcpNativeTls(ref mut connection) => self.parser.parse_value_bounded(&mut connection.reader, limit),
-                #[cfg(feature = "tls-rustls")]
-                ActualConnection::TcpRustls(ref mut connection) => self.parser.parse_value_bounded(&mut connection.reader, limit),
-                #[cfg(unix)]
-                ActualConnection::Unix(UnixConnection { ref mut sock, .. }) => self.parser.parse_value_bounded(sock, limit),
-            };
-            match result {
-                Ok(Value::Push { .. }) => {
-                    self.close_connection();
-                    return Err((ErrorKind::Parse, "Unexpected push in bounded RESP2 response").into());
-                }
-                Ok(value) => values.push(value),
-                Err(error) => { self.close_connection(); return Err(error); }
-            }
+        limits.iter().map(|limit| self.recv_response_bounded(*limit)).collect()
+    }
+
+    /// Receive one bounded RESP2 reply after a caller-managed send. The caller
+    /// must track the exact reply count and drain all replies before reuse.
+    /// A decoder/transport failure closes the connection, including TLS sockets.
+    pub fn recv_response_bounded(&mut self, limit: usize) -> RedisResult<Value> {
+        if self.pubsub || self.protocol.supports_resp3() || self.messages_to_skip != 0
+            || limit == 0 || limit > 16 * 1024 * 1024 {
+            self.close_connection();
+            return Err((ErrorKind::InvalidClientConfig, "Bounded receive requires a clean RESP2 connection and a valid reply limit").into());
         }
-        Ok(values)
+        let result = match self.con {
+            ActualConnection::Tcp(TcpConnection { ref mut reader, .. }) => self.parser.parse_value_bounded(reader, limit),
+            #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+            ActualConnection::TcpNativeTls(ref mut connection) => self.parser.parse_value_bounded(&mut connection.reader, limit),
+            #[cfg(feature = "tls-rustls")]
+            ActualConnection::TcpRustls(ref mut connection) => self.parser.parse_value_bounded(&mut connection.reader, limit),
+            #[cfg(unix)]
+            ActualConnection::Unix(UnixConnection { ref mut sock, .. }) => self.parser.parse_value_bounded(sock, limit),
+        };
+        match result {
+            Ok(Value::Push { .. }) => {
+                self.close_connection();
+                Err((ErrorKind::Parse, "Unexpected push in bounded RESP2 response").into())
+            }
+            Ok(value) => Ok(value),
+            Err(error) => { self.close_connection(); Err(error) }
+        }
     }
 
     /// Fetches a single message from the connection. If the message is a response,

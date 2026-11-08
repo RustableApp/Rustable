@@ -371,3 +371,35 @@ RESP reads and suitable pipelining. Five model tests passed, covering duplicates
 missing keys, expiry boundaries, partial cancellation, name/page bounds, and
 serialization. Network integration, UI, saved-report storage and their fixtures
 remain outstanding; Analyze is not marked complete.
+
+### Analyze transport checkpoint
+
+Session now implements the collector source: bounded SCAN (1 MiB response) and
+one pipelined MEMORY USAGE SAMPLES 5 / PTTL / TYPE batch per up-to-200 new keys.
+Metadata replies are limited to 16 KiB each. The opt-in bounded batch reader now
+admits 1,000 replies within the unchanged 64 MiB aggregate input cap, avoiding
+serialized sub-batches for 600 scalar replies. Its parser is shared with a bounded
+receive API used by Cluster fan-out; ordinary unbounded callers are unchanged.
+Cluster metadata redirects preserve the response limit. Protocol/transport
+failures close affected connections; server errors are drained and reported,
+never silently omitted from a supposedly complete batch.
+
+Warm standalone collection takes one SCAN exchange followed by one metadata
+pipeline exchange per 200 unique returned keys (COUNT is advisory, so a larger
+page can require more metadata batches). Cluster retains independent-node fan-out
+and existing bounded waves; topology redirects can add recovery exchanges. No
+preflight PING or per-key sequential metadata is added. The UI integration will
+create a dedicated report Session through existing verified settings so Cluster
+scan state cannot overwrite Browse's cursor; initial authentication/discovery
+costs apply once per explicitly requested report. That lifecycle is not wired yet.
+
+`cargo check --locked` passed with temporary unused-code warnings for the not-yet
+wired collector. The 200-key protocol test withheld all replies until all 600
+commands arrived, then checked normal and server-error batches followed by PING
+(`/tmp/redis-analysis-transport-tests.log`). Fourteen Cluster tests passed (four
+live cases ignored), including expanded warm/cold normal/bounded fan-out and
+1,000-command pipelines (`/tmp/redis-analysis-cluster-tests.log`). New bounded
+Cluster SCAN test verifies a valid page and immediate rejection/connection stop
+on an oversized declared response (`/tmp/redis-analysis-scan-test.log`). Existing
+bounded-response cleanup regression also passed. Live Analyze integration, TLS
+coverage, UI and storage remain required; this milestone is still incomplete.

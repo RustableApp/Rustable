@@ -2060,3 +2060,98 @@ mod tests {
 #[cfg(test)]
 #[path = "redis_browser_tests.rs"]
 mod browser_tests;
+
+// Analysis owns a separate Session, so its Cluster cursor cannot invalidate Browse.
+impl crate::redis_analysis::Source for Session {
+    fn page(&mut self, cursor: u64) -> Result<(u64, Vec<Vec<u8>>), String> {
+        if let Some(router) = &mut self.cluster {
+            let page = router.analysis_scan(cursor)?;
+            return Ok((page.cursor, page.keys));
+        }
+        let value = self.query_bounded(redis::cmd("SCAN").arg(cursor).arg("MATCH").arg("*").arg("COUNT").arg(crate::redis_analysis::BATCH))?;
+        redis::from_redis_value(value).map_err(|error| error.to_string())
+    }
+    fn samples(&mut self, keys: &[Vec<u8>]) -> Result<Vec<crate::redis_analysis::Sample>, String> {
+        if keys.is_empty() || keys.len() > crate::redis_analysis::BATCH || keys.iter().any(|key| key.len() > 4096) {
+            return Err("Analysis metadata requires 1–200 keys, each at most 4 KiB.".into());
+        }
+        let mut pipeline = redis::pipe();
+        for key in keys {
+            pipeline.cmd("MEMORY").arg("USAGE").arg(key).arg("SAMPLES").arg(5)
+                .cmd("PTTL").arg(key).cmd("TYPE").arg(key);
+        }
+        let values = if let Some(router) = &mut self.cluster {
+            router.analysis_metadata(&pipeline)?
+        } else {
+            let connection = self.connection.as_mut().ok_or("Analysis connection closed.")?;
+            let result = connection.req_packed_commands_bounded(&pipeline.get_packed_pipeline(), &vec![16 * 1024; keys.len() * 3]);
+            match result {
+                Ok(values) => values,
+                Err(error) => { self.connection = None; return Err(format!("Analysis connection closed: {error}")); }
+            }
+        };
+        // The transport drains the full pipeline even when an individual command
+        // errors. A failed batch is not added to the report or silently retried.
+        if values.len() != keys.len() * 3 { return Err("Incomplete analysis metadata.".into()); }
+        let mut values = values.into_iter();
+        let mut rows = Vec::with_capacity(keys.len());
+        while let Some(memory) = values.next() {
+            let memory = memory.extract_error().map_err(|error| error.to_string())?;
+            let ttl = values.next().unwrap().extract_error().map_err(|error| error.to_string())?;
+            let kind = values.next().unwrap().extract_error().map_err(|error| error.to_string())?;
+            let bytes = redis::from_redis_value::<Option<u64>>(memory).map_err(|error| error.to_string())?;
+            let ttl_ms = redis::from_redis_value::<i64>(ttl).map_err(|error| error.to_string())?;
+            let kind = redis::from_redis_value::<String>(kind).map_err(|error| error.to_string())?;
+            if kind.len() > 64 { return Err("Analysis type name exceeds 64 bytes.".into()); }
+            rows.push(crate::redis_analysis::Sample { bytes, ttl_ms, kind });
+        }
+        Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod analysis_transport_tests {
+    use super::*;
+    use crate::redis_analysis::Source;
+    use std::io::Write;
+    #[test]
+    fn full_metadata_batch_has_one_exchange_and_drains_server_errors() {
+        for fail in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let peer = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                let mut parser = redis::Parser::new();
+                let read = |parser: &mut redis::Parser, socket: &mut std::net::TcpStream| -> Vec<Vec<u8>> {
+                    redis::from_redis_value(parser.parse_value(socket).unwrap()).unwrap()
+                };
+                loop {
+                    let command = read(&mut parser, &mut socket);
+                    if command[0] == b"MEMORY" { assert_eq!(command[2], b"key:0"); break; }
+                    assert_eq!(command[0], b"CLIENT"); socket.write_all(b"+OK\r\n").unwrap();
+                }
+                // All 600 commands must arrive before any response: this fails
+                // if metadata is accidentally changed to per-key round trips.
+                for index in 1..600 {
+                    let command = read(&mut parser, &mut socket);
+                    let expected = [b"MEMORY".as_slice(), b"PTTL", b"TYPE"][index % 3];
+                    assert_eq!(command[0], expected);
+                    assert_eq!(command[if index % 3 == 0 {2} else {1}], format!("key:{}",index/3).as_bytes());
+                }
+                for index in 0..200 {
+                    socket.write_all(if fail && index == 1 { b"-NOPERM memory denied\r\n:-1\r\n+string\r\n" } else { b":64\r\n:-1\r\n+string\r\n" }).unwrap();
+                }
+                assert_eq!(read(&mut parser,&mut socket)[0],b"PING"); socket.write_all(b"+PONG\r\n").unwrap();
+            });
+            let settings = Settings { host:"127.0.0.1".into(),port,tls:false,..Default::default() };
+            let mut session = Session { connection:Some(Session::raw_node(&settings,"").unwrap()),..Session::disconnected() };
+            let keys: Vec<_> = (0..200).map(|n|format!("key:{n}").into_bytes()).collect();
+            let result = session.samples(&keys);
+            if fail { let error = result.unwrap_err(); assert!(error.contains("memory denied"), "{error}"); }
+            else { let rows = result.unwrap(); assert_eq!(rows.len(),200); assert!(rows.iter().all(|row|row.bytes == Some(64) && row.ttl_ms == -1 && row.kind == "string")); }
+            assert_eq!(session.execute("PING",true).unwrap(),vec![redis::Value::SimpleString("PONG".into())]);
+            peer.join().unwrap();
+        }
+    }
+}

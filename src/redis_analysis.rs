@@ -58,6 +58,7 @@ pub(crate) struct Progress {
     pub keys: AtomicUsize,
     pub pages: AtomicUsize,
 }
+#[derive(Debug)]
 pub(crate) struct Sample {
     pub bytes: Option<u64>,
     pub ttl_ms: i64,

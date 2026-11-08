@@ -224,6 +224,12 @@ impl Router {
         count: usize,
         kind: &str,
     ) -> Result<crate::redis_session::KeyPage, String> {
+        self.scan_limited(token, pattern, count, kind, None)
+    }
+    pub fn analysis_scan(&mut self, token: u64) -> Result<crate::redis_session::KeyPage, String> {
+        self.scan_limited(token, b"*", 200, "", Some(1024 * 1024))
+    }
+    fn scan_limited(&mut self, token: u64, pattern: &[u8], count: usize, kind: &str, limit: Option<usize>) -> Result<crate::redis_session::KeyPage, String> {
         let mut scan = if token == 0 {
             self.scan = None;
             let mut nodes: Vec<_> = self
@@ -283,7 +289,7 @@ impl Router {
                 (endpoint.clone(), vec![index], command.get_packed_command())
             })
             .collect();
-        let (values, rejected) = self.exchange(&groups, batch.len())?;
+        let (values, rejected) = self.exchange_limited(&groups, batch.len(), limit)?;
         if let Some((_, _, error)) = rejected.first() {
             return Err(server_error(error));
         }
@@ -586,6 +592,12 @@ impl Router {
         &mut self,
         pipeline: &redis::Pipeline,
     ) -> Result<Vec<redis::Value>, String> {
+        self.read_pipeline_limited(pipeline, None)
+    }
+    pub fn analysis_metadata(&mut self, pipeline: &redis::Pipeline) -> Result<Vec<redis::Value>, String> {
+        self.read_pipeline_limited(pipeline, Some(16 * 1024))
+    }
+    fn read_pipeline_limited(&mut self, pipeline: &redis::Pipeline, limit: Option<usize>) -> Result<Vec<redis::Value>, String> {
         if pipeline.is_transaction() {
             return Err("Cluster preview cannot execute transactions".into());
         }
@@ -626,13 +638,13 @@ impl Router {
             groups[group].1.push(index);
             command.write_packed_command(&mut groups[group].2);
         }
-        let (mut values, rejected) = self.exchange(&groups, commands.len())?;
+        let (mut values, rejected) = self.exchange_limited(&groups, commands.len(), limit)?;
         // Every outstanding response was drained before redirect work starts.
         for (index, source, error) in rejected {
             let command = commands[index];
             let slot = command_slot(command)?;
             let (endpoint, asking) = self.redirect(&error, &source, slot)?;
-            values[index] = self.query_at(command, slot, endpoint, asking)?;
+            values[index] = self.query_at_limited(command, slot, endpoint, asking, limit)?;
         }
         Ok(values)
     }
@@ -641,6 +653,9 @@ impl Router {
         groups: &[ReadGroup],
         size: usize,
     ) -> Result<(Vec<redis::Value>, Vec<Rejected>), String> {
+        self.exchange_limited(groups, size, None)
+    }
+    fn exchange_limited(&mut self, groups: &[ReadGroup], size: usize, limit: Option<usize>) -> Result<(Vec<redis::Value>, Vec<Rejected>), String> {
         let mut values = vec![redis::Value::Nil; size];
         let mut rejected = Vec::new();
         // A wave is completely drained before the next prepare may evict sockets.
@@ -673,8 +688,7 @@ impl Router {
             for (endpoint, indexes, _) in groups {
                 for &index in indexes {
                     let connection = self.connections.get_mut(endpoint).unwrap();
-                    match connection
-                        .recv_response()
+                    match (if let Some(limit) = limit { connection.recv_response_bounded(limit) } else { connection.recv_response() })
                         .and_then(redis::Value::extract_error)
                     {
                         Ok(value) => values[index] = value,
@@ -975,6 +989,25 @@ mod tests {
         Router::new(settings, String::new(), connection, vec![None; 16384])
     }
     #[test]
+    fn analysis_scan_bounds_resp_and_stops_on_oversize() {
+        for oversized in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let peer = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut parser = redis::Parser::new(); handshake(&mut socket, &mut parser);
+                assert_eq!(read(&mut socket, &mut parser), vec![b"SCAN".to_vec(),b"0".to_vec(),b"MATCH".to_vec(),b"*".to_vec(),b"COUNT".to_vec(),b"200".to_vec()]);
+                socket.write_all(if oversized { b"$1048577\r\n" } else { b"*2\r\n$1\r\n0\r\n*1\r\n$3\r\nkey\r\n" }).unwrap();
+                if !oversized { assert_eq!(read(&mut socket,&mut parser)[0], b"PING"); socket.write_all(b"+PONG\r\n").unwrap(); }
+            });
+            let mut router = router(port); router.routes.fill(Some(router.seed.clone()));
+            let result = router.analysis_scan(0);
+            if oversized { assert!(result.is_err()); assert!(!router.is_connected()); }
+            else { let page = result.unwrap(); assert_eq!(page.cursor,0); assert_eq!(page.keys,vec![b"key".to_vec()]); assert!(router.query(&redis::cmd("PING")).is_ok()); }
+            peer.join().unwrap();
+        }
+    }
+    #[test]
     fn binary_hash_tags_and_cross_slot_guards() {
         assert_eq!(hash_slot(b"123456789"), 0x31c3);
         assert_eq!(hash_slot(b"foo{bar}zap"), hash_slot(b"bar"));
@@ -1163,7 +1196,7 @@ mod tests {
                 let (mut socket, _) = listener.accept().unwrap();
                 let mut parser = redis::Parser::new();
                 handshake(&mut socket, &mut parser);
-                for _ in 0..2 {
+                for _ in 0..4 {
                     let command = read(&mut socket, &mut parser);
                     assert_eq!(command[0], b"GET");
                     assert_eq!(command[1], key);
@@ -1183,9 +1216,9 @@ mod tests {
         });
         let mut pipe = redis::pipe();
         pipe.cmd("GET").arg("b").cmd("GET").arg("a");
-        for _ in 0..2 {
+        for bounded in [false, false, true, true] {
             assert_eq!(
-                router.read_pipeline(&pipe).unwrap(),
+                (if bounded { router.analysis_metadata(&pipe) } else { router.read_pipeline(&pipe) }).unwrap(),
                 vec![
                     redis::Value::BulkString(b"b".to_vec()),
                     redis::Value::BulkString(b"a".to_vec())
@@ -1538,7 +1571,7 @@ mod tests {
             handshake(&mut socket, &mut parser);
             // Withhold all replies until the complete batch arrives. A sequential
             // per-key implementation cannot pass this protocol check.
-            for _ in 0..2 {
+            for _ in 0..4 {
                 for i in 0..MAX_READ_COMMANDS {
                     assert_eq!(
                         read(&mut socket, &mut parser),
@@ -1567,8 +1600,8 @@ mod tests {
                 .arg("SAMPLES")
                 .arg(5);
         }
-        for _ in 0..2 {
-            let values = router.read_pipeline(&pipe).unwrap();
+        for bounded in [false, false, true, true] {
+            let values = (if bounded { router.analysis_metadata(&pipe) } else { router.read_pipeline(&pipe) }).unwrap();
             assert_eq!(
                 values,
                 (0..MAX_READ_COMMANDS)
