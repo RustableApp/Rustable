@@ -2,11 +2,11 @@
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
-pub async fn start(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsValue> {
+pub async fn start(canvas: web_sys::HtmlCanvasElement, redis: bool) -> Result<(), JsValue> {
     eframe::WebRunner::new().start(
         canvas,
         eframe::WebOptions::default(),
-        Box::new(|cc| Ok(Box::new(rustable::Rustable::new_demo(cc)))),
+        Box::new(move |cc| Ok(Box::new(if redis { rustable::Rustable::new_redis_demo(cc) } else { rustable::Rustable::new_demo(cc) }))),
     ).await
 }
 

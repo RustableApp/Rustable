@@ -1022,6 +1022,18 @@ impl Rustable {
         )
     }
 
+    /// Open the disposable Redis workspace directly in the browser demo.
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_redis_demo(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut app = Self::new_demo(cc);
+        app.redis_workspace = Some(crate::redis_workspace::Workspace::new(
+            Default::default(), String::new(), cc.egui_ctx.clone(),
+        ));
+        app.redis_demo_active = true;
+        app.connections = false;
+        app
+    }
+
     #[cfg(test)]
     fn with_preferences(ctx: &egui::Context, prefs: Preferences) -> Self {
         Self::with_initial_connection(ctx, prefs, Command::Open(None), None)
