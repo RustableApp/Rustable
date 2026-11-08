@@ -16,7 +16,7 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
   practical create/drop index workflow with explicit destructive-action review.
   Compact schema/options controls and use the available editor/results space.
   Avoid implementing a general schema designer or every Search clause.
-- [ ] Analyze: opt-in bounded incremental database scan with progress/cancel,
+- [x] Analyze: opt-in bounded incremental database scan with progress/cancel,
   honest sampled/partial coverage, expiry buckets and locally saved reports.
   Make top-key/namespace rankings visible without oversized chart spacing.
   This is not continuous telemetry, exhaustive memory accounting or a scheduler.
@@ -457,3 +457,41 @@ displays its existing loaded-key analysis, while the candidate additionally
 displays type/expiry and full-report controls. The baseline compatibility adapter
 and fixture are retained with measurement metadata. Runner's eight tests pass.
 No rendering-performance result is claimed until this run finishes.
+
+### Analyze functional milestone completion
+
+The delayed-network cancellation test passed
+(`/tmp/redis-analysis-delayed-cancel.log`): cancellation is signalled while SCAN
+is awaiting an 80 ms delayed reply. The worker drains that reply, emits no
+metadata command, returns a cancelled report, and the connection answers PING.
+This proves cancellation between network reads; it does not claim instantaneous
+interruption of an in-flight socket/TLS read.
+
+The browser demo no longer offers the nonfunctional loaded-key report workflow.
+It uses the same report action labels with an explicit desktop-only state because
+its in-memory sample data has no real Redis server memory or slow log to measure.
+No fabricated server measurements are shown. The separate browser-package locked
+WASM check passed (`/tmp/redis-analysis-browser-check.log`, 76 platform/dead-code
+warnings; not warning-free). Live browser visual/provenance verification remains
+a final release gate.
+
+The five-pair release rendering comparison against `188e34e` finished in
+`target/redis-analysis-final-performance/`: Analyze median p50/p95/p99 was
+0.093958/0.101542/0.110209 → 0.113583/0.123000/0.134083 ms. Maximum observed
+sample was 0.231833 → 0.233584 ms. p95 increased 21.1% (+0.021458 ms), a
+regression explicitly accepted for the new expiry/type breakdown, report status
+and controls alongside the requested rankings. It is not a threshold pass.
+Prepared table strings and bounded/virtualized tables are already used. Removing
+the additional breakdown would drop a requested feature; hiding all analysis
+behind collapsible panels merely to reduce measured work would change the
+workload. Custom painting or further micro-optimization at this measured cost
+would duplicate shared controls and expand the polish scope. The unchanged 10%
+threshold and full distributions remain recorded. One unrelated workspace case
+was inconclusive from noise; other Redis pages passed. This does not prove native
+presentation/input latency or close the release-wide performance gate.
+
+Analyze is functionally complete with targeted collector/protocol/live/UI/storage
+checks and inspected native screenshots. Shared TLS/Cluster failure fixtures and
+full-suite/native-platform checks remain release-wide gates, not silently waived.
+Next deliverable: bounded per-connection persistent Workbench history and distinct
+per-command result sections.

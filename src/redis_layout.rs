@@ -71,8 +71,8 @@ impl Workspace {
             ui.horizontal(|ui| {
                 if ui.selectable_label(!self.analysis_server, "Database analysis").clicked() { self.analysis_server = false; }
                 if ui.selectable_label(self.analysis_server, "Server / Slow log").clicked() { self.analysis_server = true; }
-                if self.analysis_server || cfg!(target_arch = "wasm32") { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add_enabled(self.connected && !self.busy && self.edit.is_none() && !self.value_dirty() && (self.analysis_server || (cfg!(target_arch = "wasm32") && !self.keys.is_empty())), action_button("refresh-cw", "New report")).clicked() {
+                if self.analysis_server { ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add_enabled(!cfg!(target_arch = "wasm32") && self.connected && !self.busy && self.edit.is_none() && !self.value_dirty() && self.analysis_server, action_button("refresh-cw", "New report")).clicked() {
                         let request = if self.analysis_server { crate::redis_diagnostics::Request::Server }
                             else { crate::redis_diagnostics::Request::Keys(self.keys.iter().take(1000).cloned().collect()) };
                         self.diagnostics_request = Some(request.clone()); self.diagnostics_report = None;
@@ -83,6 +83,24 @@ impl Workspace {
             ui.separator();
             #[cfg(not(target_arch = "wasm32"))]
             if !self.analysis_server { self.analysis.show(ui, self.database, self.connected); return; }
+            #[cfg(target_arch = "wasm32")]
+            {
+                ui.horizontal(|ui| {
+                    ui.heading(if self.analysis_server { "Server / Slow log" } else { "Database analysis" });
+                    if !self.analysis_server {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            for (icon,label) in [("refresh-cw","New report"),("list-upload","Save report"),("folder","Open report")] {
+                                ui.add_enabled(false,action_button(icon,label)).on_hover_text("Available in the desktop app with a Redis connection");
+                            }
+                        });
+                    }
+                });
+                ui.add_space(16.0);
+                ui.label("Connect to Redis in the desktop app to generate and save analysis reports.");
+                ui.weak("This browser demo stores sample keys in memory; it has no Redis server memory, expiry scan or slow log to measure.");
+                return;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             egui::ScrollArea::vertical().id_salt("redis-analysis-page").show(ui, |ui| {
                 let report = self.diagnostics_report.as_ref().filter(|report| {
                     report.module_key.is_none() && !report.topology && report.vector_element.is_none() && report.vector_matches.is_none()

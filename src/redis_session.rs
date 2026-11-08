@@ -2141,6 +2141,34 @@ mod analysis_transport_tests {
         assert!(session.execute("PING",true).is_ok());
     }
     #[test]
+    fn analysis_cancellation_during_delayed_scan_sends_no_metadata() {
+        use std::sync::{Arc, mpsc, atomic::Ordering};
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let port=listener.local_addr().unwrap().port();
+        let (scanned_tx,scanned_rx)=mpsc::sync_channel(1);let (release_tx,release_rx)=mpsc::sync_channel(1);
+        let peer=std::thread::spawn(move || {
+            let (mut socket,_)=listener.accept().unwrap();socket.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            let mut parser=redis::Parser::new();
+            let read=|parser:&mut redis::Parser,socket:&mut std::net::TcpStream|->Vec<Vec<u8>> {redis::from_redis_value(parser.parse_value(socket).unwrap()).unwrap()};
+            loop {let command=read(&mut parser,&mut socket);if command[0]==b"SCAN" {break;}assert_eq!(command[0],b"CLIENT");socket.write_all(b"+OK\r\n").unwrap();}
+            scanned_tx.send(()).unwrap();release_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            socket.write_all(b"*2\r\n$1\r\n5\r\n*1\r\n$3\r\nkey\r\n").unwrap();
+            assert_eq!(read(&mut parser,&mut socket)[0],b"PING");socket.write_all(b"+PONG\r\n").unwrap();
+        });
+        let progress=Arc::new(crate::redis_analysis::Progress::default());let worker_progress=progress.clone();
+        let worker=std::thread::spawn(move || {
+            let settings=Settings {host:"127.0.0.1".into(),port,tls:false,..Default::default()};
+            let mut session=Session {connection:Some(Session::raw_node(&settings,"").unwrap()),..Session::disconnected()};
+            let report=crate::redis_analysis::collect(&mut session,0,&worker_progress);
+            assert!(session.execute("PING",true).is_ok());report
+        });
+        scanned_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        let cancelled=std::time::Instant::now();progress.cancel.store(true,Ordering::Release);release_tx.send(()).unwrap();
+        let report=worker.join().unwrap();
+        assert_eq!(report.coverage,crate::redis_analysis::Coverage::Cancelled);assert_eq!(report.visited,0);assert_eq!(report.pages,1);
+        assert!(cancelled.elapsed()>=std::time::Duration::from_millis(80));assert!(cancelled.elapsed()<std::time::Duration::from_secs(1));peer.join().unwrap();
+    }
+    #[test]
     fn full_metadata_batch_has_one_exchange_and_drains_server_errors() {
         for fail in [false, true] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
