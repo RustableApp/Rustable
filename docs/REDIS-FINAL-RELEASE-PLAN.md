@@ -1107,3 +1107,22 @@ mutations, JSON, Search/aggregation/profile, time-series, Pub/Sub, monitor, arch
 and discovered-node TLS identity cases passed. No production driver sequence was
 changed; test-port plumbing and protocol assertions only. Cluster/Sentinel final
 runs and full locked/Clippy/browser gates remain outstanding.
+
+### Full validation and native availability checkpoint
+
+Full locked tests passed: 786 tests, 204 opt-in cases ignored, zero failures
+(`/tmp/redis-final-full-tests.log`). Strict all-target Clippy initially found five
+new-code style lints; collapsed equivalent conditions and changed a constant pair
+iterator to as_chunks without changing protocol or rendering behavior. Strict
+Clippy then passed (`/tmp/redis-final-clippy.log`). The separate browser-package
+locked wasm32 check passed with 77 existing browser warnings
+(`/tmp/redis-final-browser.log`). Final version preparation still requires both
+lockfiles and validation of the release candidate.
+
+Native control inventory reports the Mac is locked and automatic unlock unavailable.
+Thus manual native focus/window/resize/display testing cannot currently run. Actual
+native QA screenshots and automated egui input/draft/copy/idle tests are retained,
+but they do not establish input-to-present latency, 60/120 Hz behavior, mixed-DPI,
+multiple monitor disconnect/reconnect or macOS snapping. Those remain explicitly
+unverified, alongside native Windows/Linux/Intel macOS GUI and installed Sparkle
+old-to-new acceptance; no release claim will imply those checks passed.

@@ -34,26 +34,24 @@ impl Capabilities {
                     "VSIM unavailable on checked node",
                 ][index];
             }
-        } else if let (Some(actual), Some(required)) = (self.version, version(since)) {
-            if actual < required {
+        } else if let (Some(actual), Some(required)) = (self.version, version(since))
+            && actual < required {
                 return "Requires a newer Redis version than the cached server version";
-            }
         }
         ""
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub fn decode(values: Vec<redis::Value>) -> Self {
         let mut result = Self::default();
-        if let Some(redis::Value::BulkString(info)) = values.first() {
-            if let Ok(info) = std::str::from_utf8(info) {
+        if let Some(redis::Value::BulkString(info)) = values.first()
+            && let Ok(info) = std::str::from_utf8(info) {
                 result.version = info.lines().find_map(|line| {
                     line.strip_prefix("redis_version:")
                         .and_then(|v| version(v.trim()))
                 });
-            }
         }
-        if let Some(redis::Value::Array(commands)) = values.get(1) {
-            if commands.len() == 4 {
+        if let Some(redis::Value::Array(commands)) = values.get(1)
+            && commands.len() == 4 {
                 for (state, command) in result.commands.iter_mut().zip(commands) {
                     *state = match command {
                         redis::Value::Nil => Some(false),
@@ -61,7 +59,6 @@ impl Capabilities {
                         _ => None,
                     };
                 }
-            }
         }
         result
     }

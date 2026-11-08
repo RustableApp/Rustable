@@ -27,7 +27,7 @@ for attempt in {1..40}; do
 done
 RUSTABLE_REDIS_CLUSTER_QA=1 mise exec -- cargo test --locked --lib redis_topology::tests -- --include-ignored --nocapture --test-threads=1 --skip redis_topology_frame_benchmark
 
-RUSTABLE_REDIS_CLUSTER_QA=1 mise exec -- cargo test --locked --lib redis_cluster::tests -- --include-ignored --nocapture --test-threads=1 --skip discovered_nodes_preserve_tls_identity_and_never_fall_back_to_plaintext
+RUSTABLE_REDIS_CLUSTER_QA=1 mise exec -- cargo test --locked --lib redis_cluster::tests -- --include-ignored --nocapture --test-threads=1 --skip discovered_nodes_preserve_tls_identity_and_never_fall_back_to_plaintext --skip live_mutual_tls_routes_preserve_identity_on_every_primary
 
 if [[ "${RUSTABLE_REDIS_CLUSTER_MODULE_QA:-0}" == 1 ]]; then
  RUSTABLE_REDIS_CLUSTER_MODULE_QA=1 mise exec -- cargo test --locked --lib redis_session::tests::live_cluster_timeseries -- --include-ignored --nocapture --test-threads=1

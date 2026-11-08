@@ -27,7 +27,7 @@ pub(crate) fn fetch(connection: &mut redis::Connection, names: &[Vec<u8>]) -> Re
 fn decode(value: redis::Value) -> Result<Metadata, String> {
     use redis::Value;
     fn member<'a>(values: &'a [Value], name: &[u8]) -> Option<&'a Value> {
-        values.chunks_exact(2).find(|pair| matches!(&pair[0], Value::BulkString(key) if key == name)
+        values.as_chunks::<2>().0.iter().find(|pair| matches!(&pair[0], Value::BulkString(key) if key == name)
             || matches!(&pair[0], Value::SimpleString(key) if key.as_bytes() == name)).map(|pair| &pair[1])
     }
     let Value::Array(values) = value else { return Err("Unexpected index metadata.".into()); };

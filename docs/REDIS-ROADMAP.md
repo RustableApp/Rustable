@@ -2048,3 +2048,28 @@ workloads passed within their documented baseline-adapter scope. Full measuremen
 and tradeoffs are in [the release checklist](REDIS-FINAL-RELEASE-PLAN.md).
 This milestone completion is not release publication; editing and remaining gates
 are still open.
+
+
+### Final Redis release scope — editing, workflows and layout
+
+Inline RedisJSON edits now target one explicit path or replace the whole document,
+with atomic whole-document conflict checks and retained failed drafts. Creation of
+hashes, lists, sets and sorted sets accepts up to 100 entries / 64 KiB combined.
+Creation never overwrites an existing key. Path syntax, expiry and validation limits
+are documented in [REDIS.md](REDIS.md).
+
+The [isolated workflow assessment](REDIS-COMMAND-WORKFLOWS.md) explicitly defers
+transactions and blocking commands. Dedicated write cancellation/outcome tracking,
+database-selected startup and transaction node ownership are missing; shared-editor
+guards remain intact. This is an evaluated deferral, not implemented parity.
+
+Final layout work fixes Analyze tables collapsing below the fold and aligns the
+Pub/Sub composer. A scrolling regression test fails before the Analyze fix and
+passes afterward. Five paired release performance runs for final layout changes
+passed; earlier editing-control costs have narrow measured justifications in the
+[release checklist](REDIS-FINAL-RELEASE-PLAN.md), not blanket performance claims.
+
+The standalone harness now uses disposable ephemeral ports and verified TLS tests
+cover batch-error alignment, oversized-reply closure and no replay of later writes.
+The remaining release acceptance, exact-tag demo and publication evidence belong
+to the release checklist; this entry does not assert publication.

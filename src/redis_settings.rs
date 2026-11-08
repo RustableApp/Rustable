@@ -105,8 +105,9 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(ssh) = &self.ssh {
-            if ssh.host.trim().is_empty() { return Err("Enter an SSH gateway host.".into()); }
+        if let Some(ssh) = &self.ssh
+            && ssh.host.trim().is_empty() {
+            return Err("Enter an SSH gateway host.".into());
         }
         validate_identity(self.tls, &self.client_certificate, &self.client_key)?;
         if let Some(sentinel) = &self.sentinel {
