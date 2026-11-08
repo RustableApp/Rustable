@@ -632,7 +632,7 @@ impl Workspace {
         let keep_error = matches!(&job, Job::Reconnect);
         #[cfg(target_arch = "wasm32")]
         let keep_error = false;
-        let preserves_draft = matches!(&job, Job::Save(..)) || matches!(&job, Job::Mutate(request, _) if self.edit.as_ref().is_some_and(|e| e.action == crate::redis_mutation::Action::Update && e.kind == "ReJSON-RL" && request.action == e.action && request.keys == e.keys));
+        let preserves_draft = matches!(&job, Job::Save(..)) || matches!(&job, Job::Mutate(request, _) if self.edit.as_ref().is_some_and(|e| e.action == crate::redis_mutation::Action::Update && e.kind == "ReJSON-RL" && e.request().is_ok_and(|expected| expected == *request)));
         #[cfg(not(target_arch = "wasm32"))]
         let preserves_draft = preserves_draft || matches!(&job, Job::Reconnect);
         if self.value_dirty() && !preserves_draft {
@@ -4000,6 +4000,37 @@ mod tests {
             w.show(ctx, "Fixture", egui::Color32::GRAY, &mut panes, &mut dirty);
         });
         assert!(matches!(jobs.try_recv().unwrap(), Job::Scan(..)));
+    }
+    #[test]
+    fn json_path_controls_preserve_failed_drafts_and_block_locked_changes() {
+        fn frame(w:&mut Workspace,ctx:&egui::Context,events:Vec<egui::Event>)->egui::FullOutput {
+            ctx.run(egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(700.0,760.0))),events,..Default::default()},|ctx| {
+                egui::CentralPanel::default().show(ctx,|ui| {let mut job=None; w.value_inspector(ui,&mut job);assert!(job.is_none());});
+            })
+        }
+        fn click(w:&mut Workspace,ctx:&egui::Context,label:&str) {
+            fn find(shape:&egui::Shape,label:&str)->Option<egui::Pos2> {match shape {egui::Shape::Text(text) if text.galley.text()==label=>Some(text.pos+text.galley.size()*0.5),egui::Shape::Vec(shapes)=>shapes.iter().find_map(|s|find(s,label)),_=>None}}
+            let output=frame(w,ctx,vec![]);
+            let pos=output.shapes.iter().find_map(|s|find(&s.shape,label)).expect("JSON mode visible");
+            for pressed in [true,false] {frame(w,ctx,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::NONE}]);}
+        }
+        let (mut w,responses,jobs)=mock_workspace();
+        let ctx=egui::Context::default();
+        let mut draft=crate::redis_edit::Draft::new(crate::redis_mutation::Action::Update,vec![b"json".to_vec()],"ReJSON-RL".into());
+        draft.field="$.price".into();draft.value="199.95".into();draft.expected=br#"{"price":249.95}"#.to_vec();
+        w.snapshot=Some(Snapshot {key:b"json".to_vec(),kind:"ReJSON-RL".into(),ttl_ms:-1,length:Some(16),truncated:false,value:redis::Value::BulkString(draft.expected.clone())});
+        w.value_page=Some(Page {cursor:Cursor::Offset(0),next:None,pattern:b"*".to_vec(),display:Default::default()});
+        w.edit=Some(draft);w.read_only=true;
+        click(&mut w,&ctx,"Remove path");assert!(!w.edit.as_ref().unwrap().json_remove);
+        w.read_only=false;click(&mut w,&ctx,"Remove path");assert!(w.edit.as_ref().unwrap().json_remove);
+        let request=w.edit.as_ref().unwrap().request().unwrap();assert_eq!(request.action,crate::redis_mutation::Action::Remove);
+        w.send(Job::Mutate(request,false));assert!(matches!(jobs.try_recv().unwrap(),Job::Mutate(..)));
+        click(&mut w,&ctx,"Set value");assert!(w.edit.as_ref().unwrap().json_remove);
+        responses.send(Err(("JSON changed. Refresh before editing.".into(),true))).unwrap();w.poll();
+        assert_eq!(w.edit.as_ref().unwrap().field,"$.price");assert_eq!(w.edit.as_ref().unwrap().value,"199.95");
+        assert!(w.edit.as_ref().unwrap().error.is_some());
+        click(&mut w,&ctx,"Set value");assert!(!w.edit.as_ref().unwrap().json_remove);
+        w.send(Job::Inspect(b"other".to_vec()));assert!(jobs.try_recv().is_err());
     }
     #[test]
     fn inline_json_draft_blocks_navigation_but_allows_its_save() {

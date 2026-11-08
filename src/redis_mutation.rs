@@ -9,7 +9,7 @@ pub(crate) enum Action {
     DeleteKeys,
     ExpireKeys,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Mutation {
     pub action: Action,
     pub entries: Vec<(Vec<u8>, Vec<u8>)>,

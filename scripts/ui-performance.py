@@ -142,6 +142,7 @@ def main():
     parser.add_argument('--redis-pages', action='store_true', help='Include Search, Analyze and Pub/Sub page workloads')
     parser.add_argument('--redis-editor', action='store_true', help='Include Redis command editor idle/edit workloads')
     parser.add_argument('--redis-completion', action='store_true', help='Compare focused command completion frames using the identical fixture')
+    parser.add_argument('--redis-editing', action='store_true', help='Include identical single-entry creation workload')
     parser.add_argument('--redis-vectors', action='store_true', help='Compare vector result controls and exercise new input workloads')
     parser.add_argument('--redis-tools', action='store_true', help='Include shared Redis diagnostics and topology workloads')
     parser.add_argument('--base', required=True, help='Git revision to compare against')
@@ -161,6 +162,9 @@ def main():
     if args.redis_completion:
         BENCHMARKS += ('redis_completion_frame_benchmark',)
         EXPECTED.update(f'redis/completion/{case}' for case in ('commands', 'arguments', 'after-idle', 'counted-keys', 'capability'))
+    if args.redis_editing:
+        BENCHMARKS += ('redis_creation_frame_benchmark',)
+        EXPECTED.add('redis/editing/create-one')
     if args.redis_vectors:
         BENCHMARKS += ('redis_vector_controls_frame_benchmark',)
         EXPECTED.update(f'redis/vector-controls/{case}' for case in ('results', 'typing', 'after-idle'))
@@ -210,7 +214,7 @@ def main():
                 metadata['vector_baseline_adapter'] = 'Results: identical 20 rows, baseline Refresh versus candidate controls. New typing/after-idle: identical current form transplanted into base, measuring the new workload against base rendering dependencies, not a pre-existing feature. Absolute timings retained; no claim of before/after feature equivalence for new interactions.'
                 metadata['vector_fixture'] = fixture.read_text()
                 (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
-            if args.redis or args.redis_editor or args.redis_pages or args.redis_completion:
+            if args.redis or args.redis_editor or args.redis_pages or args.redis_completion or args.redis_editing:
                 # New workload, identical source on each side; never change the
                 # workload in just the candidate and call it a comparison.
                 fixture = root / 'src' / 'redis_browser_benchmark.rs'
@@ -234,7 +238,7 @@ def main():
                     metadata['capability_baseline_adapter'] = 'Same focused command text; baseline shows ordinary completion, candidate adds advisory cached-version warning.'
                 metadata['redis_fixture'] = fixture.read_text()
                 (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
-            if args.redis or args.redis_editor or args.redis_pages or args.redis_completion:
+            if args.redis or args.redis_editor or args.redis_pages or args.redis_completion or args.redis_editing:
                 # All shared fixture variants compile the page workload, even
                 # when another Redis workload is selected for measurement.
                 # The current catalog benchmark represents already loaded data,
@@ -261,6 +265,19 @@ def main():
                     rows = measure(base_binary if label == 'base' else head_binary,
                                    base_path if label == 'base' else root, logs, label, index)
                     (base_runs if label == 'base' else head_runs).append(rows)
+            if args.redis_editing:
+                # This interaction did not exist in the base. Record absolute
+                # release costs, not a misleading comparison with one old row.
+                absolute = []
+                for index in range(args.runs):
+                    result = run([str(head_binary), 'redis_creation_many_frame_benchmark', '--ignored', '--nocapture', '--test-threads=1'], root, capture_output=True)
+                    output = result.stdout + result.stderr
+                    (logs / f'head-create-100-{index}.log').write_text(output)
+                    parsed = parse_output(output)
+                    if set(parsed) != {'redis/editing/create-100-scroll'}:
+                        raise ValueError('missing 100-entry editing workload')
+                    absolute.append(parsed)
+                (logs / 'editing-new-workload.json').write_text(json.dumps(dict(scope='Candidate-only 100-entry scrolling/after-idle workload; no pre-existing feature comparison', runs=absolute), indent=2))
             comparisons = compare(base_runs, head_runs)
             report = dict(environment=metadata, base_runs=base_runs, head_runs=head_runs, comparisons=comparisons)
             (logs / 'results.json').write_text(json.dumps(report, indent=2))

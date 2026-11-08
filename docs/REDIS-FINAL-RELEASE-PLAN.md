@@ -950,3 +950,27 @@ retained failed draft and cancel. It also asserts the form stays within its pane
 (`/tmp/redis-editing-interaction-tests.log`). Release CPU comparison, focused JSON
 interaction coverage and remaining safety review are still open. No native display
 latency or mixed-DPI claim follows from these captures.
+
+### Editing interaction guard and performance fixture correction
+
+The focused JSON interaction test found that the dirty-value navigation guard rejected
+Remove mutations from an Update-mode JSON draft. The guard now permits only the exact
+validated mutation produced by that draft (including path, action, value and expected
+document). Unrelated navigation remains blocked. JSON mode switches stay disabled in
+read-only/pending states; worker errors retain the full draft. The matching test run
+passed 13 tests, with three live/manual tests ignored
+(`/tmp/redis-json-interaction-tests.log`).
+
+Review also found an invalid old JSON page benchmark fixture: it omitted value_page,
+so the UI could render Loading value instead of the editor. The shared fixture now
+provides a page and asserts the Value section renders; the identical correction is
+copied to the baseline. Previous json-edit timings without this fix do not establish
+editor rendering performance. Debug fixture smoke passed
+(`/tmp/redis-editing-fixture-smoke.log`).
+
+Added an identical single-entry hash-creation comparison and a candidate-only
+100-entry scrolling/after-idle workload. The latter asserts it actually reaches the
+last entry and retains raw release samples separately; the old form had no equivalent
+multi-entry behavior, so no false before/after feature comparison is claimed.
+All eight runner unit checks and the new workload smoke passed. Release measurements
+remain pending, and the editing milestone stays unchecked.

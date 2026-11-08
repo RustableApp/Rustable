@@ -388,3 +388,30 @@ mod entry_interaction_tests {
         assert!(click(&ctx,&mut draft,false,"Cancel").1);
     }
 }
+
+#[cfg(test)]
+mod creation_many_benchmark {
+    use super::*;
+    #[test]
+    #[ignore = "new 100-entry scrolling workload; absolute release timings"]
+    fn redis_creation_many_frame_benchmark() {
+        let ctx=egui::Context::default();
+        let mut draft=Draft::new(Action::Create,vec![],"hash".into());
+        draft.key_text="app:settings".into();draft.field="field:000".into();draft.value="enabled".into();
+        draft.extra_entries=(1..100).map(|i|(format!("field:{i:03}"),"enabled".into())).collect();
+        let mut samples=Vec::new();let mut last_visible=false;
+        fn contains(shape:&egui::Shape)->bool {match shape {egui::Shape::Text(t)=>t.galley.text()=="field:099",egui::Shape::Vec(v)=>v.iter().any(contains),_=>false}}
+        for frame in 0..240 {
+            let start=std::time::Instant::now();
+            let output=ctx.run(egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(600.0,760.0))),time:Some(frame as f64/120.0+if frame>=200 {30.0}else{0.0}),events:vec![egui::Event::PointerMoved(egui::pos2(300.0,280.0)),egui::Event::MouseWheel {unit:egui::MouseWheelUnit::Point,delta:egui::vec2(0.0,if frame<190 {-48.0}else{0.0}),modifiers:egui::Modifiers::NONE}],..Default::default()},|ctx| {
+                egui::CentralPanel::default().show(ctx,|ui| {assert!(draft.pane(ui,true,false,false,true).0.is_none());});
+            });
+            let visible=output.shapes.iter().any(|s|contains(&s.shape));
+            let _=ctx.tessellate(output.shapes,output.pixels_per_point);
+            if frame>=20 {samples.push(start.elapsed().as_secs_f64()*1000.0);}
+            last_visible|=visible;
+        }
+        assert!(last_visible,"scroll workload must reach final entry");
+        samples.sort_by(f64::total_cmp);crate::ui_benchmark::report("redis/editing/create-100-scroll",&samples);
+    }
+}

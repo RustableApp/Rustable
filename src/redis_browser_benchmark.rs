@@ -389,6 +389,7 @@ mod redis_tool_pages_benchmark {
                     let mut draft = crate::redis_edit::Draft::new(crate::redis_mutation::Action::Update, vec![b"fixture:json".to_vec()], "ReJSON-RL".into());
                     draft.value = serde_json::to_string_pretty(&serde_json::json!({"users": (0..30).map(|i| format!("User {i}")).collect::<Vec<_>>()})).unwrap();
                     workspace.snapshot = Some(Snapshot { key: b"fixture:json".to_vec(), kind: "ReJSON-RL".into(), ttl_ms: -1, length: Some(draft.value.len() as u64), truncated: false, value: redis::Value::BulkString(draft.value.as_bytes().to_vec()) });
+                    workspace.value_page = Some(Page { cursor: Cursor::Offset(0), next: None, pattern: b"*".to_vec(), display: Default::default() });
                     workspace.edit = Some(draft);
                 }
                 _ => workspace.pubsub.open = true,
@@ -403,6 +404,10 @@ mod redis_tool_pages_benchmark {
                     time: Some(frame as f64/120.0 + if frame >= 100 {30.0} else {0.0}),
                     ..Default::default()
                 }, |ctx| { workspace.show(ctx, "Fixture", egui::Color32::BLUE, &mut sizes, &mut dirty); });
+                if page == "json-edit" && frame > 0 {
+                    fn has_value(shape: &egui::Shape) -> bool { match shape {egui::Shape::Text(text) => text.galley.text() == "Value", egui::Shape::Vec(shapes) => shapes.iter().any(has_value), _ => false} }
+                    assert!(output.shapes.iter().any(|shape|has_value(&shape.shape)), "JSON editor must render, not Loading value");
+                }
                 let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
                 if frame >= 20 { samples.push(start.elapsed().as_secs_f64()*1000.0); }
             }
@@ -446,5 +451,27 @@ mod redis_completion_ui_benchmark {
             }
             samples.sort_by(f64::total_cmp);crate::ui_benchmark::report(&format!("redis/completion/{scenario}"),&samples);
         }
+    }
+}
+
+#[cfg(test)]
+mod redis_creation_comparison {
+    #[test]
+    #[ignore = "manual shared single-entry creation workload"]
+    fn redis_creation_frame_benchmark() {
+        use eframe::egui;
+        let ctx=egui::Context::default();
+        let mut draft=crate::redis_edit::Draft::new(crate::redis_mutation::Action::Create,vec![],"hash".into());
+        draft.key_text="app:users:1004".into();draft.field="name".into();draft.value="Jordan Lee".into();
+        let mut samples=Vec::new();
+        for frame in 0..180 {
+            let start=std::time::Instant::now();
+            let output=ctx.run(egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(600.0,760.0))),time:Some(frame as f64/120.0),..Default::default()},|ctx| {
+                egui::CentralPanel::default().show(ctx,|ui| {assert!(draft.pane(ui,true,false,false,true).0.is_none());});
+            });
+            let _=ctx.tessellate(output.shapes,output.pixels_per_point);
+            if frame>=20 {samples.push(start.elapsed().as_secs_f64()*1000.0);}
+        }
+        samples.sort_by(f64::total_cmp);crate::ui_benchmark::report("redis/editing/create-one",&samples);
     }
 }
