@@ -142,6 +142,7 @@ def main():
     parser.add_argument('--redis-pages', action='store_true', help='Include Search, Analyze and Pub/Sub page workloads')
     parser.add_argument('--redis-editor', action='store_true', help='Include Redis command editor idle/edit workloads')
     parser.add_argument('--redis-completion', action='store_true', help='Compare focused command completion frames using the identical fixture')
+    parser.add_argument('--redis-vectors', action='store_true', help='Compare vector result controls and exercise new input workloads')
     parser.add_argument('--redis-tools', action='store_true', help='Include shared Redis diagnostics and topology workloads')
     parser.add_argument('--base', required=True, help='Git revision to compare against')
     parser.add_argument('--output', default='target/ui-performance')
@@ -160,6 +161,9 @@ def main():
     if args.redis_completion:
         BENCHMARKS += ('redis_completion_frame_benchmark',)
         EXPECTED.update(f'redis/completion/{case}' for case in ('commands', 'arguments', 'after-idle', 'counted-keys', 'capability'))
+    if args.redis_vectors:
+        BENCHMARKS += ('redis_vector_controls_frame_benchmark',)
+        EXPECTED.update(f'redis/vector-controls/{case}' for case in ('results', 'typing', 'after-idle'))
     if args.runs < 5:
         parser.error('--runs must be at least 5')
     root = Path(run(['git', 'rev-parse', '--show-toplevel'], Path.cwd(), capture_output=True).stdout.strip())
@@ -190,6 +194,22 @@ def main():
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
+            if args.redis_vectors:
+                fixture = root / 'src' / 'redis_vector_benchmark.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                library = base_path / 'src' / 'lib.rs'
+                if 'mod redis_vector_benchmark;' not in library.read_text():
+                    with library.open('a') as output:
+                        output.write('\n#[cfg(all(test, not(target_arch = "wasm32")))] mod redis_vector_benchmark;\n')
+                vector_source = base_path / 'src' / 'redis_vector_search.rs'
+                if not vector_source.exists():
+                    source = (root / 'src' / 'redis_vector_search.rs').read_text().replace('BENCHMARK_HAS_CONTROLS: bool = true', 'BENCHMARK_HAS_CONTROLS: bool = false')
+                    vector_source.write_text(source)
+                    with library.open('a') as output:
+                        output.write('\n#[cfg(test)] mod redis_vector_search;\n')
+                metadata['vector_baseline_adapter'] = 'Results: identical 20 rows, baseline Refresh versus candidate controls. New typing/after-idle: identical current form transplanted into base, measuring the new workload against base rendering dependencies, not a pre-existing feature. Absolute timings retained; no claim of before/after feature equivalence for new interactions.'
+                metadata['vector_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.redis or args.redis_editor or args.redis_pages or args.redis_completion:
                 # New workload, identical source on each side; never change the
                 # workload in just the candidate and call it a comparison.

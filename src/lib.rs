@@ -205,3 +205,6 @@ pub(crate) fn browser_error(error: wasm_bindgen::JsValue) -> String {
 mod ui_benchmark;
 
 mod redis_value_editor;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod redis_vector_benchmark;

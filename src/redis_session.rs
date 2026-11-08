@@ -2199,6 +2199,64 @@ mod analysis_transport_tests {
         assert!(session.execute("PING",true).is_ok());
     }
     #[test]
+    fn configurable_vector_request_is_direct_bounded_and_preserves_error_alignment() {
+        use std::io::Read;
+        for oversized in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let peer = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                let mut parser = redis::Parser::new();
+                let read = |parser: &mut redis::Parser, socket: &mut std::net::TcpStream| -> Vec<Vec<u8>> {
+                    redis::from_redis_value(parser.parse_value(socket).unwrap()).unwrap()
+                };
+                let command = loop {
+                    let command = read(&mut parser, &mut socket);
+                    if command[0] != b"CLIENT" { break command; }
+                    socket.write_all(b"+OK\r\n").unwrap();
+                };
+                let expected: Vec<Vec<u8>> = ["VSIM", "vectors", "VALUES", "2", "1.0", "0.5", "WITHSCORES", "COUNT", "7", "EF", "250", "FILTER", ".price < 100", "FILTER-EF", "500"].iter().map(|s|s.as_bytes().to_vec()).collect();
+                assert_eq!(command, expected); // No VDIM, EVAL or metadata preflight.
+                if oversized {
+                    socket.write_all(b"$1048577\r\n").unwrap();
+                    let _ = socket.write_all(&vec![b'x'; 1048577]);
+                    let mut byte = [0];
+                    match socket.read(&mut byte) {
+                        Ok(0) => {},
+                        Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof) => {},
+                        result => panic!("unexpected request after limit: {result:?}"),
+                    } // Closed; no replay.
+                } else {
+                    socket.write_all(b"-ERR invalid filter\r\n").unwrap();
+                    assert_eq!(read(&mut parser, &mut socket)[0], b"PING");
+                    socket.write_all(b"+PONG\r\n").unwrap();
+                    assert_eq!(read(&mut parser, &mut socket), expected);
+                    socket.write_all(b"*2\r\n$3\r\none\r\n$3\r\n0.9\r\n").unwrap();
+                    assert_eq!(read(&mut parser, &mut socket)[0], b"PING");
+                    socket.write_all(b"+PONG\r\n").unwrap();
+                }
+            });
+            let settings = Settings { host: "127.0.0.1".into(), port, tls: false, ..Default::default() };
+            let mut session = Session { connection: Some(Session::raw_node(&settings, "").unwrap()), ..Session::disconnected() };
+            let mut search = crate::redis_vector_search::Search::element(b"vectors".to_vec(), vec![]);
+            search.input = crate::redis_vector_search::Input::Values(vec![1.0, 0.5]);
+            search.count = 7; search.effort = 250; search.filter_effort = 500;
+            search.filter = ".price < 100".into();
+            let request = crate::redis_diagnostics::Request::VectorSearch(search);
+            let error = session.diagnostics(&request).err().unwrap();
+            if oversized { assert!(error.contains("byte limit"), "{error}"); assert!(session.connection.is_none()); }
+            else {
+                assert!(session.execute_report("PING", true).is_ok());
+                let report = session.diagnostics(&request).unwrap().vector_matches.unwrap();
+                assert_eq!(report.rows[0].element, b"one");
+                assert_eq!(report.limit, 7);
+                assert!(session.execute_report("PING", true).is_ok());
+            }
+            peer.join().unwrap();
+        }
+    }
+    #[test]
     fn capability_metadata_is_one_bounded_exchange_and_acl_denials_stay_unknown() {
         for denied in [false, true] {
             let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let port=listener.local_addr().unwrap().port();

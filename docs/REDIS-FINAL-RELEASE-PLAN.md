@@ -799,3 +799,24 @@ corrected to a human-readable dimension summary. Dark/light captures are retaine
 in `target/redis-vector-controls-captures/` and
 `target/redis-vector-controls-light-captures/`. Release CPU comparison and focused
 configurable-request protocol coverage remain open; this milestone stays unchecked.
+
+### Vector protocol coverage and performance workload
+
+A disposable RESP peer now verifies the configurable VALUES/COUNT/EF/FILTER/FILTER-EF
+arguments, no metadata preflight or Lua wrapper, ordinary-error/retry/PING alignment,
+and closure without replay after crossing the existing 1 MiB response byte cap.
+The test passed (`/tmp/redis-vector-protocol-tests.log`). The fixture sends actual
+oversized response bytes: the bounded reader enforces bytes consumed, rather than
+rejecting a declared bulk length before payload arrives. An earlier header-only
+fixture timed out and was corrected; it was not evidence of a passing limit check.
+
+Added `--redis-vectors` to the same-machine comparison runner. The identical
+20-result workload compares baseline Refresh with the new selected-element controls.
+New typing and after-idle workloads use a focused 4,096-component draft; because
+those interactions did not exist in the baseline, the current form is transplanted
+into the baseline solely for comparison against its rendering dependencies. These
+new-workload numbers are not a claim of before/after feature equivalence. Both raw
+absolute timings and this adapter are recorded. Parsing is excluded because these
+are typing/rendering workloads; parsing occurs only on explicit submission.
+All eight runner tests, four vector form tests and a debug workload smoke run passed.
+Release comparison is pending; debug timings do not establish performance acceptance.

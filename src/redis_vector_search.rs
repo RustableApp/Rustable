@@ -168,6 +168,8 @@ pub(crate) struct Draft {
     supplied: bool,
     values: String,
     error: Option<String>,
+    #[cfg(test)]
+    benchmark_focus: bool,
 }
 impl Draft {
     pub fn new(key: Vec<u8>, element: Vec<u8>) -> Self {
@@ -176,6 +178,8 @@ impl Draft {
             supplied: false,
             values: String::new(),
             error: None,
+            #[cfg(test)]
+            benchmark_focus: false,
         }
     }
     #[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
@@ -201,7 +205,7 @@ impl Draft {
                 ui.selectable_value(&mut self.supplied, true, "Supplied vector");
             });
             if self.supplied {
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::multiline(&mut self.values)
                         .desired_rows(3)
                         .desired_width(f32::INFINITY)
@@ -209,6 +213,13 @@ impl Draft {
                         .font(egui::TextStyle::Monospace)
                         .hint_text("1, 0.5, -0.2 …"),
                 );
+                #[cfg(test)]
+                if self.benchmark_focus {
+                    response.request_focus();
+                    self.benchmark_focus = false;
+                }
+                #[cfg(not(test))]
+                let _ = response;
                 ui.weak("Up to 4,096 components · match the stored vector dimensions");
             }
             ui.label("Attribute filter");
@@ -357,5 +368,18 @@ mod interaction_tests {
         assert!(click(&ctx, &mut draft, true, "Selected element").is_none());
         let request = click(&ctx, &mut draft, true, "Search").unwrap();
         assert!(matches!(request.input,Input::Element(v) if v==[0,255]));
+    }
+}
+
+#[cfg(test)]
+pub(crate) const BENCHMARK_HAS_CONTROLS: bool = true;
+#[cfg(test)]
+impl Draft {
+    pub(crate) fn prepare_benchmark(&mut self, supplied: bool) {
+        self.supplied = supplied;
+        self.benchmark_focus = supplied;
+        self.values = std::iter::repeat_n("0.25", 4096)
+            .collect::<Vec<_>>()
+            .join(", ");
     }
 }
