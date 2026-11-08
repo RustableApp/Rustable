@@ -159,3 +159,24 @@ rejected writes did not execute. `bash scripts/test-redis-cluster-mtls.sh` passe
 than only calling the node constructor against standalone Redis. SSH topology and
 stream integration, UI/performance evidence and the remaining release gates are
 still outstanding.
+
+### Connection-form CPU comparison
+
+Compared `6a6b930` with `cb9e130` using
+`python3 scripts/ui-performance.py --base 6a6b930 --redis-connections --output target/redis-connection-security-performance`.
+Apple M4 Max, macOS 27.2 arm64, mise-selected release toolchain recorded in
+`environment.json`; serial builds, five alternating pairs, unchanged standalone
+profile workload (20 warmups, 160 measured frames, default egui scale/manager
+viewport). Redis profile median p95 was 0.0567 → 0.0579 ms (+2.1%, pass).
+The full suite was inconclusive due to noisy vertical-grid tessellation.
+
+A five-pair repeat using the same compiled binaries recorded hashes and raw
+p50/p95/p99/max samples in
+`target/redis-connection-security-performance-repeat-verified/`. Redis profile
+p95 was 0.053584 → 0.056000 ms (+4.5%, pass). Several unrelated grid/sidebar cases
+remained noisy, so this is not a whole-suite pass. An earlier repeat attempt
+selected an older cached binary and failed the workload-presence check; its
+incomplete output is retained but excluded. No thresholds or fixtures changed.
+These results cover the default form only, not newly expanded SSH/client-identity
+interactions or native input-to-display latency. Those checks remain outstanding;
+no overall UI/release gate is checked off from this narrow evidence.
