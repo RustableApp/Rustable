@@ -121,17 +121,23 @@ mod tests {
                 assert_eq!(command[0], b"CLIENT");
                 socket.write_all(b"+OK\r\n").unwrap();
             }
-            // The second metadata request must arrive before either reply.
+            // Every command in the full 50-index page must arrive before any reply.
             assert_eq!(read(&mut socket, &mut parser), vec![b"FT.INFO".to_vec(), b"gone".to_vec()]);
+            for _ in 2..PAGE_SIZE { assert_eq!(read(&mut socket, &mut parser), vec![b"FT.INFO".to_vec(), b"present".to_vec()]); }
             std::thread::sleep(Duration::from_millis(80));
             socket.write_all(b"*4\r\n$8\r\nnum_docs\r\n:3\r\n$10\r\nattributes\r\n*0\r\n-ERR Unknown index name\r\n").unwrap();
+            for _ in 2..PAGE_SIZE { socket.write_all(b"*4\r\n$8\r\nnum_docs\r\n:3\r\n$10\r\nattributes\r\n*0\r\n").unwrap(); }
             assert_eq!(read(&mut socket, &mut parser)[0], b"PING");
             socket.write_all(b"+PONG\r\n").unwrap();
         });
         let settings = crate::redis_settings::Settings { host: "127.0.0.1".into(), port, tls: false, ..Default::default() };
         let mut connection = crate::redis_session::Session::raw_node(&settings, "").unwrap();
         let started = std::time::Instant::now();
-        let rows = fetch(&mut connection, &[b"present".to_vec(), b"gone".to_vec()]).unwrap();
+        let mut names = vec![b"present".to_vec(); PAGE_SIZE]; names[1] = b"gone".to_vec();
+        let rows = fetch(&mut connection, &names).unwrap();
+        assert_eq!(rows.len(), PAGE_SIZE);
+        assert!(rows[2..].iter().all(|row| row.1.is_ok()));
+        assert!(connection.req_packed_commands_bounded(b"invalid-not-sent", &[16 * 1024 * 1024; 5]).is_err());
         let elapsed = started.elapsed();
         eprintln!("catalog metadata page with 80 ms simulated response delay: {elapsed:?}");
         assert!(elapsed >= Duration::from_millis(80) && elapsed < Duration::from_millis(250));

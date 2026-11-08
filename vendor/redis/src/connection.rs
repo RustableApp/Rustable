@@ -1994,9 +1994,10 @@ impl Connection {
     /// Server error values are returned normally so every reply can be consumed.
     pub fn req_packed_commands_bounded(&mut self, command: &[u8], limits: &[usize]) -> RedisResult<Vec<Value>> {
         if self.pubsub || self.protocol.supports_resp3() || self.messages_to_skip != 0
-            || limits.is_empty() || limits.len() > 16
+            || limits.is_empty() || limits.len() > 50
+            || limits.iter().try_fold(0usize, |sum, limit| sum.checked_add(*limit)).is_none_or(|sum| sum > 64 * 1024 * 1024)
             || limits.iter().any(|limit| *limit == 0 || *limit > 16 * 1024 * 1024) {
-            return Err((ErrorKind::InvalidClientConfig, "Bounded requests require a clean RESP2 connection and 1–16 valid reply limits").into());
+            return Err((ErrorKind::InvalidClientConfig, "Bounded requests require a clean RESP2 connection and 1–50 valid reply limits totaling at most 64 MiB").into());
         }
         if let Err(error) = self.send_bytes(command) {
             self.close_connection();

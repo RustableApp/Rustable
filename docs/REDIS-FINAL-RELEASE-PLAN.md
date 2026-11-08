@@ -345,3 +345,29 @@ inspected (`target/redis-search-management-light-captures/`). This completes the
 functional milestone and targeted validation, including the explicitly accepted
 rendering cost above; it does not close release-wide native/platform or full-suite
 gates. Next milestone is bounded database-wide Analyze.
+
+### Full catalog page correction and Analyze collector
+
+Transport reuse review found that Search's 50-index page exceeded the bounded
+reader's earlier 16-reply admission limit. The prior two-index fixture missed
+this: the functional milestone evidence was insufficient for a full page. The
+reader now admits up to 50 replies with an explicit 64 MiB total input budget
+and unchanged 16 MiB individual maximum. Search remains one exchange per page,
+with 1 MiB per FT.INFO reply (50 MiB maximum page input). A protocol test now
+requires all 50 commands before sending any replies, retains a per-index server
+error, verifies later replies and PING, and rejects over-budget batches before
+sending bytes. It passed with the same 80 ms simulated delay
+(`/tmp/redis-search-full-page-test.log`).
+
+Analyze now has a worker-oriented collector/report model in `redis_analysis.rs`.
+It deduplicates SCAN results, caps collection at 100,000 unique names / 16 MiB
+of name bytes / 1,000 pages, checks cancellation and a 60-second collection
+budget between reads, groups expiry buckets and types, and retains top 15 keys
+and namespaces while totals include all measured keys. Complete means cursor
+traversal finished, never snapshot consistency. Cancellation/errors preserve
+partial measured results. Metadata requests are bounded to 200 keys in the
+source interface; the transport implementation still needs to supply bounded
+RESP reads and suitable pipelining. Five model tests passed, covering duplicates,
+missing keys, expiry boundaries, partial cancellation, name/page bounds, and
+serialization. Network integration, UI, saved-report storage and their fixtures
+remain outstanding; Analyze is not marked complete.
