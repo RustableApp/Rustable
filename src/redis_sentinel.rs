@@ -63,6 +63,7 @@ pub(crate) fn with_primary<T>(
                 host: seed.host.clone(),
                 port: seed.port,
                 username: sentinel.username.clone(),
+                ssh: settings.ssh.clone(),
                 tls: sentinel.tls,
                 root_certificate: sentinel.root_certificate.clone(),
                 client_certificate: sentinel.client_certificate.clone(),

@@ -642,6 +642,14 @@ mod tests {
             remote_host: "127.0.0.1".into(),
             remote_port: echo_port,
         };
+        // Never enroll or overwrite the user's host keys during verification.
+        let rejected_hosts = dir.join("rejected_hosts");
+        let mut rejected = c.clone();
+        rejected.known_hosts_file = Some(rejected_hosts.clone());
+        for contents in [String::new(), format!("[127.0.0.1]:{ssh_port} {}", std::fs::read_to_string(dir.join("client.pub")).unwrap())] {
+            std::fs::write(&rejected_hosts, contents).unwrap();
+            assert!(Tunnel::start(&rejected, &AtomicBool::new(false)).is_err(), "unverified SSH host connected");
+        }
         let mut tunnel = Tunnel::start(&c, &AtomicBool::new(false)).unwrap();
         let local_port = tunnel.local_port();
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, local_port)).unwrap();
@@ -659,6 +667,39 @@ mod tests {
         drop(tunnel);
         assert!(!control_dir.exists());
         assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, local_port)).is_err());
+
+        // A Redis connection owns its tunnel, including when moved out of a
+        // session into a topology router. No caller-side lease is needed.
+        let redis_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut redis_config = c.clone();
+        redis_config.remote_port = redis_listener.local_addr().unwrap().port();
+        let responder = std::thread::spawn(move || {
+            let (mut socket, _) = redis_listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut parser = redis::Parser::new();
+            loop {
+                let command: Vec<Vec<u8>> = redis::from_redis_value(parser.parse_value(&mut socket).unwrap()).unwrap();
+                match command[0].as_slice() {
+                    b"CLIENT" => socket.write_all(b"+OK\r\n").unwrap(),
+                    b"PING" => { socket.write_all(b"+PONG\r\n").unwrap(); break; }
+                    _ => panic!("unexpected Redis setup command"),
+                }
+            }
+        });
+        let tunnel = Tunnel::start(&redis_config, &AtomicBool::new(false)).unwrap();
+        let port = tunnel.local_port();
+        let directory = tunnel._directory.path().to_owned();
+        let client = redis::Client::open("redis://unresolvable.invalid:1").unwrap();
+        let mut connection = client.get_connection_via(
+            (Ipv4Addr::LOCALHOST, port).into(), Duration::from_secs(5),
+        ).unwrap();
+        connection.retain_transport(Box::new(tunnel));
+        assert!(directory.exists());
+        assert_eq!(redis::cmd("PING").query::<String>(&mut connection).unwrap(), "PONG");
+        responder.join().unwrap();
+        drop(connection);
+        assert!(!directory.exists());
+        assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err());
     }
 
     #[test]

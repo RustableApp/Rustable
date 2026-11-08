@@ -160,8 +160,12 @@ impl Session {
         if settings.tls {
             transport.push(Tls);
         }
-        let connection = client
-            .get_connection_with_timeout(settings.connect_timeout)
+        let tunnel = crate::redis_settings::start_tunnel(settings, &std::sync::atomic::AtomicBool::new(false))
+            .map_err(|message| failure(vec![], vec![SshHost], message))?;
+        let opened = if let Some(tunnel) = &tunnel {
+            client.get_connection_via(std::net::SocketAddr::from(([127, 0, 0, 1], tunnel.local_port())), settings.connect_timeout)
+        } else { client.get_connection_with_timeout(settings.connect_timeout) };
+        let mut connection = opened
             .map_err(|e| {
                 if e.kind() == redis::ErrorKind::AuthenticationFailed
                     || matches!(e.code(), Some("WRONGPASS" | "NOAUTH"))
@@ -175,6 +179,7 @@ impl Session {
                     failure(vec![], transport.clone(), format!("Redis connection: {e}"))
                 }
             })?;
+        if let Some(tunnel) = tunnel { connection.retain_transport(Box::new(tunnel)); }
         connection
             .set_read_timeout(Some(settings.read_timeout))
             .map_err(|e| failure(vec![], transport.clone(), e.to_string()))?;
@@ -1811,6 +1816,21 @@ mod tests {
             client_key: Some(directory.join("client.key")),
             ..Default::default()
         };
+        // A forwarded endpoint changes only the dial address, never TLS identity.
+        for (host, succeeds) in [("127.0.0.1", true), ("localhost", false)] {
+            let info = redis::ConnectionAddr::TcpTls { host: host.into(), port: 1, insecure: false, tls_params: None }
+                .into_connection_info().unwrap()
+                .set_redis_settings(redis::RedisConnectionInfo::default().set_password("rustable-mtls-test-only"));
+            let client = redis::Client::build_with_tls(info, redis::TlsCertificates {
+                root_cert: Some(std::fs::read(directory.join("ca.crt")).unwrap()),
+                client_tls: Some(redis::ClientTlsConfig {
+                    client_cert: std::fs::read(directory.join("client.crt")).unwrap(),
+                    client_key: std::fs::read(directory.join("client.key")).unwrap(),
+                }),
+            }).unwrap();
+            let result = client.get_connection_via(std::net::SocketAddr::from(([127,0,0,1], settings.port)), settings.connect_timeout);
+            assert_eq!(result.is_ok(), succeeds, "forwarded TLS identity {host}");
+        }
         let mut session = Session::connect(&settings, "rustable-mtls-test-only").unwrap();
         for _ in 0..2 {
             assert_eq!(session.query(&redis::cmd("PING")).unwrap(), redis::Value::SimpleString("PONG".into()));

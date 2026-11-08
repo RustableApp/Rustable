@@ -76,6 +76,12 @@ impl Client {
         connect(&self.connection_info, Some(timeout))
     }
 
+    /// Connect through an externally managed TCP endpoint while preserving the
+    /// configured server hostname for TLS certificate verification and SNI.
+    pub fn get_connection_via(&self, endpoint: std::net::SocketAddr, timeout: Duration) -> RedisResult<Connection> {
+        crate::connection::connect_via(&self.connection_info, Some(timeout), Some(endpoint))
+    }
+
     /// Returns a reference of client connection info object.
     pub fn get_connection_info(&self) -> &ConnectionInfo {
         &self.connection_info

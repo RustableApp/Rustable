@@ -968,6 +968,7 @@ pub struct Connection {
     /// The number of messages that are expected to be returned from the server,
     /// but the user no longer waits for - answers for requests that already returned a transient error.
     messages_to_skip: usize,
+    transport_lease: Option<Box<dyn Send + Sync>>,
 }
 
 /// Represents a RESP2 pubsub connection.
@@ -992,6 +993,11 @@ impl ActualConnection {
         timeout: Option<Duration>,
         tcp_settings: &TcpSettings,
     ) -> RedisResult<Self> {
+        Self::new_via(addr, timeout, tcp_settings, None)
+    }
+
+    fn new_via(addr: &ConnectionAddr, timeout: Option<Duration>, tcp_settings: &TcpSettings, endpoint: Option<std::net::SocketAddr>) -> RedisResult<Self> {
+        let endpoint_host = endpoint.map(|address| address.ip().to_string());
         Ok(match *addr {
             ConnectionAddr::Tcp(ref host, ref port) => {
                 if is_wildcard_address(host) {
@@ -1000,7 +1006,7 @@ impl ActualConnection {
                         "Cannot connect to a wildcard address (0.0.0.0 or ::)"
                     ));
                 }
-                let addr = (host.as_str(), *port);
+                let addr = (endpoint_host.as_deref().unwrap_or(host.as_str()), endpoint.map_or(*port, |address| address.port()));
                 let tcp = match timeout {
                     None => connect_tcp(addr, tcp_settings)?,
                     Some(timeout) => {
@@ -1046,7 +1052,7 @@ impl ActualConnection {
                 let deadline=timeout.map(|timeout| Instant::now()+timeout);
                 let tls_connector =
                     create_native_tls_connector_builder(insecure, tls_params.clone()).build()?;
-                let addr = (host.as_str(), port);
+                let addr = (endpoint_host.as_deref().unwrap_or(host.as_str()), endpoint.map_or(port, |address| address.port()));
                 let mut tls = match timeout {
                     None => {
                         let tcp = connect_tcp(addr, tcp_settings)?;
@@ -1060,7 +1066,7 @@ impl ActualConnection {
                     Some(_) => {
                         let mut tcp = None;
                         let mut last_error = None;
-                        for addr in (host.as_str(), port).to_socket_addrs()? {
+                        for addr in addr.to_socket_addrs()? {
                             let remaining=deadline.unwrap().checked_duration_since(Instant::now()).filter(|d|!d.is_zero()).ok_or_else(||io::Error::new(io::ErrorKind::TimedOut,"TLS connection timed out"))?;
                             match connect_tcp_timeout(&addr, remaining, tcp_settings) {
                                 Ok(l) => {
@@ -1105,6 +1111,7 @@ impl ActualConnection {
                 ref tls_params,
             } => {
                 let host: &str = host;
+                let addr = (endpoint_host.as_deref().unwrap_or(host), endpoint.map_or(port, |address| address.port()));
                 let config = create_rustls_config(insecure, tls_params.clone())?;
                 let conn = rustls::ClientConnection::new(
                     Arc::new(config),
@@ -1112,13 +1119,13 @@ impl ActualConnection {
                 )?;
                 let reader = match timeout {
                     None => {
-                        let tcp = connect_tcp((host, port), tcp_settings)?;
+                        let tcp = connect_tcp(addr, tcp_settings)?;
                         StreamOwned::new(conn, tcp)
                     }
                     Some(timeout) => {
                         let mut tcp = None;
                         let mut last_error = None;
-                        for addr in (host, port).to_socket_addrs()? {
+                        for addr in addr.to_socket_addrs()? {
                             match connect_tcp_timeout(&addr, timeout, tcp_settings) {
                                 Ok(l) => {
                                     tcp = Some(l);
@@ -1417,12 +1424,15 @@ pub fn connect(
     connection_info: &ConnectionInfo,
     timeout: Option<Duration>,
 ) -> RedisResult<Connection> {
+    connect_via(connection_info, timeout, None)
+}
+
+pub(crate) fn connect_via(connection_info: &ConnectionInfo, timeout: Option<Duration>, endpoint: Option<std::net::SocketAddr>) -> RedisResult<Connection> {
     let start = Instant::now();
-    let con: ActualConnection = ActualConnection::new(
-        &connection_info.addr,
-        timeout,
-        &connection_info.tcp_settings,
-    )?;
+    let con = match endpoint {
+        Some(endpoint) => ActualConnection::new_via(&connection_info.addr, timeout, &connection_info.tcp_settings, Some(endpoint))?,
+        None => ActualConnection::new(&connection_info.addr, timeout, &connection_info.tcp_settings)?,
+    };
 
     // we temporarily set the timeout, and will remove it after finishing setup.
     let remaining_timeout = timeout.and_then(|timeout| timeout.checked_sub(start.elapsed()));
@@ -1680,6 +1690,7 @@ fn setup_connection(
         protocol: connection_info.protocol,
         push_sender: None,
         messages_to_skip: 0,
+        transport_lease: None,
     };
 
     if execute_connection_pipeline(
@@ -1776,6 +1787,11 @@ pub trait ConnectionLike {
 /// You generally do not much with this object other than passing it to
 /// `Cmd` objects.
 impl Connection {
+    /// Keep an externally managed transport alive until this connection is dropped.
+    pub fn retain_transport(&mut self, lease: Box<dyn Send + Sync>) {
+        self.transport_lease = Some(lease);
+    }
+
     /// Sends an already encoded (packed) command into the TCP socket and
     /// does not read a response.  This is useful for commands like
     /// `MONITOR` which yield multiple items.  This needs to be used with

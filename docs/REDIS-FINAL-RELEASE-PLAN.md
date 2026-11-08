@@ -110,3 +110,23 @@ Verified: `bash scripts/test-redis-mtls.sh` passed (latest log
 `/tmp/redis-mtls-live.log`). These checks do not yet prove an actual Sentinel
 mTLS discovery/data handoff or routed Cluster mTLS behavior, nor SSH. Those and
 connection-form screenshot/performance validation remain part of the open milestone.
+
+### SSH transport checkpoint
+
+Redis connection settings now reuse the existing SSH form and OpenSSH gateway
+configuration. Ordinary, Cluster-node and Sentinel-discovery/data connections own
+an SSH lease through the Redis connection; streaming transports own their lease
+through stream drop. TCP forwarding preserves the configured Redis TLS hostname.
+No extra warm-path Redis requests were added; SSH authentication/forwarding occurs
+only when establishing a new connection. See `vendor/README.md` for the endpoint
+and ownership APIs. Windows retains the existing explicit unsupported SSH result.
+
+Verified on macOS: all seven `ssh_tunnel::tests` passed, including isolated live
+sshd forwarding, unknown/changed host-key rejection, Redis PING through the
+forwarded endpoint, and listener/private-directory cleanup when the Redis
+connection drops (`/tmp/redis-ssh-tests.log`). The mutual-TLS fixture also passes
+forwarded endpoint checks with correct/incorrect configured TLS hostnames
+(`/tmp/redis-ssh-tls-identity.log`). These tests use temporary known-hosts files,
+not the user's trust store. Live routed topology and streaming SSH coverage,
+connection-form UI/performance checks and release checks remain open. The parent
+connection milestone is still incomplete.

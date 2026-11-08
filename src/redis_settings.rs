@@ -72,6 +72,7 @@ pub(crate) struct Settings {
     pub port: u16,
     pub database: u32,
     pub cluster: bool,
+    pub ssh: Option<crate::connection_profiles::SshOptions>,
     pub cluster_seeds: Vec<SentinelSeed>,
     pub sentinel: Option<Sentinel>,
     pub username: String,
@@ -89,6 +90,7 @@ impl Default for Settings {
             port: 6379,
             database: 0,
             cluster: false,
+            ssh: None,
             cluster_seeds: Vec::new(),
             sentinel: None,
             username: String::new(),
@@ -103,6 +105,9 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(ssh) = &self.ssh {
+            if ssh.host.trim().is_empty() { return Err("Enter an SSH gateway host.".into()); }
+        }
         validate_identity(self.tls, &self.client_certificate, &self.client_key)?;
         if let Some(sentinel) = &self.sentinel {
             if self.cluster {
@@ -143,6 +148,16 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn start_tunnel(settings: &Settings, cancelled: &std::sync::atomic::AtomicBool) -> Result<Option<crate::ssh_tunnel::Tunnel>, String> {
+    settings.ssh.as_ref().map(|ssh| crate::ssh_tunnel::Tunnel::start(&crate::ssh_tunnel::Config {
+        host: ssh.host.clone(), port: ssh.port, user: ssh.user.clone(),
+        identity_file: ssh.identity_file.clone(), known_hosts_file: None,
+        config_file: ssh.ignore_config.then(|| PathBuf::from("/dev/null")),
+        remote_host: settings.host.clone(), remote_port: settings.port,
+    }, cancelled)).transpose()
 }
 
 #[cfg(not(target_arch = "wasm32"))]

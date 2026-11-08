@@ -11,6 +11,17 @@ use std::{
 };
 pub(crate) trait Transport: Read + Write + Send {}
 impl<T: Read + Write + Send> Transport for T {}
+struct TunneledTransport {
+    stream: Box<dyn Transport>,
+    _tunnel: crate::ssh_tunnel::Tunnel,
+}
+impl Read for TunneledTransport {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> { self.stream.read(bytes) }
+}
+impl Write for TunneledTransport {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.stream.write(bytes) }
+    fn flush(&mut self) -> std::io::Result<()> { self.stream.flush() }
+}
 #[derive(Default)]
 pub(crate) struct Control {
     cancelled: AtomicBool,
@@ -158,7 +169,10 @@ impl Control {
         }
         // DNS and TLS stay on this worker. Stop during setup is remembered; a socket
         // is registered before TLS, so cancellation also interrupts the handshake.
-        let addresses = (settings.host.as_str(), settings.port)
+        let tunnel = crate::redis_settings::start_tunnel(settings, &self.cancelled)?;
+        let endpoint = tunnel.as_ref().map(|tunnel| ("127.0.0.1", tunnel.local_port()))
+            .unwrap_or((settings.host.as_str(), settings.port));
+        let addresses = endpoint
             .to_socket_addrs()
             .map_err(|e| e.to_string())?;
         let deadline = Instant::now() + settings.connect_timeout;
@@ -216,7 +230,8 @@ impl Control {
         } else {
             Box::new(socket)
         };
-        Ok(stream)
+        if let Some(tunnel) = tunnel { Ok(Box::new(TunneledTransport { stream, _tunnel: tunnel })) }
+        else { Ok(stream) }
     }
 }
 

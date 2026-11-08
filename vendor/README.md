@@ -259,7 +259,7 @@ this accessor performs no network I/O and does not expose the cancellation secre
 
 `redis/` is the crates.io source of `redis 1.8.1` from
 [redis-rs](https://github.com/redis-rs/redis-rs), retaining its BSD-3-Clause license.
-The only upstream source change is in `src/connection.rs`: native TLS wraps its
+The native TLS patch in `src/connection.rs` wraps its
 TCP stream during connection establishment with an absolute I/O deadline. Each
 handshake read/write receives the remaining socket timeout; TCP address attempts
 in the native TLS branch share that deadline. The wrapper disables its deadline
@@ -291,3 +291,20 @@ Element-based similarity search now uses this API, including pipelined ASKING
 and VSIM. Application sessions discard ordinary parse-failed connections before
 a later bounded request. Redirect, overflow and parser-cleanup tests pass; bounded
 TLS and further batch-error coverage remain in progress.
+
+### Synchronous Redis over verified SSH
+
+`Client::get_connection_via` overrides only the TCP dial endpoint. TLS SNI and
+certificate hostname checks still use the original `ConnectionInfo` host. The
+existing setup/authentication deadline and command sequence are retained.
+`Connection::retain_transport` owns the tunnel lease through connection drop,
+including connections transferred into Sentinel/Cluster routing. Dedicated
+streaming connections own the same lease through their transport wrapper.
+
+SSH adds gateway authentication and forwarding setup on cold connection creation;
+it adds no Redis protocol exchanges. Warm query paths retain the same connection
+and do not create tunnels, ping, or do extra setup. Each newly connected topology
+endpoint owns its own tunnel, subject to existing connection bounds. The existing
+OpenSSH transport rejects unknown/changed host keys and cleans up private masters.
+Coverage: `ssh_tunnel::tests::config_alias_live_forward_and_drop_cleanup` and the
+forwarded-hostname cases in `redis_session::tests::live_mutual_tls_client_identity`.
