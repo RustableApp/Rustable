@@ -136,6 +136,15 @@ impl Router {
         }
         Err(format!("Cluster reconnect failed across up to {} known nodes: {last}. No operation was replayed.", candidates.len()))
     }
+    pub(crate) fn search_metadata(&mut self, names: &[Vec<u8>]) -> Result<crate::redis_search_catalog::Rows, String> {
+        let seed = self.seed.clone();
+        let connection = self.connection(&seed)?;
+        let result = crate::redis_search_catalog::fetch(connection, names);
+        if !connection.is_open() {
+            self.stopped = true; self.connections.clear(); self.recent.clear();
+        }
+        result
+    }
     fn connection(&mut self, endpoint: &Endpoint) -> Result<&mut redis::Connection, String> {
         if self.stopped {
             return Err("Cluster connection lost. Reconnect before continuing; submitted writes were not retried.".into());

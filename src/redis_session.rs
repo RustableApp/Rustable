@@ -636,6 +636,17 @@ impl Session {
         &mut self,
         request: crate::redis_search::Request,
     ) -> Result<crate::redis_search::Reply, String> {
+        if let crate::redis_search::Request::Metadata(names) = &request {
+            let rows = if let Some(router) = &mut self.cluster {
+                router.search_metadata(names)?
+            } else {
+                let connection = self.connection.as_mut().ok_or("Redis connection closed. Reconnect before continuing.")?;
+                let result = crate::redis_search_catalog::fetch(connection, names);
+                if !connection.is_open() { self.connection = None; }
+                result?
+            };
+            return Ok(crate::redis_search::Reply::Metadata(rows));
+        }
         let command = request.command()?;
         let started = std::time::Instant::now();
         let value = self.query(&command)?;

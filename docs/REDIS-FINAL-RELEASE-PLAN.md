@@ -234,3 +234,32 @@ Enrichment must batch bounded metadata for a catalog page, cache it until explic
 refresh, preserve names when one index disappears or lacks metadata permission,
 and keep schema/query loading independent. Create/drop must validate again on the
 worker under safe mode; dropping an index must not implicitly delete its documents.
+
+### Search catalog implementation checkpoint
+
+The catalog now displays prefixes, field types, document count and field count
+in the existing styled table. Pages contain at most 50 indexes; metadata stays
+cached until explicit refresh. FT.INFO requests for a page are sent together
+through the bounded RESP pipeline (1 MiB per reply, at most 50 MiB decoded input
+per batch). Display strings are capped and schemas are not retained in catalog
+cache. Per-index server errors remain local to their rows; transport/parser
+failure closes the connection and is never replayed. Cluster catalogs use the
+same seed as the existing keyless Search commands.
+
+Exchange budget: previously names-only discovery cost one FT._LIST exchange.
+Cold enriched discovery costs that exchange plus one metadata pipeline for the
+requested page; a new page costs one pipeline, cached revisits zero exchanges.
+Names returned by FT._LIST are needed to construct FT.INFO requests and the list
+reply does not contain metadata, so the additional cold exchange is necessary.
+No per-row sequential wait or per-frame network operation was introduced. Existing
+Search query and selected-schema execution paths are unchanged. A protocol fixture
+requires both FT.INFO commands to arrive before sending either reply; with an
+80 ms simulated response delay, the batch completed in 91.25 ms. This measures the
+metadata operation, not full native input-to-display or SSH latency.
+
+`cargo check --locked` and eight Search tests pass; four explicit live/benchmark
+cases remain opt-in. The separate disposable Redis 8.4 Search fixture also passed
+real catalog metadata plus a missing-index error and subsequent PING. Evidence:
+`/tmp/redis-search-catalog-tests.log`, `/tmp/redis-search-catalog-live.log`.
+Create/drop management, native captures and final Search performance comparison
+remain in progress; the Search milestone remains unchecked.

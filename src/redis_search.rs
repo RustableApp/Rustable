@@ -25,6 +25,7 @@ pub(crate) enum Request {
     Aggregate(crate::redis_analytics::Query),
     Profile(Box<Request>),
     Indexes,
+    Metadata(Vec<Vec<u8>>),
     Schema(Vec<u8>),
     Query {
         index: Vec<u8>,
@@ -41,6 +42,7 @@ pub(crate) enum Reply {
         profile: crate::redis_analytics::Profile,
     },
     Indexes(Vec<Vec<u8>>),
+    Metadata(crate::redis_search_catalog::Rows),
     Schema(Vec<Field>),
     Results {
         request: Request,
@@ -56,6 +58,9 @@ pub(crate) struct View {
     pub error: Option<String>,
     indexes: Vec<Vec<u8>>,
     catalog_loaded: bool,
+    catalog_page: usize,
+    metadata: std::collections::BTreeMap<Vec<u8>, Result<crate::redis_search_catalog::Metadata, String>>,
+    metadata_attempted: std::collections::BTreeSet<usize>,
     index: Option<Vec<u8>>,
     schema: Vec<Field>,
     options: Options,
@@ -153,7 +158,9 @@ impl View {
                 self.profile_visible = true;
                 self.collapse_schema = true;
             }
+            Reply::Metadata(rows) => { self.metadata.extend(rows); }
             Reply::Indexes(indexes) => {
+                self.metadata.clear(); self.metadata_attempted.clear(); self.catalog_page = 0;
                 self.catalog_loaded = true;
                 if self.index.as_ref().is_some_and(|i| !indexes.contains(i)) {
                     self.index = None;
@@ -245,17 +252,27 @@ impl View {
         });
         ui.add_space(16.0);
         use egui_extras::{Column, TableBuilder};
+        let start = self.catalog_page * crate::redis_search_catalog::PAGE_SIZE;
+        let end = (start + crate::redis_search_catalog::PAGE_SIZE).min(self.indexes.len());
         crate::controls::table_surface(ui, |ui| {
         TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center)).id_salt("redis-index-catalog").striped(true)
-            .column(Column::remainder().clip(true)).column(Column::exact(90.0))
-            .header(32.0, |mut row| { row.col(|ui| { crate::controls::table_header(ui, "Index name"); }); row.col(|ui| {crate::controls::table_header(ui, "");}); })
-            .body(|body| body.rows(32.0, self.indexes.len(), |mut row| {
-                let index = &self.indexes[row.index()];
-                row.col(|ui| { ui.monospace(label(index)); });
+            .column(Column::remainder().clip(true)).column(Column::remainder().clip(true))
+            .column(Column::initial(120.0).clip(true)).column(Column::exact(80.0)).column(Column::exact(60.0)).column(Column::exact(90.0))
+            .header(32.0, |mut row| { for title in ["Index name", "Prefixes", "Field types", "Documents", "Fields", ""] {
+                row.col(|ui| { crate::controls::table_header(ui, title); });
+            } })
+            .body(|body| body.rows(32.0, end.saturating_sub(start), |mut row| {
+                let index = &self.indexes[start + row.index()];
+                let metadata = self.metadata.get(index);
+                row.col(|ui| { let response = ui.monospace(label(index)); if let Some(Err(error)) = metadata { response.on_hover_text(error); } });
+                let info = metadata.and_then(|value| value.as_ref().ok());
+                row.col(|ui| { ui.add(egui::Label::new(info.map_or("—", |m| m.prefixes.as_str())).truncate()); });
+                row.col(|ui| { ui.add(egui::Label::new(info.map_or("—", |m| m.types.as_str())).truncate()); });
+                row.col(|ui| { ui.label(info.and_then(|m| m.documents).map_or_else(|| "—".into(), |n| n.to_string())); });
+                row.col(|ui| { ui.label(info.map_or_else(|| "—".into(), |m| m.fields.to_string())); });
                 row.col(|ui| {
                     if ui.add_enabled(enabled && !self.pending, crate::redis_workspace::action_button("search", "Query")).clicked() {
-                        self.index = Some(index.clone());
-                        self.schema.clear(); self.results = None;
+                        self.index = Some(index.clone()); self.schema.clear(); self.results = None;
                         self.options = Options::default(); self.aggregate = Default::default();
                         self.aggregate_report = None; self.profile = None; self.profile_visible = false;
                         action = Some(Action::Request(Request::Schema(index.clone())));
@@ -263,6 +280,18 @@ impl View {
                 });
             }));
         });
+        ui.horizontal(|ui| {
+            ui.weak(format!("{} indexes · {}–{} shown", self.indexes.len(), if end == 0 {0} else {start + 1}, end));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(enabled && !self.pending && end < self.indexes.len(), crate::redis_workspace::action_button("chevron-right", "Next")).clicked() { self.catalog_page += 1; }
+                if ui.add_enabled(enabled && !self.pending && self.catalog_page > 0, crate::redis_workspace::action_button("chevron-left", "Previous")).clicked() { self.catalog_page -= 1; }
+            });
+        });
+        let start = self.catalog_page * crate::redis_search_catalog::PAGE_SIZE;
+        let end = (start + crate::redis_search_catalog::PAGE_SIZE).min(self.indexes.len());
+        if action.is_none() && enabled && !self.pending && self.catalog_loaded && start < end && self.metadata_attempted.insert(self.catalog_page) {
+            action = Some(Action::Request(Request::Metadata(self.indexes[start..end].to_vec())));
+        }
         if self.pending { ui.spinner(); }
         if let Some(error) = &self.error { ui.colored_label(ui.visuals().error_fg_color, error); }
         if self.indexes.is_empty() && !self.pending { ui.weak("No search indexes loaded. Refresh to discover indexes on this connection."); }
@@ -446,6 +475,7 @@ impl Request {
     pub fn command(&self) -> Result<redis::Cmd, String> {
         let mut cmd;
         match self {
+            Self::Metadata(_) => return Err("Catalog metadata requires the bounded batch path.".into()),
             Self::Indexes => cmd = redis::cmd("FT._LIST"),
             Self::Schema(index) => {
                 validate_index(index)?;
@@ -560,7 +590,7 @@ impl Request {
             return Err("Unexpected Search response.".into());
         };
         match self {
-            Self::Aggregate(_) | Self::Profile(_) => Err("Unexpected query decoder.".into()),
+            Self::Aggregate(_) | Self::Profile(_) | Self::Metadata(_) => Err("Unexpected query decoder.".into()),
             Self::Indexes => {
                 if values.len() > 1000 {
                     return Err("More than 1,000 indexes returned; use the command editor to narrow inspection.".into());
