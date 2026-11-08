@@ -40,3 +40,13 @@ calls, sorted-set union/intersection/difference and STORE variants, multi-pop
 commands and intersection cardinality. WEIGHTS consumes one value per declared key;
 subsequent options are suggested only after those values. Zero-key scripts switch
 to ordinary arguments. These hints remain local and do not enable blocked commands.
+
+Command help → Refresh server hints explicitly reads INFO SERVER and COMMAND INFO
+for JSON.GET, FT.SEARCH, TS.INFO and VSIM in one bounded worker-side batch. Cached
+version hints flag commands newer than the checked server; missing representative
+commands produce advisory module warnings, not claims about every command or ACL
+permission. Unknown/denied metadata leaves suggestions unannotated. Suggestions
+remain available and execution guards still apply. The cache is memory-only,
+scoped to the checked node, and cleared on disconnect/reconnect or database change.
+No capability requests run at startup or while typing; refresh again after changing
+server modules/version. The browser demo does not probe server capabilities.

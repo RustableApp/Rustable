@@ -45,6 +45,7 @@ mod redis_archive_view;
 mod redis_commands;
 mod redis_command_editor;
 mod redis_completion;
+mod redis_capabilities;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod redis_demo;
 mod redis_diagnostics;

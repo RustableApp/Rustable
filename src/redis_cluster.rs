@@ -588,6 +588,13 @@ impl Router {
         }
         report
     }
+    pub fn capabilities(&mut self) -> Result<crate::redis_capabilities::Capabilities, String> {
+        let pipe = crate::redis_capabilities::pipeline();
+        let groups = vec![(self.seed.clone(), vec![0, 1], pipe.get_packed_pipeline())];
+        // Per-command ACL errors leave unknown fields; all replies are drained.
+        let (values, _) = self.exchange_limited(&groups, 2, Some(64 * 1024))?;
+        Ok(crate::redis_capabilities::Capabilities::decode(values))
+    }
     pub fn read_pipeline(
         &mut self,
         pipeline: &redis::Pipeline,

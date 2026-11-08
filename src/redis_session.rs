@@ -286,6 +286,15 @@ impl Session {
         Ok(KeyPage { cursor, keys })
     }
 
+    pub fn capabilities(&mut self) -> Result<crate::redis_capabilities::Capabilities, String> {
+        if let Some(router) = &mut self.cluster { return router.capabilities(); }
+        let connection = self.connection.as_mut().ok_or("Redis connection closed. Reconnect before continuing.")?;
+        let pipe = crate::redis_capabilities::pipeline();
+        match connection.req_packed_commands_bounded(&pipe.get_packed_pipeline(), &[64 * 1024; 2]) {
+            Ok(values) => Ok(crate::redis_capabilities::Capabilities::decode(values)),
+            Err(error) => { self.connection = None; Err(format!("Capability metadata connection closed: {error}")) }
+        }
+    }
     fn pipeline(&mut self, pipeline: &redis::Pipeline) -> Result<Vec<redis::Value>, String> {
         if let Some(router)=&mut self.cluster {return router.read_pipeline(pipeline);}
         let connection = self
@@ -2160,6 +2169,32 @@ mod analysis_transport_tests {
         assert_eq!(partial.coverage,crate::redis_analysis::Coverage::Cancelled);
         assert!(partial.visited>0 && partial.visited<650);
         assert!(session.execute("PING",true).is_ok());
+    }
+    #[test]
+    fn capability_metadata_is_one_bounded_exchange_and_acl_denials_stay_unknown() {
+        for denied in [false, true] {
+            let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let port=listener.local_addr().unwrap().port();
+            let peer=std::thread::spawn(move || {
+                let (mut socket,_)=listener.accept().unwrap();socket.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+                let mut parser=redis::Parser::new();
+                let read=|parser:&mut redis::Parser,socket:&mut std::net::TcpStream|->Vec<Vec<u8>> {redis::from_redis_value(parser.parse_value(socket).unwrap()).unwrap()};
+                loop {let command=read(&mut parser,&mut socket);if command[0]==b"INFO" { assert_eq!(command[1],b"SERVER");break;}assert_eq!(command[0],b"CLIENT");socket.write_all(b"+OK\r\n").unwrap();}
+                // Do not reply until the second command is received: one exchange.
+                let command=read(&mut parser,&mut socket);assert_eq!(command[0],b"COMMAND");assert_eq!(command.len(),6);
+                if denied { socket.write_all(b"-NOPERM INFO denied\r\n-NOPERM COMMAND denied\r\n").unwrap(); }
+                else {
+                    let info="redis_version:6.2.0\r\n";
+                    write!(socket,"${}\r\n{info}\r\n*4\r\n$-1\r\n*1\r\n$9\r\nft.search\r\n$-1\r\n$-1\r\n",info.len()).unwrap();
+                }
+                assert_eq!(read(&mut parser,&mut socket)[0],b"PING");socket.write_all(b"+PONG\r\n").unwrap();
+            });
+            let settings=Settings {host:"127.0.0.1".into(),port,tls:false,..Default::default()};
+            let mut session=Session {connection:Some(Session::raw_node(&settings,"").unwrap()),..Session::disconnected()};
+            let caps=session.capabilities().unwrap();
+            if denied { assert_eq!(caps,crate::redis_capabilities::Capabilities::default()); }
+            else { assert_eq!(caps.version,Some([6,2,0]));assert_eq!(caps.commands,[Some(false),Some(true),Some(false),Some(false)]); }
+            assert!(session.execute_report("PING",true).is_ok());peer.join().unwrap();
+        }
     }
     #[test]
     fn command_report_preserves_replies_stops_on_error_and_bounds_transport() {

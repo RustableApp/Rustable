@@ -667,3 +667,28 @@ and maximal counts as well as existing binary/Unicode/context completion behavio
 No network requests or protocol changes. This milestone remains open: cached
 capability awareness, visible review and release-mode completion comparisons are
 still required before claiming it complete.
+
+### IntelliSense checkpoint — explicit bounded capability cache
+
+Added Command help → Refresh server hints. This optional worker operation pipelines
+INFO SERVER and COMMAND INFO for four representative module/vector commands, with
+64 KiB per-response bounds. The standalone/Sentinel path drains both responses;
+Cluster checks its seed via the existing bounded batch exchange. On an established
+connection the explicit refresh costs one exchange, cold or warm cache. Ordinary
+connection, editor execution, browsing and typing paths add zero exchanges; no
+routine probe was introduced. Cache is memory-only and invalidated on connection
+loss/recovery or database change. Version comparisons are numeric, and per-command
+metadata denials remain unknown rather than false absence. Missing representatives
+are labelled as possible limited support on the checked node, not blanket module
+or cluster-wide conclusions. Suggestions annotate incompatibility without bypassing
+safe mode or hiding potentially usable commands.
+
+The completion stamp includes the small cached capability value, so a metadata
+refresh invalidates suggestions without requiring another text edit. Three relevant
+tests passed (plus one unrelated matching test): version/unknown semantics,
+completion annotations, and a disposable RESP peer that withholds all replies until
+both requests arrive, tests normal and ACL-denied metadata, then verifies PING
+alignment (`/tmp/redis-capability-integration-tests.log`). The command metadata
+semantics were checked against https://redis.io/docs/latest/commands/command-info/.
+Cluster-specific capability coverage, UI capture, browser and completion performance
+validation remain open; the IntelliSense milestone is not yet complete.

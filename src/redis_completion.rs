@@ -5,6 +5,7 @@ use std::ops::Range;
 #[derive(Default)]
 pub(crate) struct Context<'a> {
     /// Sorted bytewise by the key browser.
+    pub capabilities: Option<&'a crate::redis_capabilities::Capabilities>,
     pub keys: &'a [Vec<u8>],
     pub indexes: &'a [Vec<u8>],
     pub snapshot: Option<&'a crate::redis_session::Snapshot>,
@@ -30,6 +31,7 @@ pub(super) struct Command {
 }
 #[derive(Clone)]
 pub(crate) struct Item {
+    pub warning: &'static str,
     pub label: String,
     pub insert: String,
     pub detail: &'static str,
@@ -37,6 +39,7 @@ pub(crate) struct Item {
 }
 #[derive(Default)]
 pub(crate) struct Suggestions {
+    pub warning: &'static str,
     pub items: Vec<Item>,
     pub replace: Range<usize>,
     pub signature: &'static str,
@@ -210,6 +213,7 @@ pub(crate) fn suggest_with_context(
                 && tail != upper
             {
                 out.items.push(Item {
+                    warning: context.capabilities.map_or("", |caps| caps.warning(c.name, c.since)),
                     label: tail.into(),
                     insert: format!("{tail} "),
                     detail: c.summary,
@@ -227,6 +231,7 @@ pub(crate) fn suggest_with_context(
     let Some(command) = command else {
         return out;
     };
+    out.warning = context.capabilities.map_or("", |caps| caps.warning(command.name, command.since));
     out.signature = command.signature;
     out.summary = command.summary;
     let _ = (command.group, command.since);
@@ -275,6 +280,7 @@ pub(crate) fn suggest_with_context(
             && !out.items.iter().any(|i| i.label == e.label)
         {
             out.items.push(Item {
+                warning: out.warning,
                 label: e.label.into(),
                 insert: format!("{} ", e.label),
                 detail: command.summary,
@@ -293,6 +299,7 @@ pub(crate) fn suggest_with_context(
             if key.starts_with(&prefix_bytes) {
                 let insert = crate::redis_commands::quote(key);
                 out.items.push(Item {
+                    warning: out.warning,
                     label: insert.clone(),
                     insert: format!("{insert} "),
                     detail: "Loaded key · no additional server request",
@@ -309,6 +316,7 @@ pub(crate) fn suggest_with_context(
             let quoted = crate::redis_commands::quote(value);
             if !out.items.iter().any(|i| i.label == quoted) {
                 out.items.push(Item {
+                    warning: out.warning,
                     label: quoted.clone(),
                     insert: format!("{quoted} "),
                     detail,
@@ -367,6 +375,17 @@ mod tests {
             s.chars().count(),
             &[b"app:config".to_vec(), b"hello world".to_vec()],
         )
+    }
+    #[test]
+    fn cached_capabilities_annotate_without_hiding_or_claiming_acl_access() {
+        let caps = crate::redis_capabilities::Capabilities { version: Some([6,2,0]), commands: [Some(false), Some(true), None, None] };
+        let context = Context { capabilities: Some(&caps), ..Default::default() };
+        let choices = suggest_with_context("LMP", 3, &context);
+        assert!(!choices.items.iter().find(|item| item.label == "LMPOP").unwrap().warning.is_empty());
+        let hints = suggest_with_context("JSON.GET ", 9, &context);
+        assert!(hints.warning.contains("checked node"));
+        assert!(suggest_with_context("TS.GET ", 7, &context).warning.is_empty());
+        assert!(suggest_with_context("FT.SEARCH ", 10, &context).warning.is_empty());
     }
     #[test]
     fn count_dependent_keys_and_option_values_do_not_overlap() {

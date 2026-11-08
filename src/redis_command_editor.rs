@@ -194,6 +194,7 @@ impl Editor {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             text.hash(&mut h);
+            context.capabilities.hash(&mut h);
             let stamp = (
                 h.finish(),
                 self.cursor.end,
@@ -248,6 +249,8 @@ impl Editor {
                                         )
                                         .wrap(),
                                     );
+                                    let warning = selected.map_or(self.suggestions.warning, |i| i.warning);
+                                    if !warning.is_empty() { ui.colored_label(ui.visuals().warn_fg_color, warning); }
                                     if !self.suggestions.argument.is_empty() {
                                         ui.weak(format!("Expected: {}", self.suggestions.argument));
                                     }

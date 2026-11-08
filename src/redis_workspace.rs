@@ -11,6 +11,8 @@ use std::sync::mpsc;
 
 enum Job {
     #[cfg(not(target_arch = "wasm32"))]
+    Capabilities,
+    #[cfg(not(target_arch = "wasm32"))]
     Bulk(crate::redis_mutation::Mutation, bool, std::sync::Arc<std::sync::atomic::AtomicBool>),
     #[cfg(not(target_arch = "wasm32"))]
     Archive(crate::redis_archive_view::Action),
@@ -39,6 +41,8 @@ enum Navigation {
     Search,
 }
 enum Reply {
+    #[cfg(not(target_arch = "wasm32"))]
+    Capabilities(crate::redis_capabilities::Capabilities),
     #[cfg(not(target_arch = "wasm32"))]
     Bulk(crate::redis_bulk_view::View, bool),
     #[cfg(not(target_arch = "wasm32"))]
@@ -129,6 +133,7 @@ pub(crate) struct Workspace {
     command_results: crate::redis_command_results::Report,
     command_result_heights: Vec<f32>,
     command_result_width: f32,
+    capabilities: Option<crate::redis_capabilities::Capabilities>,
     command: String,
     command_editor: crate::redis_command_editor::Editor,
     error: Option<String>,
@@ -221,6 +226,7 @@ impl Workspace {
                     Job::Publish(request, safe) => session
                         .publish(&request.channel, &request.payload, safe)
                         .map(Reply::Published),
+                    Job::Capabilities => session.capabilities().map(Reply::Capabilities),
                     Job::Scan(cursor, pattern, kind) => session
                         .scan_filtered(cursor, &pattern, 200, &kind)
                         .map(Reply::Keys),
@@ -363,6 +369,7 @@ impl Workspace {
             command_results: Default::default(),
             command_result_heights: Vec::new(),
             command_result_width: 0.0,
+            capabilities: None,
             output: if cfg!(target_arch = "wasm32") {
                 "In-memory Redis demo · Rust/WASM. Data stays in this tab and resets on reload. Run INFO for supported commands; key searches support * and ?.".into()
             } else {
@@ -721,6 +728,7 @@ impl Workspace {
         ));
     }
     fn connection_failed(&mut self, error: String, connected: bool) {
+        if !connected { self.capabilities = None; }
         #[cfg(not(target_arch = "wasm32"))]
         if self.archive.busy {
             self.archive.failed(error.clone());
@@ -746,6 +754,7 @@ impl Workspace {
     }
     #[cfg(not(target_arch = "wasm32"))]
     fn connection_recovered(&mut self) {
+        self.capabilities = None;
         self.connected = true;
         self.notice = Some("Reconnected. The failed operation was not replayed. Displayed data may be stale; refresh after reviewing your drafts and any uncertain write.".into());
         // Keep drafts, results and the original error. Do not reuse a scan
@@ -791,7 +800,10 @@ impl Workspace {
                 Ok(Reply::Recovered) => {
                     self.connection_recovered();
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                Ok(Reply::Capabilities(capabilities)) => { self.capabilities = Some(capabilities); self.notice = Some("Server hints refreshed for the checked node. Missing permissions leave support unknown.".into()); }
                 Ok(Reply::Connected(database)) => {
+                    self.capabilities = None;
                     self.connected = true;
                     self.database = database;
                     self.database_draft = database;
@@ -2260,7 +2272,7 @@ impl Workspace {
     fn command_pane(&mut self, ui: &mut egui::Ui) {
         if self.cluster {ui.weak("Key commands route to their primary. Server-level commands and command-line scans use the seed node; the key browser scans all primaries.");}
         let enabled = !self.busy && self.connected && self.edit.is_none();
-        let mut command_to_run = self.command_editor.show_with_context(ui, &mut self.command, enabled, &crate::redis_completion::Context {keys:&self.keys,indexes:self.search.loaded_indexes(),snapshot:self.snapshot.as_ref()});
+        let mut command_to_run = self.command_editor.show_with_context(ui, &mut self.command, enabled, &crate::redis_completion::Context {capabilities:self.capabilities.as_ref(),keys:&self.keys,indexes:self.search.loaded_indexes(),snapshot:self.snapshot.as_ref()});
         ui.add_space(6.0);
         egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)).show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -2271,6 +2283,14 @@ impl Workspace {
             }
             ui.separator();
             ui.menu_button("Command help", |ui| {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    ui.weak(if self.capabilities.is_some() { "Cached server hints · checked node only" } else { "Server capabilities unknown" });
+                    if ui.add_enabled(enabled, action_button("refresh-cw", "Refresh server hints")).on_hover_text("Reads bounded version and command metadata once. No requests while typing; ACL permissions are not inferred.").clicked() {
+                        self.send(Job::Capabilities); ui.close();
+                    }
+                    ui.separator();
+                }
                 for (name, template) in [
                     ("GET · read a string", "GET \"key\""),
                     ("HGET · read a field", "HGET \"key\" \"field\""),
