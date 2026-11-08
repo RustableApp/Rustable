@@ -197,11 +197,15 @@ impl Control {
         let stream: Box<dyn Transport> = if settings.tls {
             let mut builder = native_tls::TlsConnector::builder();
             if let Some(path) = &settings.root_certificate {
-                let pem = std::fs::read(path)
-                    .map_err(|e| format!("Cannot read Redis CA certificate: {e}"))?;
+                let pem = crate::redis_settings::read_pem(path, "CA certificate")?;
                 builder.add_root_certificate(
                     native_tls::Certificate::from_pem(&pem).map_err(|e| e.to_string())?,
                 );
+            }
+            if let (Some(cert), Some(key)) = (&settings.client_certificate, &settings.client_key) {
+                let cert = crate::redis_settings::read_pem(cert, "client certificate")?;
+                let key = crate::redis_settings::read_pem(key, "client private key")?;
+                builder.identity(native_tls::Identity::from_pkcs8(&cert, &key).map_err(|e| format!("Redis client identity: {e}"))?);
             }
             let connector = builder.build().map_err(|e| e.to_string())?;
             Box::new(

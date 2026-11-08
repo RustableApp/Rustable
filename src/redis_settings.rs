@@ -145,6 +145,18 @@ impl Settings {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn read_pem(path: &std::path::Path, label: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).and_then(|file| file.take(1024 * 1024 + 1).read_to_end(&mut bytes))
+        .map_err(|e| format!("Cannot read Redis {label}: {e}"))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(format!("Redis {label} exceeds the 1 MiB limit."));
+    }
+    Ok(bytes)
+}
+
 fn validate_identity(tls: bool, certificate: &Option<PathBuf>, key: &Option<PathBuf>) -> Result<(), String> {
     if certificate.is_some() != key.is_some() {
         return Err("Configure both the Redis client certificate and private key.".into());

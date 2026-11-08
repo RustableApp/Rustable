@@ -140,14 +140,8 @@ impl Session {
             .set_redis_settings(auth);
         let client = if settings.tls && (settings.root_certificate.is_some() || settings.client_certificate.is_some()) {
             let read_pem = |path: &std::path::Path, label: &str| -> Result<Vec<u8>, ConnectFailure> {
-                use std::io::Read;
-                let mut bytes = Vec::new();
-                let result = std::fs::File::open(path).and_then(|file| file.take(1024 * 1024 + 1).read_to_end(&mut bytes));
-                result.map_err(|e| failure(vec![], vec![Tls], format!("Cannot read Redis {label}: {e}")))?;
-                if bytes.len() > 1024 * 1024 {
-                    return Err(failure(vec![], vec![Tls], format!("Redis {label} exceeds the 1 MiB limit.")));
-                }
-                Ok(bytes)
+                crate::redis_settings::read_pem(path, label)
+                    .map_err(|message| failure(vec![], vec![Tls], message))
             };
             let root_cert = settings.root_certificate.as_deref().map(|path| read_pem(path, "CA certificate")).transpose()?;
             let client_tls = match (&settings.client_certificate, &settings.client_key) {
@@ -1803,6 +1797,56 @@ mod tests {
             )
         );
     }
+    #[test]
+    #[ignore = "requires scripts/test-redis-mtls.sh disposable fixture"]
+    fn live_mutual_tls_client_identity() {
+        assert_eq!(std::env::var("RUSTABLE_REDIS_MTLS_QA").as_deref(), Ok("1"));
+        let directory = std::path::PathBuf::from(std::env::var_os("RUSTABLE_REDIS_MTLS_CERTS").unwrap());
+        let settings = Settings {
+            host: "127.0.0.1".into(),
+            port: std::env::var("RUSTABLE_REDIS_MTLS_PORT").unwrap().parse().unwrap(),
+            tls: true,
+            root_certificate: Some(directory.join("ca.crt")),
+            client_certificate: Some(directory.join("client.crt")),
+            client_key: Some(directory.join("client.key")),
+            ..Default::default()
+        };
+        let mut session = Session::connect(&settings, "rustable-mtls-test-only").unwrap();
+        for _ in 0..2 {
+            assert_eq!(session.query(&redis::cmd("PING")).unwrap(), redis::Value::SimpleString("PONG".into()));
+        }
+        let control = crate::redis_stream::Control::default();
+        let mut stream = control.connect(&settings).unwrap();
+        use std::io::{Read, Write};
+        stream.write_all(&redis::cmd("AUTH").arg("rustable-mtls-test-only").get_packed_command()).unwrap();
+        let mut okay = [0; 5];
+        stream.read_exact(&mut okay).unwrap();
+        assert_eq!(&okay, b"+OK\r\n");
+        control.stop();
+        drop(stream);
+        // Node and raw constructors must also preserve the client identity.
+        assert!(Session::cluster_node(&settings, "rustable-mtls-test-only").is_ok());
+        assert!(Session::raw_node(&settings, "rustable-mtls-test-only").is_ok());
+        for variant in 0..6 {
+            let mut invalid = settings.clone();
+            match variant {
+                0 => { invalid.client_certificate = None; invalid.client_key = None; }
+                1 => { invalid.client_certificate = Some(directory.join("untrusted.crt")); invalid.client_key = Some(directory.join("untrusted.key")); }
+                2 => invalid.host = "localhost".into(),
+                3 => invalid.root_certificate = Some(directory.join("other-ca.crt")),
+                4 => invalid.client_key = Some(directory.join("untrusted.key")),
+                _ => invalid.client_key = Some(directory.join("missing.key")),
+            }
+            assert!(crate::redis_stream::Control::default().connect(&invalid).is_err(), "invalid streaming identity variant {variant} connected");
+            assert!(Session::connect(&invalid, "rustable-mtls-test-only").is_err(), "invalid identity variant {variant} connected");
+        }
+        let mut oversized = settings.clone();
+        let file = directory.join("oversized.pem");
+        std::fs::write(&file, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        oversized.client_key = Some(file);
+        assert!(Session::connect(&oversized, "rustable-mtls-test-only").err().unwrap().contains("1 MiB"));
+    }
+
     #[test]
     #[ignore = "requires disposable Redis TLS fixture on localhost:16380"]
     fn live_verified_tls_rejects_untrusted_and_wrong_hostname() {

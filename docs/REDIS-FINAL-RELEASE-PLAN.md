@@ -93,3 +93,20 @@ Logs: `/tmp/redis-mtls-check.log`, `/tmp/redis-mtls-settings-tests.log`.
 This is partial implementation: live mutual-TLS acceptance/rejection, UI capture
 and performance checks are still required. SSH remains unimplemented. The parent
 connection milestone remains unchecked until those requirements are verified.
+
+### Live mutual-TLS verification
+
+Added `scripts/test-redis-mtls.sh`: a disposable Redis 7.4 container, ephemeral
+loopback port and separate test CAs; cleanup removes only its own container/files.
+The live test passes valid client certificate authentication, repeated PING,
+raw/node connector reuse and authentication on the dedicated streaming transport.
+It rejects no identity, an untrusted client certificate, a mismatched private
+key, wrong server hostname, untrusted server CA and missing key files on both
+ordinary and streaming connections. An oversized PEM is rejected before connect.
+The transport audit found Pub/Sub/MONITOR build TLS separately; that path now uses
+the same bounded PEM reader and native TLS client identity support.
+
+Verified: `bash scripts/test-redis-mtls.sh` passed (latest log
+`/tmp/redis-mtls-live.log`). These checks do not yet prove an actual Sentinel
+mTLS discovery/data handoff or routed Cluster mTLS behavior, nor SSH. Those and
+connection-form screenshot/performance validation remain part of the open milestone.
