@@ -508,9 +508,14 @@ mod tests {
             std::path::PathBuf::from(std::env::var_os("RUSTABLE_SENTINEL_TLS_CA").unwrap());
         let data_ca =
             std::path::PathBuf::from(std::env::var_os("RUSTABLE_SENTINEL_DATA_TLS_CA").unwrap());
+        let certs = std::path::PathBuf::from(std::env::var_os("RUSTABLE_SENTINEL_TLS_CERTS").unwrap());
         let settings = Settings {
+            client_certificate: Some(certs.join("data-client.crt")),
+            client_key: Some(certs.join("data-client.key")),
             root_certificate: Some(data_ca.clone()),
             sentinel: Some(Sentinel {
+                client_certificate: Some(certs.join("sentinel-client.crt")),
+                client_key: Some(certs.join("sentinel-client.key")),
                 service: "rustable-tls-qa".into(),
                 root_certificate: Some(sentinel_ca.clone()),
                 seeds: vec![SentinelSeed {
@@ -521,13 +526,15 @@ mod tests {
             }),
             ..Default::default()
         };
-        for fault in 0..5 {
+        for fault in 0..7 {
             let mut candidate = settings.clone();
             match fault {
                 1 => candidate.root_certificate = Some(sentinel_ca.clone()),
                 2 => candidate.sentinel.as_mut().unwrap().root_certificate = Some(data_ca.clone()),
                 3 => candidate.sentinel.as_mut().unwrap().seeds[0].host = "localhost".into(),
                 4 => candidate.root_certificate = None,
+                5 => { candidate.client_certificate = None; candidate.client_key = None; }
+                6 => { let discovery = candidate.sentinel.as_mut().unwrap(); discovery.client_certificate = None; discovery.client_key = None; }
                 _ => {}
             }
             let session = connect(
@@ -536,6 +543,9 @@ mod tests {
                 "rustable-sentinel-test-only",
             );
             assert_eq!(session.is_ok(), fault == 0, "session trust case {fault}");
+            if let Ok(mut session) = session {
+                assert_eq!(session.execute("PING", true).unwrap(), vec![redis::Value::SimpleString("PONG".into())]);
+            }
             for command in [redis::cmd("MONITOR"), {
                 let mut command = redis::cmd("SUBSCRIBE");
                 command.arg("tls-proof");
@@ -549,6 +559,17 @@ mod tests {
                     &command,
                 );
                 assert_eq!(stream.is_ok(), fault == 0, "stream trust case {fault}");
+                if let Ok(mut stream) = stream {
+                    let reply = redis::Parser::new().parse_value(&mut stream).unwrap();
+                    match command.args_iter().next().unwrap() {
+                        redis::Arg::Simple(b"MONITOR") => assert_eq!(reply, redis::Value::Okay),
+                        _ => assert_eq!(reply, redis::Value::Array(vec![
+                            redis::Value::BulkString(b"subscribe".to_vec()),
+                            redis::Value::BulkString(b"tls-proof".to_vec()),
+                            redis::Value::Int(1),
+                        ])),
+                    }
+                }
                 control.stop();
             }
         }

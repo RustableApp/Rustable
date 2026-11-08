@@ -130,3 +130,19 @@ forwarded endpoint checks with correct/incorrect configured TLS hostnames
 not the user's trust store. Live routed topology and streaming SSH coverage,
 connection-form UI/performance checks and release checks remain open. The parent
 connection milestone is still incomplete.
+
+### Sentinel mutual-TLS handoff verification
+
+The disposable Sentinel TLS fixture now requires client certificates on both
+endpoints and supplies distinct discovery/data client identities. Sentinel uses
+its data client identity for monitoring the primary. Its listener trusts the data
+CA (also needed for outbound primary verification); server trust remains separate
+between discovery and data. This does not claim certificate-subject ACL isolation.
+
+The test exercises an actual discovered-primary PING and parses MONITOR and
+SUBSCRIBE acknowledgements. It rejects wrong discovery/data server trust, wrong
+discovery hostname, and missing client identity independently on either side for
+both sessions and streams. `bash scripts/test-redis-sentinel-tls.sh` passed;
+evidence: `/tmp/redis-sentinel-mtls.log`. The fixture removes only its own container
+and temporary certificates. Cluster mTLS, SSH topology/stream integration and
+connection UI checks remain open.
