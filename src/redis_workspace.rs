@@ -58,7 +58,7 @@ enum Reply {
     Keys(KeyPage),
     Rows(Vec<KeyRow>),
     Value(Box<Inspection>),
-    Output(String),
+    Output(crate::redis_command_results::Report),
     Changed(&'static str),
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -126,6 +126,7 @@ pub(crate) struct Workspace {
     string_mode: StringMode,
     preview: String,
     output: String,
+    command_results: crate::redis_command_results::Report,
     command: String,
     command_editor: crate::redis_command_editor::Editor,
     error: Option<String>,
@@ -236,8 +237,8 @@ impl Workspace {
                         .mutate(&mutation, safe)
                         .map(|count| Reply::Mutation(mutation, count)),
                     Job::Execute(text, safe) => session
-                        .execute(&text, safe)
-                        .map(|values| Reply::Output(render_values(&values))),
+                        .execute_report(&text, safe)
+                        .map(Reply::Output),
                     Job::Save(key, original, value, safe) => session
                         .replace_string(&key, &original, &value, safe)
                         .map(|_| Reply::Changed("Value saved.")),
@@ -354,6 +355,7 @@ impl Workspace {
             selected_value: None,
             string_mode: StringMode::Text,
             preview: String::new(),
+            command_results: Default::default(),
             output: if cfg!(target_arch = "wasm32") {
                 "In-memory Redis demo · Rust/WASM. Data stays in this tab and resets on reload. Run INFO for supported commands; key searches support * and ?.".into()
             } else {
@@ -636,8 +638,8 @@ impl Workspace {
                     .map(|count| Reply::Mutation(mutation, count)),
                 Job::Execute(text, safe) => self
                     .demo
-                    .execute(&text, safe)
-                    .map(|v| Reply::Output(render_values(&v))),
+                    .execute_report(&text, safe)
+                    .map(Reply::Output),
                 Job::Save(key, original, value, safe) => self
                     .demo
                     .replace_string(&key, &original, &value, safe)
@@ -920,7 +922,7 @@ impl Workspace {
                         self.send(Job::Inspect(key));
                     }
                 }
-                Ok(Reply::Output(output)) => self.output = output,
+                Ok(Reply::Output(report)) => { self.output = report.text(); self.command_results = report; },
                 Ok(Reply::Changed(notice)) => {
                     if let Some(snapshot) = &self.snapshot {
                         let key = snapshot.key.clone();
@@ -2377,6 +2379,17 @@ impl Workspace {
                                 ui.heading("Command results");
                                 ui.weak("Run a command to see its result.");
                             });
+                        } else if !self.command_results.entries.is_empty() {
+                            for (index, entry) in self.command_results.entries.iter().enumerate() {
+                                ui.push_id(index, |ui| {
+                                    egui::CollapsingHeader::new(format!("{}. {} · {} · {:.2} ms", index + 1, entry.command, entry.status.label(), entry.elapsed.as_secs_f64() * 1000.0))
+                                        .default_open(true).show(ui, |ui| {
+                                            crate::redis_value_editor::copy(ui, "command-result", Some("Copy"), true, || entry.output.clone());
+                                            ui.monospace(&entry.output);
+                                        });
+                                    ui.separator();
+                                });
+                            }
                         } else {
                             ui.monospace(&self.output);
                         }
@@ -3327,7 +3340,7 @@ fn limit_output(mut output: String) -> String {
     }
     output
 }
-fn render_values(values: &[redis::Value]) -> String {
+pub(crate) fn render_values(values: &[redis::Value]) -> String {
     fn append(value: &redis::Value, out: &mut String, depth: usize) {
         if out.len() > 256 * 1024 {
             return;

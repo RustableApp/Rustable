@@ -63,6 +63,7 @@ mod redis_monitor;
 mod redis_mutation;
 mod redis_preferences;
 mod redis_history;
+mod redis_command_results;
 #[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
 mod redis_preview;
 #[cfg(not(target_arch = "wasm32"))]

@@ -249,7 +249,11 @@ impl Session {
         let result = conn.req_packed_commands_bounded(&command.get_packed_command(), &[LIMIT]).and_then(|mut values| values.remove(0).extract_error());
         match result {
             Ok(value) => Ok(value),
-            Err(error) if error.is_io_error() || error.kind() == redis::ErrorKind::Parse || !conn.is_open() => { self.connection = None; Err(format!("Redis search connection closed: {error}. Reconnect before retrying. Nothing was replayed.")) }
+            Err(error) if self.sentinel_primary && error.code() == Some("READONLY") => {
+                self.connection = None;
+                Err("Sentinel primary is now read-only. Reconnect to discover the current primary. The rejected command was not replayed.".into())
+            }
+            Err(error) if error.is_io_error() || error.kind() == redis::ErrorKind::Parse || !conn.is_open() => { self.connection = None; Err(format!("Redis connection closed: {error}. A submitted write may have completed; verify before retrying. Nothing was replayed.")) }
             Err(error) => Err(error.to_string()),
         }
     }
@@ -951,6 +955,22 @@ impl Session {
             }
             _ => Err("Invalid PUBLISH response".into()),
         }
+    }
+    pub fn execute_report(&mut self, text: &str, read_only: bool) -> Result<crate::redis_command_results::Report, String> {
+        let commands = crate::redis_commands::parse(text)?;
+        for args in &commands {
+            crate::redis_commands::validate(args, read_only)?;
+            let name = std::str::from_utf8(&args[0]).map_err(|_| "Command name must be UTF-8.")?;
+            if self.cluster.is_some() {
+                let mut command = redis::cmd(name); command.arg(&args[1..]);
+                crate::redis_cluster::command_slot(&command)?;
+            }
+        }
+        Ok(crate::redis_command_results::execute(&commands, |args| {
+            let name = std::str::from_utf8(&args[0]).map_err(|_| "Command name must be UTF-8.")?;
+            let mut command = redis::cmd(name); command.arg(&args[1..]);
+            self.query_bounded(&command)
+        }))
     }
     pub fn execute(&mut self, text: &str, read_only: bool) -> Result<Vec<redis::Value>, String> {
         let commands = crate::redis_commands::parse(text)?;
@@ -2139,6 +2159,34 @@ mod analysis_transport_tests {
         assert_eq!(partial.coverage,crate::redis_analysis::Coverage::Cancelled);
         assert!(partial.visited>0 && partial.visited<650);
         assert!(session.execute("PING",true).is_ok());
+    }
+    #[test]
+    fn command_report_preserves_replies_stops_on_error_and_bounds_transport() {
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();let port=listener.local_addr().unwrap().port();
+        let peer=std::thread::spawn(move || {
+            let (mut socket,_)=listener.accept().unwrap();socket.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            let mut parser=redis::Parser::new();
+            let read=|parser:&mut redis::Parser,socket:&mut std::net::TcpStream|->Vec<Vec<u8>> {redis::from_redis_value(parser.parse_value(socket).unwrap()).unwrap()};
+            loop {let command=read(&mut parser,&mut socket);if command[0]==b"GET" { assert_eq!(command[1],b"first");break;}assert_eq!(command[0],b"CLIENT");socket.write_all(b"+OK\r\n").unwrap();}
+            socket.write_all(b"$5\r\nvalue\r\n").unwrap();
+            assert_eq!(read(&mut parser,&mut socket)[1],b"bad");
+            socket.write_all(b"-WRONGTYPE not a string\r\n").unwrap();
+            assert_eq!(read(&mut parser,&mut socket)[0],b"PING");socket.write_all(b"+PONG\r\n").unwrap();
+            assert_eq!(read(&mut parser,&mut socket)[1],b"huge");socket.write_all(b"$999999999\r\n").unwrap();
+        });
+        let settings=Settings {host:"127.0.0.1".into(),port,tls:false,..Default::default()};
+        let mut session=Session {connection:Some(Session::raw_node(&settings,"").unwrap()),..Session::disconnected()};
+        // The peer expects GET first, proving rejected batches send no writes.
+        assert!(session.execute_report("SET forbidden value\nAUTH secret",false).is_err());
+        let report=session.execute_report("GET first\nGET bad\nINCR never",false).unwrap();
+        assert!(report.entries[0].output.contains("value"));
+        assert!(matches!(report.entries[1].status,crate::redis_command_results::Status::Failed));
+        assert!(matches!(report.entries[2].status,crate::redis_command_results::Status::NotRun));
+        assert!(session.execute_report("PING",true).is_ok());
+        let report=session.execute_report("GET huge\nGET never",true).unwrap();
+        assert!(matches!(report.entries[0].status,crate::redis_command_results::Status::Failed));
+        assert!(matches!(report.entries[1].status,crate::redis_command_results::Status::NotRun));
+        assert!(!session.is_connected());peer.join().unwrap();
     }
     #[test]
     fn analysis_cancellation_during_delayed_scan_sends_no_metadata() {

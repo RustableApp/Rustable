@@ -516,3 +516,29 @@ legacy loading, eviction and preserving recording opt-out across eviction/reload
 (`/tmp/redis-history-preferences-tests.log`). UI screenshots and release performance
 comparisons will cover the completed Workbench milestone together. Distinct
 per-command results remain unimplemented, so the milestone remains unchecked.
+
+### Workbench checkpoint — individual execution results
+
+The editor now receives a bounded report with separate command headers, completion
+status, elapsed query time and per-result copy controls. Successful replies survive
+a later failure; remaining commands are labelled Not run and are never sent.
+The entire batch is still validated before the first command, including Cluster
+slot validation. Existing recovery delivers the report before reconnecting and
+never replays the batch. Query timing excludes display formatting.
+
+The editor now uses the existing 1 MiB bounded-response transport per command,
+formats/releases each reply immediately, and shares a 256 KiB successful-output
+budget across at most 100 commands. Error explanations are separately bounded.
+Exchange count remains one sequential exchange per executed command, on both cold
+and warm established sessions (connection setup and Cluster redirects unchanged).
+Sentinel READONLY and uncertain-write connection-loss explanations remain explicit.
+
+Two report model tests passed (partial failure and shared display bounds), plus
+two execution tests for demo and a disposable local RESP peer. The peer proves
+upfront rejection sends no writes, earlier output survives server errors, later
+writes are not sent, PING remains aligned, and an oversized declared reply closes
+the connection without allocating the declared body. Logs:
+`/tmp/redis-command-results-tests.log`, `/tmp/redis-command-report-tests.log`.
+This is an implementation checkpoint, not milestone completion: native screenshots,
+interaction/performance validation, browser compilation and affected topology
+regressions remain to be run. UI result layout has not yet been visually verified.

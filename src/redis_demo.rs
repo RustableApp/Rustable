@@ -402,6 +402,14 @@ impl Session {
         e.expires = expires;
         Ok(changed)
     }
+    pub fn execute_report(&mut self, text: &str, safe: bool) -> Result<crate::redis_command_results::Report, String> {
+        let commands = crate::redis_commands::parse(text)?;
+        for args in &commands {
+            crate::redis_commands::validate(args, safe)?;
+            Self::validate_demo(args)?;
+        }
+        Ok(crate::redis_command_results::execute(&commands, |args| self.command(args)))
+    }
     pub fn execute(&mut self, text: &str, safe: bool) -> Result<Vec<Value>, String> {
         let commands = crate::redis_commands::parse(text)?;
         for args in &commands {
@@ -650,6 +658,18 @@ fn glob(pattern: &[u8], key: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_report_validates_before_writes_and_retains_partial_results() {
+        let mut session = Session::new();
+        assert!(session.execute_report("SET untouched value\nFLUSHALL", false).is_err());
+        assert_eq!(session.inspect(b"untouched").unwrap().kind, "none");
+        let report = session.execute_report("SET done value\nGET user:42\nSET never value", false).unwrap();
+        assert!(matches!(report.entries[0].status, crate::redis_command_results::Status::Completed));
+        assert!(matches!(report.entries[1].status, crate::redis_command_results::Status::Failed));
+        assert!(matches!(report.entries[2].status, crate::redis_command_results::Status::NotRun));
+        assert_eq!(session.inspect(b"never").unwrap().kind, "none");
+        assert_eq!(session.inspect(b"done").unwrap().kind, "string");
+    }
     #[test]
     fn demo_commands_and_types() {
         let mut s = Session::new();
