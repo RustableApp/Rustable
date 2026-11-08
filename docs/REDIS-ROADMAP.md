@@ -2034,3 +2034,17 @@ same-machine release CPU comparison passed all measured scenarios, including the
 new counted-key and capability workloads. Detailed percentiles, bounds, caveats
 and evidence are in [the release checklist](REDIS-FINAL-RELEASE-PLAN.md).
 Vector controls and the remaining checklist/publication gates are still open.
+
+
+### Bounded final-release configurable vector milestone
+
+The existing similarity workflow now supports supplied numeric vectors, attribute
+filters, result count and bounded search/filter effort. Direct background VSIM,
+worker validation, the 1 MiB response cap and virtualized results are preserved.
+Live Redis, protocol/error-alignment, UI draft submission, browser and dark/light
+native captures are validated. The result panel has an explicitly accepted
++0.009333 ms (+17.0%) p95 CPU cost for visible controls; typing and after-idle
+workloads passed within their documented baseline-adapter scope. Full measurements
+and tradeoffs are in [the release checklist](REDIS-FINAL-RELEASE-PLAN.md).
+This milestone completion is not release publication; editing and remaining gates
+are still open.

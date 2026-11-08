@@ -26,7 +26,7 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
 - [x] IntelliSense: improve common advanced/count-dependent clauses and gate or
   annotate known version/module incompatibilities using cached capabilities.
   No per-keystroke network calls, external language server or exhaustive grammar.
-- [ ] Vector search: support a supplied vector, attribute filter and bounded
+- [x] Vector search: support a supplied vector, attribute filter and bounded
   result/search settings in the existing similarity workflow. Preserve bounded
   transport and direct server background execution; no vector visualization suite.
 - [ ] Editing: JSON path operations with explicit conflict/safety semantics and
@@ -820,3 +820,46 @@ absolute timings and this adapter are recorded. Parsing is excluded because thes
 are typing/rendering workloads; parsing occurs only on explicit submission.
 All eight runner tests, four vector form tests and a debug workload smoke run passed.
 Release comparison is pending; debug timings do not establish performance acceptance.
+
+
+### Vector milestone completed — measured control overhead accepted
+
+Serial five-pair release comparison completed against `bf504c0`, candidate
+`a96d1fb`. Artifacts: `target/redis-vector-controls-performance/` (raw samples,
+summary, environment, fixture and adapter); log `/tmp/redis-vector-controls-performance.log`.
+Apple M4 Max, arm64 macOS 27.2, Rust 1.99.1, release profile, default scale,
+1200×760 logical viewport, 20 warmups/160 measured frames per workload per run.
+Timestamps simulate 120 Hz and a 30-second idle interval; they are not a native
+input-to-display measurement. Native GPU/presentation and display checks remain
+in the release-wide gate.
+
+Median timings across runs (ms), base → candidate; worst is the largest individual
+sample across all five runs:
+
+| Workload | p50 | p95 | p99 | Median maximum | Worst |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| redis/vector-controls/results | 0.050833 → 0.059625 | 0.054833 → 0.064166 | 0.059750 → 0.068250 | 0.062541 → 0.072625 | 0.086083 → 0.136584 |
+| redis/vector-controls/typing | 0.747250 → 0.752667 | 0.786709 → 0.794375 | 0.808250 → 0.819166 | 0.823250 → 0.833792 | 0.844792 → 0.945875 |
+| redis/vector-controls/after-idle | 0.038041 → 0.037875 | 0.041000 → 0.040875 | 0.044792 → 0.044833 | 0.045917 → 0.046500 | 0.048459 → 0.079542 |
+
+The result-panel case is a repeatable **17.0% regression**, +0.009333 ms p95.
+The runner exited 1; the threshold remains unchanged. This narrow measured cost is
+accepted for the requested visible input/filter/result/effort controls. Source
+review confirms that Draft::show adds standard labels, text fields, three bounded
+numeric controls and a submit button; it neither parses vector text nor clones
+search inputs unless Search is clicked. Result rows remain virtualized; request
+formatting and reply decoding run on the worker. The common-form typing/after-idle
+comparisons pass (+1.0% and −0.3%), supporting attribution to extra visible controls
+rather than a change to the existing result renderer. Those new-form comparisons
+have the baseline adapter limitation described above.
+
+Alternatives considered: hiding these controls in another dialog would make the
+requested workflow less discoverable and add interaction steps; custom painted
+or cached interactive controls would duplicate egui editing/focus/accessibility
+behavior without removing the required interactions. Retain standard controls and
+the measured cost, rather than weaken the threshold or reduce the workload.
+All unrelated measured scenarios passed. This is not a blanket performance pass.
+
+Functional/live/protocol, explicit-input/draft, browser and both-theme native capture
+evidence above complete the bounded vector milestone. Existing one-exchange direct
+VSIM and 1 MiB response budget remain. Next: JSON path editing and multi-entry creation.

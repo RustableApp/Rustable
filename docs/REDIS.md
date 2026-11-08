@@ -264,7 +264,7 @@ VCARD supplies the total; a fixed EVAL_RO/VRANGE script limits returned names to
 script before applying these output limits. EVAL_RO and VRANGE permissions are
 required; older servers and denied permissions produce an error without an
 unbounded fallback. Select an element and choose **Inspect element…** to load stored approximate
-components and syntax-highlighted JSON attributes. Choose **Find similar…** on a selected element for up to 20 approximate matches,
+components and syntax-highlighted JSON attributes. Choose **Find similar…** on a selected element for configurable approximate matches (20 by default, up to 100),
 ranked by score, with an Inspect action for each result. Concurrent changes may alter the set between pages.
 
 Initial inspection uses TYPE/PTTL followed by a pipelined VCARD/script (two
@@ -280,13 +280,23 @@ elements, denied permissions and size limits report errors without an uncapped
 fallback. These values are Redis's stored, approximate embedding components;
 normalization and quantization can differ from the original input vector.
 
-Similarity search uses direct VSIM ELE/WITHSCORES/COUNT 20/EF 100, preserving Redis's
+Similarity search uses direct VSIM with ELE or VALUES and WITHSCORES, preserving Redis's
 normal background search behavior. It does not run VSIM in Lua or a transaction.
 The existing connection is reused; replies have a 1 MiB transport budget, and
 result names are capped at 64 KiB. A response-limit or protocol failure closes the
 connection without replay. Cluster MOVED/ASK routing is supported; ASKING and the
-query stay pipelined. Source elements may appear among results. Arbitrary input
-vectors, attribute filters and adjustable search parameters are not yet exposed.
+query stay pipelined. Source elements may appear among results.
+
+The similarity window accepts a supplied vector (comma/space-separated numbers,
+optionally enclosed in brackets), an optional Redis attribute filter, and bounded
+settings: 1–100 results, 1–1,000 search effort and 1–10,000 filter attempts. Higher
+effort can improve recall at the cost of server work; these settings do not impose
+a strict server execution-time limit. Supplied vectors must contain 1–4,096 finite
+32-bit components with at least one nonzero component; Redis checks dimensional
+compatibility in the search reply without an additional metadata exchange. Text
+input is limited to 64 KiB and filters to 4 KiB. Parsing happens on explicit Search,
+not on each keystroke. Inputs remain available after errors. Search does not enable
+TRUTH or NOTHREAD. See the final-release checklist for validation still in progress.
 Changing databases clears old diagnostic windows and their key-scoped actions.
 
 ### Command editor
