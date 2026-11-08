@@ -350,6 +350,18 @@ from discarding it. Rename, refresh, delete and close actions live in the key he
 closing the inspector returns the key list to full width. Copy buttons briefly show
 “Copied” without polling. Enter retains focus in the key-pattern field.
 
+The inline JSON editor can replace a single path (for example `$.name` or
+`$["with.dot"][0]`) or remove it. Empty path or `$` replaces the whole document;
+removing the root requires Delete key. Wildcards, recursive paths, filters, slices
+and negative indexes are intentionally unsupported. Every save compares the full
+original document atomically, preserves expiry, and retains the draft on failure.
+Documents and replacement values remain limited to 64 KiB.
+
+New hashes, lists, sets and sorted sets accept up to 100 entries with a combined
+64 KiB field/value limit. Lists preserve entry order; duplicate hash fields or
+set/sorted-set members are rejected. Creation checks that the key is absent and
+submits all entries in one atomic operation. Failed creation retains the form.
+
 Workbench has a virtualized history sidebar (last 100 commands; persistence limits above).
 Selecting a history entry restores it without execution. Search separates the
 query editor, optional query settings and results. Analyze shows top 15 keys and
