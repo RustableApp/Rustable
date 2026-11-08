@@ -482,7 +482,9 @@ fn sentinel_form(ui: &mut egui::Ui, config: &mut crate::redis_settings::Sentinel
 }
 
 fn redis_identity_form(ui: &mut egui::Ui, certificate: &mut Option<PathBuf>, key: &mut Option<PathBuf>) {
-    ui.collapsing("Client certificate (optional)", |ui| {
+    egui::CollapsingHeader::new("Client certificate (optional)")
+        .default_open(certificate.is_some() || key.is_some())
+        .show(ui, |ui| {
         for (label, path) in [("Certificate PEM", certificate), ("Private key PEM", key)] {
             let mut text = path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
             if form_text(ui, label, &mut text, false, Some(ProbeField::Tls)) {
@@ -2846,6 +2848,41 @@ mod tests {
                 assert!(painted_text(&output,label).is_some(),"missing {label}");
             }
         }
+    }
+
+    #[test]
+    fn redis_security_fields_preserve_paths_and_actions_in_compact_form() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.connection_action(Action::NewRedis).unwrap();
+        app.connections = true;
+        app.child_window = false;
+        let ConnectionKind::Redis(settings) = &mut app.connection_manager.draft.as_mut().unwrap().connection else { unreachable!() };
+        settings.client_certificate = Some("/certificates/client.pem".into());
+        settings.client_key = Some("/certificates/client-key.pem".into());
+        settings.ssh = Some(SshOptions { host: "gateway.example.test".into(), ..Default::default() });
+        let mut labels = std::collections::HashSet::new();
+        for frame in 0..30 {
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 760.0))),
+                time: Some(frame as f64 / 60.0),
+                events: if frame >= 8 { vec![
+                    egui::Event::PointerMoved(egui::pos2(800.0, 500.0)),
+                    egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -80.0), modifiers: egui::Modifiers::NONE },
+                ] } else { vec![] },
+                ..Default::default()
+            }, |ctx| app.connections_window(ctx));
+            for label in ["Certificate PEM", "Private key PEM", "SSH gateway", "Use SSH config", "Choose key…", "Save", "Test", "Connect"] {
+                if painted_text(&output, label).is_some() { labels.insert(label); }
+            }
+        }
+        assert_eq!(labels.len(), 8, "missing controls: {labels:?}");
+        let generation = app.connection_manager.generation;
+        app.connection_manager.set_path(generation, true, "/keys/ssh-client".into());
+        let ConnectionKind::Redis(settings) = &app.connection_manager.draft.as_ref().unwrap().connection else { unreachable!() };
+        assert_eq!(settings.ssh.as_ref().unwrap().identity_file.as_deref(), Some(std::path::Path::new("/keys/ssh-client")));
+        assert_eq!(settings.client_certificate.as_deref(), Some(std::path::Path::new("/certificates/client.pem")));
+        assert_eq!(settings.client_key.as_deref(), Some(std::path::Path::new("/certificates/client-key.pem")));
     }
 
     #[test]

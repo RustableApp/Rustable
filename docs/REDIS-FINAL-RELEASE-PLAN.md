@@ -199,3 +199,13 @@ in dark/light themes at 1200×1080 logical points (2400×2160 pixels):
 SSH uses the existing SQL gateway controls and action sizing; no clipping in these
 captures. Client-identity expansion, compact viewport and native interaction
 coverage remain open. Both isolated preview processes were stopped afterwards.
+
+Compact form verification passed at 1000×760, covering expanded certificate/key
+inputs, scrolling through SSH controls and fixed actions. The file-picker test
+confirms selecting an SSH identity leaves TLS identity paths intact
+(`/tmp/redis-security-ui-test.log`). Existing configured client identities now
+expand on first display; empty optional sections remain collapsed. Native compact
+capture inspected at `target/redis-security-captures/connection-compact-expanded.png`;
+text wraps and actions remain visible. Added a dedicated expanded-security CPU
+workload at compact/large viewports with scrolling and a simulated idle time jump;
+its release measurements are pending, not covered by the prior default-form pass.
