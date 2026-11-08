@@ -156,6 +156,7 @@ pub(crate) struct Workspace {
     diagnostics_open: bool,
     diagnostics_report: Option<Box<crate::redis_diagnostics::Report>>,
     diagnostics_request: Option<crate::redis_diagnostics::Request>,
+    vector_search: Option<crate::redis_vector_search::Draft>,
     preferences_loaded: bool,
     snippets: Vec<crate::redis_preferences::Snippet>,
     snippets_dirty: bool,
@@ -402,6 +403,7 @@ impl Workspace {
             diagnostics_open: false,
             diagnostics_report: None,
             diagnostics_request: None,
+            vector_search: None,
             preferences_loaded: false,
             snippets: vec![],
             snippets_dirty: false,
@@ -814,6 +816,7 @@ impl Workspace {
                     self.search = Default::default();
                     self.diagnostics_open = false;
                     self.diagnostics_request = None;
+                    self.vector_search = None;
                     self.diagnostics_report = None;
                     self.snapshot = None;
                     self.selected_key = None;
@@ -1311,10 +1314,14 @@ impl Workspace {
         }
         if self.section != Section::Search && let Some(action) = self.search.show(ctx, self.connected && !self.busy && self.edit.is_none()) { self.search_action(action); }
         if self.diagnostics_open {
+            if let Some(crate::redis_diagnostics::Request::VectorSimilar { key, element }) = &self.diagnostics_request
+                && !self.vector_search.as_ref().is_some_and(|draft| draft.matches(key, element)) {
+                self.vector_search = Some(crate::redis_vector_search::Draft::new(key.clone(), element.clone()));
+            }
             let mut open = true;
             let mut refresh = false;
             let mut followup = None;
-            egui::Window::new(if matches!(self.diagnostics_request, Some(crate::redis_diagnostics::Request::Cluster)) { "Redis cluster topology" } else if matches!(self.diagnostics_request, Some(crate::redis_diagnostics::Request::TimeSeries(_))) { "Time-series metadata" } else if matches!(self.diagnostics_request, Some(crate::redis_diagnostics::Request::VectorElement { .. })) { "Vector element" } else if matches!(self.diagnostics_request, Some(crate::redis_diagnostics::Request::VectorSimilar { .. })) { "Similar elements" } else { "Redis diagnostics" })
+            egui::Window::new(if matches!(self.diagnostics_request, Some(crate::redis_diagnostics::Request::Cluster)) { "Redis cluster topology" } else if matches!(self.diagnostics_request, Some(crate::redis_diagnostics::Request::TimeSeries(_))) { "Time-series metadata" } else if matches!(self.diagnostics_request, Some(crate::redis_diagnostics::Request::VectorElement { .. })) { "Vector element" } else if matches!(self.diagnostics_request, Some(crate::redis_diagnostics::Request::VectorSimilar { .. } | crate::redis_diagnostics::Request::VectorSearch(_))) { "Similar elements" } else { "Redis diagnostics" })
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .frame(
                     egui::Frame::window(&ctx.style())
@@ -1327,11 +1334,17 @@ impl Workspace {
                 .resizable(true)
                 .show(ctx, |ui| {
                     browser_style(ui);
-                    refresh = ui
-                        .add_enabled(!self.busy, action_button("refresh-cw", "Refresh"))
-                        .clicked();
+                    let vector = matches!(self.diagnostics_request, Some(crate::redis_diagnostics::Request::VectorSimilar { .. } | crate::redis_diagnostics::Request::VectorSearch(_)));
+                    if vector {
+                        if let Some(draft) = &mut self.vector_search {
+                            followup = draft.show(ui, self.connected && !self.busy).map(crate::redis_diagnostics::Request::VectorSearch);
+                        }
+                    } else {
+                        refresh = ui.add_enabled(!self.busy, action_button("refresh-cw", "Refresh")).clicked();
+                    }
                     if let Some(report) = &self.diagnostics_report {
-                        followup = ui.add_enabled_ui(!self.busy, |ui| report.show(ui)).inner;
+                        let action = ui.add_enabled_ui(!self.busy, |ui| report.show(ui)).inner;
+                        if followup.is_none() { followup = action; }
                     } else if self.busy {
                         ui.spinner();
                     }

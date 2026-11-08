@@ -54,6 +54,7 @@ mod redis_analysis;
 mod redis_analysis_view;
 mod redis_vector_element;
 mod redis_vector_matches;
+mod redis_vector_search;
 #[cfg(not(target_arch = "wasm32"))]
 mod redis_module_info;
 #[cfg(not(target_arch = "wasm32"))]

@@ -682,9 +682,17 @@ impl Session {
         let mut pipe = redis::pipe();
         match request {
             crate::redis_diagnostics::Request::VectorSimilar { key, element } => {
-                if key.len() > 4096 || element.len() > 65536 { return Err("Vector search supports keys up to 4 KiB and element names up to 64 KiB.".into()); }
-                let value = self.query_bounded(redis::cmd("VSIM").arg(key).arg("ELE").arg(element).arg("WITHSCORES").arg("COUNT").arg(20).arg("EF").arg(100))?;
-                Ok(crate::redis_diagnostics::Report { vector_matches: Some(Box::new(crate::redis_vector_matches::Matches::decode(value, key, element)?)), ..Default::default() })
+                self.diagnostics(&crate::redis_diagnostics::Request::VectorSearch(
+                    crate::redis_vector_search::Search::element(key.clone(), element.clone())))
+            }
+            crate::redis_diagnostics::Request::VectorSearch(search) => {
+                let command = search.command()?;
+                let value = self.query_bounded(&command)?;
+                let source = match &search.input {
+                    crate::redis_vector_search::Input::Element(element) => element.clone(),
+                    crate::redis_vector_search::Input::Values(values) => format!("Supplied vector · {} dimensions", values.len()).into_bytes(),
+                };
+                Ok(crate::redis_diagnostics::Report { vector_matches: Some(Box::new(crate::redis_vector_matches::Matches::decode_limit(value, &search.key, &source, search.count)?)), ..Default::default() })
             }
             crate::redis_diagnostics::Request::VectorElement { key, element } => {
                 if key.len() > 4096 || element.len() > 65536 { return Err("Vector inspection supports keys up to 4 KiB and element names up to 64 KiB.".into()); }
@@ -1187,7 +1195,7 @@ mod tests {
     fn live_vector_pages_preserve_binary_elements_and_enforce_byte_limits() {
         use crate::redis_value::{Cursor, PageRequest};
         assert_eq!(std::env::var("RUSTABLE_REDIS_VECTOR_QA").as_deref(), Ok("1"));
-        let mut session = Session::connect(&Settings { host: "127.0.0.1".into(), port: 16382, tls: false, ..Default::default() }, "rustable-vector-test-only").unwrap();
+        let mut session = Session::connect(&Settings { host: "127.0.0.1".into(), port: std::env::var("RUSTABLE_REDIS_VECTOR_PORT").unwrap_or_else(|_| "16382".into()).parse().unwrap(), tls: false, ..Default::default() }, "rustable-vector-test-only").unwrap();
         let similarity_key = b"rustable:vector:similarity";
         for (name, x, y) in [(vec![0,255], 1, 0), (b"side".to_vec(), 0, 1), (b"opposite".to_vec(), -1, 0)] {
             session.query(redis::cmd("VADD").arg(similarity_key).arg("VALUES").arg(2).arg(x).arg(y).arg(name)).unwrap();
@@ -1196,6 +1204,22 @@ mod tests {
         let result = session.diagnostics(&request).unwrap().vector_matches.unwrap();
         assert_eq!(result.rows.iter().map(|row| row.score.as_str()).collect::<Vec<_>>(), ["1.0000", "0.5000", "0.0000"]);
         assert_eq!(result.rows[0].element, [0,255]);
+        session.query(redis::cmd("VSETATTR").arg(similarity_key).arg("side").arg(r#"{"category":"camera"}"#)).unwrap();
+        let mut custom = crate::redis_vector_search::Search::element(similarity_key.to_vec(), vec![0,255]);
+        custom.input = crate::redis_vector_search::Input::Values(vec![0.0, 1.0]);
+        custom.filter = ".category == \"camera\"".into();
+        custom.count = 1;
+        let filtered = session.diagnostics(&crate::redis_diagnostics::Request::VectorSearch(custom.clone())).unwrap().vector_matches.unwrap();
+        assert_eq!(filtered.rows.len(), 1);
+        assert_eq!(filtered.rows[0].element, b"side");
+        assert_eq!(filtered.rows[0].score, "1.0000");
+        assert_eq!(filtered.limit, 1);
+        custom.input = crate::redis_vector_search::Input::Values(vec![1.0, 0.0, 0.0]);
+        assert!(session.diagnostics(&crate::redis_diagnostics::Request::VectorSearch(custom.clone())).is_err());
+        custom.input = crate::redis_vector_search::Input::Values(vec![1.0, 0.0]);
+        custom.filter = "(".into();
+        assert!(session.diagnostics(&crate::redis_diagnostics::Request::VectorSearch(custom)).is_err());
+        assert_eq!(session.query(&redis::cmd("PING")).unwrap(), redis::Value::SimpleString("PONG".into()));
         session.query(redis::cmd("DEL").arg(similarity_key)).unwrap();
         assert!(session.diagnostics(&request).unwrap().vector_matches.unwrap().rows.is_empty());
         let key = b"rustable:vector:pages";

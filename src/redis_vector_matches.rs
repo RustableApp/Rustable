@@ -8,6 +8,7 @@ pub(crate) struct Matches {
     pub key: Vec<u8>,
     pub source: String,
     pub rows: Vec<Match>,
+    pub limit: usize,
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn label(bytes: &[u8]) -> String {
@@ -20,13 +21,17 @@ fn label(bytes: &[u8]) -> String {
     short
 }
 impl Matches {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub fn decode(value: redis::Value, key: &[u8], source: &[u8]) -> Result<Self, String> {
+        Self::decode_limit(value, key, source, 20)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn decode_limit(value: redis::Value, key: &[u8], source: &[u8], limit: usize) -> Result<Self, String> {
         let redis::Value::Array(values) = value else {
             return Err("Invalid similarity response.".into());
         };
-        if values.len() > 40 || !values.len().is_multiple_of(2) {
-            return Err("Similarity response exceeds 20 results.".into());
+        if !(1..=100).contains(&limit) || values.len() > limit * 2 || !values.len().is_multiple_of(2) {
+            return Err("Similarity response exceeds the requested result limit.".into());
         }
         let mut rows = Vec::with_capacity(values.len() / 2);
         let mut previous = f64::INFINITY;
@@ -55,6 +60,7 @@ impl Matches {
             key: key.to_vec(),
             source: label(source),
             rows,
+            limit,
         })
     }
     pub fn show(&self, ui: &mut eframe::egui::Ui) -> Option<crate::redis_diagnostics::Request> {
@@ -62,7 +68,7 @@ impl Matches {
         use egui_extras::{Column, TableBuilder};
         ui.weak("Similar to");
         ui.add(egui::Label::new(egui::RichText::new(&self.source).monospace()).truncate());
-        ui.weak("Top 20 approximate matches · higher scores mean more similar");
+        ui.weak(format!("Top {} approximate matches · higher scores mean more similar", self.limit));
         let mut action = None;
         TableBuilder::new(ui).cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .id_salt("vector-matches")

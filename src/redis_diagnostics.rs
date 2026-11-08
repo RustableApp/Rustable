@@ -4,6 +4,7 @@ pub(crate) enum Request {
     Server,
     Cluster,
     TimeSeries(Vec<u8>),
+    VectorSearch(crate::redis_vector_search::Search),
     VectorSimilar { key: Vec<u8>, element: Vec<u8> },
     VectorElement { key: Vec<u8>, element: Vec<u8> },
     Keys(Vec<Vec<u8>>),

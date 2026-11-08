@@ -753,3 +753,32 @@ is explicit and one batched exchange; completion itself performs zero network
 exchanges, cold or warm. No routine editor exchange was added. This is targeted
 common grammar plus advisory checked-node capabilities, not exhaustive grammar or
 cluster-wide permission discovery. Next milestone: configurable vector search.
+
+
+### Vector controls implementation checkpoint
+
+The existing similarity window now offers selected-element or supplied-vector input,
+an optional attribute filter, result count (1–100), search effort (1–1,000), and
+filter attempts (1–10,000). Vector text is parsed on explicit submission only;
+1–4,096 finite f32 components, nonzero vector, 64 KiB input, 4 KiB key/filter,
+and 64 KiB element limits are revalidated on the worker. Drafts survive submission
+and server errors. Results retain virtualized styled rows and validate the requested
+count, unique names, bounded elements and finite ordered scores.
+
+Protocol path remains one direct bounded VSIM exchange on an established connection,
+both before and after this change, with no metadata preflight for supplied dimensions.
+Redis validates dimensions in the same reply. Cluster uses the existing bounded
+router. Response cap stays 1 MiB. No Lua wrapper, TRUTH or NOTHREAD is used, preserving
+server background execution and avoiding an exact full scan. Syntax checked against
+https://redis.io/docs/latest/commands/vsim/.
+
+Six focused vector tests passed (three manual benchmarks ignored), log
+`/tmp/redis-vector-controls-tests.log`. The disposable Redis 8.4 live fixture passed
+supplied-vector/filter/result-count behavior, dimension and malformed-filter failures,
+and following PING alignment, alongside existing binary/page/byte-limit coverage
+(`/tmp/redis-vector-controls-live.log`). The fixture now allocates an ephemeral host
+port instead of a fixed port; no saved user database was used.
+
+This is not milestone completion. Native captures, browser compilation, draft/input
+interaction coverage and a matching release UI comparison remain open, along with
+focused protocol coverage for configurable requests.
