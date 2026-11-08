@@ -506,7 +506,12 @@ impl Workspace {
         if step > 0 {
             let key = b"search:product:embeddings".to_vec();
             let element = b"product:00000:description".to_vec();
-            let request = if step == 1 { crate::redis_diagnostics::Request::VectorElement { key, element } } else { crate::redis_diagnostics::Request::VectorSimilar { key, element } };
+            let request = if step == 1 { crate::redis_diagnostics::Request::VectorElement { key, element } } else if std::env::var_os("RUSTABLE_REDIS_VECTOR_SUPPLIED_CAPTURE").is_some() {
+                let mut draft = crate::redis_vector_search::Draft::new(key, element);
+                let request = crate::redis_diagnostics::Request::VectorSearch(draft.preview_supplied());
+                self.vector_search = Some(draft);
+                request
+            } else { crate::redis_diagnostics::Request::VectorSimilar { key, element } };
             self.diagnostics_request = Some(request.clone());
             self.diagnostics_report = None;
             self.diagnostics_open = true;

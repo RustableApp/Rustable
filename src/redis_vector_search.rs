@@ -178,6 +178,16 @@ impl Draft {
             error: None,
         }
     }
+    #[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
+    pub fn preview_supplied(&mut self) -> Search {
+        self.supplied = true;
+        self.values = "[1, 0.25, 0.1]".into();
+        self.search.filter = ".category == \"Electronics\"".into();
+        self.search.count = 10;
+        let mut search = self.search.clone();
+        search.input = Input::Values(parse_values(&self.values).unwrap());
+        search
+    }
     pub fn matches(&self, key: &[u8], element: &[u8]) -> bool {
         self.search.key == key
             && matches!(&self.search.input, Input::Element(value) if value == element)
@@ -253,5 +263,99 @@ impl Draft {
         }
         ui.separator();
         result
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use eframe::egui;
+    fn frame(
+        ctx: &egui::Context,
+        draft: &mut Draft,
+        enabled: bool,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Option<Search>) {
+        let mut action = None;
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 760.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    action = draft.show(ui, enabled);
+                });
+            },
+        );
+        (output, action)
+    }
+    fn click(ctx: &egui::Context, draft: &mut Draft, enabled: bool, label: &str) -> Option<Search> {
+        fn find(shape: &egui::Shape, label: &str) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| find(shape, label)),
+                _ => None,
+            }
+        }
+        let (output, _) = frame(ctx, draft, enabled, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| find(&shape.shape, label))
+            .expect("visible control");
+        let mut result = None;
+        for pressed in [true, false] {
+            let (_, action) = frame(
+                ctx,
+                draft,
+                enabled,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            if action.is_some() {
+                result = action;
+            }
+        }
+        result
+    }
+    #[test]
+    fn vector_form_submits_explicitly_and_retains_draft_after_validation_and_server_error() {
+        let ctx = egui::Context::default();
+        let mut draft = Draft::new(b"key".to_vec(), vec![0, 255]);
+        assert!(click(&ctx, &mut draft, true, "Supplied vector").is_none());
+        assert!(draft.supplied);
+        draft.values = "NaN".into();
+        draft.search.filter = ".price < 100".into();
+        assert!(click(&ctx, &mut draft, true, "Search").is_none());
+        assert!(draft.error.is_some());
+        assert_eq!(draft.values, "NaN");
+        draft.values = "[1,0.5]".into();
+        assert!(click(&ctx, &mut draft, false, "Search").is_none());
+        let request = click(&ctx, &mut draft, true, "Search").unwrap();
+        assert!(matches!(request.input,Input::Values(v) if v==[1.0,0.5]));
+        assert_eq!(request.filter, ".price < 100");
+        // Server errors are displayed by Workspace; neither response nor rendering consumes the draft.
+        for _ in 0..3 {
+            assert!(frame(&ctx, &mut draft, true, vec![]).1.is_none());
+        }
+        assert_eq!(draft.values, "[1,0.5]");
+        assert_eq!(draft.search.filter, ".price < 100");
+        assert!(click(&ctx, &mut draft, true, "Selected element").is_none());
+        let request = click(&ctx, &mut draft, true, "Search").unwrap();
+        assert!(matches!(request.input,Input::Element(v) if v==[0,255]));
     }
 }

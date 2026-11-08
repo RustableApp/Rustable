@@ -782,3 +782,20 @@ port instead of a fixed port; no saved user database was used.
 This is not milestone completion. Native captures, browser compilation, draft/input
 interaction coverage and a matching release UI comparison remain open, along with
 focused protocol coverage for configurable requests.
+
+
+### Vector input interaction and native preview checkpoint
+
+Locked browser-package wasm32 check passed with the existing 77 warnings
+(`/tmp/redis-vector-browser-check.log`). The focused egui interaction test passed:
+mode switching, explicit click submission, disabled submission, invalid-vector
+feedback and retained vector/filter drafts after submission/rendering. It does not
+claim native OS input-to-present coverage (`/tmp/redis-vector-interaction-tests.log`).
+
+Added `scripts/preview-redis-vector-controls.sh`: an ephemeral-port Redis 8.4 fixture
+renders the real native inspector and supplied-vector filtered results. Native QA
+build passed; the first capture caught an escaped-byte summary label, which was
+corrected to a human-readable dimension summary. Dark/light captures are retained
+in `target/redis-vector-controls-captures/` and
+`target/redis-vector-controls-light-captures/`. Release CPU comparison and focused
+configurable-request protocol coverage remain open; this milestone stays unchecked.

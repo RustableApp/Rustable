@@ -692,7 +692,11 @@ impl Session {
                     crate::redis_vector_search::Input::Element(element) => element.clone(),
                     crate::redis_vector_search::Input::Values(values) => format!("Supplied vector · {} dimensions", values.len()).into_bytes(),
                 };
-                Ok(crate::redis_diagnostics::Report { vector_matches: Some(Box::new(crate::redis_vector_matches::Matches::decode_limit(value, &search.key, &source, search.count)?)), ..Default::default() })
+                let mut matches = crate::redis_vector_matches::Matches::decode_limit(value, &search.key, &source, search.count)?;
+                if let crate::redis_vector_search::Input::Values(values) = &search.input {
+                    matches.source = format!("Supplied vector · {} dimensions", values.len());
+                }
+                Ok(crate::redis_diagnostics::Report { vector_matches: Some(Box::new(matches)), ..Default::default() })
             }
             crate::redis_diagnostics::Request::VectorElement { key, element } => {
                 if key.len() > 4096 || element.len() > 65536 { return Err("Vector inspection supports keys up to 4 KiB and element names up to 64 KiB.".into()); }
