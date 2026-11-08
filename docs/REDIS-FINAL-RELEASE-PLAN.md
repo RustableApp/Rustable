@@ -647,3 +647,23 @@ presentation/display checks and the final exact-tag bundle remain open.
 
 The functional Workbench milestone is complete. Continue with targeted
 count-dependent/advanced completion and cached server capability awareness.
+
+### IntelliSense checkpoint — count-dependent argument positions
+
+Added a bounded, authored completion-state helper for EVAL/EVALSHA/FCALL (including
+read-only variants), ZUNION/ZINTER/ZDIFF and STORE variants, LMPOP/ZMPOP and blocking
+variants, SINTERCARD/ZINTERCARD. It consumes exactly numkeys keys, then suggests
+arguments/options; WEIGHTS consumes exactly that many values before returning to
+remaining options. Pop directions and COUNT, cardinality LIMIT, aggregate modes
+and already-used options follow their argument positions. Blocking-command hints
+do not change the pooled execution guard. Numeric counts never allocate arrays
+proportional to their value; token/editor/menu bounds remain unchanged.
+
+Validated against the existing bundled command metadata and Redis command syntax
+references (FCALL, ZUNION, LMPOP). Five completion tests passed, one manual benchmark
+ignored (`/tmp/redis-count-completion-tests.log`), covering count boundaries,
+zero-key scripts, weighted values, store destinations, directions, LIMIT, invalid
+and maximal counts as well as existing binary/Unicode/context completion behavior.
+No network requests or protocol changes. This milestone remains open: cached
+capability awareness, visible review and release-mode completion comparisons are
+still required before claiming it complete.

@@ -34,3 +34,9 @@ current documentation license imposes different conditions, without reviewing it
 
 Performance and screenshot validation are recorded in UI-PERFORMANCE.md and the
 Redis roadmap. This provider runs on native and WASM without an LSP process.
+
+The unreleased completion pass adds exact key-count boundaries for script/function
+calls, sorted-set union/intersection/difference and STORE variants, multi-pop
+commands and intersection cardinality. WEIGHTS consumes one value per declared key;
+subsequent options are suggested only after those values. Zero-key scripts switch
+to ordinary arguments. These hints remain local and do not enable blocked commands.

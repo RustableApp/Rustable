@@ -11,6 +11,8 @@ pub(crate) struct Context<'a> {
 }
 #[path = "redis_completion_catalog.rs"]
 mod catalog;
+#[path = "redis_completion_counts.rs"]
+mod counts;
 pub(super) struct Edge {
     pub from: u16,
     pub to: u16,
@@ -252,7 +254,8 @@ pub(crate) fn suggest_with_context(
         states = next;
         closure(command, &mut states);
     }
-    let expected = command
+    let dynamic = counts::expected(command.name, &words[command.name.split_whitespace().count()..]);
+    let expected = if let Some(edges) = &dynamic { edges.iter().collect::<Vec<_>>() } else { command
         .edges
         .iter()
         .filter(|e| {
@@ -260,7 +263,7 @@ pub(crate) fn suggest_with_context(
                 && states.contains(&e.from)
                 && (e.slot == 0 || !used_options.contains(&e.slot))
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>() };
     let mut labels = Vec::new();
     for e in &expected {
         if !labels.contains(&e.label) {
@@ -364,6 +367,26 @@ mod tests {
             s.chars().count(),
             &[b"app:config".to_vec(), b"hello world".to_vec()],
         )
+    }
+    #[test]
+    fn count_dependent_keys_and_option_values_do_not_overlap() {
+        assert_eq!(at("EVAL 'return 1' 0 ").argument, "arg");
+        assert!(at("FCALL f 2 app:config ").items.iter().any(|i| i.detail.starts_with("Loaded key")));
+        assert_eq!(at("FCALL f 2 app:config other ").argument, "arg");
+        assert_eq!(at("ZUNION 2 one ").argument, "key");
+        assert!(at("ZUNION 2 one two W").items.iter().any(|i| i.label == "WEIGHTS"));
+        assert_eq!(at("ZUNION 2 one two WEIGHTS 1 ").argument, "weight");
+        let done = at("ZUNION 2 one two WEIGHTS 1 2 ");
+        assert!(!done.items.iter().any(|i| i.label == "WEIGHTS" || i.detail.starts_with("Loaded key")));
+        assert!(done.items.iter().any(|i| i.label == "AGGREGATE"));
+        assert!(at("ZUNIONSTORE out 2 one two AGGREGATE ").items.iter().any(|i| i.label == "MAX"));
+        assert!(!at("ZDIFF 2 one two ").items.iter().any(|i| i.label == "WEIGHTS"));
+        assert!(at("LMPOP 2 one two ").items.iter().any(|i| i.label == "LEFT"));
+        assert_eq!(at("BLMPOP 1 2 one two LEFT COUNT ").argument, "count");
+        assert!(at("ZMPOP 1 one ").items.iter().any(|i| i.label == "MIN"));
+        assert_eq!(at("SINTERCARD 2 one two LIMIT ").argument, "limit");
+        assert_eq!(at("ZUNION 18446744073709551615 ").argument, "key");
+        assert!(at("ZUNION -1 ").items.is_empty());
     }
     #[test]
     fn commands_subcommands_and_grammar() {
