@@ -85,10 +85,36 @@ pub(crate) enum Action {
     Inspect(Vec<u8>),
 }
 impl View {
+    #[cfg(test)]
+    pub(crate) fn prepare_catalog_benchmark(&mut self) {
+        self.catalog_loaded = true;
+        self.metadata_attempted.extend(0..self.indexes.len().div_ceil(crate::redis_search_catalog::PAGE_SIZE));
+        self.metadata = self.indexes.iter().cloned().map(|index| (index, Ok(crate::redis_search_catalog::Metadata {
+            prefixes: "app:users:".into(), types: "TAG, TEXT".into(), documents: Some(1000), fields: 4,
+        }))).collect();
+    }
     pub fn loaded_indexes(&self) -> &[Vec<u8>] { &self.indexes }
     #[cfg(feature = "qa")]
     pub fn preview_request(&mut self, step: usize) -> Request {
         self.open = true;
+        if std::env::var_os("RUSTABLE_REDIS_INDEX_MANAGEMENT_CAPTURE").is_some() {
+            let index = b"idx:users".to_vec();
+            self.index = None; self.create = None; self.drop_index = None;
+            match step {
+                0 => return Request::Indexes,
+                1 => return Request::Metadata(vec![index]),
+                2 => {
+                    self.create = Some(crate::redis_search_manage::Create { name: "idx:products".into(), prefix: "products:".into(), fields: vec![
+                        crate::redis_search_manage::Field { path: "name".into(), kind: crate::redis_search_manage::Kind::Text, sortable: true, ..Default::default() },
+                        crate::redis_search_manage::Field { path: "price".into(), kind: crate::redis_search_manage::Kind::Numeric, ..Default::default() },
+                    ], ..Default::default() });
+                    return Request::Metadata(vec![index]);
+                }
+                3 => { self.drop_index = Some(index.clone()); self.drop_confirmation = "DROP".into(); return Request::Metadata(vec![index]); }
+                4 => { self.index = Some(index.clone()); return Request::Schema(index); }
+                _ => { self.index = Some(index.clone()); return Request::Query { index, query: "*".into(), offset: 0, options: Options::default() }; }
+            }
+        }
         if step == 0 {
             return Request::Indexes;
         }
@@ -934,6 +960,76 @@ mod tests {
         assert!(view.index.is_none());
         assert!(!view.pending);
     }
+    #[test]
+    #[ignore = "manual new Search management form CPU workload"]
+    fn index_management_frame_benchmark() {
+        for drop in [false, true] {
+            let ctx = egui::Context::default();
+            let mut view = View { writable: true, catalog_loaded: true, ..Default::default() };
+            if drop { view.drop_index = Some(b"idx:users".to_vec()); view.drop_confirmation = "DROP".into(); }
+            else { view.create = Some(crate::redis_search_manage::Create { name: "idx:users".into(), prefix: "users:".into(), fields: (0..8).map(|i| crate::redis_search_manage::Field { path: format!("field_{i}"), ..Default::default() }).collect(), ..Default::default() }); }
+            let mut samples = vec![];
+            for frame in 0..180 {
+                let started = std::time::Instant::now();
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0,760.0))),
+                    time: Some(frame as f64 / 120.0 + if frame >= 100 {30.0} else {0.0}), ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| { assert!(view.pane(ui, true).is_none()); }); });
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                if frame >= 20 { samples.push(started.elapsed().as_secs_f64() * 1000.0); }
+            }
+            samples.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(if drop { "redis/search/drop-review" } else { "redis/search/create-eight-fields" }, &samples);
+        }
+    }
+
+    #[test]
+    fn index_forms_submit_reviewed_actions_and_retain_failed_drafts() {
+        fn frame(ctx: &egui::Context, view: &mut View, events: Vec<egui::Event>) -> (egui::FullOutput, Option<Action>) {
+            let mut action = None;
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 760.0))), events, ..Default::default()
+            }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| { action = view.pane(ui, true); }); });
+            (output, action)
+        }
+        fn click(ctx: &egui::Context, view: &mut View, label: &str) -> Option<Action> {
+            let (output, _) = frame(ctx, view, vec![]);
+            fn find(shape: &egui::Shape, label: &str, found: &mut Vec<egui::Pos2>) {
+                match shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => found.push(text.pos + text.galley.size() * 0.5),
+                    egui::Shape::Vec(shapes) => for shape in shapes { find(shape, label, found); },
+                    _ => {}
+                }
+            }
+            let mut positions = vec![];
+            for shape in output.shapes { find(&shape.shape, label, &mut positions); }
+            let pos = *positions.last().expect("action visible");
+            for pressed in [true, false] {
+                let (_, action) = frame(ctx, view, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }]);
+                if action.is_some() { return action; }
+            }
+            None
+        }
+        use crate::redis_search_manage::{Create, Field as CreateField, Mutation};
+        let draft = Create { name: "idx:review".into(), prefix: "users:".into(), fields: vec![CreateField { path: "name".into(), ..Default::default() }], ..Default::default() };
+        let ctx = egui::Context::default();
+        let mut view = View { writable: true, catalog_loaded: true, create: Some(draft.clone()), ..Default::default() };
+        for _ in 0..4 { frame(&ctx, &mut view, vec![]); }
+        assert!(matches!(click(&ctx, &mut view, "Create index"), Some(Action::Mutate(Mutation::Create(value))) if value == draft));
+        view.begin(); view.pending = false; view.error = Some("Index already exists".into());
+        frame(&ctx, &mut view, vec![]);
+        assert_eq!(view.create.as_ref(), Some(&draft));
+        view.receive(Reply::MutationCompleted(Mutation::Create(draft)));
+        assert!(view.create.is_none());
+        view.metadata_attempted.insert(0);
+        view.drop_index = Some(b"idx:review".to_vec());
+        assert!(click(&ctx, &mut view, "Drop index").is_none());
+        view.drop_confirmation = "DROP".into(); view.writable = false;
+        assert!(click(&ctx, &mut view, "Drop index").is_none());
+        view.writable = true;
+        assert!(matches!(click(&ctx, &mut view, "Drop index"), Some(Action::Mutate(Mutation::Drop(name))) if name == b"idx:review"));
+    }
+
     #[test]
     fn search_settles_at_idle() {
         let ctx = egui::Context::default();

@@ -2460,6 +2460,7 @@ impl Workspace {
         if self.busy || !self.scan_started || self.cursor != 0 {
             return false;
         }
+        if std::env::var_os("RUSTABLE_REDIS_INDEX_MANAGEMENT_CAPTURE").is_some() { self.read_only = false; }
         let request = self.search.preview_request(step);
         self.search.begin();
         self.send(Job::Search(request));

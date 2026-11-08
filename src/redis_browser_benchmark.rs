@@ -367,6 +367,7 @@ mod redis_tool_pages_benchmark {
             match page {
                 "search" => {
                     workspace.search.receive(crate::redis_search::Reply::Indexes((0..200).map(|i|format!("idx:catalog:{i:04}").into_bytes()).collect()));
+                    workspace.search.prepare_catalog_benchmark();
                     workspace.search.open = true;
                 }
                 "analysis" => {

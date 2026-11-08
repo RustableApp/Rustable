@@ -288,3 +288,24 @@ and preservation of indexed documents after drop (`/tmp/redis-search-manage-live
 Separate browser-package locked WASM check passed with platform dead-code warnings
 (`/tmp/redis-search-manage-wasm.log`). Native Search captures, draft/error interaction
 coverage and comparative UI measurements remain pending; Search is not marked complete.
+
+### Search native and interaction checkpoint
+
+The disposable native capture script `scripts/preview-redis-search.sh` captured
+all six Search states at 1200×760 logical pixels: catalog, loaded metadata, inline
+create, reviewed drop, selected schema and query. The catalog, create and drop
+PNGs were visually inspected in `target/redis-search-management-captures/`.
+Ten targeted Search tests pass (five explicitly ignored live/performance tests);
+the new pointer interaction test covers draft retention after create failure and
+requires both typed confirmation and unlocked editing before drop submission.
+The performance runner's eight tests pass.
+
+The shared Search page workload now prepares a loaded metadata cache instead of
+accidentally dispatching requests to a disconnected fixture worker. The baseline
+adapter marks the older names-only catalog loaded; neither measurement performs
+network work. The richer catalog displays a bounded page of the same 200 index
+names. A release comparison against `dc417bf` is running under
+`target/redis-search-final-performance/` (log `/tmp/redis-search-final-performance.log`);
+no performance pass is claimed yet. A separate create-eight-fields/drop-review
+CPU workload was added and remains to be run. Light-theme native capture and
+final release-wide platform checks remain open.

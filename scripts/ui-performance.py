@@ -201,6 +201,17 @@ def main():
                     workspace.write_text(source + '\ninclude!("redis_browser_benchmark.rs");\n')
                 metadata['redis_fixture'] = fixture.read_text()
                 (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
+            if args.redis_pages:
+                # The current catalog benchmark represents already loaded data,
+                # never an attempted request to the disconnected fixture worker.
+                # Older catalogs contain names only and need no metadata cache.
+                search = base_path / 'src' / 'redis_search.rs'
+                source = search.read_text()
+                if 'fn prepare_catalog_benchmark(' not in source:
+                    source = source.replace('impl View {', 'impl View {\n    #[cfg(test)]\n    pub(crate) fn prepare_catalog_benchmark(&mut self) { self.catalog_loaded = true; }', 1)
+                    search.write_text(source)
+                    metadata['search_catalog_baseline_adapter'] = 'Mark names-only catalog loaded; candidate adds cached metadata. No network in either measurement.'
+                    (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             # Both builds finish before any timing. Separate saved executables
             # prevent the second build from replacing the first benchmark binary.
             # Vendored crates can share Cargo package IDs across worktrees.

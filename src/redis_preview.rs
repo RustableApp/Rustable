@@ -19,7 +19,7 @@ pub(crate) fn run() -> eframe::Result {
                     Settings {
                         host: "127.0.0.1".into(),
                         cluster: std::env::var_os("RUSTABLE_REDIS_TOPOLOGY_CAPTURE").is_some(),
-                        port: if std::env::var_os("RUSTABLE_REDIS_FAILOVER_CAPTURE").is_some() {16603} else if std::env::var_os("RUSTABLE_REDIS_TOPOLOGY_CAPTURE").is_some() {16400} else {16379},
+                        port: if let Ok(port) = std::env::var("RUSTABLE_REDIS_PREVIEW_PORT") { port.parse().expect("disposable preview port") } else if std::env::var_os("RUSTABLE_REDIS_FAILOVER_CAPTURE").is_some() {16603} else if std::env::var_os("RUSTABLE_REDIS_TOPOLOGY_CAPTURE").is_some() {16400} else {16379},
                         tls: false,
                         ..Default::default()
                     },
@@ -118,6 +118,8 @@ impl eframe::App for Preview {
                             "profile-documents.ppm",
                             "profile-aggregate.ppm",
                         ][(self.stage / 3) as usize]
+                    } else if self.search_capture && std::env::var_os("RUSTABLE_REDIS_INDEX_MANAGEMENT_CAPTURE").is_some() {
+                        ["catalog.ppm", "metadata.ppm", "create-index.ppm", "drop-review.ppm", "schema.ppm", "query.ppm"][(self.stage / 3) as usize]
                     } else if self.search_capture {
                         [
                             "indexes.ppm",
