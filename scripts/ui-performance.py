@@ -199,6 +199,10 @@ def main():
                 source = workspace.read_text()
                 if 'include!("redis_browser_benchmark.rs")' not in source:
                     workspace.write_text(source + '\ninclude!("redis_browser_benchmark.rs");\n')
+                if 'fn prepare_analysis_benchmark(' not in source:
+                    with workspace.open('a') as output:
+                        output.write('\n#[cfg(test)] impl Workspace { fn prepare_analysis_benchmark(&mut self) {} }\n')
+                    metadata['analysis_baseline_adapter'] = 'Same 1,000 names and memory values; candidate adds full report metadata and expiry/type tables.'
                 metadata['redis_fixture'] = fixture.read_text()
                 (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.redis or args.redis_editor or args.redis_pages or args.redis_completion:

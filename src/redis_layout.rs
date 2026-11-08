@@ -148,6 +148,13 @@ pub(crate) fn analysis_distribution(ui: &mut egui::Ui, rows: &[[String; 3]]) {
 
 #[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
 impl Workspace {
+    pub(crate) fn preview_analysis(&mut self, ctx: &egui::Context) -> bool {
+        if !self.connected || self.busy { return false; }
+        self.auto_scan = false; self.preview_queue.clear();
+        self.section = Section::Analyze; self.analysis_server = false;
+        self.commands_visible = false; self.diagnostics_open = false;
+        self.analysis.preview(ctx, self.database)
+    }
     pub(crate) fn preview_layout(&mut self, ctx: &egui::Context, step: usize) -> bool {
         if !self.connected || self.busy { return false; }
         if !self.scan_started || self.cursor != 0 { self.auto_scan = true; return false; }

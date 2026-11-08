@@ -2115,6 +2115,32 @@ mod analysis_transport_tests {
     use crate::redis_analysis::Source;
     use std::io::Write;
     #[test]
+    #[ignore = "disposable analysis fixture via scripts/preview-redis-analysis.sh"]
+    fn live_database_analysis_and_partial_cancel() {
+        assert_eq!(std::env::var("RUSTABLE_REDIS_ANALYSIS_QA").as_deref(),Ok("1"));
+        let settings=Settings {host:"127.0.0.1".into(),port:std::env::var("RUSTABLE_REDIS_PREVIEW_PORT").unwrap().parse().unwrap(),tls:false,..Default::default()};
+        let mut session=Session::connect(&settings,"rustable-redis-test-only").unwrap();
+        let report=crate::redis_analysis::collect(&mut session,0,&Default::default());
+        assert_eq!(report.coverage,crate::redis_analysis::Coverage::Complete);
+        assert_eq!(report.total.keys,650);assert_eq!(report.visited,650);assert_eq!(report.missing,0);
+        assert_eq!(report.types["string"].keys,600);assert_eq!(report.types["hash"].keys,20);
+        assert_eq!(report.types["list"].keys,20);assert_eq!(report.types["zset"].keys,10);
+        assert!(report.total.bytes>0);assert_eq!(report.expiry.iter().map(|b|b.keys).sum::<u64>(),650);
+        assert_eq!(report.largest.len(),15);assert!(report.pages>1);
+        struct Cancel<'a>(&'a mut Session,&'a crate::redis_analysis::Progress);
+        impl Source for Cancel<'_> {
+            fn page(&mut self,c:u64)->Result<(u64,Vec<Vec<u8>>),String>{self.0.page(c)}
+            fn samples(&mut self,k:&[Vec<u8>])->Result<Vec<crate::redis_analysis::Sample>,String>{
+                let rows=self.0.samples(k)?;self.1.cancel.store(true,std::sync::atomic::Ordering::Release);Ok(rows)
+            }
+        }
+        let progress=crate::redis_analysis::Progress::default();
+        let partial=crate::redis_analysis::collect(&mut Cancel(&mut session,&progress),0,&progress);
+        assert_eq!(partial.coverage,crate::redis_analysis::Coverage::Cancelled);
+        assert!(partial.visited>0 && partial.visited<650);
+        assert!(session.execute("PING",true).is_ok());
+    }
+    #[test]
     fn full_metadata_batch_has_one_exchange_and_drains_server_errors() {
         for fail in [false, true] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

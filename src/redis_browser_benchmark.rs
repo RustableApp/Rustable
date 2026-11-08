@@ -371,14 +371,11 @@ mod redis_tool_pages_benchmark {
                     workspace.search.open = true;
                 }
                 "analysis" => {
-                    workspace.diagnostics_open = true;
-                    workspace.diagnostics_request = Some(crate::redis_diagnostics::Request::Keys(vec![]));
-                    workspace.diagnostics_report = Some(Box::new(crate::redis_diagnostics::Report {
-                        analysis: true,
-                        summary: vec![("Keys sampled".into(), "1000".into()), ("Sampled memory".into(), "10 MiB".into())],
-                        rows: (0..50).map(|i| [format!("app:users:{i:04}"), (10000-i*100).to_string(), format!("namespace:{}",i%4)]).collect(),
-                        ..Default::default()
-                    }));
+                    workspace.section = Section::Analyze;
+                    workspace.diagnostics_open = false;
+                    let names: Vec<_> = (0..1000).map(|i|format!("namespace{}:key:{i:04}",i%16).into_bytes()).collect();
+                    workspace.diagnostics_report = Some(Box::new(crate::redis_diagnostics::keys(&names, vec![redis::Value::Int(1024);1000]).unwrap()));
+                    workspace.prepare_analysis_benchmark();
                 }
                 "workbench-history" => {
                     workspace.section = Section::Workbench;

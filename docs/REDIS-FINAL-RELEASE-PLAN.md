@@ -429,3 +429,31 @@ required: disposable live report checks, screenshots in both themes, a meaningfu
 release UI comparison for the new report, cancellation under network delay, and
 reviewing the browser-demo presentation (it still uses the older loaded-key
 report path). Analyze remains unchecked until these are addressed.
+
+### Analyze live fixture and native visual check
+
+`scripts/preview-redis-analysis.sh` now creates its own ephemeral Redis 8.4
+instance with 650 keys (600 strings, 20 hashes, 20 lists, 10 sorted sets), runs a
+live collector assertion, and captures the native page after its dedicated worker
+finishes. The test verifies exact counts, expiry total, multi-page traversal and
+nonzero memory estimates. Cancelling after a real metadata batch preserves a
+partial report and the connection still answers PING. It passed in both capture
+runs (`/tmp/redis-analysis-live-preview.log`, `/tmp/redis-analysis-light-preview.log`).
+This is between-batch cancellation evidence, not yet delayed-read cancellation.
+
+Dark and light screenshots were inspected at 1200×760 logical pixels:
+`target/redis-analysis-captures/analyze.png` and
+`target/redis-analysis-light-captures/analyze.png`. Visual review caught rankings
+below the fold and fallback icons. Rankings now come first, side by side on wide
+windows; existing folder/list-upload/refresh icons identify the report actions.
+Shared action buttons also now correctly resolve the previously requested trash
+icon. No browser layout or default previews changed.
+
+The release-mode comparison against pre-Analyze `188e34e` is running in
+`target/redis-analysis-final-performance/` (process log
+`/tmp/redis-analysis-final-performance.log`). Both sides now prepare the same
+1,000 key names / 1 KiB-per-key sample outside measurement; the older report
+displays its existing loaded-key analysis, while the candidate additionally
+displays type/expiry and full-report controls. The baseline compatibility adapter
+and fixture are retained with measurement metadata. Runner's eight tests pass.
+No rendering-performance result is claimed until this run finishes.

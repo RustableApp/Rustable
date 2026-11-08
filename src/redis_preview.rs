@@ -30,6 +30,7 @@ pub(crate) fn run() -> eframe::Result {
                 stage: 0,
                 inspector_capture: std::env::var_os("RUSTABLE_REDIS_INSPECTOR_CAPTURE").is_some()
                     || std::env::var_os("RUSTABLE_REDIS_LAYOUT_CAPTURE").is_some()
+                    || std::env::var_os("RUSTABLE_REDIS_ANALYSIS_CAPTURE").is_some()
                     || std::env::var_os("RUSTABLE_REDIS_ROADMAP_CAPTURE").is_some()
                     || std::env::var_os("RUSTABLE_REDIS_SEARCH_CAPTURE").is_some()
                     || std::env::var_os("RUSTABLE_REDIS_MONITOR_CAPTURE").is_some()
@@ -83,7 +84,7 @@ impl eframe::App for Preview {
         if let Some(directory) = &self.capture {
             for event in ctx.input(|i| i.events.clone()) {
                 if let egui::Event::Screenshot { image, .. } = event {
-                    let path = directory.join(if self.layout_capture { ["browse-tree.ppm", "browse-list.ppm", "new-key.ppm", "search-indexes.ppm", "search-query.ppm", "workbench.ppm", "analyze.ppm", "pubsub.ppm", "json-view.ppm", "json-inline.ppm"][(self.stage/3) as usize] } else if self.command_capture { "command-editor.ppm" } else if self.vector_capture { ["vector-elements.ppm", "vector-detail.ppm", "vector-similar.ppm"][(self.stage/3) as usize] } else if self.timeseries_capture { ["timeseries-all.ppm", "timeseries-range.ppm", "timeseries-info.ppm", "timeseries-chart.ppm"][(self.stage/3) as usize] } else if self.recovery_capture { ["recovery-draft.ppm", "recovery-restored.ppm"][(self.stage/3) as usize] } else if self.topology_capture && std::env::var_os("RUSTABLE_REDIS_BULK_CAPTURE").is_some() { ["bulk-review.ppm","bulk-results.ppm"][(self.stage/3) as usize] } else if self.topology_capture { ["cluster-topology.ppm","cluster-key.ppm"][(self.stage/3) as usize] } else if self.archive_capture {
+                    let path = directory.join(if std::env::var_os("RUSTABLE_REDIS_ANALYSIS_CAPTURE").is_some() { "analyze.ppm" } else if self.layout_capture { ["browse-tree.ppm", "browse-list.ppm", "new-key.ppm", "search-indexes.ppm", "search-query.ppm", "workbench.ppm", "analyze.ppm", "pubsub.ppm", "json-view.ppm", "json-inline.ppm"][(self.stage/3) as usize] } else if self.command_capture { "command-editor.ppm" } else if self.vector_capture { ["vector-elements.ppm", "vector-detail.ppm", "vector-similar.ppm"][(self.stage/3) as usize] } else if self.timeseries_capture { ["timeseries-all.ppm", "timeseries-range.ppm", "timeseries-info.ppm", "timeseries-chart.ppm"][(self.stage/3) as usize] } else if self.recovery_capture { ["recovery-draft.ppm", "recovery-restored.ppm"][(self.stage/3) as usize] } else if self.topology_capture && std::env::var_os("RUSTABLE_REDIS_BULK_CAPTURE").is_some() { ["bulk-review.ppm","bulk-results.ppm"][(self.stage/3) as usize] } else if self.topology_capture { ["cluster-topology.ppm","cluster-key.ppm"][(self.stage/3) as usize] } else if self.archive_capture {
                         [
                             "archive-export.ppm",
                             "archive-loaded.ppm",
@@ -169,10 +170,10 @@ impl eframe::App for Preview {
                 }
             }
             if self.inspector_capture {
-                let last_stage = if self.layout_capture {30} else if self.command_capture {3} else if self.vector_capture {9} else if self.timeseries_capture {12} else if self.topology_capture || self.recovery_capture {6} else if self.monitor_capture { 9 } else { 18 };
+                let last_stage = if std::env::var_os("RUSTABLE_REDIS_ANALYSIS_CAPTURE").is_some() {3} else if self.layout_capture {30} else if self.command_capture {3} else if self.vector_capture {9} else if self.timeseries_capture {12} else if self.topology_capture || self.recovery_capture {6} else if self.monitor_capture { 9 } else { 18 };
                 if self.stage < last_stage
                     && self.stage.is_multiple_of(3)
-                    && (if self.layout_capture { self.workspace.preview_layout(ctx, (self.stage/3) as usize) } else if self.command_capture { self.workspace.preview_commands() } else if self.vector_capture { self.workspace.preview_vectors((self.stage/3) as usize) } else if self.timeseries_capture { self.workspace.preview_timeseries((self.stage/3) as usize) } else if self.recovery_capture { self.workspace.preview_recovery((self.stage/3) as usize) } else if self.topology_capture && std::env::var_os("RUSTABLE_REDIS_BULK_CAPTURE").is_some() { self.workspace.preview_bulk((self.stage/3) as usize) } else if self.topology_capture { self.workspace.preview_topology((self.stage/3) as usize) } else if self.archive_capture {
+                    && (if std::env::var_os("RUSTABLE_REDIS_ANALYSIS_CAPTURE").is_some() { self.workspace.preview_analysis(ctx) } else if self.layout_capture { self.workspace.preview_layout(ctx, (self.stage/3) as usize) } else if self.command_capture { self.workspace.preview_commands() } else if self.vector_capture { self.workspace.preview_vectors((self.stage/3) as usize) } else if self.timeseries_capture { self.workspace.preview_timeseries((self.stage/3) as usize) } else if self.recovery_capture { self.workspace.preview_recovery((self.stage/3) as usize) } else if self.topology_capture && std::env::var_os("RUSTABLE_REDIS_BULK_CAPTURE").is_some() { self.workspace.preview_bulk((self.stage/3) as usize) } else if self.topology_capture { self.workspace.preview_topology((self.stage/3) as usize) } else if self.archive_capture {
                         self.workspace
                             .preview_archive(ctx, (self.stage / 3) as usize)
                     } else if self.pubsub_capture {
@@ -192,7 +193,7 @@ impl eframe::App for Preview {
                     self.stage += 1;
                 }
                 if self.stage < last_stage && self.stage % 3 == 1 && (!self.workspace.busy() || self.recovery_capture || (self.layout_capture && self.stage / 3 == 9)) {
-                    if self.layout_capture {
+                    if self.layout_capture || std::env::var_os("RUSTABLE_REDIS_ANALYSIS_CAPTURE").is_some() {
                         // Full-page state is ready.
                     } else if self.command_capture {
                         // Command response is ready.

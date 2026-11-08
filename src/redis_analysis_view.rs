@@ -149,11 +149,25 @@ impl Drop for View {
     }
 }
 impl View {
+    #[cfg(test)]
+    pub(crate) fn prepare_benchmark(&mut self) {
+        struct Fixture;
+        impl analysis::Source for Fixture {
+            fn page(&mut self,_:u64)->Result<(u64,Vec<Vec<u8>>),String>{Ok((0,(0..1000).map(|i|format!("namespace{}:key:{i:04}",i%16).into_bytes()).collect()))}
+            fn samples(&mut self,keys:&[Vec<u8>])->Result<Vec<analysis::Sample>,String>{Ok(keys.iter().map(|_|analysis::Sample {bytes:Some(1024),ttl_ms:-1,kind:"string".into()}).collect())}
+        }
+        self.data=Some(Prepared::new(analysis::collect(&mut Fixture,0,&Progress::default())));
+    }
+
     #[cfg(feature = "qa")]
     pub fn preview(&mut self, ctx: &egui::Context, database: u32) -> bool {
         self.poll(ctx);
-        if self.data.is_some() { return true; }
-        if self.receiver.is_none() && self.error.is_none() { self.start(ctx, database); }
+        if self.data.is_some() {
+            return true;
+        }
+        if self.receiver.is_none() && self.error.is_none() {
+            self.start(ctx, database);
+        }
         false
     }
     pub fn new(settings: Settings, password: String, sentinel_password: String) -> Self {
@@ -265,7 +279,7 @@ impl View {
                 if ui
                     .add_enabled(
                         self.receiver.is_none() && connected,
-                        crate::redis_workspace::action_button("play", "New report"),
+                        crate::redis_workspace::action_button("refresh-cw", "New report"),
                     )
                     .clicked()
                 {
@@ -274,7 +288,7 @@ impl View {
                 if ui
                     .add_enabled(
                         self.receiver.is_none() && self.data.is_some(),
-                        crate::redis_workspace::action_button("save", "Save report"),
+                        crate::redis_workspace::action_button("list-upload", "Save report"),
                     )
                     .clicked()
                 {
@@ -283,7 +297,7 @@ impl View {
                 if ui
                     .add_enabled(
                         self.receiver.is_none(),
-                        crate::redis_workspace::action_button("folder-open", "Open report"),
+                        crate::redis_workspace::action_button("folder", "Open report"),
                     )
                     .clicked()
                 {
@@ -365,6 +379,49 @@ impl View {
                              numeric: [bool; 3]| {
                     crate::controls::report_table(ui, id, title, headers, rows, numeric, 260.0);
                 };
+                let rankings = |left: &mut egui::Ui, right: &mut egui::Ui| {
+                    table(
+                        left,
+                        "analysis-namespaces",
+                        "Top namespaces",
+                        ["Namespace", "Keys", "Memory"],
+                        &data.namespaces,
+                        [false, true, true],
+                    );
+                    table(
+                        right,
+                        "analysis-largest",
+                        "Top 15 keys",
+                        ["Key", "Memory", "Type"],
+                        &data.keys,
+                        [false, true, false],
+                    );
+                };
+                if ui.available_width() >= 950.0 {
+                    ui.columns(2, |cols| {
+                        let (left, right) = cols.split_at_mut(1);
+                        rankings(&mut left[0], &mut right[0]);
+                    });
+                } else {
+                    table(
+                        ui,
+                        "analysis-largest",
+                        "Top 15 keys",
+                        ["Key", "Memory", "Type"],
+                        &data.keys,
+                        [false, true, false],
+                    );
+                    ui.add_space(12.0);
+                    table(
+                        ui,
+                        "analysis-namespaces",
+                        "Top namespaces",
+                        ["Namespace", "Keys", "Memory"],
+                        &data.namespaces,
+                        [false, true, true],
+                    );
+                }
+                ui.add_space(12.0);
                 ui.columns(2, |cols| {
                     table(
                         &mut cols[0],
@@ -383,24 +440,6 @@ impl View {
                         [false, true, true],
                     );
                 });
-                ui.add_space(12.0);
-                table(
-                    ui,
-                    "analysis-namespaces",
-                    "Top namespaces",
-                    ["Namespace", "Keys", "Memory"],
-                    &data.namespaces,
-                    [false, true, true],
-                );
-                ui.add_space(12.0);
-                table(
-                    ui,
-                    "analysis-largest",
-                    "Top 15 keys",
-                    ["Key", "Memory", "Type"],
-                    &data.keys,
-                    [false, true, false],
-                );
             });
     }
 }

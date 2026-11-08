@@ -165,6 +165,9 @@ impl Drop for Workspace {
     }
 }
 impl Workspace {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn prepare_analysis_benchmark(&mut self) { self.analysis.prepare_benchmark(); }
+
     #[cfg(any(test, feature = "qa", target_arch = "wasm32"))]
     pub fn new(settings: Settings, password: String, ctx: egui::Context) -> Self {
         Self::new_with_sentinel(settings, password, String::new(), ctx)
@@ -4342,6 +4345,9 @@ pub(crate) fn action_button(icon: &str, label: &'static str) -> egui::Button<'st
         "file-code" => egui::include_image!("../assets/icons/lucide/file-code.svg"),
         "check" => egui::include_image!("../assets/icons/lucide/check.svg"),
         "pencil" => egui::include_image!("../assets/icons/lucide/pencil.svg"),
+        "folder" => egui::include_image!("../assets/icons/lucide/folder.svg"),
+        "list-upload" => egui::include_image!("../assets/icons/lucide/list-upload.svg"),
+        "trash-2" => egui::include_image!("../assets/icons/lucide/trash-2.svg"),
         "arrow-right" => egui::include_image!("../assets/icons/lucide/arrow-right.svg"),
         _ => egui::include_image!("../assets/icons/lucide/refresh-cw.svg"),
     };
