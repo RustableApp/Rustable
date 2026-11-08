@@ -1332,3 +1332,18 @@ regression. These are accepted measured costs, not threshold passes. New JSON-st
 editor and completion cold-use absolute measurements are also recorded there.
 Cross-platform CI run 42506585821 is checking the exact d9876f1 candidate; publication
 and exact-tag WASM deployment remain open.
+
+
+### v0.4.21 tagged after final acceptance CI
+
+[Main CI 42507572438](https://github.com/RustableApp/Rustable/actions/runs/42507572438)
+passed all macOS, Windows, Linux and browser jobs at
+`16e53fa793c0d2fd8b67148e5c23ca9acebc3a5a`, including the updater-enabled Mac build.
+The preceding branch CI 42506585821 passed the same implementation; the final
+source commit adds only the recorded performance review. Both lockfiles and Cargo
+identify 0.4.21, and the source tree was clean at tagging.
+
+Immutable annotated tag `v0.4.21` resolves to that exact commit.
+[Signed release 42508380169](https://github.com/RustableApp/Rustable/actions/runs/42508380169)
+is building packages and the matching WASM archive. Artifact inspection, website
+deployment and publication remain pending; the release gate above stays open.

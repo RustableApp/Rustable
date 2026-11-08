@@ -2073,3 +2073,16 @@ The standalone harness now uses disposable ephemeral ports and verified TLS test
 cover batch-error alignment, oversized-reply closure and no replay of later writes.
 The remaining release acceptance, exact-tag demo and publication evidence belong
 to the release checklist; this entry does not assert publication.
+
+
+### Final candidate tagged; publication pending
+
+User-requested follow-ups now include exact-first shared completion ranking,
+continuous padded table headers, row hover over child text, native macOS double-click
+timing, and inline highlighted JSON-string editing in the desktop and WASM demo.
+Value/format and bytes/copy controls share compact aligned rows with copy feedback.
+The final performance review records 36 passing repeated scenarios and four
+accepted completion costs of 0.006–0.013 ms p95; see UI-PERFORMANCE.md for tail
+metrics and limits. All main CI jobs passed. v0.4.21 is tagged at `16e53fa`; signed
+package inspection, matching live demo and publication are still pending in the
+[release checklist](REDIS-FINAL-RELEASE-PLAN.md).
