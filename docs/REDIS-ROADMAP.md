@@ -2021,3 +2021,16 @@ Results use bounded transport and virtualized layout. See
 [the release checklist](REDIS-FINAL-RELEASE-PLAN.md) for tests, theme captures and
 the accepted +0.010792 ms p95 CPU cost for separate result controls. This is not a
 release announcement; the remaining bounded checklist and publication gates are open.
+
+
+### Bounded final-release IntelliSense milestone
+
+Common count-dependent clauses now follow declared key/weight counts; explicit
+server-hint refresh caches version and representative module availability for local
+advisory completion. Metadata denials remain unknown, suggestions stay insertable,
+and typing never requests server metadata. Standalone/Cluster protocol, cache
+invalidation, browser and dark/light native captures are verified. The five-pair
+same-machine release CPU comparison passed all measured scenarios, including the
+new counted-key and capability workloads. Detailed percentiles, bounds, caveats
+and evidence are in [the release checklist](REDIS-FINAL-RELEASE-PLAN.md).
+Vector controls and the remaining checklist/publication gates are still open.

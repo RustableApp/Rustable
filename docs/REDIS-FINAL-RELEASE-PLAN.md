@@ -23,7 +23,7 @@ Insight parity, a browser redesign, or the unrelated TablePlus parity goal.
 - [x] Workbench: bounded per-connection persistent automatic command history,
   privacy/clear controls, and distinguishable per-command result sections with
   status/timing/copy. Preserve saved snippets and keyboard execution conventions.
-- [ ] IntelliSense: improve common advanced/count-dependent clauses and gate or
+- [x] IntelliSense: improve common advanced/count-dependent clauses and gate or
   annotate known version/module incompatibilities using cached capabilities.
   No per-keystroke network calls, external language server or exhaustive grammar.
 - [ ] Vector search: support a supplied vector, attribute filter and bounded
@@ -716,3 +716,40 @@ cached-version warning display; the baseline adapter displays the same prefix
 without capability annotations. Existing command, argument and after-idle cases
 remain. All eight runner unit checks passed. Performance comparison is the remaining
 milestone check; screenshots and functional tests do not establish its outcome.
+
+
+### IntelliSense milestone completed — release CPU comparison
+
+The serial five-pair release run against `609508f` completed successfully at
+candidate `5ae87f1`. All reported comparisons passed the unchanged 10% p95 rule.
+Raw samples, environment, identical fixtures and baseline adapter are retained in
+`target/redis-intellisense-final-performance/`; process log:
+`/tmp/redis-intellisense-final-performance.log`.
+Apple M4 Max, arm64 macOS 27.2, Rust 1.99.1, release profile; each workload has
+20 warmups and 160 measured frames per run. Completion viewport is 1200×760
+logical pixels, default scale, synthetic 120 Hz timestamps. After-idle includes
+a synthetic 30-second idle interval. This measures CPU layout/tessellation only;
+it does not establish native input-to-present latency, GPU performance or mixed-DPI
+behavior. Those available native checks remain in the release gate.
+
+Values below are medians across five runs (milliseconds); worst is the largest
+individual stall across all runs. Each cell is base → candidate.
+
+| Workload | p50 | p95 | p99 | Median maximum | Worst |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| redis/command-editor/20/false | 0.023792 → 0.023792 | 0.026083 → 0.027375 | 0.029541 → 0.029542 | 0.029959 → 0.029875 | 0.053500 → 0.051167 |
+| redis/command-editor/20/true | 0.033583 → 0.033833 | 0.037125 → 0.039791 | 0.039291 → 0.042458 | 0.041375 → 0.043125 | 0.067959 → 0.057750 |
+| redis/command-editor/200/false | 0.047417 → 0.047917 | 0.052416 → 0.055750 | 0.057041 → 0.058000 | 0.058625 → 0.059167 | 0.066209 → 0.076000 |
+| redis/command-editor/200/true | 0.132583 → 0.135000 | 0.147167 → 0.147583 | 0.167375 → 0.153917 | 0.197625 → 0.156375 | 0.237375 → 0.186292 |
+| redis/completion/commands | 0.013125 → 0.013250 | 0.016416 → 0.015250 | 0.017209 → 0.017708 | 0.017542 → 0.018333 | 0.033042 → 0.042291 |
+| redis/completion/arguments | 0.012333 → 0.012375 | 0.015167 → 0.015208 | 0.015708 → 0.015666 | 0.015875 → 0.015750 | 0.016833 → 0.018041 |
+| redis/completion/after-idle | 0.013459 → 0.014000 | 0.016292 → 0.017000 | 0.017375 → 0.018125 | 0.017709 → 0.018292 | 0.038833 → 0.020541 |
+| redis/completion/counted-keys | 0.024125 → 0.019875 | 0.029250 → 0.023208 | 0.031708 → 0.025000 | 0.033375 → 0.025834 | 0.048250 → 0.044292 |
+| redis/completion/capability | 0.011167 → 0.012417 | 0.013750 → 0.015000 | 0.014125 → 0.015875 | 0.014417 → 0.015917 | 0.014792 → 0.016209 |
+
+Together with the functional, Cluster/ACL, cache-refresh, browser and native theme
+checks above, this completes the bounded IntelliSense milestone. Capability refresh
+is explicit and one batched exchange; completion itself performs zero network
+exchanges, cold or warm. No routine editor exchange was added. This is targeted
+common grammar plus advisory checked-node capabilities, not exhaustive grammar or
+cluster-wide permission discovery. Next milestone: configurable vector search.
