@@ -974,3 +974,31 @@ last entry and retains raw release samples separately; the old form had no equiv
 multi-entry behavior, so no false before/after feature comparison is claimed.
 All eight runner unit checks and the new workload smoke passed. Release measurements
 remain pending, and the editing milestone stays unchecked.
+
+### Editing release measurement checkpoint
+
+The comparison completed against `46b4818`, candidate `5042a2c`, with five
+serial paired release runs on Apple M4 Max / macOS 27.2 arm64 / Rust 1.99.1.
+Raw samples, environment, build logs and summary are retained in
+`target/redis-editing-performance/`. The runner reports regressions, not a pass.
+
+- Single-entry creation median p50 0.013500→0.016125 ms, p95
+  0.014917→0.019750 ms (+32.4%, +0.004833 ms), p99
+  0.016709→0.020500 ms, median maximum 0.018458→0.022709 ms;
+  worst observed maximum 0.034000→0.044625 ms.
+- Corrected JSON editor fixture median p50 0.058417→0.066292 ms, p95
+  0.067625→0.075083 ms (+11.0%, +0.007458 ms), p99
+  0.086916→0.081125 ms, median maximum 0.096958→0.098291 ms;
+  worst observed maximum 0.130459→0.145750 ms.
+- Both regressions exceeded 10% in four of five pairs. Other Redis page cases
+  passed. The unrelated sidebar/20 case was inconclusive; no whole-suite pass
+  is claimed. Thresholds remain unchanged.
+- Candidate-only 100-entry scrolling/after-idle workload: median p50 0.031125 ms,
+  p95 0.036625 ms, p99 0.039291 ms, median maximum 0.044084 ms, worst
+  maximum 0.071125 ms (220 measured frames per run, five runs). It verifies
+  reaching the final virtualized entry, not equivalence to a pre-existing feature.
+
+The added visible path/mode and creation-entry controls are a likely fixed-cost
+source, but the regressions remain under review before milestone closure. These
+measurements cover CPU layout/tessellation, not native input-to-present latency.
+User-facing editing limits and conflict semantics are now documented in REDIS.md.
