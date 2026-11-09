@@ -78,3 +78,14 @@ On macOS, use NSEvent's system double-click interval instead of a fixed toolkit
 value. Keep semantic same-target checks for opening/editing, and preserve ordinary
 single-click selection and Control-click context menus. Test slower valid clicks,
 clicks outside the interval, and adjacent targets; do not tune thresholds by feel.
+
+## macOS application icon
+
+Packaged apps must retain the bundle icon so macOS controls its presentation in
+Finder, the Dock and the app switcher. Do not override it with a runtime PNG:
+that bypasses the system icon renderer. With eframe, use the empty `IconData`
+sentinel to preserve the bundle icon; omitting the icon selects eframe's default.
+Keep the padded PNG fallback for unbundled development runs only. Do not resize
+the artwork to compensate for a runtime override. Compare visible icon bounds
+with native apps at the same size, and inspect both the Dock and app switcher
+after launching the rebuilt bundle before claiming visual verification.

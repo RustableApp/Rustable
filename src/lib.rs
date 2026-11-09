@@ -112,8 +112,25 @@ mod updates;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn application_icon() -> eframe::egui::IconData {
-    // eframe sets the macOS Dock icon at runtime, overriding the bundle icon.
-    // Always supply our artwork, including when launched through cargo run.
+    // Keep macOS in charge of the packaged icon's sizing and appearance in
+    // Finder, the Dock and the app switcher. Supplying pixels here replaces
+    // NSApplication.applicationIconImage with an unprocessed bitmap. `None`
+    // would select eframe's default icon; its empty IconData sentinel preserves
+    // the native bundle icon instead.
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSBundle, NSString};
+        let bundle = NSBundle::mainBundle();
+        if bundle.bundlePath().to_string().ends_with(".app")
+            && bundle.pathForResource_ofType(
+                Some(&NSString::from_str("Rustable")),
+                Some(&NSString::from_str("icns")),
+            ).is_some()
+        {
+            return eframe::egui::IconData::default();
+        }
+    }
+    // Unbundled `cargo run` still needs an icon; other platforms are unchanged.
     #[cfg(target_os = "macos")]
     let bytes = include_bytes!("../assets/rustable-macos-1024.png").as_slice();
     #[cfg(not(target_os = "macos"))]
