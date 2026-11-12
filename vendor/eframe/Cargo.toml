@@ -182,6 +182,7 @@ features = [
     "NSMenu",
     "NSMenuItem",
     "NSResponder",
+    "NSView",
 ]
 default-features = false
 

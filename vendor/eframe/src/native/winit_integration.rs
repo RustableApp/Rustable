@@ -108,7 +108,7 @@ pub enum EventResult {
 
     /// Causes a synchronous repaint inside the event handler. This should only
     /// be used in special situations if the window must be repainted while
-    /// handling a specific event. This occurs on Windows when handling resizes.
+    /// handling a specific event. This occurs on Windows and macOS when handling resizes.
     ///
     /// `RepaintNow` creates a new frame synchronously, and should therefore
     /// only be used for extremely urgent repaints.

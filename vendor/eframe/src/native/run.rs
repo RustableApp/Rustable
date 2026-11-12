@@ -306,12 +306,37 @@ impl<T: WinitApp> ApplicationHandler<UserEvent> for WinitAppWrapper<T> {
 
         // Nb: Make sure this guard is dropped after this function returns.
         event_loop_context::with_event_loop_context(event_loop, move || {
+            #[cfg(target_os = "macos")]
+            let is_resize = matches!(event, winit::event::WindowEvent::Resized(_));
+
             let event_result = match event {
                 winit::event::WindowEvent::RedrawRequested => {
                     self.winit_app.run_ui_and_paint(event_loop, window_id)
                 }
                 _ => self.winit_app.window_event(event_loop, window_id, event),
             };
+
+            // AppKit can animate a title-bar zoom inside its resize callback.
+            // Present the new layout before returning, otherwise the compositor
+            // stretches the previous framebuffer until a deferred redraw arrives.
+            // Only paint after the backend has updated its surface and egui input;
+            // zero-sized/unknown viewports do not request RepaintNow. Do not make
+            // ordinary input or repaint requests synchronous, or queue an extra
+            // redraw for this frame (the paint result schedules any further work).
+            #[cfg(target_os = "macos")]
+            let event_result =
+                if is_resize && matches!(event_result, Ok(EventResult::RepaintNow(_))) {
+                    if self
+                        .windows_next_repaint_times
+                        .get(&window_id)
+                        .is_some_and(|when| *when <= Instant::now())
+                    {
+                        self.windows_next_repaint_times.remove(&window_id);
+                    }
+                    self.winit_app.run_ui_and_paint(event_loop, window_id)
+                } else {
+                    event_result
+                };
 
             self.handle_event_result(event_loop, event_result);
         });

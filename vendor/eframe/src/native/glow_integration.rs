@@ -1211,6 +1211,28 @@ impl GlutinWindowContext {
                 };
             let current_gl_context = not_current_gl_context.make_current(&gl_surface)?;
 
+            #[cfg(target_os = "macos")]
+            if let raw_window_handle::RawWindowHandle::AppKit(handle) = window
+                .window_handle()
+                .expect("Failed to get window handle")
+                .as_raw()
+            {
+                // Glutin makes this view layer-backed. AppKit's default placement
+                // scales the cached framebuffer independently on each axis while
+                // animating a title-bar zoom, even if we paint on every resize.
+                // Keep text/cells at their original scale between fresh frames.
+                // Configure once, after attaching the OpenGL context, for every
+                // viewport. AppKit still owns the backing scale and redraw policy.
+                // SAFETY: The live winit window owns this NSView, and native
+                // window initialization runs on the AppKit main thread.
+                unsafe {
+                    let view = &*handle.ns_view.as_ptr().cast::<objc2_app_kit::NSView>();
+                    view.setLayerContentsPlacement(
+                        objc2_app_kit::NSViewLayerContentsPlacement::TopLeft,
+                    );
+                }
+            }
+
             // try setting swap interval. but its not absolutely necessary, so don't panic on failure.
             log::trace!("made context current. setting swap interval for surface");
             if let Err(err) = gl_surface.set_swap_interval(&current_gl_context, self.swap_interval)

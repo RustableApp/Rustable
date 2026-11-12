@@ -323,3 +323,57 @@ Native screenshots and local WASM editing/save/validation/copy checks passed as
 recorded in the release checklist. High-refresh input-to-present, mixed-DPI,
 multiple-monitor and native Windows/Linux/Intel Mac interactive checks remain
 unverified; no claim about those is inferred from CPU timing or browser screenshots.
+
+## macOS title-bar resize — 2026-11-12
+
+Native diagnosis: intermediate `Resized` events arrive during title-bar fill/zoom,
+and the layer-backed NSView already has `DuringViewResize` redraw policy. Its
+default `ScaleAxesIndependently` placement stretches cached contents between
+frames. Synchronous resize painting alone was tested in a fresh dev build and
+did **not** fix the report. Adding `TopLeft` contents placement fixed the stretch
+in the user's native preview test. The final patch uses the equivalent named
+AppKit API once per OpenGL surface and retains synchronous resize painting.
+It does not change database operations, table layout, DPI, or ordinary input
+repaint scheduling. Temporary diagnostic logging was removed.
+
+The disposable SQLite preview used the production table at 2× capture scale;
+native settled screenshots were reviewed before and after resizing. The user
+confirmed the animation no longer stretches. This is functional validation,
+not measured input-to-present latency. `cargo build --locked --features qa` and
+`cargo run --locked --example macos_gl_context_recovery` pass; the latter verifies
+four painted frames after clearing the GL thread context.
+
+Mixed-DPI movement, monitor reconnection, secondary-window animations, light
+theme, 60/120 Hz presentation, missed-frame counts and idle-redraw counts remain
+unverified. The CPU suite below cannot establish those properties.
+
+Final comparison: `python3 scripts/ui-performance.py --base
+44ad36b441684b87ec8e389d82c065e278f504c1 --output
+target/macos-resize-final-performance` (one command). Apple M4 Max, macOS 27.2.1
+arm64, Rust 1.99.1 / LLVM 23.1.1, release/thin LTO. Five alternating paired runs,
+serial builds and measurements; unchanged default-scale fixtures: grid 1200×800,
+20 warmups/160 samples; workspace/sidebar 1440×900, 20 warmups/100 samples.
+Raw samples, p50/p95/p99/max, environment, build logs and all 19 comparisons are
+retained in `target/macos-resize-final-performance/`.
+
+18 metrics passed; precise vertical-scroll tessellation remains **inconclusive**
+(exit 2). Its median p95 rose 3.35%, but paired ratios varied from 0.866 to 1.300,
+with relative median absolute deviation above 10%. Only two of five pairs exceeded
+10%; there is no repeatable above-threshold regression and no blanket pass.
+No thresholds or fixtures were changed. The first run, retained separately in
+`target/macos-resize-performance/`, predates the placement fix and had three
+inconclusive metrics; it is superseded by this final-code run.
+
+Representative timings below are median per-run values, in milliseconds; the
+maximum column is the median of each run's maximum, not a pooled worst case.
+Individual maxima and all sorted samples remain in `results.json`.
+
+| Scenario | Base p50/p95/p99/max | Final p50/p95/p99/max |
+| --- | --- | --- |
+| Vertical precise layout | 0.234416/0.253708/0.293250/0.341542 | 0.239917/0.259042/0.329292/0.347083 |
+| Vertical precise tessellation (inconclusive) | 0.042417/0.046042/0.052375/0.052542 | 0.042125/0.047583/0.051875/0.056667 |
+| 120-column workspace with inspector | 0.405792/0.430875/0.450000/0.450000 | 0.408083/0.425500/0.440375/0.440375 |
+
+These fixtures do not execute native resize callbacks. They protect existing CPU
+layout/tessellation workloads; the user-confirmed native reproduction is the
+functional evidence for the resize fix, with the native limitations listed above.

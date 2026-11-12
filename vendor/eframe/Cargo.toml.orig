@@ -164,6 +164,7 @@ objc2-app-kit = { workspace = true, default-features = false, features = [
   "NSMenu",
   "NSMenuItem",
   "NSResponder",
+  "NSView",
 ] }
 
 # windows:

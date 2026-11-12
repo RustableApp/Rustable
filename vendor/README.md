@@ -116,6 +116,39 @@ a second session or cache displayed metadata across refreshes.
 
 ## eframe checked persistence
 
+### macOS resize presentation
+
+`src/native/glow_integration.rs`: after glutin attaches the OpenGL context, set
+the layer-backed NSView's contents placement to `TopLeft`. AppKit's default
+`ScaleAxesIndependently` stretches the cached framebuffer during title-bar
+zoom/fill animations, even when intermediate resize events are painted. Keep
+cached text and cells at their original scale between fresh frames. This is a
+one-time setting for each viewport; AppKit retains ownership of the backing scale,
+layer and redraw policy. Do not disable layer backing (glutin requires it for
+context attachment stability) or override the scale for mixed-DPI displays.
+
+`src/native/run.rs`: after a macOS `Resized` event updates the backend surface
+and egui input, honor its `RepaintNow` by laying out and presenting synchronously
+before returning to AppKit. Previously only Windows painted synchronously;
+macOS queued a later redraw. Painting promptly complements the contents-placement
+fix; synchronous painting alone did not resolve the reported stretch. The change
+is restricted to resize events requesting
+an immediate paint. Ordinary input, zero-sized surfaces and other platforms keep
+their existing scheduling. Consume any due repaint for that window, preserve
+future deadlines, and use
+the paint result to schedule further work, rather than adding a redundant redraw
+or an animation timer. Both root and secondary viewports use this dispatch path.
+
+Native acceptance requires title-bar double-click zoom/restore, edge dragging,
+idle settling, secondary windows, and mixed-DPI move/snap/reconnect checks.
+The headless UI suite measures layout/tessellation only, not this AppKit path.
+Use `RUSTABLE_UI_PREVIEW=1 mise exec -- cargo run --locked --features qa` for a
+disposable SQLite table. Shrink the window, then double-click its title bar to
+fill the screen; repeat in both directions and with ordinary edge dragging.
+Text and cell heights must retain their scale throughout the transition, not
+just after it. Leave it idle afterwards and verify that repaints settle.
+See `docs/UI-PERFORMANCE.md` for the November 12 validation scope and limitations.
+
 ### Native OpenGL context recovery
 
 `src/native/glow_integration.rs`: the context-switch fast path now requires
