@@ -28,7 +28,10 @@ fn fallback() -> Option<Arc<FontData>> {
         candidates.iter().find_map(|path| {
             std::fs::read(path)
                 .ok()
-                .map(|bytes| Arc::new(FontData::from_owned(bytes)))
+                // This cache already retains one fallback for the process lifetime.
+                // Borrow its immutable bytes so epaint's FontRef can share them;
+                // FontData::from_owned makes epaint clone the full font for parsing.
+                .map(|bytes| Arc::new(FontData::from_static(Box::leak(bytes.into_boxed_slice()))))
         })
     })
     .clone()
@@ -96,6 +99,17 @@ pub fn install(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn native_fallback_bytes_are_borrowed_and_shared() {
+        let first = fallback().expect("macOS Unicode fallback font");
+        let second = fallback().expect("cached Unicode fallback font");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(matches!(first.font, std::borrow::Cow::Borrowed(_)));
+        let definitions = definitions(Some(first.clone()));
+        assert!(Arc::ptr_eq(&first, &definitions.font_data[FALLBACK]));
+    }
+
     #[test]
     fn browser_cjk_asset_renders_without_replacing_latin_or_emoji() {
         let font = FontData::from_static(include_bytes!("../assets/fonts/NotoSansCJKjp-Regular.otf"));
