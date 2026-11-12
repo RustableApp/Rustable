@@ -4,6 +4,11 @@ use web_time::Instant;
 mod query_library;
 #[path = "query_history.rs"]
 mod query_history;
+#[path = "query_result_tabs.rs"]
+mod query_result_tabs;
+#[cfg(any(test, feature = "qa"))]
+#[path = "query_layout_qa.rs"]
+mod query_layout_qa;
 #[path = "table_tabs.rs"]
 mod table_tabs;
 #[path = "navigator.rs"]
@@ -4176,16 +4181,17 @@ Right-click to inspect or remove individual changes",
         };
         // Reserve every control below the viewport. Under-reserving causes the
         // resizable panel to grow each frame after result tabs appear.
-        let footer_height = if self.tabs[self.tab].results.len() <= 1 && self.tabs[self.tab].pins.items.is_empty() {
-            36.0
-        } else {
-            76.0
-        };
+        let has_result_tabs = self.tabs[self.tab].results.len() > 1 || !self.tabs[self.tab].pins.items.is_empty();
+        let compact_footer = ui.available_width() < 600.0;
+        let footer_height = 4.0 + 28.0 + ui.spacing().item_spacing.y
+            + if compact_footer { 28.0 + ui.spacing().item_spacing.y } else { 0.0 }
+            + if has_result_tabs { 4.0 + query_result_tabs::STRIP_HEIGHT + ui.spacing().item_spacing.y } else { 0.0 };
         let editor_height = (ui.available_height() - footer_height).max(0.0);
         let line_index = crate::editor::line_index(ui.ctx(), &self.tabs[self.tab].sql);
         let digits = line_index.line_count().to_string().len().max(2);
         let gutter_width = digits as f32 * 8.0 + 16.0;
         let mut active_caret = self.tabs[self.tab].cursor.start;
+        let mut text_left = ui.cursor().left();
         let editor_background = if ui.visuals().dark_mode {
             Color32::from_gray(30)
         } else {
@@ -4392,6 +4398,7 @@ Right-click to inspect or remove individual changes",
                 .map(|r| r.primary.index)
                 .unwrap_or(self.tabs[self.tab].cursor.start);
             active_caret = caret;
+            text_left = scrolled.inner.galley_pos.x;
             crate::editor::paint_line_numbers(
                 ui,
                 gutter,
@@ -4402,14 +4409,18 @@ Right-click to inspect or remove individual changes",
         ui.add_space(4.0);
         let current = crate::editor::line_index(ui.ctx(), &self.tabs[self.tab].sql);
         let (line, column) = current.line_column(active_caret);
+        let cursor_status = |ui: &mut egui::Ui, status: &str| {
+            ui.add_space((text_left - ui.cursor().left()).max(0.0));
+            ui.add(egui::Label::new(RichText::new(format!("Line {line}, column {column}"))
+                .size(11.0).color(ui.visuals().weak_text_color())).truncate())
+                .on_hover_text(status);
+        };
+        if compact_footer {
+            ui.horizontal(|ui| { ui.set_height(28.0); cursor_status(ui, &self.language.status); });
+        }
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(format!("Line {line}, column {column}"))
-                    .size(11.0)
-                    .color(ui.visuals().weak_text_color()),
-            )
-            .on_hover_text(&self.language.status);
+            ui.set_height(28.0);
+            if !compact_footer { cursor_status(ui, &self.language.status); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 rounded_action_buttons(ui);
                 ui.add_space(8.0);
@@ -4499,57 +4510,9 @@ Right-click to inspect or remove individual changes",
                 }
             });
         });
-        if self.tabs[self.tab].results.len() > 1 || !self.tabs[self.tab].pins.items.is_empty() {
-            ui.add_space(8.0);
-            egui::ScrollArea::horizontal()
-                .id_salt("result-tabs")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let tab = &mut self.tabs[self.tab];
-                        let mut close_pin = None;
-                        for (index, pin) in tab.pins.items.iter().enumerate() {
-                            let response = ui.selectable_label(tab.selected_pin == Some(index), format!("Pinned {} · {} rows", pin.id, pin.grid.rows.len()));
-                            if response.clicked() {
-                                tab.selected_pin = Some(index);
-                                tab.grid = pin.grid.clone();
-                                self.row_selection.clear();
-                                self.selected = None;
-                            }
-                            response.context_menu(|ui| {
-                                if ui.button("Close pinned result").clicked() { close_pin = Some(index); ui.close(); }
-                            });
-                        }
-                        if let Some(index) = close_pin {
-                            tab.remove_pin(index);
-                            self.row_selection.clear();
-                            self.selected = None;
-                        }
-                        for (index, grid) in tab.results.iter().enumerate() {
-                            let label = if grid.columns.is_empty() {
-                                format!("{} · {} affected", index + 1, grid.affected)
-                            } else {
-                                format!(
-                                    "{} · {} rows{}",
-                                    index + 1,
-                                    grid.rows.len(),
-                                    if grid.truncated { "+" } else { "" }
-                                )
-                            };
-                            if ui
-                                .selectable_label(tab.selected_pin.is_none() && tab.result_index == index, label)
-                                .clicked()
-                            {
-                                tab.result_index = index;
-                                tab.selected_pin = None;
-                                tab.grid = grid.clone();
-                                self.view = View::Query;
-                                self.row_selection.clear();
-                                self.selected = None;
-                            }
-                        }
-                    });
-                });
+        if has_result_tabs {
+            ui.add_space(4.0);
+            self.query_result_tabs(ui);
         }
     }
 
@@ -7184,6 +7147,30 @@ fn workspace_tab(
     preview: bool,
 ) -> (egui::Response, bool) {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::click());
+    paint_workspace_tab(ui, rect, &response, title, selected, preview, 38.0);
+    let mut closed = false;
+    if closable {
+        let close_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.right() - 19.0, rect.center().y),
+            egui::vec2(20.0, 22.0),
+        );
+        let close = ui.interact(close_rect, response.id.with("close"), egui::Sense::click());
+        crate::icons::paint(ui.painter(), close_rect.center(), "x", 12.0, ui.style().interact(&close).fg_stroke.color);
+        closed = close.clicked_by(egui::PointerButton::Middle)
+            || close.on_hover_text(format!("Close tab · {} · Reopen {}", crate::icons::shortcut(ui.ctx(), false, "W"), crate::icons::shortcut(ui.ctx(), true, "T"))).clicked();
+    }
+    (response.on_hover_text(title), closed)
+}
+
+fn paint_workspace_tab(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    title: &str,
+    selected: bool,
+    preview: bool,
+    text_inset: f32,
+) {
     let dark = ui.visuals().dark_mode;
     let (fill, outline) = match (dark, selected, response.hovered()) {
         (true, true, _) => (78, 96),
@@ -7196,8 +7183,8 @@ fn workspace_tab(
     ui.painter().rect(rect, 10.0, Color32::from_gray(fill),
         if selected { Stroke::new(1.0_f32, Color32::from_gray(outline)) } else { Stroke::NONE }, egui::StrokeKind::Inside);
     let text_rect = egui::Rect::from_min_max(
-        rect.min + egui::vec2(38.0, 0.0),
-        rect.max - egui::vec2(38.0, 0.0),
+        rect.min + egui::vec2(text_inset, 0.0),
+        rect.max - egui::vec2(text_inset, 0.0),
     );
     let mut job = egui::text::LayoutJob::simple_singleline(
         title.to_owned(),
@@ -7213,18 +7200,6 @@ fn workspace_tab(
     ui.painter()
         .with_clip_rect(text_rect.intersect(ui.clip_rect()))
         .galley(pos, galley, ui.visuals().text_color());
-    let mut closed = false;
-    if closable {
-        let close_rect = egui::Rect::from_center_size(
-            egui::pos2(rect.right() - 19.0, rect.center().y),
-            egui::vec2(20.0, 22.0),
-        );
-        let close = ui.interact(close_rect, response.id.with("close"), egui::Sense::click());
-        crate::icons::paint(ui.painter(), close_rect.center(), "x", 12.0, ui.style().interact(&close).fg_stroke.color);
-        closed = close.clicked_by(egui::PointerButton::Middle)
-            || close.on_hover_text(format!("Close tab · {} · Reopen {}", crate::icons::shortcut(ui.ctx(), false, "W"), crate::icons::shortcut(ui.ctx(), true, "T"))).clicked();
-    }
-    (response.on_hover_text(title), closed)
 }
 
 fn field_value_menu(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) -> egui::Response {

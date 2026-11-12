@@ -148,6 +148,10 @@ pub fn run_native() -> eframe::Result {
     objc2_foundation::NSProcessInfo::processInfo()
         .setProcessName(&objc2_foundation::NSString::from_str("Rustable"));
     #[cfg(feature = "qa")]
+    if std::env::var_os("RUSTABLE_QUERY_CAPTURE").is_some() {
+        return app::Rustable::run_query_layout_preview();
+    }
+    #[cfg(feature = "qa")]
     if std::env::var_os("RUSTABLE_SENTINEL_CAPTURE").is_some() {
         return app::Rustable::run_sentinel_preview();
     }

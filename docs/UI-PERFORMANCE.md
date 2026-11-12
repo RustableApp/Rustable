@@ -28,6 +28,40 @@ processes run serially. It does not access saved connections or user databases.
 The candidate is the current working tree; its commit and dirty status are recorded.
 Each invocation needs a new/empty output directory to preserve prior evidence.
 
+Query editor layout changes can add `--query-editor`. The runner copies the same
+`query_layout_qa.rs` fixture into the baseline and measures the production workspace
+with 0/4 results at 1280×760, 128 results at 760×760, and 4 results at 500×760 logical
+points. Each case uses 20 warmup and 160 measured frames, cycles the selected result,
+and includes a synthetic 30-second idle time jump. These are CPU layout/tessellation
+measurements at the default headless scale, not native input-to-present latency.
+The QA build can also capture the native view with
+`RUSTABLE_QUERY_CAPTURE=/absolute/path/capture.ppm`; optional `RUSTABLE_QUERY_LIGHT=1`
+and `RUSTABLE_QUERY_WIDTH=760` select the theme and logical window width. This preview
+uses disposable in-memory results and never opens a database connection.
+
+### Query footer/result-tab verification (2026-11-12)
+
+Compared against `268c4e674466e55a57c9bbdfb74a1c3a8c8420ef` on Apple M4 Max,
+macOS 27.2.1 arm64, Rust 1.99.1, release profile. Five alternating paired runs,
+using the query fixtures described above at default headless scale (1×).
+All 23 metrics passed. Median per-run CPU milliseconds are below; each cell
+is base → candidate. Maximum is the median of per-run maxima, not a pooled maximum.
+
+| Results / width | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| 0 / 1280 | 0.02250 → 0.02237 | 0.02504 → 0.02325 | 0.02792 → 0.02750 | 0.02879 → 0.02912 |
+| 4 / 1280 | 0.05233 → 0.05412 | 0.05546 → 0.05658 | 0.06088 → 0.06017 | 0.06187 → 0.06279 |
+| 128 / 760 | 0.09450 → 0.05600 | 0.10008 → 0.06008 | 0.10754 → 0.06263 | 0.10788 → 0.06892 |
+| 4 / 500 | 0.05212 → 0.05454 | 0.05392 → 0.05733 | 0.06083 → 0.06246 | 0.06183 → 0.06413 |
+
+Raw samples, build logs and environment are retained locally in
+`target/query-tabs-style-performance/` (final shared workspace-tab styling). Native dark 1280×760 and light 760×760
+captures at 2× scale were visually inspected in `target/query-layout-review/`.
+Layout tests cover both themes, 500/760/1280 widths, a four-digit gutter,
+128 results, selection, revealing offscreen selections and stable pane height.
+Native frame intervals, input-to-present timing, missed frames, 60/120 Hz,
+multiple windows and mixed-DPI/monitor reconnect/snapping were not measured.
+
 Performance comparisons run locally to avoid consuming GitHub Actions minutes
 on repeated release builds. Keep the raw report and summarize the relevant
 before/after measurements in the PR. There is no automated GitHub performance

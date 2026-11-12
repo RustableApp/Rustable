@@ -137,6 +137,7 @@ def measure(binary, source, logs, label, iteration):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--query-editor', action='store_true', help='Compare query footer and multiple-result tabs with the same fixture')
     parser.add_argument('--redis', action='store_true', help='Compare the same Redis grid fixture on both revisions')
     parser.add_argument('--redis-connections', action='store_true', help='Include the shared Redis connection profile workload')
     parser.add_argument('--redis-pages', action='store_true', help='Include Search, Analyze and Pub/Sub page workloads')
@@ -150,6 +151,9 @@ def main():
     parser.add_argument('--runs', type=int, default=5)
     args = parser.parse_args()
     global BENCHMARKS
+    if args.query_editor:
+        BENCHMARKS += ('query_editor_results_frame_benchmark',)
+        EXPECTED.update(f'query/editor-results/{count}/{width}' for count, width in ((0,1280),(4,1280),(128,760),(4,500)))
     if args.redis:
         BENCHMARKS += ('redis_key_grid_frame_benchmark', 'redis_hash_inspector_frame_benchmark', 'redis_string_inspector_frame_benchmark', 'redis_browser_chrome_frame_benchmark')
         EXPECTED.update(('redis/grid', 'redis/hash-inspector', 'redis/string-inspector', 'redis/browser-chrome'))
@@ -199,6 +203,15 @@ def main():
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
+            if args.query_editor:
+                fixture = root / 'src' / 'query_layout_qa.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                app = base_path / 'src' / 'app.rs'
+                if 'mod query_layout_qa;' not in app.read_text():
+                    with app.open('a') as output:
+                        output.write('\n#[cfg(test)] #[path = "query_layout_qa.rs"] mod query_layout_qa;\n')
+                metadata['query_editor_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.redis_pages:
                 fixture = root / 'src' / 'redis_pubsub_benchmark.rs'
                 shutil.copy2(fixture, base_path / 'src' / fixture.name)
