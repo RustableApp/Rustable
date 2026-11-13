@@ -1,14 +1,49 @@
 //! Cached SQL highlighting: tokenization runs only when text or appearance changes.
 use eframe::egui::{self, Color32, FontId, TextFormat, text::LayoutJob};
+use std::sync::Arc;
 
 pub const EDITOR_FONT_SIZE: f32 = 14.0;
 pub const EDITOR_LINE_HEIGHT: f32 = 18.0;
 
 #[derive(Default)]
 struct Highlighter;
-impl egui::cache::ComputerMut<(&str, bool), LayoutJob> for Highlighter {
-    fn compute(&mut self, (code, dark): (&str, bool)) -> LayoutJob {
-        highlight(code, dark)
+impl egui::cache::ComputerMut<(&str, bool, bool), Arc<LayoutJob>> for Highlighter {
+    fn compute(&mut self, (code, dark, editor): (&str, bool, bool)) -> Arc<LayoutJob> {
+        let mut job = highlight(code, dark);
+        if editor {
+            for section in &mut job.sections {
+                section.format.font_id = FontId::monospace(EDITOR_FONT_SIZE);
+                section.format.line_height = Some(EDITOR_LINE_HEIGHT);
+            }
+        }
+        Arc::new(job)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LayoutKey<'a> {
+    text: &'a str,
+    dark: bool,
+    editor: bool,
+    width: u32,
+    max_rows: usize,
+    highlighted: &'a Arc<LayoutJob>,
+}
+impl std::hash::Hash for LayoutKey<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Highlighting is a pure function of text/theme/editor. Hash those inputs,
+        // not every format record in the supplied immutable intermediate job.
+        (self.text, self.dark, self.editor, self.width, self.max_rows).hash(state);
+    }
+}
+#[derive(Default)]
+struct LayoutComputer;
+impl egui::cache::ComputerMut<LayoutKey<'_>, Arc<LayoutJob>> for LayoutComputer {
+    fn compute(&mut self, key: LayoutKey<'_>) -> Arc<LayoutJob> {
+        let mut job = (**key.highlighted).clone();
+        job.wrap.max_width = f32::from_bits(key.width);
+        job.wrap.max_rows = key.max_rows;
+        Arc::new(job)
     }
 }
 
@@ -41,22 +76,20 @@ pub fn preview(ui: &egui::Ui, text: &str, width: f32) -> std::sync::Arc<egui::Ga
 }
 
 fn layout_rows(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32, max_rows: usize, editor: bool) -> std::sync::Arc<egui::Galley> {
-    type Cache = egui::cache::FrameCache<LayoutJob, Highlighter>;
-    let mut job = ui.ctx().memory_mut(|memory| {
-        memory
-            .caches
-            .cache::<Cache>()
-            .get((text.as_str(), ui.visuals().dark_mode))
+    type SyntaxCache = egui::cache::FrameCache<Arc<LayoutJob>, Highlighter>;
+    type LayoutCache = egui::cache::FrameCache<Arc<LayoutJob>, LayoutComputer>;
+    let width = width.max(1.0).round().to_bits();
+    let dark = ui.visuals().dark_mode;
+    let job = ui.ctx().memory_mut(|memory| {
+        // Keep syntax alive across frames so resizing only prepares a new wrap,
+        // without re-tokenizing an unchanged document.
+        let highlighted = memory.caches.cache::<SyntaxCache>()
+            .get((text.as_str(), dark, editor));
+        memory.caches.cache::<LayoutCache>().get(LayoutKey {
+            text: text.as_str(), dark, editor, width, max_rows, highlighted: &highlighted,
+        })
     });
-    if editor {
-        for section in &mut job.sections {
-            section.format.font_id = FontId::monospace(EDITOR_FONT_SIZE);
-            section.format.line_height = Some(EDITOR_LINE_HEIGHT);
-        }
-    }
-    job.wrap.max_width = width.max(1.0);
-    job.wrap.max_rows = max_rows;
-    ui.fonts_mut(|fonts| fonts.layout_job(job))
+    ui.fonts_mut(|fonts| fonts.layout_job_shared(job))
 }
 
 fn highlight(code: &str, dark: bool) -> LayoutJob {
@@ -153,11 +186,21 @@ fn highlight(code: &str, dark: bool) -> LayoutJob {
             {
                 index += 1;
             }
-            if KEYWORDS.contains(&code[start..index].to_ascii_uppercase().as_str()) {
+            if KEYWORDS.iter().any(|word| word.eq_ignore_ascii_case(&code[start..index])) {
                 color = keyword;
             }
         } else {
             index += code[index..].chars().next().unwrap().len_utf8();
+        }
+        // Adjacent tokens with the same format need only one layout section.
+        // This also keeps long whitespace/Unicode runs from retaining a section
+        // per character in the highlight and font-layout caches.
+        if let Some(section) = job.sections.last_mut()
+            && section.format.color == color
+        {
+            job.text.push_str(&code[start..index]);
+            section.byte_range.end = index;
+            continue;
         }
         job.append(
             &code[start..index],
@@ -260,6 +303,110 @@ const KEYWORDS: &[&str] = &[
 mod tests {
     use super::*;
     #[test]
+    fn shared_jobs_reuse_storage_and_match_owned_layout() {
+        let ctx = egui::Context::default();
+        let sql = "SELECT '日本語', customer_name FROM customers;\n".repeat(30);
+        let mut job = highlight(&sql, true);
+        job.wrap.max_width = 300.0;
+        let job = Arc::new(job);
+        for frame in 0..6 {
+            if frame == 3 {
+                // Exercise a real font-definition replacement, not an identical
+                // set_fonts request that egui deliberately ignores.
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap().reverse();
+                ctx.set_fonts(fonts);
+                ctx.set_pixels_per_point(2.0);
+            }
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                ctx.fonts_mut(|fonts| {
+                    let shared = fonts.layout_job_shared(job.clone());
+                    assert!(Arc::ptr_eq(&shared.job, &job));
+                    let owned = fonts.layout_job((*job).clone());
+                    assert!(Arc::ptr_eq(&shared, &owned));
+                    let mut fractional = (*job).clone();
+                    fractional.wrap.max_width = 250.25;
+                    let fractional = Arc::new(fractional);
+                    let shared = fonts.layout_job_shared(fractional.clone());
+                    assert_eq!(fractional.wrap.max_width, 250.25);
+                    assert_eq!(shared.job.wrap.max_width, 250.0);
+                    let owned = fonts.layout_job((*fractional).clone());
+                    assert!(Arc::ptr_eq(&shared, &owned));
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn prepared_editor_jobs_reuse_ownership_and_invalidate_all_inputs() {
+        let ctx = egui::Context::default();
+        let mut previous = None;
+        for _ in 0..4 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let current = editor_layout(ui, &"SELECT 42", 300.0);
+                    if let Some(previous) = &previous {
+                        assert!(Arc::ptr_eq(&current.job, previous));
+                    }
+                    previous = Some(current.job.clone());
+                    for (text, width, rows, editor) in [
+                        ("SELECT 43", 300.0, usize::MAX, true),
+                        ("SELECT 42", 100.0, usize::MAX, true),
+                        ("SELECT 42", 300.0, 2, true),
+                        ("SELECT 42", 300.0, usize::MAX, false),
+                    ] {
+                        let changed = layout_rows(ui, &text, width, rows, editor);
+                        assert!(!Arc::ptr_eq(&changed.job, &current.job));
+                    }
+                    let dark = ui.visuals().dark_mode;
+                    ui.visuals_mut().dark_mode = !dark;
+                    let changed = editor_layout(ui, &"SELECT 42", 300.0);
+                    assert_ne!(changed.job.sections[0].format.color, current.job.sections[0].format.color);
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn compact_sections_preserve_layout_and_colors() {
+        for dark in [false, true] {
+            let sql = "select  customer_name, 日本語\n    FROM customers -- comment\nWHERE name = 'it''s fine' AND value >= 42;";
+            let mut compact = highlight(sql, dark);
+            assert_eq!(compact.text, sql);
+            assert!(compact.sections.windows(2).all(|pair| {
+                pair[0].byte_range.end == pair[1].byte_range.start
+                    && pair[0].format != pair[1].format
+            }));
+            // Splitting identical formatting at every character must render the
+            // same glyph positions/colors as the compact representation.
+            let mut split = LayoutJob::default();
+            for section in &compact.sections {
+                for ch in sql[section.byte_range.clone()].chars() {
+                    split.append(ch.encode_utf8(&mut [0; 4]), 0.0, section.format.clone());
+                }
+            }
+            compact.wrap.max_width = 180.0;
+            split.wrap = compact.wrap.clone();
+            let ctx = egui::Context::default();
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                let a = ctx.fonts_mut(|fonts| fonts.layout_job(compact.clone()));
+                let b = ctx.fonts_mut(|fonts| fonts.layout_job(split.clone()));
+                assert_eq!(a.rect, b.rect);
+                assert_eq!(a.rows.len(), b.rows.len());
+                for (a, b) in a.rows.iter().zip(&b.rows) {
+                    assert_eq!(a.pos, b.pos);
+                    assert_eq!(a.visuals.mesh, b.visuals.mesh);
+                }
+            });
+        }
+        let whitespace = highlight(&" ".repeat(32_768), true);
+        assert_eq!(whitespace.sections.len(), 1);
+        let lowercase = highlight("select", true);
+        assert_eq!(lowercase.sections[0].format, highlight("SELECT", true).sections[0].format);
+        assert_ne!(lowercase.sections[0].format, highlight("selection", true).sections[0].format);
+    }
+
+    #[test]
     fn selection_preserves_token_colors_in_both_themes() {
         for dark in [false, true] {
             let ctx = egui::Context::default();
@@ -355,3 +502,7 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+#[path = "sql_highlight_performance.rs"]
+mod performance;

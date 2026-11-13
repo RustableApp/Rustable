@@ -411,3 +411,388 @@ Individual maxima and all sorted samples remain in `results.json`.
 These fixtures do not execute native resize callbacks. They protect existing CPU
 layout/tessellation workloads; the user-confirmed native reproduction is the
 functional evidence for the resize fix, with the native limitations listed above.
+
+## SQL highlighting memory and CPU — 2026-11-12
+
+The `--sql-highlight` runner option copies the identical fixture into the base
+revision and measures uncached highlighting plus production editor layout and
+headless tessellation. Fixtures are a 200-statement report (22,000 UTF-8 bytes)
+and a statement containing 32,768 spaces. Layout uses 1200×800 logical pixels,
+1× default scale, 20 warmup and 160 measured frames. Both unchanged text and
+alternating text variants are covered, with a synthetic 30-second idle jump.
+Alternating variants exercise changed-text cache lookup, not native key events;
+uncached highlighting is measured separately. First-use font initialization is
+in warmup, not included in the reported percentiles.
+
+`HIGHLIGHT_MEMORY` records text capacity plus section-vector capacity times the
+section size, for one retained highlighting job. This excludes allocator overhead,
+font galleys, glyph atlases, other caches and whole-process RSS. The fixture and
+all raw measurements are retained in the report directory. No SQL execution or
+driver/protocol sequencing changes are involved.
+
+Compared against `06088d111e10b95d96696e69b4dc403dc0ee4009` on Apple M4 Max,
+macOS 27.2.1 arm64, Rust 1.99.1, release profile, five alternating serial pairs:
+
+```sh
+python3 scripts/ui-performance.py --base 06088d111e10b95d96696e69b4dc403dc0ee4009 --query-editor --sql-highlight --output target/sql-highlight-performance
+```
+
+All 29 comparisons passed the unchanged regression gate. Median per-run CPU
+milliseconds are below; maximum is the worst single sample across all five runs.
+
+| Workload | Base p50/p95/p99/max | Candidate p50/p95/p99/max |
+| --- | --- | --- |
+| sql/highlight/query | 0.137417/0.145875/0.149584/0.156833 | 0.087125/0.092166/0.096959/0.108208 |
+| sql/layout/query/false | 0.178250/0.200708/0.209417/0.225125 | 0.085250/0.097000/0.105459/0.114625 |
+| sql/layout/query/true | 0.608833/0.634208/0.643666/0.899250 | 0.356667/0.375292/0.381500/0.415458 |
+| sql/highlight/whitespace | 0.519208/0.561833/0.587917/0.620375 | 0.116083/0.122708/0.125875/0.144667 |
+| sql/layout/whitespace/false | 0.919750/0.954708/0.971500/1.151167 | 0.006625/0.007333/0.008500/0.028584 |
+| sql/layout/whitespace/true | 4.594208/4.768417/4.855875/5.117083 | 0.889375/0.932583/0.948791/1.117750 |
+
+Retained single-job storage: normal SQL 888,832 → 462,848 bytes (47.9% less;
+5,800 → 2,400 sections), whitespace fixture 6,881,280 → 65,952 bytes (99.0%
+less; 32,781 → 4 sections). Adjacent identically formatted spans are coalesced;
+keyword recognition no longer allocates an uppercase identifier. No cache lifetime,
+visual styling, repaint scheduling or database behavior changed. Exact glyph-mesh
+and wrapping equality tests cover both themes and Unicode. Existing highlighting,
+selection, incomplete-input and preview tests pass.
+
+Raw results, fixture source and environment are in
+`target/sql-highlight-performance/`. Native input-to-present, whole-process RSS,
+idle wakeups and display/multi-monitor checks were not measured. These results
+establish CPU and single-job allocation improvements, not whole-app memory savings.
+
+The full-snapshot undo hotspot identified during this pass was addressed in the
+following change. Its effects are not included in the highlighting-only numbers.
+
+## Staged-edit undo history memory and CPU — 2026-11-12
+
+History now keeps one current state and reversible replacement spans. Recording
+an action compares the common prefix/suffix, clones only the changed span, and
+moves replaced values into history. Undo/redo exchange owned spans, then return
+an owned current-state copy as before. A no-op preserves redo; a new edit after
+undo drops the abandoned future. Successful commit/discard releases history
+storage. No history-depth limit or loss of undo steps is introduced. Arbitrary
+large replacement spans can still require large storage; this is not a total
+memory cap. Database execution, safety guards and protocol exchanges are unchanged.
+
+The `--change-history` runner copies identical action and memory fixtures into
+both revisions. CPU measurement stages 180 distinct cell changes containing
+16 KiB text each, then undoes and redoes all 180. Each phase excludes its first
+20 operations and measures 160; both versions return and verify the same owned
+states. These are completed-action CPU times, not frame layout or physical input
+timing. The fixture exercises accumulated changes to different rows, not every
+possible bulk/reordering workload. Common-value comparisons still scan the
+unchanged prefix/suffix; restoring an owned state still copies its values.
+
+The separate memory workload stages 128 such changes and verifies one undo/redo
+in a fresh process. `/usr/bin/time -l` measures whole-test-process peak RSS,
+including the fixture, runtime and temporary returned states; it is not live-app
+RSS or solely retained history. Both implementations retain all 128 undo steps.
+
+Comparison: base `06088d111e10b95d96696e69b4dc403dc0ee4009`, Apple M4 Max,
+macOS 27.2.1 arm64, Rust 1.99.1, release profile; five alternating serial pairs.
+The candidate includes the preceding SQL highlighting change. All 32 comparisons
+passed the unchanged regression gate, including the existing grid/workspace/sidebar,
+query-editor and highlighting fixtures. The history-only timings below isolate
+this second optimization from the highlighting work.
+
+```sh
+python3 scripts/ui-performance.py --base 06088d111e10b95d96696e69b4dc403dc0ee4009 --query-editor --sql-highlight --change-history --output target/change-history-performance
+/usr/bin/time -l <release-test-executable> app::change_history::performance::change_history_memory_benchmark --exact --ignored --nocapture
+```
+
+CPU milliseconds: median per-run percentiles; maximum is the worst single sample
+across all five runs. The changing state size is intentional and identical on both
+versions; these are distributions across the same action sequence.
+
+| Action | Base p50/p95/p99/max | Candidate p50/p95/p99/max |
+| --- | --- | --- |
+| history/record | 0.095625/0.164292/0.178000/0.193208 | 0.032750/0.057583/0.060167/0.066875 |
+| history/undo | 0.027875/0.084000/0.096000/0.114208 | 0.018916/0.036458/0.039500/0.042583 |
+| history/redo | 0.024416/0.041875/0.060458/0.085250 | 0.023791/0.041125/0.042167/0.044333 |
+
+Peak RSS in the 128-edit test: median **144.45 → 15.41 MiB (89.3% lower)**
+across five fresh processes per version, alternating order. Base range
+144.45–144.47 MiB; candidate 15.36–15.45 MiB. Identical retained-value accounting
+for this append workload is 8,256 large values in snapshots versus 128 in current
+state plus reversible spans; no undo step is evicted. Current application edits
+and temporary returned states are additional allocations on both versions.
+
+Raw CPU samples, logs, environment and fixture are in
+`target/change-history-performance/`. `memory-results.json` records every peak,
+exact release executable paths and SHA-256 hashes; `*-memory-*.log` retain the
+complete timing output. The memory runs used the same Cargo executables from the
+comparison after the runner removed its temporary copies. No competing builds or
+benchmarks ran during either measurement.
+
+Correctness covers 2,000 deterministic mixed operations checked against snapshot
+history, stable allocation ownership for unchanged values, releasing history on
+clear, and the existing actual cell/bulk/insert/schema, failed-save, intermediate
+save and keyboard-ownership tests. Native display/input timing and live-app memory
+were not measured; there are no layout, event-loop or repaint changes.
+
+## Search cancellation, shared SQL layout and native profiling (2026-11-12)
+
+Result searches now cancel obsolete requests before starting their replacements.
+Closing search, replacing/closing result tabs, reconnecting and dropping a search
+signal cancellation; closing also releases match coordinates. Browser cancellation
+terminates its worker. Empty searches do not spawn a worker. Native scans check
+before compilation, each row, groups of 32 cells, large text cells and completion.
+A single regex call is not preempted (the 16 MiB cell fixture takes about 1.5 ms).
+Tests cover cancellation and source release, stale identities, match limits,
+unicode/navigation and empty searches.
+
+SQL syntax and wrapping now use frame-evicted immutable jobs. A narrow vendored
+epaint API shares those jobs with its existing font/atlas/DPI-aware galley cache.
+Resizing does not re-tokenize unchanged SQL. Tests cover shared ownership,
+fractional width normalization, font/scale/theme/style changes and mesh equivalence.
+See `vendor/README.md` for the fork's scope and provenance.
+
+### Final release CPU comparison
+
+Same-machine comparison against `06088d111e10b95d96696e69b4dc403dc0ee4009`,
+Apple M4 Max, macOS 27.2.1, Rust 1.99.1, release profile, five alternating pairs.
+All builds and benchmarks ran serially. Original 38 workloads and the 10% p95
+threshold are unchanged. Final raw samples, exact binary hashes, fixture/build
+provenance and reproducible rerun script: `target/performance-goal-chunked`.
+The base binary was retained from `target/performance-goal-final`; the candidate
+was rebuilt with the final chunked scanner. Unused experimental test code in the
+base does not change the executed workloads. The standard rebuild command is:
+
+```sh
+python3 scripts/ui-performance.py --base 06088d111e10b95d96696e69b4dc403dc0ee4009 --query-editor --sql-highlight --change-history --result-search --output target/ui-performance
+```
+
+**37 comparisons passed; one is inconclusive, not a pass.** History undo's baseline
+p95 was 0.11525/0.07617/0.06346/0.03613/0.07950 ms; candidate was
+0.05763/0.03663/0.03742/0.03667/0.03621 ms. No pair exceeded +10%, but baseline
+variance prevents a reliable quantified undo speedup in this run. Earlier retained
+runs passed it. There are no repeatable regressions in the final comparison.
+
+Selected medians across the five runs (milliseconds; p50 / p95 / p99 / maximum):
+
+| Workload | Base | Candidate |
+| --- | ---: | ---: |
+| SQL cached layout | 0.1782 / 0.1983 / 0.2080 / 0.2130 | 0.0772 / 0.0887 / 0.0968 / 0.0981 |
+| SQL editing | 0.6037 / 0.6401 / 0.7074 / 0.7127 | 0.3522 / 0.3718 / 0.3803 / 0.3964 |
+| SQL resizing | 0.4741 / 0.5016 / 0.5224 / 0.5428 | 0.2632 / 0.2890 / 0.2950 / 0.2999 |
+| Numeric result scan | 1.3029 / 1.3468 / 1.3551 / 1.4558 | 1.3183 / 1.3381 / 1.3589 / 1.4281 |
+| Text result scan | 0.9103 / 0.9348 / 0.9473 / 0.9845 | 0.9224 / 0.9430 / 0.9530 / 0.9665 |
+| Record staged change | 0.0910 / 0.1610 / 0.1677 / 0.1737 | 0.0357 / 0.0600 / 0.0651 / 0.0663 |
+| Undo (inconclusive) | 0.0204 / 0.0762 / 0.0859 / 0.0913 | 0.0199 / 0.0367 / 0.0389 / 0.0424 |
+
+Worst individual samples across all pairs: cached SQL 0.217→0.108 ms, editing
+0.795→0.409 ms, resizing 0.773→0.317 ms, wide workspace 0.394→0.393 ms
+without inspector and 0.455→0.448 ms with inspector. Numeric scan maximum was
+1.648→1.797 ms despite unchanged p95; all raw tails are retained.
+
+SQL/search fixtures use 20 warmups and 160 measured frames/scans per run;
+SQL viewport is 1200×800 points at 1x, 200 repeated query lines and a separate
+32 KiB whitespace fixture. Workspace selection uses 20 warmups, 100 measured
+frames, 1440×900 points, 500 rows and 12/120 columns. All fixture definitions and
+raw tails remain in the artifacts. The first query-layout frame was 1.015→0.756 ms;
+first editing frame 0.677→0.424 ms; first resize frame 0.712→0.414 ms. After the
+synthetic 30-second idle jump those were 0.178→0.077, 0.607→0.342 and
+0.461→0.251 ms. These are CPU frames, not native wake-to-display latency.
+
+The first combined run (`target/performance-goal-comparison`) exposed numeric-scan
+overhead. Checking by groups instead of doing checkpoint bookkeeping per cell
+resolved it: final numeric p95 is 1.347→1.338 ms; text scan 0.935→0.943 ms.
+An experimental test-only close/render fixture caused repeatable +12–16% wide
+workspace timings in `target/performance-goal-final`. Removing that fixture with
+the rejected allocator experiment restored timings using the same baseline binary
+(`target/workspace-performance-{investigation,without-close}`). This isolates a
+compiler-output effect from unused test code; the exact compiler mechanism was
+not established. Final wide-workspace p95 changes are −0.1%/+0.3%.
+The intermediate rerun `target/performance-goal-verified` exposed remaining numeric
+scan overhead; it is retained too. No thresholds were weakened or failing evidence
+removed. Whole-process native results below do not imply those CPU-only timings
+measure presentation latency.
+
+### Native profiling method
+
+The QA-only `RUSTABLE_NATIVE_PROFILE` fixture uses production SessionWindows,
+tab closing and window archive paths with synthetic in-memory results. It reads
+no saved connections/recovered documents and isolates preferences in a fresh output
+directory. Large fixture construction and logging run off-thread. Background
+telemetry requests do not repaint. Weak references track actual Grid release.
+
+The macOS sampler uses libproc RUSAGE_INFO_V4 CPU ticks, interrupt/package-idle
+wakeups, RSS and physical footprint. CPU uses `mach_timebase_info` (125/3 ns here),
+validated against the OS process CPU clock. Early debug smoke results used an
+uncalibrated conversion and unsuccessful optional child-window capture; those are
+not performance evidence. Capture hooks were removed before release profiling.
+
+```sh
+python3 scripts/native-performance-compare.py --base 06088d111e10b95d96696e69b4dc403dc0ee4009 --output target/native-performance-comparison --runs 3 --seconds 8
+```
+
+This copies identical QA fixture adapters to the base, completes both release
+builds before sampling, and records binary hashes, OS/hardware/toolchain, fixture
+source and raw counters. Results are from three alternating pairs of fresh
+processes. Startup means launch-to-first-update notification, not presentation.
+
+### Native results and allocator investigation (2026-11-12)
+
+Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release QA builds, 2x scale.
+Root viewport 960×860 points; session windows 1280×820 points. The three-pair
+medians below use two seconds settling and eight seconds sampling per phase.
+All 48 phase samples reported zero wrapper UI updates during the settled interval;
+all expected live-result counts passed (0, 1, 20, 1, 11, 1, 0, 0).
+Interrupt wakeups remained approximately 0.37–1.12/s. CPU is percent of one core.
+This fixture does not include connected database keepalives or user extensions.
+
+| Phase | CPU % base → head | RSS MiB base → head | Footprint MiB base → head | Interrupt wakeups/s base → head |
+| --- | ---: | ---: | ---: | ---: |
+| launcher-idle | 0.034 → 0.033 | 138.766 → 139.047 | 141.907 → 141.845 | 1.117 → 1.117 |
+| one-tab | 0.014 → 0.014 | 161.625 → 160.922 | 251.126 → 250.486 | 0.869 → 0.868 |
+| tabs20 | 0.002 → 0.002 | 373.359 → 372.484 | 450.111 → 444.111 | 0.373 → 0.372 |
+| close-tabs | 0.002 → 0.003 | 373.688 → 372.734 | 319.439 → 317.861 | 0.497 → 0.496 |
+| three-windows | 0.008 → 0.007 | 377.703 → 375.406 | 454.720 → 456.642 | 0.869 → 0.745 |
+| close-windows | 0.004 → 0.005 | 378.016 → 375.672 | 322.392 → 327.408 | 0.622 → 0.621 |
+| close-last | 0.001 → 0.006 | 388.156 → 385.844 | 332.486 → 330.579 | 0.373 → 0.497 |
+| close-all-windows | 0.008 → 0.005 | 388.125 → 385.797 | 187.611 → 195.251 | 0.620 → 0.620 |
+
+Launch-to-first-update times were 424/135/134 ms for base and 410/130/132 ms
+for candidate, in process order. These include first-run loader/cache effects;
+OS caches were not flushed and these are not first-presentation measurements.
+Whole-process memory changes are small and mixed: no broad RSS reduction is
+claimed. Closing all results released every tracked Grid, while allocator and
+native graphics allocations kept RSS above startup. Separate untimed vmmap
+snapshots in `target/native-memory-diagnostics` identified approximately 213 MiB
+resident in empty malloc small regions and about 63 MiB of IOSurface memory.
+
+An experimental debounced background call to macOS's public
+`malloc_zone_pressure_relief(NULL, 0)` returned zero bytes on all four closure
+requests (1–12 microseconds per call) and did not reduce retained memory. It was
+removed rather than adding an ineffective background worker. Raw debug efficacy
+results are in `target/memory-reclaim-debug-profile`; their timings are not release
+comparison evidence. No allocator replacement or unsafe buffer pooling is shipped.
+The experimental close-results benchmark was removed with that implementation;
+its raw results and identical fixture source remain in `target/performance-goal-final`.
+Native profiling still covers production tab/window closure and result release.
+
+Dark 1280-point and light 760-point native SQL previews were captured and visually
+inspected (`target/performance-goal-visual/{dark,light}.png`): editor syntax, result
+tabs, table rows and controls render correctly. Native frame intervals,
+input-to-present timing, missed frames, 60/120 Hz, mixed-DPI/monitor reconnect and
+macOS tiling were not measured; CPU results make no claims about those behaviors.
+No database execution/protocol path changed, so network exchange budgets remain
+unchanged and database latency fixtures were not rerun for this pass.
+
+
+### Final checks
+
+806 library tests passed; 211 opt-in tests were ignored. Strict
+`cargo clippy --all-targets --features qa -- -D warnings` passed. Locked
+browser/WASM compilation passed with the existing target-specific warnings.
+Eight UI-runner tests and the native CPU-counter calibration test passed.
+Logs: `target/performance-goal-final-{tests,clippy,wasm}.log`.
+The native profile precedes the final scan-loop change; its fixture does not
+perform result searches. Final scan and rendering measurements use the final code.
+
+
+## Reused result-search formatting buffer — 2026-11-12
+
+Search now formats scalar values into one reusable String per scan. Text remains
+borrowed and NULL uses a static string; blobs format only their byte count.
+This removes a temporary allocation/free for every numeric/blob cell and avoids
+allocating NULL strings. Cancellation checks, match limits, Unicode matching and
+displayed-value semantics are unchanged. Scratch storage depends on scalar
+formatting length, never text/blob payload size. There is no persistent cache.
+
+Same-machine incremental comparison uses the exact candidate binary from the
+preceding pass as its baseline, preserved before editing. Apple M4 Max, macOS
+27.2.1 arm64, Rust 1.99.1, release profile, five alternating serial pairs, unchanged
+fixtures: 20 warmups and 160 measured scans each. Numeric fixture: 500 rows ×
+120 integers, verifying all 60,000 coordinates. All four search comparisons pass.
+
+| Numeric scan metric | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| Median p50 | 1.2929 | 0.8621 |
+| Median p95 | 1.3249 | 0.9015 |
+| Median p99 | 1.4090 | 0.9079 |
+| Median per-run maximum | 1.4642 | 0.9226 |
+| Worst individual sample | 1.5178 | 0.9515 |
+
+Numeric p95 improves 32.0%; text/16 MiB-cell scans and navigation remain within
+the existing regression gate. These are completed background scan CPU times,
+not input-to-display latency or whole-app RSS. Raw samples, binary hashes and
+reproducible script: `target/search-buffer-performance`.
+
+The full 38-workload comparison against PR base `06088d111e10b95d96696e69b4dc403dc0ee4009`
+also passes, including undo and wide-workspace scenarios that had been noisy or
+sensitive to compiler output earlier. Raw samples and provenance:
+`target/search-buffer-full-suite`. It reuses the previously built baseline and
+runs the unchanged workloads on both implementations. Earlier inconclusive/failing
+reports remain retained; their status is not retrospectively changed.
+
+Correctness coverage compares reused formatting with `db::display` for signed
+integer extremes, zero, negative zero, subnormal/extreme/nonfinite floats, empty
+and large blobs, NULL and Unicode text. It checks buffer reuse, small retained
+capacity after large values, and actual match coordinates. No DB protocol, UI
+layout, repaint or event-loop path changed; network/native display tests were not
+rerun for this search-only change.
+
+Validation: 807 library tests passed (211 opt-in ignored), strict all-target QA
+Clippy passed, and locked WASM compilation passed with existing warnings.
+Logs are in `target/search-buffer-performance/{all-tests,clippy,wasm}.log`.
+
+
+## macOS animated zoom and repeated click pairs — 2026-11-12
+
+The final native preview was confirmed by the user: the center grid grows smoothly
+through title-bar zoom/restore, and repeated double-click cell editing works without
+a cooldown. The renderer flushes the implicit Core Animation transaction only after
+a successful swap at a changed framebuffer size. No additional repaint requests,
+permanent polling, database operations or ordinary-frame flushes were introduced.
+The click helper consumes same-target pairs using the configured double-click delay,
+avoiding egui's rolling triple-click classification. Regression tests cover repeated
+pairs on the same/different cells, adjacent unpaired clicks, and timeout behavior.
+
+Command: `python3 scripts/ui-performance.py --base 06088d1 --output
+target/zoom-click-final-performance`, run in the isolated `rustable-titlebar-zoom`
+worktree. Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile, five
+alternating serial pairs without competing builds. Unchanged default-scale fixtures:
+grid 1200×800, 20 warmup/160 measured frames; workspace/sidebar 1440×900,
+20 warmup/100 measured frames. All 19 comparisons pass. Raw samples, build logs,
+environment and full comparisons remain in that worktree's report directory.
+
+Representative median per-run timings below are milliseconds, ordered
+p50/p95/p99/max (maximum is the median of run maxima).
+
+| Scenario | Base | Candidate |
+| --- | --- | --- |
+| grid/vertical precise/layout | 0.235584/0.251459/0.297500/0.348708 | 0.243084/0.274834/0.310541/0.367292 |
+| grid/vertical precise/tessellation | 0.041667/0.047583/0.052167/0.052708 | 0.042250/0.048875/0.052125/0.062667 |
+| workspace/120/true | 0.407042/0.433375/0.448500/0.448500 | 0.407875/0.432750/0.458541/0.458541 |
+
+These CPU workloads do not measure native presentation or the timing of click
+activation. The native reproduction and click-sequence tests supply functional
+evidence. Native frame intervals, missed frames, input-to-present latency, idle
+redraw counts, 60/120 Hz comparisons, secondary windows, mixed-DPI movement,
+monitor reconnect and snapping remain unmeasured. Full isolated library tests:
+797 passed, 207 ignored; strict all-target QA Clippy and WASM browser check passed.
+
+
+## v0.4.25 combined release validation — 2026-11-12
+
+The combined performance, resize-presentation and click-pair source passed 808
+library tests, strict all-target QA Clippy and the separate locked browser/WASM
+check. Release-profile comparisons used the unchanged 38 workloads and thresholds
+against `06088d1`, on the same M4 Max/macOS 27.2.1/Rust 1.99.1 machine.
+The first five-pair run had 25 passes/13 inconclusive metrics; a second five-pair
+run of the exact same binaries had 24 passes/14 inconclusive metrics. Neither
+reported a repeatable regression. These are inconclusive comparisons, not blanket
+passes. A process snapshot after the second run showed substantial WindowServer,
+video-decoder and streaming-app activity; `pmset` reported no thermal warning.
+Background contention is a plausible contributor, not a proven explanation for
+every noisy metric. No user apps were stopped and no thresholds were changed.
+
+Raw samples, hashes, environment and rerun script are retained under
+`target/release-v0.4.25/{performance,performance-repeat}`. Earlier 38-case search/
+performance and isolated 19-case resize/click comparisons passed as documented
+above; they do not turn the combined noisy runs into passes. The user-confirmed
+native resize behavior and unavailable native presentation/display checks remain
+as stated in the preceding section. No database sequencing changed.

@@ -597,3 +597,7 @@ mod launcher_tests {
         assert_eq!(launcher_size(Some(egui::Vec2::ZERO)), LAUNCHER_SIZE);
     }
 }
+
+#[cfg(feature = "qa")]
+#[path = "native_performance.rs"]
+pub(crate) mod native_performance;

@@ -252,6 +252,7 @@ impl QueryTab {
     fn remove_pin(&mut self, index: usize) {
         self.pins.items.remove(index);
         if self.selected_pin == Some(index) {
+            self.result_search.cancel();
             self.selected_pin = None;
             self.grid = self.results.get(self.result_index).cloned().unwrap_or_default();
         } else if let Some(selected) = &mut self.selected_pin && *selected > index {
@@ -940,13 +941,13 @@ impl Rustable {
             match result {
                 Ok(Some(updated)) => {
                     let updated = Arc::new(updated);
-                    if Arc::ptr_eq(&tab.grid, &tab.results[0]) { tab.grid = updated.clone(); }
+                    if Arc::ptr_eq(&tab.grid, &tab.results[0]) { tab.result_search.cancel(); tab.grid = updated.clone(); }
                     tab.results[0] = updated;
                 }
                 Ok(None) => {}
                 Err(error) => {
                     tab.results.clear();
-                    if tab.selected_pin.is_none() { tab.grid = Arc::default(); }
+                    if tab.selected_pin.is_none() { tab.result_search.cancel(); tab.grid = Arc::default(); }
                     tab.edit_target = None;
                     tab.result_error = Some(format!("Changes saved, but results could not be refreshed: {error}. Run the query again to reload the results."));
                 }
@@ -1423,9 +1424,10 @@ impl Rustable {
                         tab.edit_target = None;
                         tab.executed_sql = None;
                         tab.chart = Default::default();
-            tab.formatter = Default::default();
-            tab.pins.clear();
-            tab.selected_pin = None;
+                        tab.result_search.cancel();
+                        tab.formatter = Default::default();
+                        tab.pins.clear();
+                        tab.selected_pin = None;
                     }
                     self.status = "Connected".into();
                     self.connections = false;
@@ -1491,6 +1493,7 @@ impl Rustable {
                     if let Some(Pending::Query(index)) = pending {
                         self.tabs[index].result_view = if report.error.is_some() { ResultView::Message } else { ResultView::Data };
                         let tab = &mut self.tabs[index];
+                        tab.result_search.cancel();
                         tab.error_highlight = tab.execution_source.take().and_then(|(source, base)| {
                             (source == tab.sql && report.error.is_some()).then_some(())?;
                             crate::editor::error_token_range(&source, base.checked_add(report.error_offset?)?)
@@ -3862,6 +3865,7 @@ Right-click to inspect or remove individual changes",
                             tab.result_view = ResultView::Data;
                             tab.result_search.open = !tab.result_search.open;
                             tab.result_search.focus = tab.result_search.open;
+                            if !tab.result_search.open { tab.result_search.cancel(); }
                             if !tab.result_search.open && let Some(id) = tab.result_grid_focus {
                                 ui.memory_mut(|m| m.request_focus(id));
                             }
@@ -4058,9 +4062,10 @@ Right-click to inspect or remove individual changes",
                 tab.grid = Arc::default();
                 tab.results.clear();
                 tab.chart = Default::default();
-            tab.formatter = Default::default();
-            tab.pins.clear();
-            tab.selected_pin = None;
+                tab.result_search.cancel();
+                tab.formatter = Default::default();
+                tab.pins.clear();
+                tab.selected_pin = None;
                 if !tab.sql.trim().is_empty() || tab.source_path.is_some() {
                     self.closed_tabs.push(tab);
                 }
@@ -4101,6 +4106,7 @@ Right-click to inspect or remove individual changes",
             self.tabs[0].grid = Arc::default();
             self.tabs[0].results.clear();
             self.tabs[0].chart = Default::default();
+            self.tabs[0].result_search.cancel();
             self.tabs[0].formatter = Default::default();
             self.tabs[0].open = false;
             self.view = View::Data;
@@ -4110,6 +4116,7 @@ Right-click to inspect or remove individual changes",
             tab.grid = Arc::default();
             tab.results.clear();
             tab.chart = Default::default();
+            tab.result_search.cancel();
             tab.formatter = Default::default();
             tab.pins.clear();
             tab.selected_pin = None;
@@ -7126,16 +7133,23 @@ fn workspace_tab_width(available: f32, count: usize, spacing: f32) -> f32 {
     ((available - 24.0 - spacing * count as f32) / count.max(1) as f32).max(72.0)
 }
 
-/// egui's click count is pointer-wide; require a matching semantic target too.
+/// Consume same-target click pairs independently of egui's pointer-wide triple-click
+/// classification, so fast repeated activations do not require a cooldown.
 fn same_target_double_click(response: &egui::Response, target: egui::Id) -> bool {
     if !response.clicked_by(egui::PointerButton::Primary) { return false; }
+    let now = response.ctx.input(|input| input.time);
+    let delay = response.ctx.options(|options| options.input_options.max_double_click_delay);
     let key = egui::Id::new((response.ctx.viewport_id(), "last-workspace-click-target"));
-    let previous = response.ctx.data_mut(|data| {
-        let previous = data.get_temp::<egui::Id>(key);
-        data.insert_temp(key, target);
-        previous
-    });
-    response.double_clicked() && previous == Some(target)
+    response.ctx.data_mut(|data| {
+        let previous = data.get_temp::<(egui::Id, f64)>(key);
+        let paired = previous.is_some_and(|(id, time)| id == target && now >= time && now - time < delay);
+        if paired {
+            data.remove::<(egui::Id, f64)>(key);
+        } else {
+            data.insert_temp(key, (target, now));
+        }
+        paired
+    })
 }
 
 fn workspace_tab(
@@ -13321,6 +13335,54 @@ mod double_click_target_tests {
     fn rapid_clicks_on_same_cell_start_edit() {
         check_clicks(99.0, true);
     }
+    #[test]
+    fn rapid_click_pairs_keep_activating_without_a_cooldown() {
+        for (targets, gap, expected) in [
+            (vec![0, 0, 1, 1, 0, 0], 0.1, 3),
+            (vec![0, 0, 0, 0, 0, 0], 0.1, 3),
+            (vec![0, 1, 1], 0.1, 1),
+            (vec![0, 1, 0, 1], 0.1, 0),
+            (vec![0, 0], 0.4, 1),
+            (vec![0, 0], 0.6, 0),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.options_mut(|o| o.input_options.max_double_click_delay = 0.5);
+            let mut activations = 0;
+            let _ = ctx.run(egui::RawInput {
+                time: Some(0.0),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0,100.0))),
+                ..Default::default()
+            }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    for index in 0..2 {
+                        let rect = egui::Rect::from_min_size(egui::pos2(index as f32*100.0, 0.0), egui::vec2(100.0,50.0));
+                        ui.interact(rect, egui::Id::new(index), egui::Sense::click());
+                    }
+                });
+            });
+            for (click, target) in targets.into_iter().enumerate() {
+                for pressed in [true, false] {
+                    let pos = egui::pos2(25.0 + target as f32 * 100.0, 25.0);
+                    let _ = ctx.run(egui::RawInput {
+                        time: Some(1.0 + click as f64 * gap + if pressed { 0.0 } else { 0.02 }),
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0,100.0))),
+                        events: vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                            pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default(),
+                        }], ..Default::default()
+                    }, |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            for index in 0..2 {
+                                let rect = egui::Rect::from_min_size(egui::pos2(index as f32*100.0, 0.0), egui::vec2(100.0,50.0));
+                                let response = ui.interact(rect, egui::Id::new(index), egui::Sense::click());
+                                activations += usize::from(same_target_double_click(&response, egui::Id::new(("cell",index))));
+                            }
+                        });
+                    });
+                }
+            }
+            assert_eq!(activations, expected);
+        }
+    }
     fn check_clicks(second_x: f32, expected: bool) {
         let ctx = egui::Context::default();
         let mut confirmed = false;
@@ -14056,3 +14118,7 @@ mod date_picker_tests {
         assert_eq!(app.changes.len(), 2, "NOT NULL columns refuse a NULL constant");
     }
 }
+
+#[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
+#[path = "native_performance_fixture.rs"]
+mod native_performance_fixture;

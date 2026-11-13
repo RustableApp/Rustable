@@ -137,6 +137,9 @@ def measure(binary, source, logs, label, iteration):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--result-search', action='store_true', help='Compare full scans with cancellation checks and result-search panel navigation')
+    parser.add_argument('--change-history', action='store_true', help='Compare staged-edit record, undo and redo CPU with identical large values')
+    parser.add_argument('--sql-highlight', action='store_true', help='Compare SQL highlighting, retained job storage and large editor layout')
     parser.add_argument('--query-editor', action='store_true', help='Compare query footer and multiple-result tabs with the same fixture')
     parser.add_argument('--redis', action='store_true', help='Compare the same Redis grid fixture on both revisions')
     parser.add_argument('--redis-connections', action='store_true', help='Include the shared Redis connection profile workload')
@@ -151,6 +154,16 @@ def main():
     parser.add_argument('--runs', type=int, default=5)
     args = parser.parse_args()
     global BENCHMARKS
+    if args.result_search:
+        BENCHMARKS += ('result_search_cpu_benchmark',)
+        EXPECTED.update(('search/scan/text', 'search/scan/numeric', 'search/scan/large-cell', 'search/panel-navigation'))
+    if args.change_history:
+        BENCHMARKS += ('change_history_action_benchmark',)
+        EXPECTED.update(('history/record', 'history/undo', 'history/redo'))
+    if args.sql_highlight:
+        BENCHMARKS += ('sql_highlight_frame_benchmark',)
+        EXPECTED.update(f'sql/highlight/{name}' for name in ('query', 'whitespace'))
+        EXPECTED.update(f'sql/layout/{name}/{editing}' for name in ('query', 'whitespace') for editing in ('false', 'true', 'resize'))
     if args.query_editor:
         BENCHMARKS += ('query_editor_results_frame_benchmark',)
         EXPECTED.update(f'query/editor-results/{count}/{width}' for count, width in ((0,1280),(4,1280),(128,760),(4,500)))
@@ -196,13 +209,47 @@ def main():
                     rustc=run(['mise', 'exec', '--', 'rustc', '-Vv'], root, capture_output=True).stdout,
                     started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     build_profile='release', runs=args.runs, p95_threshold_percent=10,
-                    scope='CPU layout/tessellation only; excludes event loop, GPU and presentation')
+                    scope='CPU workloads (rendering and optional action/provider benchmarks); excludes event loop, GPU and presentation')
     (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
     base_runs, head_runs = [], []
     with tempfile.TemporaryDirectory(prefix='rustable-ui-base-') as temp:
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
+            if args.result_search:
+                fixture = root / 'src' / 'result_search_performance.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                source = base_path / 'src' / 'result_search.rs'
+                original = source.read_text()
+                with source.open('a') as output:
+                    if 'mod performance;' not in original:
+                        output.write('\n#[cfg(test)] #[path = "result_search_performance.rs"] mod performance;\n')
+                    if 'fn scan_until_cancelled(' not in original:
+                        # Baseline has no mid-scan cancellation. The shared full-scan
+                        # fixture never cancels: this adapter calls its unchanged scan.
+                        output.write('\n#[cfg(test)] fn scan_until_cancelled(grid: &Arc<Grid>, needle: String, case: bool, mut cancelled: impl FnMut() -> bool) -> Option<Found> { if cancelled() { None } else { Some(scan(grid, needle, case)) } }\n')
+                        output.write('\n#[cfg(test)] use std::sync::atomic::{AtomicBool, Ordering};\n')
+                metadata['result_search_fixture'] = fixture.read_text()
+                metadata['result_search_baseline_adapter'] = 'Uncancelled shared workloads call the unchanged baseline scan; candidate checks cancellation between cells.'
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
+            if args.change_history:
+                fixture = root / 'src' / 'change_history_performance.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                source = base_path / 'src' / 'change_history.rs'
+                if 'mod performance;' not in source.read_text():
+                    with source.open('a') as output:
+                        output.write('\n#[cfg(test)] #[path = "change_history_performance.rs"] mod performance;\n')
+                metadata['change_history_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
+            if args.sql_highlight:
+                fixture = root / 'src' / 'sql_highlight_performance.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                source = base_path / 'src' / 'sql_highlight.rs'
+                if 'mod performance;' not in source.read_text():
+                    with source.open('a') as output:
+                        output.write('\n#[cfg(test)] #[path = "sql_highlight_performance.rs"] mod performance;\n')
+                metadata['sql_highlight_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.query_editor:
                 fixture = root / 'src' / 'query_layout_qa.rs'
                 shutil.copy2(fixture, base_path / 'src' / fixture.name)

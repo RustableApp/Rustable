@@ -102,6 +102,9 @@ struct GlutinWindowContext {
 }
 
 struct Viewport {
+    /// Size of the last submitted framebuffer; ordinary frames need no CA flush.
+    #[cfg(target_os = "macos")]
+    last_presented_size: Option<[u32; 2]>,
     ids: ViewportIdPair,
     class: ViewportClass,
     builder: ViewportBuilder,
@@ -726,6 +729,8 @@ impl GlowWinitRunning<'_> {
                 ))?;
 
             gl_surface.swap_buffers(context)?;
+            #[cfg(target_os = "macos")]
+            flush_resized_frame(&mut viewport.last_presented_size, screen_size_in_pixels);
             frame_timer.resume();
         }
 
@@ -1069,6 +1074,8 @@ impl GlutinWindowContext {
         viewports.insert(
             ViewportId::ROOT,
             Viewport {
+                #[cfg(target_os = "macos")]
+                last_presented_size: None,
                 ids: ViewportIdPair::ROOT,
                 class: ViewportClass::Root,
                 builder: viewport_builder,
@@ -1407,6 +1414,8 @@ fn initialize_or_update_viewport(
             // New viewport:
             log::debug!("Creating new viewport {:?} ({:?})", ids.this, builder.title);
             entry.insert(Viewport {
+                #[cfg(target_os = "macos")]
+                last_presented_size: None,
                 ids,
                 class,
                 builder,
@@ -1583,6 +1592,9 @@ fn render_immediate_viewport(
         profiling::scope!("swap_buffers");
         if let Err(err) = gl_surface.swap_buffers(current_gl_context) {
             log::error!("swap_buffers failed: {err}");
+        } else {
+            #[cfg(target_os = "macos")]
+            flush_resized_frame(&mut viewport.last_presented_size, screen_size_in_pixels);
         }
     }
 
@@ -1618,4 +1630,15 @@ fn save_screenshot_and_exit(
 
     #[expect(clippy::exit)]
     std::process::exit(0);
+}
+
+/// AppKit may retain the previous layer contents during animated window zooms
+/// even after OpenGL has swapped the newly sized framebuffer. Submit the pending
+/// implicit transaction when framebuffer geometry changes. Do not flush ordinary
+/// input/animation frames or request further repaints: the run loop handles those.
+#[cfg(target_os = "macos")]
+fn flush_resized_frame(previous: &mut Option<[u32; 2]>, size: [u32; 2]) {
+    if previous.replace(size).is_some_and(|old| old != size) {
+        objc2_quartz_core::CATransaction::flush();
+    }
 }

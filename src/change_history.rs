@@ -1,28 +1,56 @@
 //! Undo concerns staged UI intentions only, never previously committed SQL.
-//! Snapshot creation happens on completed actions, not frames or keystrokes.
+//! Retain the current state and reversible changed spans, not full snapshots.
 use super::*;
 
 #[derive(Default)]
 pub(super) struct ChangeHistory {
-    states: Vec<Vec<Change>>,
+    current: Vec<Change>,
+    steps: Vec<HistoryStep>,
     position: usize,
+}
+
+struct HistoryStep {
+    start: usize,
+    len: usize,
+    replacement: Vec<Change>,
+}
+
+impl HistoryStep {
+    /// Exchange the stored span with the current one. Calling twice restores
+    /// both sides, so undo and redo share the same operation and owned values.
+    fn exchange(&mut self, current: &mut Vec<Change>) {
+        let replacement = std::mem::take(&mut self.replacement);
+        let next_len = replacement.len();
+        self.replacement = current
+            .splice(self.start..self.start + self.len, replacement)
+            .collect();
+        self.len = next_len;
+    }
 }
 
 impl ChangeHistory {
     fn record(&mut self, changes: &[Change]) {
-        let current = self
-            .states
-            .get(self.position)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        if current == changes {
+        let prefix = self.current.iter().zip(changes)
+            .take_while(|(old, new)| old == new).count();
+        if prefix == self.current.len() && prefix == changes.len() {
             return;
         }
-        if self.states.is_empty() {
-            self.states.push(Vec::new());
-        }
-        self.states.truncate(self.position + 1);
-        self.states.push(changes.to_vec());
+        // Never let the suffix overlap the common prefix (including pure
+        // insertion/deletion and repeated identical changes).
+        let suffix = self.current[prefix..].iter().rev()
+            .zip(changes[prefix..].iter().rev())
+            .take_while(|(old, new)| old == new).count();
+        let new_end = changes.len() - suffix;
+        let old_end = self.current.len() - suffix;
+        self.steps.truncate(self.position);
+        let replacement = self.current
+            .splice(prefix..old_end, changes[prefix..new_end].iter().cloned())
+            .collect();
+        self.steps.push(HistoryStep {
+            start: prefix,
+            len: new_end - prefix,
+            replacement,
+        });
         self.position += 1;
     }
 
@@ -31,20 +59,22 @@ impl ChangeHistory {
             return None;
         }
         self.position -= 1;
-        Some(self.states[self.position].clone())
+        self.steps[self.position].exchange(&mut self.current);
+        Some(self.current.clone())
     }
 
     fn redo(&mut self) -> Option<Vec<Change>> {
-        if self.position + 1 >= self.states.len() {
+        if self.position == self.steps.len() {
             return None;
         }
+        self.steps[self.position].exchange(&mut self.current);
         self.position += 1;
-        Some(self.states[self.position].clone())
+        Some(self.current.clone())
     }
 
     fn clear(&mut self) {
-        self.states.clear();
-        self.position = 0;
+        // A successful commit/discard releases the session's history storage.
+        *self = Self::default();
     }
 }
 
@@ -206,12 +236,101 @@ mod tests {
         assert_eq!(history.undo(), Some(vec![cell("one")]));
         // A failed plan/apply does not mutate history. Retrying at this point
         // uses exactly "one", not an action from the discarded future.
-        assert_eq!(history.states[history.position], vec![cell("one")]);
+        assert_eq!(history.current, vec![cell("one")]);
         history.clear();
         assert_eq!(history.undo(), None);
         assert_eq!(history.redo(), None);
         history.record(&[cell("after save")]);
         assert_eq!(history.undo(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn mixed_edits_match_snapshot_history_through_branching_and_clear() {
+        let mut history = ChangeHistory::default();
+        let mut snapshots = vec![Vec::<Change>::new()];
+        let mut position = 0;
+        let mut seed = 7u64;
+        for iteration in 0..2_000 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let mut next = snapshots[position].clone();
+            match (seed >> 32) % 10 {
+                0 => {
+                    let expected = if position > 0 {
+                        position -= 1;
+                        Some(snapshots[position].clone())
+                    } else { None };
+                    assert_eq!(history.undo(), expected);
+                }
+                1 => {
+                    let expected = if position + 1 < snapshots.len() {
+                        position += 1;
+                        Some(snapshots[position].clone())
+                    } else { None };
+                    assert_eq!(history.redo(), expected);
+                }
+                2 if iteration % 17 == 0 => {
+                    history.clear();
+                    snapshots = vec![Vec::new()];
+                    position = 0;
+                }
+                action => {
+                    let index = seed as usize % (next.len() + 1);
+                    match action {
+                        3 => next.clear(),
+                        4 if !next.is_empty() => { next.remove(index.min(next.len() - 1)); }
+                        5 if !next.is_empty() => {
+                            let index = index.min(next.len() - 1);
+                            next[index] = cell(&iteration.to_string());
+                        }
+                        6 => next.reverse(),
+                        7 => {}, // no-op must preserve redo
+                        _ => next.insert(index, cell(if iteration % 2 == 0 { "same" } else { "other" })),
+                    }
+                    history.record(&next);
+                    if next != snapshots[position] {
+                        snapshots.truncate(position + 1);
+                        snapshots.push(next);
+                        position += 1;
+                    }
+                }
+            }
+            assert_eq!(history.current, snapshots[position], "step {iteration}");
+        }
+        while position > 0 {
+            position -= 1;
+            assert_eq!(history.undo(), Some(snapshots[position].clone()));
+        }
+        for expected in snapshots.iter().skip(1) {
+            assert_eq!(history.redo(), Some(expected.clone()));
+        }
+    }
+
+    #[test]
+    fn unchanged_large_values_are_owned_once_and_clear_releases_storage() {
+        let mut history = ChangeHistory::default();
+        let mut changes = Vec::new();
+        for _ in 0..128 {
+            changes.push(cell(&"x".repeat(16 * 1024)));
+            history.record(&changes);
+        }
+        let retained_changes = history.current.len()
+            + history.steps.iter().map(|step| step.replacement.len()).sum::<usize>();
+        assert_eq!(retained_changes, 128);
+        let pointer = match &history.current[0] {
+            Change::Cell { value: Value::Text(text), .. } => text.as_ptr(),
+            _ => unreachable!(),
+        };
+        // A middle replacement must preserve the prefix and suffix allocations.
+        changes[64] = cell("replacement");
+        history.record(&changes);
+        assert!(matches!(&history.current[0], Change::Cell { value: Value::Text(text), .. } if text.as_ptr() == pointer));
+        assert_eq!(history.steps.last().unwrap().replacement.len(), 1);
+        for _ in 0..129 { assert!(history.undo().is_some()); }
+        for _ in 0..129 { assert!(history.redo().is_some()); }
+        assert_eq!(history.current, changes);
+        history.clear();
+        assert_eq!(history.current.capacity(), 0);
+        assert_eq!(history.steps.capacity(), 0);
     }
 
     fn wait(app: &mut Rustable) {
@@ -430,3 +549,7 @@ mod tests {
         assert_eq!(app.changes, staged);
     }
 }
+
+#[cfg(test)]
+#[path = "change_history_performance.rs"]
+mod performance;

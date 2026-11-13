@@ -139,6 +139,15 @@ future deadlines, and use
 the paint result to schedule further work, rather than adding a redundant redraw
 or an animation timer. Both root and secondary viewports use this dispatch path.
 
+`src/native/glow_integration.rs` also flushes the implicit Core Animation
+transaction after a successful swap whose framebuffer size changed. Intermediate
+resize layouts and inspector widths were correct, but AppKit could retain the old
+contents until zoom completed. The user verified that this size-change-only flush
+makes the center grid grow throughout title-bar zoom/restore. It runs for root and
+immediate viewports, skips the first frame and unchanged-size frames, and adds no
+repaint requests or timers. The macOS-only QuartzCore dependency uses the existing
+objc2 0.5 ecosystem. Native frame timing and mixed-DPI coverage remain outstanding.
+
 Native acceptance requires title-bar double-click zoom/restore, edge dragging,
 idle settling, secondary windows, and mixed-DPI move/snap/reconnect checks.
 The headless UI suite measures layout/tessellation only, not this AppKit path.
@@ -353,3 +362,24 @@ endpoint owns its own tunnel, subject to existing connection bounds. The existin
 OpenSSH transport rejects unknown/changed host keys and cleans up private masters.
 Coverage: `ssh_tunnel::tests::config_alias_live_forward_and_drop_cleanup` and the
 forwarded-hostname cases in `redis_session::tests::live_mutual_tls_client_identity`.
+
+## epaint 0.33.3: immutable shared layout jobs
+
+Source: crates.io epaint 0.33.3, package checksum
+`009d0dd3c2163823a0abdb899451ecbc78798dec545ee91b43aff1fa790bab62`, from the same
+MIT/Apache-2.0 egui release already vendored here. License files are copied from
+that egui release. Both native and browser manifests patch this exact version.
+
+`FontsView::layout_job_shared(Arc<LayoutJob>)` accepts a cached immutable job
+without cloning its text/format sections on every hit. Owned `layout_job` and the
+new API enter the same generic cache path; owned cache hits still avoid an Arc
+allocation. Shared cache misses retain the caller's Arc. Fractional wrap widths
+use copy-on-write normalization, leaving the caller's job unchanged. Font/atlas
+invalidation, DPI keys, child-paragraph cache liveness and eviction are unchanged.
+Rustable keeps separate frame-evicted syntax and prepared-layout caches, so resize
+does not tokenize unchanged SQL again. The only unrelated source adjustment is
+an explicit `2.0_f32` literal in tessellator debug drawing for Rust 1.99's
+float-literal-f32-fallback lint. Tests in `src/sql_highlight.rs` cover owned/shared
+cache equivalence, ownership, fractional widths, font replacement, DPI, theme,
+editor style, text and preview/wrap changes. Release performance and native
+profiling evidence is tracked in `docs/UI-PERFORMANCE.md`.

@@ -985,6 +985,7 @@ dependencies = [
  "objc2 0.5.3",
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
+ "objc2-quartz-core",
  "parking_lot",
  "percent-encoding",
  "profiling",
@@ -1162,8 +1163,6 @@ dependencies = [
 [[package]]
 name = "epaint"
 version = "0.33.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "009d0dd3c2163823a0abdb899451ecbc78798dec545ee91b43aff1fa790bab62"
 dependencies = [
  "ab_glyph",
  "ahash",
@@ -3586,7 +3585,7 @@ dependencies = [
 
 [[package]]
 name = "rustable"
-version = "0.4.24"
+version = "0.4.25"
 dependencies = [
  "aes",
  "bincode",

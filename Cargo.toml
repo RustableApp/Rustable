@@ -1,6 +1,6 @@
 [package]
 name = "rustable"
-version = "0.4.24"
+version = "0.4.25"
 edition = "2024"
 description = "A responsive native database workspace built with Rust and egui"
 license = "MIT"
@@ -71,6 +71,7 @@ sparkle-updater = { version = "=0.1.0", optional = true }
 # Preserve typed empty-result metadata without an extra prepare round trip.
 # See vendor/README.md for the minimal upstream patches.
 [patch.crates-io]
+epaint = { path = "vendor/epaint" }
 postgres = { path = "vendor/postgres" }
 tokio-postgres = { path = "vendor/tokio-postgres" }
 
