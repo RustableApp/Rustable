@@ -99,7 +99,7 @@ fn lost_commit_acknowledgement_reports_uncertainty_without_replay() {
         port,
         database: "rustable_qa".into(),
         password: "rustable_qa_only".into(),
-        tls: false,
+        tls: crate::connection::PostgresTlsMode::Disable,
         ..Default::default()
     };
     let mut observer = Client::connect(
@@ -162,7 +162,7 @@ fn next_operation_reconnects_a_lost_session_without_replaying_work() {
     assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
     let config = crate::connection::PostgresConfig {
         host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-        user: "postgres".into(), password: "rustable_qa_only".into(), tls: false,
+        user: "postgres".into(), password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable,
         ssh: None,
     };
     let cancel = Arc::new(AtomicBool::new(false));
@@ -216,4 +216,54 @@ fn typed_query_closes_statement_in_execution_exchange() {
     // This query closes its own statement before execution too.
     assert_eq!(rows[0].get::<_, i64>(0), 0);
     assert_eq!(client.transaction_status(), Some(b'I'));
+}
+
+#[test]
+#[ignore = "disposable issue-8 PostgreSQL TLS fixture with a long-lived, untrusted, wrong-host certificate"]
+fn explicit_tls_modes_accept_encrypt_only_and_reject_untrusted_identity() {
+    use crate::connection::PostgresTlsMode;
+    assert_eq!(std::env::var("RUSTABLE_POSTGRES_TLS_QA").as_deref(), Ok("1"));
+    let mut config = crate::connection::PostgresConfig {
+        host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
+        user: "postgres".into(), password: "rustable_qa_only".into(),
+        tls: PostgresTlsMode::Require, ssh: None,
+    };
+    for mode in [PostgresTlsMode::Require, PostgresTlsMode::Prefer] {
+        config.tls = mode;
+        let mut client = super::client_config(&config, None)
+            .connect(postgres_native_tls::MakeTlsConnector::new(mode.connector().unwrap())).unwrap();
+        assert!(client.query_one("SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()", &[]).unwrap().get::<_, bool>(0));
+        client.simple_query("SELECT 42").unwrap();
+        let mut driver = PostgresDriver::open(&config, Arc::new(AtomicBool::new(false))).unwrap();
+        assert!(driver.client.query_one("SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()", &[]).unwrap().get::<_, bool>(0));
+    }
+    for mode in [PostgresTlsMode::VerifyCa, PostgresTlsMode::VerifyFull] {
+        config.tls = mode;
+        assert!(super::client_config(&config, None)
+            .connect(postgres_native_tls::MakeTlsConnector::new(mode.connector().unwrap())).is_err());
+    }
+    config.tls = PostgresTlsMode::Disable;
+    let mut client = super::client_config(&config, None).connect(postgres::NoTls).unwrap();
+    assert!(!client.query_one("SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid()", &[]).unwrap().get::<_, bool>(0));
+}
+
+#[test]
+fn required_tls_modes_never_send_startup_after_server_refuses_encryption() {
+    use crate::connection::PostgresTlsMode;
+    for mode in [PostgresTlsMode::Require, PostgresTlsMode::VerifyCa, PostgresTlsMode::VerifyFull] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = [0; 8];
+            socket.read_exact(&mut request).unwrap();
+            assert_eq!(request, [0, 0, 0, 8, 4, 210, 22, 47]);
+            socket.write_all(b"N").unwrap();
+            assert_eq!(socket.read(&mut [0; 1]).unwrap(), 0, "must close without sending credentials");
+        });
+        let config = crate::connection::PostgresConfig { host: "127.0.0.1".into(), port, tls: mode, ..Default::default() };
+        assert!(client_config(&config, None).connect(MakeTlsConnector::new(mode.connector().unwrap())).is_err());
+        server.join().unwrap();
+    }
 }

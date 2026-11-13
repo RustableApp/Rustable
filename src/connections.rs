@@ -1,4 +1,7 @@
 //! Saved connection manager. Credentials and unfinished forms stay in memory only.
+#[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
+#[path = "connection_tls_qa.rs"]
+mod connection_tls_qa;
 use super::*;
 use crate::connection_probe::{Event as ProbeEvent, Probe, ProbeField};
 use crate::connection_profiles::{
@@ -159,11 +162,14 @@ impl Manager {
                 if self.probe_message.is_none() {
                     let transport = self.draft.as_ref().and_then(|draft| match &draft.connection {
                         ConnectionKind::Mysql(profile) | ConnectionKind::MariaDb(profile) => Some(profile.tls),
-                        ConnectionKind::Postgres(profile) => Some(profile.tls),
+                        ConnectionKind::Postgres(profile) => {
+                            self.probe_message = Some(format!("Connection test succeeded · TLS mode: {}", profile.tls.label()));
+                            None
+                        },
                         ConnectionKind::Redis(profile) => Some(profile.tls),
                         ConnectionKind::SQLite { .. } => None,
                     });
-                    self.probe_message = Some(match transport {
+                    self.probe_message.get_or_insert_with(|| match transport {
                         Some(true) => "Connection test succeeded · TLS verified",
                         Some(false) => "Connection test succeeded · Database TLS disabled",
                         None => "Connection test succeeded",
@@ -1095,11 +1101,34 @@ impl Rustable {
                                 if form_text(ui, "Password", &mut self.connection_manager.password, true, Some(ProbeField::Password)) { self.connection_manager.password_revision = self.connection_manager.password_revision.wrapping_add(1); }
                                 form_section(ui, "Security");
                                 status_row(ui, "TLS", Some(ProbeField::Tls), |ui| {
-                                    egui::ComboBox::from_id_salt("profile-tls").width(ui.available_width()).selected_text(if config.tls { "Verify full" } else { "Disabled" }).show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut config.tls, true, "Verify full");
-                                        ui.selectable_value(&mut config.tls, false, "Disabled (unencrypted)");
+                                    #[cfg(feature = "qa")]
+                                    if ui.ctx().data_mut(|data| data.remove_temp::<bool>(egui::Id::new("tls-preview-open")).unwrap_or(false)) {
+                                        egui::Popup::open_id(ui.ctx(), ui.make_persistent_id(egui::Id::new("profile-tls")).with("popup"));
+                                    }
+                                    egui::ComboBox::from_id_salt("profile-tls").height(340.0).width(ui.available_width()).selected_text(config.tls.label()).show_ui(ui, |ui| {
+                                        for mode in crate::connection::PostgresTlsMode::ALL {
+                                            let selected = config.tls == mode;
+                                            let mut text = egui::text::LayoutJob::default();
+                                            let color = if selected { ui.visuals().selection.stroke.color } else { ui.visuals().text_color() };
+                                            text.append(mode.label(), 0.0, egui::TextFormat {
+                                                font_id: egui::TextStyle::Body.resolve(ui.style()), color, ..Default::default()
+                                            });
+                                            text.append(&format!("\n{}", mode.description()), 0.0, egui::TextFormat {
+                                                font_id: egui::TextStyle::Small.resolve(ui.style()),
+                                                color: if selected { color.gamma_multiply(0.8) } else { ui.visuals().weak_text_color() },
+                                                ..Default::default()
+                                            });
+                                            // Bound the mixed-size layout to the popup's content width.
+                                            text.wrap.max_width = (ui.available_width() - 2.0 * ui.spacing().button_padding.x).max(1.0);
+                                            let text = ui.fonts_mut(|fonts| fonts.layout_job(text));
+                                            if ui.add(egui::Button::selectable(selected, text).wrap().min_size(egui::vec2(ui.available_width(), 0.0))).clicked() {
+                                                config.tls = mode;
+                                                ui.close();
+                                            }
+                                        }
                                     });
                                 });
+                                ui.label(egui::RichText::new(config.tls.description()).small());
                                 ports_valid &= ssh_form(ui, &mut config.ssh, self.connection_manager.generation, &mut pick);
                             }
                         }
@@ -1829,12 +1858,40 @@ mod tests {
     }
 
     #[test]
+    fn postgres_tls_picker_changes_policy_and_probe_summary_does_not_claim_verification() {
+        use crate::connection::PostgresTlsMode;
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.connections = true;
+        app.connection_manager.draft = Some(Profile::draft("PostgreSQL".into(), ConnectionKind::Postgres(PostgresProfile::default())));
+        for _ in 0..3 { manager_frame(&ctx, &mut app, vec![]); }
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        let position = painted_text(&output, "Verify full").unwrap();
+        manager_click(&ctx, &mut app, position, egui::PointerButton::Primary);
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        for mode in PostgresTlsMode::ALL { assert!(painted_text(&output, &format!("{}\n{}", mode.label(), mode.description())).is_some()); }
+        let position = painted_text(&output, &format!("Require\n{}", PostgresTlsMode::Require.description())).unwrap();
+        manager_click(&ctx, &mut app, position, egui::PointerButton::Primary);
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        assert!(painted_text(&output, PostgresTlsMode::Require.description()).is_some());
+        let ConnectionKind::Postgres(profile) = &app.connection_manager.draft.as_ref().unwrap().connection else { panic!() };
+        assert_eq!(profile.tls, PostgresTlsMode::Require);
+        for mode in PostgresTlsMode::ALL {
+            let ConnectionKind::Postgres(profile) = &mut app.connection_manager.draft.as_mut().unwrap().connection else { panic!() };
+            profile.tls = mode;
+            app.connection_manager.probe_message = None;
+            app.connection_manager.apply_probe_event(ProbeEvent::Finished);
+            assert_eq!(app.connection_manager.probe_message.as_deref(), Some(format!("Connection test succeeded · TLS mode: {}", mode.label()).as_str()));
+        }
+    }
+
+    #[test]
     fn connection_test_summary_distinguishes_tls_and_preserves_failures() {
         for tls in [false, true] {
             for kind in [
                 ConnectionKind::Mysql(crate::connection_profiles::MysqlProfile { tls, ..Default::default() }),
                 ConnectionKind::MariaDb(crate::connection_profiles::MysqlProfile { tls, ..Default::default() }),
-                ConnectionKind::Postgres(PostgresProfile { tls, ..Default::default() }),
+
             ] {
                 let mut manager = Manager { draft: Some(Profile::draft("Test".into(), kind)), ..Default::default() };
                 manager.apply_probe_event(ProbeEvent::Success(vec![ProbeField::Host]));
@@ -1877,6 +1934,7 @@ mod tests {
         }
     }
     include!("redis_connection_benchmark.rs");
+    include!("postgres_connection_benchmark.rs");
     fn app() -> Rustable {
         let mut app = Rustable::with_preferences(&egui::Context::default(), Preferences::default());
         let deadline = Instant::now() + std::time::Duration::from_secs(5);

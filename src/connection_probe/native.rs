@@ -66,7 +66,7 @@ pub(super) fn run_with_sentinel(connection: ConnectionKind, password: String, se
                 return;
             }
             let mut fields = vec![Host, Port, Database, User, Password];
-            if config.tls {
+            if config.tls.enabled() {
                 fields.push(Tls);
             }
             emit(Event::Running(fields.clone()));
@@ -83,9 +83,9 @@ pub(super) fn run_with_sentinel(connection: ConnectionKind, password: String, se
                 }
             };
             let result = runtime.block_on(async {
-                if config.tls {
-                    connection.ssl_mode(postgres::config::SslMode::Require);
-                    let tls = match native_tls::TlsConnector::new() {
+                if config.tls.enabled() {
+                    connection.ssl_mode(config.tls.ssl_mode());
+                    let tls = match config.tls.connector() {
                         Ok(tls) => tls,
                         Err(error) => {
                             emit(Event::Failed(vec![Tls], error.to_string()));
@@ -125,7 +125,7 @@ pub(super) fn run_with_sentinel(connection: ConnectionKind, password: String, se
                 Err(ProbeError::Postgres(error)) => {
                     if let Some(db) = error.as_db_error() {
                         let mut succeeded = vec![Host, Port];
-                        if config.tls {
+                        if config.tls.enabled() {
                             succeeded.push(Tls);
                         }
                         emit(Event::Success(succeeded));
@@ -332,6 +332,21 @@ fn describe_error(error: &postgres::Error) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    #[ignore = "disposable issue-8 PostgreSQL TLS fixture"]
+    fn probe_honors_encrypt_only_tls() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_TLS_QA").as_deref(), Ok("1"));
+        let profile = crate::connection_profiles::PostgresProfile {
+            host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(), user: "postgres".into(),
+            tls: crate::connection::PostgresTlsMode::Require, ssh: None,
+        };
+        let events = std::cell::RefCell::new(Vec::new());
+        run(ConnectionKind::Postgres(profile), "rustable_qa_only".into(), &AtomicBool::new(false), &|event| events.borrow_mut().push(event));
+        let events = events.into_inner();
+        assert!(events.iter().any(|event| matches!(event, Event::Success(fields) if fields.contains(&ProbeField::Tls))));
+        assert!(!events.iter().any(|event| matches!(event, Event::Failed(..))));
+    }
+
+    #[test]
     #[ignore = "requires disposable SSH and MySQL/MariaDB TLS fixtures"]
     fn live_mysql_probe_keeps_ssh_success_on_database_failure() {
         use crate::connection::MysqlConfig;
@@ -398,7 +413,7 @@ mod tests {
             port: 54329,
             database: "rustable_qa".into(),
             user: "postgres".into(),
-            tls: false,
+            tls: crate::connection::PostgresTlsMode::Disable,
             ssh: None,
         };
         let collect = |profile, password: &str| {
@@ -438,7 +453,7 @@ mod tests {
             let profile = crate::connection_profiles::PostgresProfile {
                 host: "127.0.0.1".into(),
                 port: listener.local_addr().unwrap().port(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ..Default::default()
             };
             let cancel = Arc::new(AtomicBool::new(false));
@@ -606,7 +621,7 @@ mod tests {
         let profile = crate::connection_profiles::PostgresProfile {
             host: "127.0.0.1".into(),
             port,
-            tls: false,
+            tls: crate::connection::PostgresTlsMode::Disable,
             ..Default::default()
         };
         let events = std::cell::RefCell::new(Vec::new());

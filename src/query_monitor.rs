@@ -192,9 +192,9 @@ fn monitor_request(control: db::PostgresControl, cancel: Option<RunningQuery>) -
     let mut config = db::postgres::async_client_config(&control.config, control.forwarded_port);
     config.application_name("Rustable query monitor").options("-c statement_timeout=5000 -c lock_timeout=1000");
     runtime.block_on(async {
-        if control.config.tls {
-            config.ssl_mode(tokio_postgres::config::SslMode::Require);
-            let tls = postgres_native_tls::MakeTlsConnector::new(native_tls::TlsConnector::new().map_err(|error| error.to_string())?);
+        if control.config.tls.enabled() {
+            config.ssl_mode(control.config.tls.ssl_mode());
+            let tls = postgres_native_tls::MakeTlsConnector::new(control.config.tls.connector().map_err(|error| error.to_string())?);
             monitor_connect(&config, tls, cancel).await
         } else {
             config.ssl_mode(tokio_postgres::config::SslMode::Disable);
@@ -256,12 +256,24 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "disposable issue-8 PostgreSQL TLS fixture"]
+    fn monitor_honors_encrypt_only_tls() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_TLS_QA").as_deref(), Ok("1"));
+        let config = crate::connection::PostgresConfig {
+            host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
+            user: "postgres".into(), password: "rustable_qa_only".into(),
+            tls: crate::connection::PostgresTlsMode::Require, ssh: None,
+        };
+        monitor_request(db::PostgresControl { process_id: 0, config, forwarded_port: Some(54329) }, None).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires opted-in disposable PostgreSQL on port 54329"]
     fn monitor_lists_and_cancels_only_selected_query() {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
         let config = crate::connection::PostgresConfig {
             host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-            user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+            user: "postgres".into(), password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable, ssh: None,
         };
         let control = db::PostgresControl { process_id: 0, config: config.clone(), forwarded_port: Some(54329) };
         let mut client = ::postgres::Client::connect("host=127.0.0.1 port=54329 user=postgres password=rustable_qa_only dbname=rustable_qa", ::postgres::NoTls).unwrap();

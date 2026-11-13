@@ -349,7 +349,7 @@ mod tests {
             let cancel = Arc::new(AtomicBool::new(false));
             let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig {
                 host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-                user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+                user: "postgres".into(), password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable, ssh: None,
             }, cancel).unwrap();
             driver.client.batch_execute("CREATE TEMP TABLE wildcard_refresh(id integer PRIMARY KEY); INSERT INTO wildcard_refresh SELECT generate_series(1,40)").unwrap();
             let mut request = Browse { table: "wildcard_refresh".into(), limit: 20, ..Default::default() };
@@ -391,7 +391,7 @@ mod tests {
                 database: "rustable_qa".into(),
                 user: "postgres".into(),
                 password: "rustable_qa_only".into(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ssh: None,
             },
             cancel.clone(),
@@ -555,7 +555,7 @@ mod tests {
                 database: "rustable_qa".into(),
                 user: "postgres".into(),
                 password: "rustable_qa_only".into(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ssh: None,
             },
             cancel.clone(),

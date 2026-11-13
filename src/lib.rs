@@ -146,6 +146,10 @@ pub fn run_native() -> eframe::Result {
     if std::env::var_os("RUSTABLE_NATIVE_PROFILE").is_some() {
         return session_windows::native_performance::run();
     }
+    #[cfg(feature = "qa")]
+    if std::env::var_os("RUSTABLE_TLS_CAPTURE").is_some() {
+        return app::Rustable::run_connection_tls_preview();
+    }
     crash_log::install();
     // Winit builds About/Hide/Quit labels from NSProcessInfo, not the window
     // title or bundle display name. Set this before it creates the native menu.
