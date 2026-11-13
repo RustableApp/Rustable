@@ -93,9 +93,9 @@ pub(super) fn export(path: &Path, grid: &Grid, cancel: &AtomicBool) -> io::Resul
             cancel,
             super::ExportFormat::Json,
         )?;
-        for row in &grid.rows {
-            writer.row(row.iter().map(|value| Ok(csv::Cell::from(value))))?;
-        }
+        grid.visit_rows_io(cancel, |row| {
+            writer.row(row.iter().map(|value| Ok(csv::Cell::from(value))))
+        })?;
         writer.finish()
     })
 }

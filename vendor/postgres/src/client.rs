@@ -544,6 +544,19 @@ impl Client {
         Ok(RowIter::new(self.connection.as_ref(), stream))
     }
 
+    /// Executes once, using temporary disk storage rather than truncation for
+    /// cold custom result types. Call on a database worker, never the UI thread.
+    pub fn query_typed_raw_spooled_with_prefix<P, I>(
+        &mut self, query: &str, params: I, prefix: &[&str], memory_bytes: usize,
+    ) -> Result<RowIter<'_>, Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        let stream = self.connection.block_on(
+            self.client.query_typed_raw_spooled_with_prefix(query, params, prefix, memory_bytes)
+        )?;
+        Ok(RowIter::new(self.connection.as_ref(), stream))
+    }
+
     /// Creates a new prepared statement.
     ///
     /// Prepared statements can be executed repeatedly, and may contain query parameters (indicated by `$1`, `$2`, etc),

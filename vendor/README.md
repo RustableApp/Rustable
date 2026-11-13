@@ -27,7 +27,7 @@ Local changes:
   `query_typed_with_prefix` executes prefixes with Bind/Execute in one Sync
   group so setup failure skips execution. Rustable's two idempotent SET LOCAL
   safeguards also run during description; arbitrary prefixes run only once.
-- `query_typed_bounded_with_prefix` is the editor's single-exchange path:
+- `query_typed_bounded_with_prefix` remains the bounded single-exchange API:
   safeguards, unnamed Parse/Describe/Bind/Execute, then Sync. Built-in and cached
   types stream immediately. Uncached types drain execution first, retaining only
   the configured row/byte budget, then resolve catalog metadata and decode those
@@ -36,6 +36,18 @@ Local changes:
   retains its describe-first behavior. Live tests cover cold enum results larger
   than the response channel, truncation, INSERT RETURNING without replay, cached
   decoding and empty custom-type results.
+- `query_typed_raw_spooled_with_prefix` is the desktop editor's complete-result
+  API (sync and async clients). It sends the same prefix/Parse/Describe/Bind/
+  Execute/Sync group as the bounded API. Built-in and cached types stream
+  immediately; cold custom types drain to a private temporary file after the
+  memory budget is reached, then resolve types and decode the saved wire rows.
+  The statement is never replayed. The spill API performs synchronous temporary
+  file I/O and is only suitable on a dedicated database worker, never a UI thread
+  or shared async executor. Files close/delete on completion, error or cancellation.
+  Storage failures drain the original response before returning an explicit error.
+  Raw rows over 64 MiB fail explicitly after draining; the bounded API remains
+  available and its truncation tests are retained. Cold and warm large-result
+  tests include INSERT RETURNING and explicit transactions.
 - `tokio-postgres/src/client.rs`: additive `query_typed_raw_with_prefix` and
   `transaction_status` APIs; tracks outstanding requests alongside status.
 - `tokio-postgres/src/codec.rs`: reads the terminal ReadyForQuery status from

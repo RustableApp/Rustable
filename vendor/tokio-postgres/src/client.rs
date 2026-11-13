@@ -596,6 +596,17 @@ impl Client {
         query::query_typed_bounded_with_prefix(&self.inner, query, params, prefix, max_rows, max_bytes).await
     }
 
+    /// Rustable's worker-only variant: uncached-type rows spill to a temporary
+    /// file after `memory_bytes`, then types resolve after the response drains.
+    /// Contains synchronous file I/O; do not call on a UI/runtime-sensitive task.
+    pub async fn query_typed_raw_spooled_with_prefix<P, I>(
+        &self, query: &str, params: I, prefix: &[&str], memory_bytes: usize,
+    ) -> Result<RowStream, Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        query::query_typed_spooled_with_prefix(&self.inner, query, params, prefix, memory_bytes).await
+    }
+
     /// Executes a parameterized row-returning query with text results in one exchange.
     /// No result-type catalog lookups are performed, including for custom types.
     pub async fn query_text_raw<P, I>(&self, query: &str, params: I) -> Result<SimpleQueryStream, Error>

@@ -88,6 +88,7 @@ mod redis_timeseries_chart;
 mod redis_workspace;
 mod result_chart;
 mod result_edit;
+mod result_pages;
 mod result_pins;
 mod result_search;
 mod review_sql;
@@ -151,6 +152,10 @@ pub fn run_native() -> eframe::Result {
     #[cfg(target_os = "macos")]
     objc2_foundation::NSProcessInfo::processInfo()
         .setProcessName(&objc2_foundation::NSString::from_str("Rustable"));
+    #[cfg(feature = "qa")]
+    if std::env::var_os("RUSTABLE_RESULT_CAPTURE").is_some() {
+        return app::Rustable::run_result_pages_preview();
+    }
     #[cfg(feature = "qa")]
     if std::env::var_os("RUSTABLE_QUERY_CAPTURE").is_some() {
         return app::Rustable::run_query_layout_preview();

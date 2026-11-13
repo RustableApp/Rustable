@@ -327,11 +327,10 @@ impl Driver for PostgresDriver {
                 };
                 let rows = self
                     .client
-                    .query_typed_raw_bounded_with_prefix(
+                    .query_typed_raw_spooled_with_prefix(
                         statement,
                         std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
                         prefix,
-                        QUERY_LIMIT,
                         budget,
                     )
                     .map_err(|err| {
@@ -352,15 +351,19 @@ impl Driver for PostgresDriver {
                     rows.columns().iter().all(|column| column.table_oid() == Some(oid) && column.column_id().is_some())
                         .then(|| self.result_origins.get(&oid).cloned()).flatten()
                 });
-                let mut grid = collect(rows, columns, QUERY_LIMIT, budget, cancel)?;
+                let mut grid = collect_complete(rows, columns, budget, cancel)?;
                 grid.source = source;
                 grid.elapsed = timer.elapsed();
                 Ok(grid)
             })();
             match result {
                 Ok(grid) => {
-                    budget = budget
-                        .saturating_sub(grid.rows.iter().flatten().map(value_size).sum::<usize>());
+                    budget = budget.saturating_sub(
+                        grid.rows
+                            .iter()
+                            .map(|row| super::result_store::row_bytes(row))
+                            .sum::<usize>(),
+                    );
                     report.grids.push(Arc::new(grid));
                 }
                 Err(e) => {
@@ -502,7 +505,14 @@ fn error(error: ::postgres::Error) -> String {
         }
         message
     } else {
-        error.to_string()
+        let mut message = error.to_string();
+        let mut cause = error.source();
+        while let Some(source) = cause {
+            message.push_str(": ");
+            message.push_str(&source.to_string());
+            cause = source.source();
+        }
+        message
     }
 }
 
@@ -557,6 +567,61 @@ impl Drop for CancelWatch {
             let _ = thread.join();
         }
     }
+}
+
+fn collect_complete(
+    rows: RowIter<'_>,
+    columns: Vec<String>,
+    budget: usize,
+    cancel: &AtomicBool,
+) -> Result<Grid, String> {
+    collect_into(
+        rows,
+        columns,
+        super::result_store::Collector::new(budget),
+        cancel,
+    )
+}
+fn collect_into(
+    mut rows: RowIter<'_>,
+    columns: Vec<String>,
+    mut collector: super::result_store::Collector,
+    cancel: &AtomicBool,
+) -> Result<Grid, String> {
+    let mut grid = Grid {
+        columns,
+        ..Default::default()
+    };
+    let mut failure = None;
+    while let Some(row) = rows.next().map_err(error)? {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Cancelled".into());
+        }
+        if failure.is_some() {
+            continue;
+        }
+        let decoded =
+            decode_row_bounded(&row, super::result_store::MAX_ROW_BYTES).and_then(|values| {
+                values.ok_or_else(|| "Result row exceeds the 64 MiB safety limit".into())
+            });
+        match decoded {
+            Ok(values) => {
+                super::progress::decoded_row(&values);
+                failure = collector.push(values).err();
+            }
+            Err(error) => failure = Some(error),
+        }
+    }
+    grid.affected = rows.rows_affected().unwrap_or(0) as usize;
+    if failure.is_none() {
+        failure = collector.finish(&mut grid).err();
+    }
+    if let Some(error) = failure {
+        return Err(format!(
+            "Statement executed, but results could not be retained: {error}. Verify writes before retrying."
+        ));
+    }
+    Ok(grid)
 }
 
 fn collect(
@@ -1657,8 +1722,8 @@ mod live_tests {
         assert!(report.error.is_none(), "{:?}", report.error);
         assert_eq!(report.grids.len(), 3);
         assert_eq!(report.grids[0].rows[0], vec![Value::Null, Value::Null]);
-        assert!(report.grids[1].truncated);
-        assert_eq!(report.grids[1].rows.len(), QUERY_LIMIT);
+        assert!(!report.grids[1].truncated);
+        assert_eq!(report.grids[1].row_count(), 6000);
         assert_eq!(report.grids[2].rows[0][0], Value::Text("semi;colon".into()));
         for sql in [
             "WITH deleted AS (DELETE FROM \"rustable.qa\".\"test.table\" RETURNING *) SELECT * FROM deleted",
@@ -1997,6 +2062,89 @@ mod query_lifetime_tests {
 #[cfg(test)]
 mod custom_type_stream_tests {
     use super::*;
+    #[test]
+    #[ignore = "requires opted-in disposable PostgreSQL on port 54329"]
+    fn complete_cold_custom_results_spill_without_replaying_writes() {
+        assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut driver = PostgresDriver::open(
+            &crate::connection::PostgresConfig {
+                host: "127.0.0.1".into(),
+                port: 54329,
+                database: "rustable_qa".into(),
+                user: "postgres".into(),
+                password: "rustable_qa_only".into(),
+                tls: false,
+                ssh: None,
+            },
+            cancel.clone(),
+        )
+        .unwrap();
+        driver.client.batch_execute("CREATE TYPE pg_temp.spill_state AS ENUM ('active'); CREATE TEMP TABLE spill_rows(id integer, state pg_temp.spill_state, payload text)").unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for sql in [
+                "INSERT INTO spill_rows SELECT i, 'active'::pg_temp.spill_state, repeat('x',4096) FROM generate_series(1,6001) i RETURNING *",
+                "SELECT * FROM spill_rows ORDER BY id",
+            ] {
+                let result = driver.execute(sql, false, &cancel);
+                assert!(result.error.is_none(), "{:?}", result.error);
+                let grid = &result.grids[0];
+                assert!(grid.is_stored());
+                assert_eq!(grid.row_count(), 6001);
+                assert!(!grid.truncated);
+                let (_, rows) = grid
+                    .stored
+                    .as_ref()
+                    .unwrap()
+                    .page(6000, false, &cancel)
+                    .unwrap();
+                assert_eq!(rows[0][0], Value::Integer(6001));
+                assert_eq!(rows[0][1], Value::Text("active".into()));
+                assert_eq!(rows[0][2], Value::Text("x".repeat(4096)));
+            }
+            assert_eq!(
+                driver
+                    .client
+                    .query_one("SELECT count(*) FROM spill_rows", &[])
+                    .unwrap()
+                    .get::<_, i64>(0),
+                6001
+            );
+            driver.client.batch_execute("BEGIN").unwrap();
+            let result = driver.execute("SELECT * FROM spill_rows ORDER BY id", false, &cancel);
+            assert!(result.error.is_none(), "{:?}", result.error);
+            assert_eq!(driver.transaction_state(), TransactionState::Active);
+            driver.client.batch_execute("ROLLBACK").unwrap();
+            assert!(driver.execute("SELECT 1/0", false, &cancel).error.is_some());
+            assert!(driver.execute("SELECT 42", false, &cancel).error.is_none());
+            let rows = driver.client.query_typed_raw_spooled_with_prefix(
+                "INSERT INTO spill_rows SELECT i, 'active'::pg_temp.spill_state, 'extra' FROM generate_series(7000,7002) i RETURNING id",
+                std::iter::empty::<(&(dyn ToSql + Sync), Type)>(), &[], 1024).unwrap();
+            let error = collect_into(
+                rows,
+                vec!["id".into()],
+                super::super::result_store::Collector::failing_after(1),
+                &cancel,
+            )
+            .unwrap_err();
+            assert!(error.contains("Statement executed"));
+            assert_eq!(
+                driver
+                    .client
+                    .query_one("SELECT count(*) FROM spill_rows", &[])
+                    .unwrap()
+                    .get::<_, i64>(0),
+                6004
+            );
+            send.send(()).unwrap();
+        });
+        receive
+            .recv_timeout(Duration::from_secs(30))
+            .expect("cold custom-type spill stalled");
+        worker.join().unwrap();
+    }
+
     #[test]
     #[ignore = "requires opted-in disposable PostgreSQL on port 54329"]
     fn single_exchange_custom_types_are_bounded_and_never_replayed() {

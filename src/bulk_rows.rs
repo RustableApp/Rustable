@@ -65,6 +65,10 @@ impl Rustable {
                 && input.consume_key(egui::Modifiers::COMMAND, egui::Key::A)
         }) {
             self.selected = self.row_selection.select_all(count, focused);
+            if self.view == View::Query && self.tabs[self.tab].grid.is_stored() {
+                self.tabs[self.tab].result_pages.all_selected = true;
+                self.selected = None;
+            }
             ctx.request_repaint();
         }
     }
@@ -177,6 +181,18 @@ impl Rustable {
     }
 
     pub(super) fn copy_rows_shortcut(&mut self, ctx: &egui::Context, row_focused: bool) {
+        if self.view == View::Query
+            && self.tabs[self.tab].grid.is_stored()
+            && !self.tabs[self.tab].result_pages.all_selected
+            && self.tabs[self.tab].result_pages.rendering
+            && self
+                .row_selection
+                .rows
+                .iter()
+                .any(|index| self.tabs[self.tab].result_pages.is_preview(*index))
+        {
+            return;
+        }
         if !row_focused || self.row_shortcuts_blocked() {
             return;
         }
@@ -195,6 +211,11 @@ impl Rustable {
             copy || key
         });
         if !copy {
+            return;
+        }
+        if self.view == View::Query && self.tabs[self.tab].result_pages.all_selected {
+            let tab = &mut self.tabs[self.tab];
+            tab.result_pages.copy_all(&tab.grid, ctx);
             return;
         }
         let grid = self.grid();

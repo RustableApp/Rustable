@@ -64,7 +64,7 @@ impl Rustable {
                             } else {
                                 format!(
                                     "{}{} rows",
-                                    grid.rows.len(),
+                                    grid.row_count(),
                                     if grid.truncated { "+" } else { "" }
                                 )
                             };
@@ -119,11 +119,13 @@ impl Rustable {
                 if !Arc::ptr_eq(&tab.grid, &pin.grid) { tab.result_search.cancel(); }
                 tab.selected_pin = Some(index);
                 tab.grid = pin.grid.clone();
+                tab.result_pages = Default::default();
             } else {
                 tab.result_index = index - tab.pins.items.len();
                 tab.selected_pin = None;
                 if !Arc::ptr_eq(&tab.grid, &tab.results[tab.result_index]) { tab.result_search.cancel(); }
                 tab.grid = tab.results[tab.result_index].clone();
+                tab.result_pages = Default::default();
             }
         }
         if close.is_some() || choose.is_some() {

@@ -369,12 +369,7 @@ fn script(conn: &Connection, sql: &str, safe: bool, cancel: &AtomicBool) -> Scri
                 let used = grid
                     .rows
                     .iter()
-                    .flatten()
-                    .map(|v| match v {
-                        Value::Text(s) => s.len(),
-                        Value::Blob(b) => b.len(),
-                        _ => 8,
-                    })
+                    .map(|row| super::result_store::row_bytes(row))
                     .sum::<usize>();
                 budget = budget.saturating_sub(used);
                 report.grids.push(Arc::new(grid));
@@ -412,6 +407,15 @@ fn query_with_budget(
     safe: bool,
     budget: usize,
 ) -> rusqlite::Result<Grid> {
+    query_into(conn, sql, safe, super::result_store::Collector::new(budget))
+}
+
+fn query_into(
+    conn: &Connection,
+    sql: &str,
+    safe: bool,
+    mut collector: super::result_store::Collector,
+) -> rusqlite::Result<Grid> {
     conn.pragma_update(None, "query_only", safe)?;
     let mut batch = rusqlite::Batch::new(conn, sql);
     let mut statement = batch.next()?.ok_or(rusqlite::Error::InvalidQuery)?;
@@ -423,7 +427,6 @@ fn query_with_budget(
     }
     let start = Instant::now();
     let changes_before = conn.total_changes();
-    let read_only = statement.readonly();
     let names = statement
         .column_names()
         .into_iter()
@@ -447,11 +450,54 @@ fn query_with_budget(
             .then(|| (schema.to_owned(), table.to_owned()))
     });
     let mut rows = statement.query([])?;
-    let mut grid = collect_with_budget(&mut rows, names, QUERY_LIMIT, budget)?;
-    if !read_only {
-        // Finish RETURNING statements even when only a bounded preview is retained.
-        // Otherwise affected counts and transaction completion are misleading.
-        while rows.next()?.is_some() {}
+    let mut grid = Grid {
+        columns: names,
+        ..Default::default()
+    };
+    let mut failure = None;
+    while let Some(row) = rows.next()? {
+        if failure.is_some() {
+            continue;
+        }
+        let size = (0..grid.columns.len()).try_fold(0usize, |sum, i| {
+            Ok::<_, rusqlite::Error>(
+                sum.saturating_add(std::mem::size_of::<Value>())
+                    .saturating_add(match row.get_ref(i)? {
+                        rusqlite::types::ValueRef::Text(v) | rusqlite::types::ValueRef::Blob(v) => {
+                            v.len()
+                        }
+                        _ => 0,
+                    }),
+            )
+        })?;
+        if size > super::result_store::MAX_ROW_BYTES {
+            failure = Some("Result row exceeds the 64 MiB safety limit".to_owned());
+            continue;
+        }
+        let values = match (0..grid.columns.len())
+            .map(|i| row.get::<_, rusqlite::types::Value>(i).map(Value::from))
+            .collect::<rusqlite::Result<Vec<_>>>()
+        {
+            Ok(values) => values,
+            Err(error) => {
+                failure = Some(error.to_string());
+                continue;
+            }
+        };
+        super::progress::decoded_row(&values);
+        if let Err(error) = collector.push(values) {
+            failure = Some(error);
+        }
+    }
+    if failure.is_none() {
+        failure = collector.finish(&mut grid).err();
+    }
+    if let Some(error) = failure {
+        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::other(format!(
+                "Statement executed, but results could not be retained: {error}. Verify writes before retrying."
+            )),
+        )));
     }
     drop(rows);
     grid.source = source;
@@ -1885,7 +1931,39 @@ mod tests {
     }
 
     #[test]
-    fn returning_finishes_with_bounded_preview_and_accurate_count() {
+    fn returning_storage_failure_drains_without_replaying_or_losing_transaction() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(id INTEGER); INSERT INTO t VALUES(1),(2),(3); BEGIN")
+            .unwrap();
+        let error = query_into(
+            &conn,
+            "UPDATE t SET id=id+10 RETURNING id",
+            false,
+            super::super::result_store::Collector::failing_after(1),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Statement executed"));
+        assert!(
+            error
+                .to_string()
+                .contains("Injected result storage failure")
+        );
+        assert!(!conn.is_autocommit());
+        assert_eq!(
+            conn.query_row("SELECT sum(id) FROM t", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            36
+        );
+        conn.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            conn.query_row("SELECT sum(id) FROM t", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+    }
+
+    #[test]
+    fn returning_spills_complete_results_and_finishes_writes() {
         let conn = demo().unwrap();
         let grid = query_with_budget(
             &conn,
@@ -1894,8 +1972,9 @@ mod tests {
             16,
         )
         .unwrap();
-        assert!(grid.truncated);
-        assert_eq!(grid.rows.len(), 2);
+        assert!(!grid.truncated);
+        assert!(grid.is_stored());
+        assert_eq!(grid.row_count(), 2400);
         assert_eq!(grid.affected, 2400);
         assert_eq!(
             query(
@@ -2042,12 +2121,12 @@ mod tests {
     }
 
     #[test]
-    fn results_are_bounded_and_queries_cancel() {
+    fn results_are_complete_and_queries_cancel() {
         let conn = demo().unwrap();
         let sql = "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT x FROM n";
         let grid = query(&conn, sql, true).unwrap();
-        assert_eq!(grid.rows.len(), QUERY_LIMIT);
-        assert!(grid.truncated);
+        assert_eq!(grid.row_count(), 10000);
+        assert!(!grid.truncated);
         conn.progress_handler(100, Some(|| true)).unwrap();
         assert!(query(&conn, sql, true).is_err());
     }
@@ -2654,22 +2733,13 @@ mod performance_tests {
     use super::*;
 
     #[test]
-    fn oversized_rows_are_rejected_before_owned_conversion() {
+    fn large_results_spill_and_oversized_rows_fail_explicitly() {
         let conn = Connection::open_in_memory().unwrap();
         let grid = query_with_budget(&conn, "SELECT zeroblob(20000000)", true, 1024).unwrap();
         assert!(grid.rows.is_empty());
-        assert!(grid.truncated);
-        // Invalid UTF-8 would fail owned Value conversion; a rejected row should
-        // never attempt that conversion, even if its first field is invalid.
-        let grid = query_with_budget(
-            &conn,
-            "SELECT CAST(x'ff' AS TEXT), zeroblob(2048)",
-            true,
-            1024,
-        )
-        .unwrap();
-        assert!(grid.rows.is_empty());
-        assert!(grid.truncated);
+        assert!(grid.is_stored());
+        assert!(!grid.truncated);
+        assert_eq!(grid.row_count(), 1);
         let grid = query_with_budget(
             &conn,
             "SELECT '1234', 7 UNION ALL SELECT '5678', 8",
@@ -2677,8 +2747,29 @@ mod performance_tests {
             12,
         )
         .unwrap();
-        assert_eq!(grid.rows.len(), 1);
-        assert!(grid.truncated);
+        assert_eq!(grid.row_count(), 2);
+        let mut values = Vec::new();
+        grid.visit_rows(&AtomicBool::new(false), |_, row| {
+            values.push(row.to_vec());
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(
+            values[1],
+            vec![Value::Text("5678".into()), Value::Integer(8)]
+        );
+        let error = query_with_budget(
+            &conn,
+            "SELECT CAST(x'ff' AS TEXT), zeroblob(67108865)",
+            true,
+            1024,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("64 MiB"));
+        assert_eq!(
+            query(&conn, "SELECT 42", true).unwrap().rows[0][0],
+            Value::Integer(42)
+        );
     }
 
     #[test]
@@ -2799,8 +2890,8 @@ mod performance_tests {
             samples.len()
         );
         let grid = query(&conn, "SELECT * FROM records", true).unwrap();
-        assert_eq!(grid.rows.len(), QUERY_LIMIT);
-        assert!(grid.truncated);
+        assert_eq!(grid.row_count(), 1_000_000);
+        assert!(!grid.truncated);
         let cancel = Arc::new(AtomicBool::new(false));
         let callback = cancel.clone();
         conn.progress_handler(1000, Some(move || callback.load(Ordering::Relaxed))).unwrap();

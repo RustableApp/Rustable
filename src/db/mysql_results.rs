@@ -1,13 +1,13 @@
 //! Bounded retained results from MySQL text/prepared query streams.
 //! The transport still drains unretained rows to keep the connection synchronized;
 //! cancellation and socket deadlines belong to the owning driver.
-use super::{Grid, ScriptResult, Value, BYTE_LIMIT, QUERY_LIMIT};
-use std::{sync::Arc, time::Instant};
+use super::{BYTE_LIMIT, Grid, ScriptResult, Value};
 use ::mysql::{QueryResult, Value as Wire, prelude::Protocol};
+use std::{sync::Arc, time::Instant};
 
 impl<T: Protocol> From<QueryResult<'_, '_, '_, T>> for ScriptResult {
     fn from(results: QueryResult<'_, '_, '_, T>) -> Self {
-        collect(results, BYTE_LIMIT, QUERY_LIMIT)
+        collect(results, BYTE_LIMIT, usize::MAX)
     }
 }
 
@@ -73,6 +73,8 @@ fn collect_inner<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &
             continue;
         }
         remaining -= header_bytes;
+        let complete = row_limit == usize::MAX;
+        let mut collector = super::result_store::Collector::new(remaining);
         let mut decoding_failed = false;
         for row in set.by_ref() {
             let row = match row {
@@ -87,16 +89,44 @@ fn collect_inner<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &
                     _ => 32,
                 })
             });
-            if grid.rows.len() >= row_limit || row_bytes > remaining {
+            if complete && row_bytes > super::result_store::MAX_ROW_BYTES {
+                report.error = Some("Statement executed, but a result row exceeds the 64 MiB safety limit. Verify writes before retrying.".into());
+                decoding_failed = true;
+                continue;
+            }
+            if !complete && (grid.rows.len() >= row_limit || row_bytes > remaining) {
                 grid.truncated = true;
                 continue;
             }
             let values = columns.iter().zip(row.unwrap()).map(Value::try_from)
                 .collect::<Result<Vec<_>, _>>();
             match values {
-                Ok(values) => { remaining -= row_bytes; grid.rows.push(values); }
+                Ok(values) => {
+                    if complete {
+                        if let Err(error) = collector.push(values) {
+                            report.error = Some(format!(
+                                "Statement executed, but results could not be retained: {error}. Verify writes before retrying."
+                            ));
+                            decoding_failed = true;
+                        }
+                    } else {
+                        remaining -= row_bytes; grid.rows.push(values); }
+                }
                 Err(error) => { report.error = Some(error); decoding_failed = true; }
             }
+        }
+        if complete && !decoding_failed {
+            if let Err(error) = collector.finish(&mut grid) {
+                report.error = Some(format!(
+                    "Results could not be retained: {error}. Verify writes before retrying."
+                ));
+            }
+            remaining = remaining.saturating_sub(
+                grid.rows
+                    .iter()
+                    .map(|row| super::result_store::row_bytes(row))
+                    .sum::<usize>(),
+            );
         }
         grid.elapsed = set_started.elapsed();
         report.grids.push(Arc::new(grid));
@@ -158,8 +188,30 @@ mod tests {
         let many = "WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<99) SELECT a.x*100+b.x AS value FROM n a CROSS JOIN n b";
         let report = ScriptResult::from(conn.query_iter(many).unwrap());
         assert!(report.error.is_none());
-        assert_eq!(report.grids[0].rows.len(), QUERY_LIMIT);
-        assert!(report.grids[0].truncated);
+        assert_eq!(report.grids[0].row_count(), 10000);
+        assert!(!report.grids[0].truncated);
+        let wide = format!(
+            "SELECT value, REPEAT('x',4096) AS payload FROM ({many}) rows_to_spill ORDER BY value"
+        );
+        for prepared in [false, true] {
+            let results = if prepared {
+                ScriptResult::from(conn.exec_iter(&wide, ()).unwrap())
+            } else {
+                ScriptResult::from(conn.query_iter(&wide).unwrap())
+            };
+            assert!(results.error.is_none(), "{:?}", results.error);
+            let grid = &results.grids[0];
+            assert!(grid.is_stored());
+            assert_eq!(grid.row_count(), 10000);
+            let (_, page) = grid
+                .stored
+                .as_ref()
+                .unwrap()
+                .page(9999, false, &std::sync::atomic::AtomicBool::new(false))
+                .unwrap();
+            assert_eq!(page[0][0], Value::Integer(9999));
+            assert_eq!(page[0][1], Value::Text("x".repeat(4096)));
+        }
         let report = collect(conn.query_iter("SELECT REPEAT('x', 4096) AS big; SELECT 2 AS following").unwrap(), 1024, 5000);
         assert!(report.grids[0].truncated);
         assert!(report.grids[0].rows.is_empty());

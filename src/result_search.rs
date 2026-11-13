@@ -1,4 +1,4 @@
-//! Literal search of loaded result cells, off the render thread.
+//! Literal search of complete result snapshots, off the render thread.
 use crate::db::{Grid, Value};
 use eframe::egui;
 use std::sync::{Arc, Weak, mpsc, atomic::{AtomicBool, Ordering}};
@@ -58,11 +58,24 @@ impl Found {
 pub(crate) fn scan(grid: &Arc<Grid>, needle: String, case_sensitive: bool) -> Found {
     scan_until_cancelled(grid, needle, case_sensitive, || false).unwrap()
 }
+#[cfg(any(test, target_arch = "wasm32"))]
 fn scan_until_cancelled(
     grid: &Arc<Grid>, needle: String, case_sensitive: bool,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Option<Found> {
-    if cancelled() { return None; }
+    scan_checked(grid, needle, case_sensitive, cancelled)
+        .ok()
+        .flatten()
+}
+fn scan_checked(
+    grid: &Arc<Grid>,
+    needle: String,
+    case_sensitive: bool,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Option<Found>, String> {
+    if cancelled() {
+        return Ok(None);
+    }
     let mut result = Found {
         source: Arc::downgrade(grid),
         needle,
@@ -71,24 +84,34 @@ fn scan_until_cancelled(
         limited: false,
     };
     if result.needle.is_empty() {
-        return Some(result);
+        return Ok(Some(result));
     }
     let Ok(pattern) = regex::RegexBuilder::new(&regex::escape(&result.needle))
         .case_insensitive(!case_sensitive)
         .build()
     else {
-        return Some(result);
+        return Ok(Some(result));
     };
     let mut rendered = String::new();
-    for (row, values) in grid.rows.iter().enumerate() {
-        if cancelled() { return None; }
+    let mut stopped = false;
+    grid.visit_rows(&AtomicBool::new(false), |row, values| {
+        if cancelled() {
+            stopped = true;
+            return Ok(false);
+        }
         // Check once per bounded group, keeping checkpoint bookkeeping out
         // of the numeric-cell hot loop. Large text still checks individually.
         for (chunk_index, chunk) in values.chunks(32).enumerate() {
-            if chunk_index != 0 && cancelled() { return None; }
+            if chunk_index != 0 && cancelled() {
+                stopped = true;
+                return Ok(false);
+            }
             for (offset, value) in chunk.iter().enumerate() {
                 let text = if let Value::Text(text) = value {
-                    if text.len() > 64 * 1024 && cancelled() { return None; }
+                    if text.len() > 64 * 1024 && cancelled() {
+                        stopped = true;
+                        return Ok(false);
+                    }
                     text.as_str()
                 } else {
                     searchable_text(value, &mut rendered)
@@ -96,14 +119,19 @@ fn scan_until_cancelled(
                 if pattern.is_match(text) {
                     if result.cells.len() == MATCH_LIMIT {
                         result.limited = true;
-                        return Some(result);
+                        return Ok(false);
                     }
                     result.cells.push((row, chunk_index * 32 + offset));
                 }
             }
         }
-    }
-    if cancelled() { None } else { Some(result) }
+        Ok(true)
+    })?;
+    Ok(if stopped || cancelled() {
+        None
+    } else {
+        Some(result)
+    })
 }
 // Only scalar representations use the scratch buffer. Text is borrowed and NULL
 // is static, so even a scan of huge text/blob values keeps scratch space small.
@@ -170,7 +198,7 @@ impl Search {
                 egui::TextEdit::singleline(&mut self.needle)
                     .char_limit(1024)
                     .desired_width(180.0)
-                    .hint_text("Loaded cells only"),
+                    .hint_text("All result cells"),
             );
             self.field_id = Some(field.id);
             if field.changed() {
@@ -222,7 +250,7 @@ impl Search {
                 move_by = 1;
             }
             ui.label(if self.needle.is_empty() {
-                "Search loaded values".into()
+                "Search result values".into()
             } else if let Some(found) = ready {
                 if found.cells.is_empty() {
                     "No matches".into()
@@ -334,12 +362,13 @@ impl Search {
             });
             #[cfg(not(target_arch = "wasm32"))]
             std::thread::spawn(move || {
-                let result = scan_until_cancelled(&source, needle, case,
-                    || cancel.load(Ordering::Relaxed));
+                let result = scan_checked(&source, needle, case, || cancel.load(Ordering::Relaxed));
                 drop(source);
                 // A closed search no longer needs a wakeup. Obsolete searches
                 // still wake their owner to launch the latest coalesced request.
-                if tx.send(Ok(result)).is_ok() { ctx.request_repaint(); }
+                if tx.send(result).is_ok() {
+                    ctx.request_repaint();
+                }
             });
             #[cfg(target_arch = "wasm32")]
             {
@@ -380,6 +409,24 @@ impl Search {
 }
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn search_finds_rows_beyond_first_disk_page() {
+        let mut collector = crate::db::result_store::Collector::new(128);
+        for i in 0..10001 {
+            collector
+                .push(vec![crate::db::Value::Text(format!("row-{i}"))])
+                .unwrap();
+        }
+        let mut grid = crate::db::Grid::default();
+        collector.finish(&mut grid).unwrap();
+        let grid = std::sync::Arc::new(grid);
+        let found = super::scan_checked(&grid, "row-10000".into(), true, || false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.cells, [(10000, 0)]);
+    }
+
     use super::*;
     #[test]
     fn cancelled_scan_stops_before_compilation_or_remaining_cells() {

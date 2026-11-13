@@ -47,9 +47,9 @@ RUSTABLE_MYSQL_TEST_PORT=43317 mise exec -- cargo test --lib db::mysql_results -
 ```
 
 The collector preserves multiple result sets and headers for empty SELECTs,
-retains earlier results when a later statement errors, caps each grid at 5,000
-rows, shares a 16 MiB retained-data budget across grids, and caps result sets at
-128. Structural/header costs are included in the budget. Rejected rows are
+retains earlier results when a later statement errors, spills complete desktop
+results after 5,000 rows or the shared 16 MiB memory budget, and caps result sets
+at 128. Explicit bounded collectors used by browsing/readback still truncate. Structural/header costs are included in the budget. Rejected rows are
 not converted or cloned into the UI grid; transport rows are still received
 and drained to preserve protocol synchronization. This is not a bound on total
 process memory or network traffic. The owning driver's packet limits, socket
@@ -613,3 +613,27 @@ bash scripts/preview-redis-browser.sh` (environment assignments on one line).
 `RUSTABLE_REDIS_CLUSTER_VECTOR_QA=1 bash scripts/test-redis-cluster.sh` selects
 Redis 8.4 and additionally validates vector counts and pages across all three
 primary owners, before the final seed-shutdown recovery test.
+
+
+## Disposable PostgreSQL complete-result checks
+
+The following isolated container uses public fixture credentials, loopback port
+54329 and disposable storage. Never point these tests at a user database.
+
+```sh
+docker run -d --name rustable-results-postgres-qa --tmpfs /var/lib/postgresql/data \
+  -p 127.0.0.1:54329:5432 -e POSTGRES_PASSWORD=rustable_qa_only \
+  -e POSTGRES_DB=rustable_qa postgres:17
+docker exec rustable-results-postgres-qa pg_isready -U postgres
+RUSTABLE_POSTGRES_QA=1 mise exec -- cargo test --release --lib db::postgres::custom_type_stream_tests -- --ignored --nocapture --test-threads=1
+RUSTABLE_POSTGRES_QA=1 mise exec -- cargo test --release --lib db::postgres::latency_tests::editor_wan_latency_comparison -- --ignored --nocapture
+RUSTABLE_POSTGRES_QA=1 mise exec -- cargo test --release --lib db::postgres::latency_tests::browse_wan_latency_comparison -- --ignored --nocapture
+docker rm -f rustable-results-postgres-qa
+```
+
+The complete-result latency workload includes 6,000 rows spilled locally, compared
+with the same rows over a single simple-query exchange. Run latency benchmarks
+serially, without competing builds or benchmark workloads. The custom-type test
+covers cold and warm enum results over 16 MiB, exactly-once INSERT RETURNING,
+explicit transactions, errors and subsequent connection reuse. The older bounded
+API tests remain separate and continue to assert intentional truncation.

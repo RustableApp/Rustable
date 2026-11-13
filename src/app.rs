@@ -1,3 +1,6 @@
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "qa")))]
+#[path = "result_pages_qa.rs"]
+mod result_pages_qa;
 use crate::controls::rounded_action_buttons;
 use web_time::Instant;
 #[path = "query_library.rs"]
@@ -237,6 +240,7 @@ struct QueryTab {
     execution_source: Option<(String, usize)>,
     error_highlight: Option<std::ops::Range<usize>>,
     result_search: crate::result_search::Search,
+    result_pages: crate::result_pages::Pages,
     result_grid_focus: Option<egui::Id>,
     /// SQL sent for the latest run, kept only until its reply arrives.
     executed_sql: Option<String>,
@@ -255,6 +259,7 @@ impl QueryTab {
             self.result_search.cancel();
             self.selected_pin = None;
             self.grid = self.results.get(self.result_index).cloned().unwrap_or_default();
+            self.result_pages = Default::default();
         } else if let Some(selected) = &mut self.selected_pin && *selected > index {
             *selected -= 1;
         }
@@ -302,6 +307,7 @@ impl QueryTab {
             execution_source: None,
             error_highlight: None,
             result_search: Default::default(),
+            result_pages: Default::default(),
             result_grid_focus: None,
             executed_sql: None,
             edit_target: None,
@@ -887,6 +893,7 @@ impl Rustable {
     fn query_edit_target(&self) -> Option<&crate::result_edit::Target> {
         let tab = self.tabs.get(self.tab)?;
         (self.view == View::Query
+            && !tab.grid.is_stored()
             && tab.selected_pin.is_none()
             && tab.results.len() == 1
             && tab.result_index == 0)
@@ -941,13 +948,15 @@ impl Rustable {
             match result {
                 Ok(Some(updated)) => {
                     let updated = Arc::new(updated);
-                    if Arc::ptr_eq(&tab.grid, &tab.results[0]) { tab.result_search.cancel(); tab.grid = updated.clone(); }
+                    if Arc::ptr_eq(&tab.grid, &tab.results[0]) { tab.result_search.cancel(); tab.result_pages = Default::default();
+                        tab.grid = updated.clone(); }
                     tab.results[0] = updated;
                 }
                 Ok(None) => {}
                 Err(error) => {
                     tab.results.clear();
-                    if tab.selected_pin.is_none() { tab.result_search.cancel(); tab.grid = Arc::default(); }
+                    if tab.selected_pin.is_none() { tab.result_search.cancel();
+                        tab.result_pages = Default::default(); tab.grid = Arc::default(); }
                     tab.edit_target = None;
                     tab.result_error = Some(format!("Changes saved, but results could not be refreshed: {error}. Run the query again to reload the results."));
                 }
@@ -1420,6 +1429,7 @@ impl Rustable {
                     self.foreign_keys.clear();
                     for tab in &mut self.tabs {
                         tab.grid = Arc::default();
+                        tab.result_pages = Default::default();
                         tab.results.clear();
                         tab.edit_target = None;
                         tab.executed_sql = None;
@@ -1494,6 +1504,7 @@ impl Rustable {
                         self.tabs[index].result_view = if report.error.is_some() { ResultView::Message } else { ResultView::Data };
                         let tab = &mut self.tabs[index];
                         tab.result_search.cancel();
+                        tab.result_pages = Default::default();
                         tab.error_highlight = tab.execution_source.take().and_then(|(source, base)| {
                             (source == tab.sql && report.error.is_some()).then_some(())?;
                             crate::editor::error_token_range(&source, base.checked_add(report.error_offset?)?)
@@ -1922,7 +1933,8 @@ impl Rustable {
 
     fn grid(&self) -> Arc<Grid> {
         if self.view == View::Query {
-            self.tabs[self.tab].grid.clone()
+            self.tabs[self.tab].result_pages
+                .grid(&self.tabs[self.tab].grid)
         } else {
             self.table.clone()
         }
@@ -3305,6 +3317,11 @@ Right-click to inspect or remove individual changes",
                     self.column_inspector(ui);
                     return;
                 }
+                if self.view == View::Query && self.tabs[self.tab].result_pages.all_selected {
+                    ui.strong(format!("All {} rows selected", self.tabs[self.tab].grid.row_count()));
+                    ui.label("Copy includes every result row. Use Export for selections larger than the clipboard limit.");
+                    return;
+                }
                 sidebar_search(ui, &mut self.field_search, "Search for field…");
                 let search = self.field_search.to_lowercase();
                 ui.add_space(3.0);
@@ -3773,43 +3790,74 @@ Right-click to inspect or remove individual changes",
             }
             if self.view == View::Query {
                 self.query_result_footer(ui);
+                let tab = &mut self.tabs[self.tab];
+                let (focus, changed) = tab.result_pages.show(ui, &tab.grid);
+                if changed { self.selected = None; self.row_selection.clear(); }
+                if let Some((row, column)) = focus {
+                    self.selected = self.row_selection.click(row, false, false, None);
+                    self.row_selection.cell_column = column;
+                    self.row_selection.pending_focus = Some(row);
+                    self.row_selection.pending_cell_scroll = true;
+                    self.tabs[self.tab].result_pages.pin_selection(self.selected, &self.row_selection.rows);
+                }
                 if self.tabs[self.tab].result_view == ResultView::Message {
                     self.query_result_message(ui);
                     return;
                 }
                 if self.tabs[self.tab].result_view == ResultView::Chart {
+                    self.tabs[self.tab].result_pages.rendering = true;
                     let grid = self.grid();
+                    self.tabs[self.tab].result_pages.rendering = false;
+                    if grid.is_stored() { ui.label("Chart shows rows near the current scroll position. Search and export include all rows."); }
                     self.tabs[self.tab].chart.show(ui, &grid);
                     return;
                 }
             }
             if self.view == View::Query {
-                let grid = self.grid();
+                let grid = self.tabs[self.tab].grid.clone();
                 let was_open = self.tabs[self.tab].result_search.open;
-                if ui.is_enabled() && let Some((row, column)) = self.tabs[self.tab].result_search.show(ui, &grid) {
+                if ui.is_enabled() && let Some((row, column)) = self.tabs[self.tab].result_search.show(ui, &grid)
+                    && let Some((row, column)) = self.tabs[self.tab].result_pages.select(&grid, row, column, ui.ctx()) {
                     self.selected = self.row_selection.click(row, false, false, None);
                     self.row_selection.cell_column = column;
                     self.row_selection.pending_focus = Some(row);
                     self.row_selection.pending_cell_scroll = true;
+                    self.tabs[self.tab].result_pages.pin_selection(self.selected, &self.row_selection.rows);
                 }
                 if was_open && !self.tabs[self.tab].result_search.open
                     && let Some(id) = self.tabs[self.tab].result_grid_focus {
                     ui.memory_mut(|m| m.request_focus(id));
                 }
             }
+            if self.view == View::Query && self.tabs[self.tab].grid.is_stored() && self.grid().rows.is_empty() {
+                ui.weak(if self.tabs[self.tab].result_pages.is_loading() { "Loading result rows…" } else { "Result rows could not be loaded." });
+                return;
+            }
             self.data_grid(ui);
         });
     }
 
     fn query_result_footer(&mut self, ui: &mut egui::Ui) {
-        let grid = self.grid();
+        let grid = self.tabs[self.tab].grid.clone();
         let failed_without_result = self.tabs[self.tab].selected_pin.is_none() && self.tabs[self.tab].results.is_empty() && self.tabs[self.tab].result_error.is_some();
         let count = if failed_without_result {
             String::new()
         } else if grid.columns.is_empty() {
             format!("{} {} affected", grid.affected, if grid.affected == 1 { "row" } else { "rows" })
         } else {
-            format!("{}{} {}", grid.rows.len(), if grid.truncated { "+" } else { "" }, if grid.rows.len() == 1 && !grid.truncated { "row" } else { "rows" })
+            format!("{}{} {}{}", grid.row_count(), if grid.truncated { "+" } else { "" }, if grid.row_count() == 1 && !grid.truncated {
+                    "row"
+                } else {
+                    "rows"
+                },
+                if grid.is_stored() {
+                    if self.tabs[self.tab].result_pages.all_selected {
+                        " · all selected · read-only"
+                    } else { " · read-only"
+                    }
+                } else {
+                    ""
+                })
         };
         let pending = self.tabs[self.tab].selected_pin.is_none() && matches!(self.pending, Some(Pending::Query(index)) if index == self.tab);
         let elapsed_ms = grid.elapsed.as_secs_f64() * 1000.0;
@@ -3847,7 +3895,7 @@ Right-click to inspect or remove individual changes",
                                 .on_hover_text(hint);
                         } else {
                             ui.label(RichText::new(if pending { String::new() } else { count }).color(ui.visuals().weak_text_color()))
-                                .on_hover_text(if grid.truncated { "Result limit reached; more rows may be available" } else { "Rows in the selected result" });
+                                .on_hover_text(if grid.truncated { "Browser preview limit reached (5,000 rows or 16 MiB); use the desktop app for complete disk-backed results." } else { "Rows in the selected result" });
                         }
                     });
                 });
@@ -3855,12 +3903,12 @@ Right-click to inspect or remove individual changes",
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_enabled_ui(self.pending.is_none() && !grid.columns.is_empty(), |ui| {
                             ui.menu_button("Export…", |ui| {
-                                if ui.button("Loaded rows as CSV…").clicked() { self.file_dialog(ui.ctx(), true); ui.close(); }
-                                if ui.button("Loaded rows as JSON…").on_hover_text("JSON objects; binary values are byte arrays. Exports loaded rows only.").clicked() { self.json_export_dialog(ui.ctx()); ui.close(); }
+                                if ui.button(if grid.truncated { "Loaded rows as CSV…" } else { "All result rows as CSV…" }).clicked() { self.file_dialog(ui.ctx(), true); ui.close(); }
+                                if ui.button(if grid.truncated { "Loaded rows as JSON…" } else { "All result rows as JSON…" }).on_hover_text(if grid.truncated { "JSON objects; binary values are byte arrays. Exports loaded rows only." } else { "JSON objects; binary values are byte arrays. Exports every result row." }).clicked() { self.json_export_dialog(ui.ctx()); ui.close(); }
                             });
                         });
                         if ui.add_enabled(!grid.columns.is_empty(), result_search_button())
-                            .on_hover_text(format!("Find in loaded results · {} when results are focused", crate::icons::shortcut(ui.ctx(), false, "F"))).clicked() {
+                            .on_hover_text(format!("Find in all result rows · {} when results are focused", crate::icons::shortcut(ui.ctx(), false, "F"))).clicked() {
                             let tab = &mut self.tabs[self.tab];
                             tab.result_view = ResultView::Data;
                             tab.result_search.open = !tab.result_search.open;
@@ -3909,7 +3957,7 @@ Right-click to inspect or remove individual changes",
                 ui.label(if tab.grid.columns.is_empty() {
                     format!("{} {} affected.", tab.grid.affected, if tab.grid.affected == 1 { "row" } else { "rows" })
                 } else {
-                    format!("{} {} returned{}.", tab.grid.rows.len(), if tab.grid.rows.len() == 1 { "row" } else { "rows" }, if tab.grid.truncated { "; result limit reached" } else { "" })
+                    format!("{} {} returned{}.", tab.grid.row_count(), if tab.grid.row_count() == 1 { "row" } else { "rows" }, if tab.grid.truncated { "; result limit reached" } else { "" })
                 });
                 if let Some(error) = &tab.result_error && tab.selected_pin.is_none() {
                     ui.add_space(8.0);
@@ -4060,6 +4108,7 @@ Right-click to inspect or remove individual changes",
                 retained.push(tab);
             } else {
                 tab.grid = Arc::default();
+                tab.result_pages = Default::default();
                 tab.results.clear();
                 tab.chart = Default::default();
                 tab.result_search.cancel();
@@ -4104,6 +4153,7 @@ Right-click to inspect or remove individual changes",
             self.tabs[0].pins.clear();
             self.tabs[0].selected_pin = None;
             self.tabs[0].grid = Arc::default();
+            self.tabs[0].result_pages = Default::default();
             self.tabs[0].results.clear();
             self.tabs[0].chart = Default::default();
             self.tabs[0].result_search.cancel();
@@ -4114,6 +4164,7 @@ Right-click to inspect or remove individual changes",
             let mut tab = self.tabs.remove(index);
             tab.open = false;
             tab.grid = Arc::default();
+            tab.result_pages = Default::default();
             tab.results.clear();
             tab.chart = Default::default();
             tab.result_search.cancel();
@@ -4762,6 +4813,103 @@ Right-click to inspect or remove individual changes",
     }
 
     fn data_grid(&mut self, ui: &mut egui::Ui) {
+        let stored = self.view == View::Query && self.tabs[self.tab].grid.is_stored();
+        if stored
+            && self.edit.is_none()
+            && !self.dialog_owns_workspace_shortcuts()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && self.tabs[self.tab]
+                .result_grid_focus
+                .is_some_and(|id| ui.memory(|m| m.has_focus(id)))
+            && let Some(local) = self.row_selection.focused.or(self.selected)
+        {
+            let tab = &mut self.tabs[self.tab];
+            let current = tab.result_pages.selected_offset() + local;
+            let last = tab.grid.row_count().saturating_sub(1);
+            let target = ui.input_mut(|input| {
+                for (key, target) in [
+                    (egui::Key::ArrowDown, current.saturating_add(1).min(last)),
+                    (egui::Key::ArrowUp, current.saturating_sub(1)),
+                    (egui::Key::Home, 0),
+                    (egui::Key::End, last),
+                    (egui::Key::PageDown, current.saturating_add(20).min(last)),
+                    (egui::Key::PageUp, current.saturating_sub(20)),
+                ] {
+                    if input.consume_key(egui::Modifiers::NONE, key) {
+                        return Some(target);
+                    }
+                }
+                None
+            });
+            if let Some(target) = target
+                && let Some((row, column)) = tab.result_pages.select(
+                    &tab.grid,
+                    target,
+                    self.row_selection.cell_column,
+                    ui.ctx(),
+                )
+            {
+                self.selected = self.row_selection.click(row, false, false, None);
+                self.row_selection.cell_column = column;
+                self.row_selection.pending_focus = Some(row);
+                self.row_selection.pending_cell_scroll = true;
+                tab.result_pages
+                    .pin_selection(self.selected, &self.row_selection.rows);
+            }
+        }
+        let retained = (stored
+            && self.tabs[self.tab]
+                .result_pages
+                .selection_outside_viewport())
+        .then(|| {
+            (
+                self.selected.take(),
+                std::mem::take(&mut self.row_selection),
+            )
+        });
+        if stored {
+            self.tabs[self.tab].result_pages.rendering = true;
+        }
+        self.data_grid_body(ui);
+        if stored {
+            if !self.tabs[self.tab].result_pages.all_selected
+                && let Some(index) = self
+                    .row_selection
+                    .rows
+                    .iter()
+                    .copied()
+                    .find(|index| self.tabs[self.tab].result_pages.is_preview(*index))
+            {
+                let tab = &mut self.tabs[self.tab];
+                tab.result_pages.select(
+                    &tab.grid,
+                    tab.result_pages.offset + index,
+                    self.row_selection.cell_column,
+                    ui.ctx(),
+                );
+                self.selected = None;
+                self.row_selection.clear();
+            }
+            self.tabs[self.tab].result_pages.rendering = false;
+            if let Some((selected, selection)) = retained
+                && self.selected.is_none()
+                && self.row_selection.rows.is_empty()
+            {
+                self.selected = selected;
+                self.row_selection = selection;
+                let focused = self.tabs[self.tab]
+                    .result_grid_focus
+                    .is_some_and(|id| ui.memory(|m| m.has_focus(id)));
+                self.copy_rows_shortcut(ui.ctx(), focused);
+            } else {
+                self.tabs[self.tab]
+                    .result_pages
+                    .pin_selection(self.selected, &self.row_selection.rows);
+            }
+        }
+    }
+
+    fn data_grid_body(&mut self, ui: &mut egui::Ui) {
         let grid = self.grid();
         if self.pending.is_some() {
             let names;
@@ -4824,6 +4972,18 @@ Right-click to inspect or remove individual changes",
                 grid_focus.request_focus();
             }
         }
+        let stored = self.view == View::Query && grid.is_stored();
+        let row_offset = if stored {
+            self.tabs[self.tab].result_pages.offset
+        } else {
+            0
+        };
+        let logical_rows = if stored {
+            grid.row_count()
+        } else {
+            grid.rows.len()
+        };
+        let mut visible_rows = 0..0;
         let mut sort = None;
         let mut explicit_sort = None;
         let insert_ids = self.insert_ids();
@@ -4932,7 +5092,12 @@ Right-click to inspect or remove individual changes",
             .data_mut(|data| data.remove_temp::<bool>(sizing_id).unwrap_or(false));
         let widths_id = sizing_id.with("widths");
         let measured_width = ui.ctx().data(|data| data.get_temp::<f32>(widths_id));
-        let expected_width = 38.0
+        let gutter_width = if grid.is_stored() {
+            38.0 + (grid.row_count().max(1).ilog10() + 1).saturating_sub(4) as f32 * 7.0
+        } else {
+            38.0
+        };
+        let expected_width = gutter_width
             + initial_widths.iter().sum::<f32>()
             + ui.spacing().item_spacing.x * (initial_widths.len() + 1) as f32;
         let content_width = if restore_widths {
@@ -4970,7 +5135,7 @@ Right-click to inspect or remove individual changes",
                     .auto_shrink([false, false])
                     .resizable(true)
                     .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(TableColumn::exact(38.0))
+                    .column(TableColumn::exact(gutter_width))
                     .sense(egui::Sense::click())
                     .min_scrolled_height(0.0);
                 for initial_width in &initial_widths {
@@ -4984,7 +5149,7 @@ Right-click to inspect or remove individual changes",
                 }
                 if restore_widths { builder.reset(); }
                 if let Some(index) = navigation_target {
-                    builder = builder.scroll_to_row(index, None);
+                    builder = builder.scroll_to_row(index + row_offset, None);
                 }
                 if let Some(edit) = self.edit.as_ref().filter(|e| e.focus && !e.inspector)
                     && let Some(index) = grid.rows.iter().position(|row| *row == edit.row) {
@@ -5078,7 +5243,7 @@ Right-click to inspect or remove individual changes",
                             && pos.x >= origin.x && pos.x < origin.x + total_width
                             && pos.y >= origin.y
                         {
-                            let index = ((pos.y - origin.y) / pitch).floor() as usize;
+                            let index = (((pos.y - origin.y) / pitch).floor() as usize).checked_sub(row_offset).unwrap_or(usize::MAX);
                             if index < grid.rows.len()
                                 && (!self.edit.as_ref().is_some_and(|e| !e.bulk_rows.is_empty()) || self.finish_cell_edit())
                             {
@@ -5106,7 +5271,7 @@ Right-click to inspect or remove individual changes",
                             && table_clip.contains(pos) && pos.y >= origin.y
                             && ui.input(|i| i.pointer.primary_down() && i.pointer.is_decidedly_dragging())
                         {
-                            let index = ((pos.y - origin.y) / pitch).floor() as usize;
+                            let index = (((pos.y - origin.y) / pitch).floor() as usize).checked_sub(row_offset).unwrap_or(usize::MAX);
                             let mut right = origin.x;
                             let mut column = 0;
                             for (i, width) in widths.iter().enumerate() {
@@ -5126,19 +5291,50 @@ Right-click to inspect or remove individual changes",
                         paint_grid_backdrop(body.ui_mut(), &widths);
                         paint_grid_selected_rows(body.ui_mut(), &widths,
                             self.row_selection.rows.iter().copied().chain(self.selected.filter(|index| !self.row_selection.rows.contains(index)))
-                                .filter(|index| *index < grid.rows.len()));
+                                .filter(|index| *index < grid.rows.len()).map(|index| index + row_offset)
+                                .chain(self.tabs[self.tab].result_pages.retained_selection().filter(|_| stored))
+                                .chain((((table_clip.top() - origin.y).max(0.0) / pitch) as usize..(((table_clip.bottom() - origin.y).max(0.0) / pitch).ceil() as usize).min(logical_rows))
+                                    .filter(|_| stored && self.tabs[self.tab].result_pages.all_selected)));
                         selection_overlays = grid_selection_rects(body.ui_mut(), &widths,
                             self.row_selection.cell_columns,
-                            self.row_selection.rows.iter().copied().filter(|index| *index < grid.rows.len()))
+                            self.row_selection.rows.iter().copied().filter(|index| *index < grid.rows.len()).map(|index| index + row_offset))
                             .into_iter().map(|rect| (rect, table_clip)).collect();
-                        body.rows(22.0, grid.rows.len() + insert_ids.len(), |mut row| {
-                            let index = row.index();
+                        body.rows(22.0, logical_rows + insert_ids.len(), |mut row| {
+                            let global = row.index();
+                            visible_rows.start = if visible_rows.is_empty() { global } else { visible_rows.start.min(global) };
+                            visible_rows.end = visible_rows.end.max(global + 1);
+                            if stored && (global < row_offset || global >= row_offset + grid.rows.len()) {
+                                row.col(|ui| {
+                                    paint_row_number(ui, &(global + 1).to_string());
+                                    // Static, row-wide skeleton: no changing layout or idle animation.
+                                    let cell = ui.max_rect();
+                                    let rect = egui::Rect::from_min_max(
+                                        egui::pos2(cell.right().max(table_clip.left()) + 10.0, cell.center().y - 3.0),
+                                        egui::pos2(table_clip.right() - 10.0, cell.center().y + 3.0),
+                                    );
+                                    if rect.is_positive() {
+                                        let mut painter = ui.painter().clone();
+                                        painter.set_clip_rect(table_clip);
+                                        painter.rect_filled(
+                                            rect, 3.0,
+                                            ui.visuals().weak_text_color().gamma_multiply(0.18),
+                                        );
+                                    }
+                                });
+                                for _ in 0..grid.columns.len() {
+                                    if row.skip_invisible_column() { continue; }
+                                    row.col(|_| {});
+                                }
+                                return;
+                            }
+                            let index = global - row_offset;
                             if index >= grid.rows.len() {
                                 self.insert_grid_row(&mut row, insert_ids[index - grid.rows.len()], index, table_clip);
                                 return;
                             }
                             let deleting = !edit_table.is_empty() && row_is_deleted(&self.changes, &edit_table, &grid.rows[index]);
-                            let row_selected = self.selected == Some(index) || self.row_selection.rows.contains(&index);
+                            let row_selected = self.selected == Some(index) || self.row_selection.rows.contains(&index)
+                                || (stored && (self.tabs[self.tab].result_pages.all_selected || self.tabs[self.tab].result_pages.selected_global(global)));
                             row.set_hovered(false);
                             row.set_selected(false);
                             row.col(|ui| {
@@ -5146,6 +5342,8 @@ Right-click to inspect or remove individual changes",
                                             + 1
                                             + if self.view == View::Data {
                                                 self.browse.offset
+                                            } else if self.view == View::Query {
+                                                self.tabs[self.tab].result_pages.offset
                                             } else {
                                                 0
                                             })
@@ -5248,6 +5446,18 @@ Right-click to inspect or remove individual changes",
                                 } else { response };
                                 if !editing {
                                     response.context_menu(|ui| {
+                                        if stored && self.tabs[self.tab].result_pages.all_selected {
+                                            if ui.button("Copy all rows").clicked() {
+                                                let tab = &mut self.tabs[self.tab]; tab.result_pages.copy_all(&tab.grid, ui.ctx()); ui.close();
+                                            }
+                                            return;
+                                        }
+                                        if stored && self.tabs[self.tab].result_pages.is_preview(index) {
+                                            ui.label("Loading full row…");
+                                            let tab = &mut self.tabs[self.tab];
+                                            tab.result_pages.select(&tab.grid, row_offset + index, column, ui.ctx());
+                                            return;
+                                        }
                                         let writable = editable && !deleting && !edit_columns.as_slice().get(column).is_some_and(|c| c.generated) && !matches!(value, Value::Blob(_));
                                         if ui.button("Quick Look Editor").clicked() { menu_action = Some(("inspect", column, index)); ui.close(); }
                                         let json_typed = edit_columns.get(column).is_some_and(|c| crate::json_editor::is_json_type(&c.data_type));
@@ -5353,13 +5563,13 @@ Right-click to inspect or remove individual changes",
                                     self.error = Some("Cannot edit this result. Include every primary-key column in your SELECT query, then run it again.".into());
                                 }
                                 // JSON documents get the multi-line editor, or a viewer when read-only.
-                                let json_cell = activated && !deleting
+                                let json_cell = activated && !deleting && !(stored && self.tabs[self.tab].result_pages.is_preview(index))
                                     && (edit_columns.get(column).is_some_and(|c| crate::json_editor::is_json_type(&c.data_type))
                                         || (!editable && matches!(value, Value::Text(text) if crate::json_editor::looks_like_json(text))));
                                 if json_cell {
                                     menu_action = Some(("json", column, index));
                                 } else if double_clicked && !editable && !missing_result_key && self.view == View::Query {
-                                    self.status = read_only_result_hint(self.safe, edit_table.is_empty());
+                                    self.status = if grid.is_stored() { "Large result snapshots are read-only. Open the table browser or run a narrower query to edit rows.".into() } else { read_only_result_hint(self.safe, edit_table.is_empty()) };
                                 }
                                 if activated && !json_cell
                                     && editable
@@ -5413,6 +5623,10 @@ Right-click to inspect or remove individual changes",
                 }
             });
         });
+        if stored {
+            let tab = &mut self.tabs[self.tab];
+            tab.result_pages.viewport(&tab.grid, visible_rows, ui.ctx());
+        }
         // The empty portion of the grid still owns table keyboard shortcuts.
         // Child cells and inputs win hit testing, so this does not steal editing focus.
         if grid_focus.clicked() && self.edit.is_none()

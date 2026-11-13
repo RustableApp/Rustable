@@ -152,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_sqlite_collection_publishes_real_rows_and_budget_truncation() {
+    fn worker_sqlite_collection_publishes_all_rows() {
         let progress = Arc::new(Progress::default());
         let cancel = Arc::new(AtomicBool::new(false));
         let mut connection = None;
@@ -171,11 +171,8 @@ mod tests {
         let _operation = progress.begin();
         let result = connection.as_mut().unwrap().execute("WITH RECURSIVE x(v) AS (SELECT 1 UNION ALL SELECT v + 1 FROM x WHERE v < 6000) SELECT v FROM x", true, &cancel);
         assert!(result.error.is_none(), "{:?}", result.error);
-        assert!(result.grids[0].truncated);
-        assert_eq!(progress.snapshot().rows, super::super::QUERY_LIMIT as u64);
-        assert_eq!(
-            progress.snapshot().decoded_bytes,
-            (super::super::QUERY_LIMIT * 8) as u64
-        );
+        assert!(!result.grids[0].truncated);
+        assert_eq!(progress.snapshot().rows, 6000);
+        assert_eq!(progress.snapshot().decoded_bytes, 6000 * 8);
     }
 }

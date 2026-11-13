@@ -187,6 +187,61 @@ fn editor_wan_latency_comparison() {
         current[3] < legacy[3] * 0.8,
         "round-trip reduction must lower measured latency"
     );
+    // Complete disk-backed results retain one exchange, even beyond the former
+    // 5,000-row ceiling. Compare the same 6,000 values over the delayed link.
+    let mut spooled = Vec::new();
+    let mut reference = Vec::new();
+    for index in 0..9 {
+        let sql = "SELECT generate_series(1,6000) AS id";
+        let start = Instant::now();
+        let baseline = driver.client.simple_query(sql).unwrap();
+        assert_eq!(
+            baseline
+                .iter()
+                .filter(|m| matches!(m, ::postgres::SimpleQueryMessage::Row(_)))
+                .count(),
+            6000
+        );
+        let baseline_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let start = Instant::now();
+        let rows = driver
+            .client
+            .query_typed_raw_spooled_with_prefix(
+                sql,
+                std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
+                &[
+                    "SET LOCAL standard_conforming_strings = on",
+                    "SET LOCAL transaction_read_only = on",
+                ],
+                1024,
+            )
+            .unwrap();
+        let grid = collect_complete(rows, vec!["id".into()], 1024, &cancel).unwrap();
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        assert!(grid.is_stored());
+        assert_eq!(grid.row_count(), 6000);
+        let (_, last) = grid
+            .stored
+            .as_ref()
+            .unwrap()
+            .page(5999, false, &cancel)
+            .unwrap();
+        assert_eq!(last[0][0], Value::Integer(6000));
+        if index >= 2 {
+            spooled.push(elapsed);
+            reference.push(baseline_ms);
+        }
+    }
+    spooled.sort_by(f64::total_cmp);
+    reference.sort_by(f64::total_cmp);
+    eprintln!(
+        "30ms simulated RTT, complete 6000 rows,7samples: spooled p50={:.1}ms p95={:.1}ms; single-exchange reference p50={:.1}ms p95={:.1}ms",
+        spooled[3], spooled[6], reference[3], reference[6]
+    );
+    assert!(
+        spooled[3] < reference[3] + 25.0,
+        "disk-backed results added an exchange or excessive local overhead"
+    );
     drop(driver);
     proxy.join().unwrap();
 }

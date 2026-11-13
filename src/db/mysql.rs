@@ -525,18 +525,37 @@ impl Driver for MysqlDriver {
             self.session_dirty = may_change_session(&sql[range.clone()]);
             let Some(conn) = self.connection.as_mut() else { report.error = Some("MySQL connection is disconnected".into()); break; };
             let statement_started = std::time::Instant::now();
-            let (outcome, cancellation_error) = with_cancel(&self.config, self.destination, conn.connection_id(), cancel, || {
-                if wrapped {
-                    // One COM_QUERY exchange, including setup and successful cleanup.
-                    // Newlines prevent a trailing line comment from hiding ROLLBACK.
-                    let batch = safe::batch(&sql[range], self.mode);
-                    conn.query_iter(batch).map(|results|
-                        super::mysql_results::collect_safe_since(results, &mut remaining, QUERY_LIMIT, statement_started))
-                } else {
-                    conn.query_iter(&sql[range]).map(|results|
-                        super::mysql_results::collect_budget_since(results, &mut remaining, QUERY_LIMIT, 128 - report.grids.len(), statement_started))
-                }
-            });
+            let (outcome, cancellation_error) = with_cancel(
+                &self.config,
+                self.destination,
+                conn.connection_id(),
+                cancel,
+                || {
+                    if wrapped {
+                        // One COM_QUERY exchange, including setup and successful cleanup.
+                        // Newlines prevent a trailing line comment from hiding ROLLBACK.
+                        let batch = safe::batch(&sql[range], self.mode);
+                        conn.query_iter(batch).map(|results| {
+                            super::mysql_results::collect_safe_since(
+                                results,
+                                &mut remaining,
+                                usize::MAX,
+                                statement_started,
+                            )
+                        })
+                    } else {
+                        conn.query_iter(&sql[range]).map(|results| {
+                            super::mysql_results::collect_budget_since(
+                                results,
+                                &mut remaining,
+                                usize::MAX,
+                                128 - report.grids.len(),
+                                statement_started,
+                            )
+                        })
+                    }
+                },
+            );
             // A multi-statement batch stops at the first error, skipping its
             // trailing rollback. Clean up only our own transaction, after the
             // cancellation worker has stopped, and discard an unusable session.

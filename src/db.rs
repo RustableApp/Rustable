@@ -1,17 +1,18 @@
 //! All database and file work happens on a single owner thread, never in a frame.
+#[cfg(any(test, target_arch = "wasm32"))]
+pub(crate) mod browser_export;
 mod csv;
 pub mod filters;
 pub mod foreign_keys;
 mod json;
-mod row_export;
 #[cfg(not(target_arch = "wasm32"))]
-mod mysql_values;
+mod mysql;
 #[cfg(not(target_arch = "wasm32"))]
 mod mysql_results;
 #[cfg(not(target_arch = "wasm32"))]
-mod mysql;
-#[cfg(any(test, target_arch = "wasm32"))]
-pub(crate) mod browser_export;
+mod mysql_values;
+pub mod result_store;
+mod row_export;
 
 #[derive(Clone, Copy)]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -137,6 +138,7 @@ trait Driver: Send {
 }
 
 pub const PAGE_SIZE: usize = 500;
+/// Bound for save readbacks and explicitly bounded collectors, not editor results.
 pub const QUERY_LIMIT: usize = 5_000;
 const BYTE_LIMIT: usize = 16 * 1024 * 1024;
 
@@ -183,6 +185,9 @@ pub struct Grid {
     pub source: Option<(String, String)>,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[serde(skip)]
+    pub stored: Option<Arc<result_store::StoredRows>>,
     pub truncated: bool,
     pub affected: usize,
     pub elapsed: Duration,
@@ -772,7 +777,7 @@ pub fn display(value: &Value) -> String {
 }
 
 /// Text preview only: the value remains binary for editing, predicates and export.
-fn readable_binary(bytes: &[u8]) -> Option<&str> {
+pub(crate) fn readable_binary(bytes: &[u8]) -> Option<&str> {
     // Avoid repeatedly scanning arbitrarily large binary payloads while painting.
     if bytes.is_empty() || bytes.len() > 65536 { return None; }
     let text = std::str::from_utf8(bytes).ok()?;

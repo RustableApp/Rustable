@@ -1,4 +1,4 @@
-//! Streaming CSV encoding and atomic publication of loaded results.
+//! Streaming CSV encoding and atomic publication of complete result snapshots.
 use super::{Grid, Value};
 use std::{
     io::{self, Write},
@@ -71,9 +71,7 @@ pub(super) fn encode(writer: &mut impl Write, grid: &Grid, cancel: &AtomicBool) 
         quoted(writer, column.as_bytes(), cancel)?;
     }
     writer.write_all(b"\n")?;
-    for row in &grid.rows {
-        write_row(writer, row, cancel)?;
-    }
+    grid.visit_rows_io(cancel, |row| write_row(writer, row, cancel))?;
     Ok(())
 }
 

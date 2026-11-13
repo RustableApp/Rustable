@@ -56,7 +56,7 @@ where
     Ok(RowStream {
         statement,
         responses,
-        rows_affected: None, buffered: VecDeque::new(), complete: false, truncated: false,
+        rows_affected: None, buffered: VecDeque::new(), spool: None, complete: false, truncated: false,
     })
 }
 
@@ -162,7 +162,7 @@ where
     // The statement is already closed; the portal owns execution and RowStream
     // only needs the resolved column metadata.
     Ok(RowStream {
-        statement: Statement::unnamed(vec![], resolved), responses, rows_affected: None, buffered: VecDeque::new(), complete: false, truncated: false,
+        statement: Statement::unnamed(vec![], resolved), responses, rows_affected: None, buffered: VecDeque::new(), spool: None, complete: false, truncated: false,
     })
 }
 
@@ -171,6 +171,23 @@ where
 pub async fn query_typed_bounded_with_prefix<P, I>(
     client: &Arc<InnerClient>, query: &str, params: I, prefix: &[&str],
     max_rows: usize, max_bytes: usize,
+) -> Result<RowStream, Error>
+where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+{
+    query_typed_retained_with_prefix(client, query, params, prefix, max_rows, max_bytes, false).await
+}
+
+pub async fn query_typed_spooled_with_prefix<P, I>(
+    client: &Arc<InnerClient>, query: &str, params: I, prefix: &[&str], memory_bytes: usize,
+) -> Result<RowStream, Error>
+where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+{
+    query_typed_retained_with_prefix(client, query, params, prefix, usize::MAX, memory_bytes, true).await
+}
+
+async fn query_typed_retained_with_prefix<P, I>(
+    client: &Arc<InnerClient>, query: &str, params: I, prefix: &[&str],
+    max_rows: usize, max_bytes: usize, spill: bool,
 ) -> Result<RowStream, Error>
 where
     P: BorrowToSql,
@@ -209,6 +226,8 @@ where
         Type::from_oid(column.4).or_else(|| client.type_(column.4))
     }).collect::<Option<Vec<_>>>();
     let mut buffered = VecDeque::new();
+    let mut spool_writer: Option<RawSpoolWriter> = None;
+    let mut storage_error = None;
     let mut rows_affected = None;
     let mut truncated = false;
     let complete = cached.is_none();
@@ -218,7 +237,23 @@ where
             match responses.next().await? {
                 Message::DataRow(body) => {
                     let size = body.buffer().len().saturating_add(std::mem::size_of::<DataRowBody>());
-                    if truncated || buffered.len() >= max_rows || size > max_bytes.saturating_sub(bytes) {
+                    if storage_error.is_some() { continue; }
+                    if spill {
+                        let result = (|| -> std::io::Result<()> {
+                            if body.buffer().len() > 64 * 1024 * 1024 {
+                                return Err(std::io::Error::other("Result row exceeds 64 MiB; statement was executed but results could not be retained"));
+                            }
+                            if spool_writer.is_none() && size > max_bytes.saturating_sub(bytes) {
+                                let mut writer = RawSpoolWriter::new(columns.len())?;
+                                for previous in buffered.drain(..) { writer.push(&previous)?; }
+                                spool_writer = Some(writer);
+                            }
+                            if let Some(writer) = &mut spool_writer { writer.push(&body)?; }
+                            else { bytes += size; buffered.push_back(body); }
+                            Ok(())
+                        })();
+                        if let Err(error) = result { storage_error = Some(error); }
+                    } else if truncated || buffered.len() >= max_rows || size > max_bytes.saturating_sub(bytes) {
                         truncated = true;
                     } else {
                         bytes += size;
@@ -232,6 +267,10 @@ where
             }
         }
     }
+    // Do not abandon unread rows on disk failure or resolve custom types before
+    // ReadyForQuery: both would compromise synchronization/transaction reporting.
+    if let Some(error) = storage_error { return Err(spool_error(error)); }
+    let spool = spool_writer.map(RawSpoolWriter::finish).transpose().map_err(spool_error)?;
     let types = match cached {
         Some(types) => types,
         None => {
@@ -246,7 +285,7 @@ where
     }).collect();
     Ok(RowStream {
         statement: Statement::unnamed(vec![], resolved), responses, rows_affected,
-        buffered, complete, truncated,
+        buffered, spool, complete, truncated,
     })
 }
 
@@ -327,7 +366,7 @@ pub async fn query_portal(
     Ok(RowStream {
         statement: portal.statement().clone(),
         responses,
-        rows_affected: None, buffered: VecDeque::new(), complete: false, truncated: false,
+        rows_affected: None, buffered: VecDeque::new(), spool: None, complete: false, truncated: false,
     })
 }
 
@@ -476,6 +515,53 @@ where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>, I::IntoIter: ExactSizeI
     }
 }
 
+// This opt-in synchronous spool is used by Rustable's database owner thread.
+// Ordinary async APIs keep their existing behavior; cached types never use it.
+fn spool_error(error: std::io::Error) -> Error {
+    Error::io(std::io::Error::other(format!("Statement executed, but results could not be retained: {error}. Verify writes before retrying.")))
+}
+struct RawSpoolWriter { file: std::io::BufWriter<std::fs::File>, count: usize, columns: u16 }
+struct RawSpool { file: std::io::BufReader<std::fs::File>, remaining: usize, columns: u16 }
+impl RawSpoolWriter {
+    fn new(columns: usize) -> std::io::Result<Self> {
+        Ok(Self { file: std::io::BufWriter::new(tempfile::tempfile()?), count: 0,
+            columns: u16::try_from(columns).map_err(std::io::Error::other)? })
+    }
+    fn push(&mut self, body: &DataRowBody) -> std::io::Result<()> {
+        use std::io::Write;
+        let size = u32::try_from(body.buffer().len()).map_err(std::io::Error::other)?;
+        self.file.write_all(&size.to_be_bytes())?;
+        self.file.write_all(body.buffer())?;
+        self.count += 1;
+        Ok(())
+    }
+    fn finish(self) -> std::io::Result<RawSpool> {
+        use std::io::Seek;
+        let mut file = self.file.into_inner().map_err(|error| error.into_error())?;
+        file.rewind()?;
+        Ok(RawSpool { file: std::io::BufReader::new(file), remaining: self.count, columns: self.columns })
+    }
+}
+impl RawSpool {
+    fn next(&mut self) -> std::io::Result<Option<DataRowBody>> {
+        use std::io::Read;
+        if self.remaining == 0 { return Ok(None); }
+        let mut length = [0; 4]; self.file.read_exact(&mut length)?;
+        let len = u32::from_be_bytes(length) as usize;
+        if len > 64 * 1024 * 1024 { return Err(std::io::Error::other("Invalid result spool row length")); }
+        let mut frame = BytesMut::with_capacity(len + 7);
+        frame.extend_from_slice(b"D");
+        frame.extend_from_slice(&((len + 6) as u32).to_be_bytes());
+        frame.extend_from_slice(&self.columns.to_be_bytes());
+        frame.resize(len + 7, 0); self.file.read_exact(&mut frame[7..])?;
+        self.remaining -= 1;
+        match Message::parse(&mut frame)? {
+            Some(Message::DataRow(body)) => Ok(Some(body)),
+            _ => Err(std::io::Error::other("Invalid result spool frame")),
+        }
+    }
+}
+
 pin_project! {
     /// A stream of table rows.
     #[project(!Unpin)]
@@ -484,6 +570,7 @@ pin_project! {
         responses: Responses,
         rows_affected: Option<u64>,
         buffered: VecDeque<DataRowBody>,
+        spool: Option<RawSpool>,
         complete: bool,
         truncated: bool,
     }
@@ -496,6 +583,13 @@ impl Stream for RowStream {
         let this = self.project();
         if let Some(body) = this.buffered.pop_front() {
             return Poll::Ready(Some(Row::new(this.statement.clone(), body)));
+        }
+        if let Some(spool) = this.spool {
+            match spool.next() {
+                Ok(Some(body)) => return Poll::Ready(Some(Row::new(this.statement.clone(), body))),
+                Ok(None) => {},
+                Err(error) => { *this.spool = None; return Poll::Ready(Some(Err(spool_error(error)))); }
+            }
         }
         if *this.complete { return Poll::Ready(None); }
         loop {
