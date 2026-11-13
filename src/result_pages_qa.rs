@@ -351,7 +351,13 @@ mod tests {
         wait_page(&ctx, &mut app, 760.0, 0);
         let snapshot = Arc::downgrade(app.tabs[0].grid.stored.as_ref().unwrap());
         app.close_tab(0);
-        assert!(snapshot.upgrade().is_none());
+        // Closing cancels prefetch without blocking the UI on its worker. The
+        // worker may still own the snapshot until it observes cancellation.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while snapshot.strong_count() != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(snapshot.upgrade().is_none(), "cancelled prefetch retained the closed result");
     }
     #[test]
     fn rapid_search_navigation_coalesces_to_latest_row() {

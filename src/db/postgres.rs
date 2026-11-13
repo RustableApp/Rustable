@@ -43,10 +43,10 @@ impl PostgresDriver {
             None
         };
         let mut connection = client_config(config, tunnel.as_ref().map(|t| t.local_port()));
-        let tls = if config.tls {
-            connection.ssl_mode(SslMode::Require);
+        let tls = if config.tls.enabled() {
+            connection.ssl_mode(config.tls.ssl_mode());
             Some(MakeTlsConnector::new(
-                native_tls::TlsConnector::new().map_err(|e| e.to_string())?,
+                config.tls.connector().map_err(|e| e.to_string())?,
             ))
         } else {
             connection.ssl_mode(SslMode::Disable);
@@ -467,6 +467,7 @@ pub(crate) fn async_client_config(
 ) -> tokio_postgres::Config {
     let mut connection = tokio_postgres::Config::new();
     connection
+        .ssl_mode(config.tls.ssl_mode())
         .host(&config.host)
         .port(forwarded_port.unwrap_or(config.port))
         .dbname(&config.database)
@@ -1099,7 +1100,7 @@ mod tests {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
         let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig {
             host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-            user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+            user: "postgres".into(), password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable, ssh: None,
         }, Arc::new(AtomicBool::new(false))).unwrap();
         driver.client.batch_execute("BEGIN; CREATE SCHEMA rustable_ddl_qa; CREATE TABLE rustable_ddl_qa.example(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, label text NOT NULL DEFAULT 'hello', calculated integer GENERATED ALWAYS AS (id+1) STORED, CONSTRAINT positive CHECK (id>0)); CREATE INDEX label_idx ON rustable_ddl_qa.example(label); CREATE VIEW rustable_ddl_qa.visible AS SELECT label FROM rustable_ddl_qa.example").unwrap();
         let ddl = driver.definition("rustable_ddl_qa.example").unwrap();
@@ -1218,7 +1219,7 @@ mod live_tests {
                 database: "rustable_qa".into(),
                 user: "postgres".into(),
                 password: "rustable_qa_only".into(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ssh: None,
             },
             cancel.clone(),
@@ -1358,7 +1359,7 @@ mod live_tests {
                 database: "rustable_qa".into(),
                 user: "postgres".into(),
                 password: "rustable_qa_only".into(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ssh: None,
             },
             cancel.clone(),
@@ -1438,7 +1439,7 @@ mod live_tests {
                 database: "rustable_qa".into(),
                 user: "postgres".into(),
                 password: "rustable_qa_only".into(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ssh: None,
             },
             cancel.clone(),
@@ -1517,7 +1518,7 @@ mod live_tests {
                 database: "rustable_qa".into(),
                 user: "postgres".into(),
                 password: "rustable_qa_only".into(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ssh: None,
             },
             Arc::new(AtomicBool::new(false)),
@@ -1574,7 +1575,7 @@ mod live_tests {
                 database: "rustable_qa".into(),
                 user: "postgres".into(),
                 password: "rustable_qa_only".into(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ssh: None,
             },
             cancel.clone(),
@@ -1665,7 +1666,7 @@ mod live_tests {
             database: "rustable_qa".into(),
             user: "postgres".into(),
             password: "rustable_qa_only".into(),
-            tls: false,
+            tls: crate::connection::PostgresTlsMode::Disable,
             ssh: None,
         };
         let mut driver = PostgresDriver::open(&config, cancel.clone()).unwrap();
@@ -1793,7 +1794,7 @@ mod ssh_live_tests {
             database: "rustable_qa".into(),
             user: "postgres".into(),
             password: "rustable_qa_only".into(),
-            tls: false,
+            tls: crate::connection::PostgresTlsMode::Disable,
             ssh: Some(ssh.clone()),
         };
         let mut driver = PostgresDriver::open(&config, cancel.clone()).unwrap();
@@ -1889,7 +1890,7 @@ mod schema_tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig {
             host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-            user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+            user: "postgres".into(), password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable, ssh: None,
         }, cancel).unwrap();
         driver.client.batch_execute("BEGIN; CREATE SCHEMA rustable_catalog_stream_qa; CREATE TABLE rustable_catalog_stream_qa.empty(); CREATE TABLE rustable_catalog_stream_qa.typed(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, gone text, name text NOT NULL DEFAULT 'hello', calculated integer GENERATED ALWAYS AS (id+1) STORED); ALTER TABLE rustable_catalog_stream_qa.typed DROP COLUMN gone; CREATE VIEW rustable_catalog_stream_qa.visible AS SELECT id,name FROM rustable_catalog_stream_qa.typed").unwrap();
         let objects = driver.select_schema("rustable_catalog_stream_qa").unwrap();
@@ -1923,7 +1924,7 @@ mod schema_tests {
             database: "rustable_qa".into(),
             user: "postgres".into(),
             password: "rustable_qa_only".into(),
-            tls: false,
+            tls: crate::connection::PostgresTlsMode::Disable,
             ssh: None,
         };
         let mut driver = PostgresDriver::open(&config, cancel.clone()).unwrap();
@@ -2013,7 +2014,7 @@ mod foreign_key_navigation_tests {
     #[ignore = "requires opted-in disposable PostgreSQL QA server on port 54329"]
     fn live_composite_foreign_key_navigation() {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
-        let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig { host:"127.0.0.1".into(),port:54329,database:"rustable_qa".into(),user:"postgres".into(),password:"rustable_qa_only".into(),tls:false,ssh:None },Arc::new(AtomicBool::new(false))).unwrap();
+        let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig { host:"127.0.0.1".into(),port:54329,database:"rustable_qa".into(),user:"postgres".into(),password:"rustable_qa_only".into(),tls: crate::connection::PostgresTlsMode::Disable,ssh:None },Arc::new(AtomicBool::new(false))).unwrap();
         driver.client.batch_execute("CREATE TEMP TABLE fk_nav_parent(tenant TEXT,id INT,PRIMARY KEY(tenant,id)); CREATE TEMP TABLE fk_nav_child(a TEXT,b INT,FOREIGN KEY(a,b) REFERENCES fk_nav_parent(tenant,id)); INSERT INTO fk_nav_parent VALUES('a',3),('b',3); INSERT INTO fk_nav_child VALUES('a',3)").unwrap();
         for _ in 0..2 {
             let source = driver.browse(&Browse { table:"fk_nav_child".into(),..Default::default() }).unwrap();
@@ -2038,7 +2039,7 @@ mod query_lifetime_tests {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
         let config = crate::connection::PostgresConfig {
             host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-            user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+            user: "postgres".into(), password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable, ssh: None,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let mut driver = PostgresDriver::open(&config, cancel.clone()).unwrap();
@@ -2074,7 +2075,7 @@ mod custom_type_stream_tests {
                 database: "rustable_qa".into(),
                 user: "postgres".into(),
                 password: "rustable_qa_only".into(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ssh: None,
             },
             cancel.clone(),
@@ -2191,7 +2192,7 @@ mod custom_type_stream_tests {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
         let config = crate::connection::PostgresConfig {
             host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-            user: "postgres".into(), password: "rustable_qa_only".into(), tls: false, ssh: None,
+            user: "postgres".into(), password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable, ssh: None,
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let mut driver = PostgresDriver::open(&config, cancel.clone()).unwrap();

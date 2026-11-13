@@ -282,6 +282,21 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Candidate>, String> {
     }
     Ok(out)
 }
+// TablePlus PostgreSQL picker: preferred, disabled, required, allow, verify-ca, verify-full.
+// Keep unknown values fail-closed rather than silently choosing a weaker policy.
+fn postgres_tls_mode(mode: &str) -> Result<crate::connection::PostgresTlsMode, String> {
+    use crate::connection::PostgresTlsMode::*;
+    match mode {
+        "" | "5" => Ok(VerifyFull),
+        "0" => Ok(Prefer),
+        "1" => Ok(Disable),
+        "2" => Ok(Require),
+        "4" => Ok(VerifyCa),
+        "3" => Err("PostgreSQL TLS Allow is not supported. Choose a TLS mode in the source before importing.".into()),
+        _ => Err("Unknown PostgreSQL TLS mode in TablePlus export.".into()),
+    }
+}
+
 pub(super) fn convert(v: &Value, warnings: &mut Vec<String>) -> Result<ConnectionKind, String> {
     let driver = text(v, "Driver").to_ascii_lowercase();
     if !matches!(
@@ -324,7 +339,7 @@ pub(super) fn convert(v: &Value, warnings: &mut Vec<String>) -> Result<Connectio
     let tls_mode = text(v, "tLSMode");
     let tls = tls_mode != "0";
     warnings.push("Review the imported TLS mode before connecting; TablePlus TLS options are not identical to Rustable’s.".into());
-    if tls {
+    if tls && !matches!(driver.as_str(), "postgresql" | "postgres") {
         warnings.push(
             "TLS uses Rustable's certificate verification. Review TLS settings before connecting."
                 .into(),
@@ -360,7 +375,7 @@ pub(super) fn convert(v: &Value, warnings: &mut Vec<String>) -> Result<Connectio
                 database
             },
             user,
-            tls,
+            tls: postgres_tls_mode(&tls_mode)?,
             ssh,
         }),
         "mysql" | "mariadb" => {
@@ -648,7 +663,7 @@ impl Dialog {
                                                     c.port,
                                                     c.database,
                                                     c.user,
-                                                    c.tls,
+                                                    c.tls.label(),
                                                     c.ssh.is_some()
                                                 ));
                                             }
@@ -975,5 +990,22 @@ mod import_ui_performance {
                 println!("IMPORT_UI dark={dark} preview={preview} p50={} p95={} p99={} max={}", samples[50], samples[95], samples[99], samples[99]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod postgres_tls_tests {
+    use super::*;
+    #[test]
+    fn imports_postgres_picker_modes_without_weakening_unknown_values() {
+        use crate::connection::PostgresTlsMode::*;
+        for (value, expected) in [(0, Prefer), (1, Disable), (2, Require), (4, VerifyCa), (5, VerifyFull)] {
+            let value = serde_json::json!({"Driver":"PostgreSQL", "tLSMode":value});
+            let ConnectionKind::Postgres(profile) = convert(&value, &mut vec![]).unwrap() else { panic!() };
+            assert_eq!(profile.tls, expected);
+        }
+        assert!(postgres_tls_mode("3").is_err());
+        assert!(postgres_tls_mode("999").is_err());
+        assert_eq!(postgres_tls_mode("").unwrap(), VerifyFull);
     }
 }

@@ -258,7 +258,7 @@ mod tests {
         let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
         app.navigator = Navigator::new(Some(&Command::OpenPostgres(crate::connection::PostgresConfig {
             host: "unused".into(), port: 5432, database: "test".into(), user: "test".into(),
-            password: String::new(), tls: false, ssh: None,
+            password: String::new(), tls: crate::connection::PostgresTlsMode::Disable, ssh: None,
         })));
         for _ in 0..2 {
             key(&ctx, &mut app, egui::Key::P, egui::Modifiers::COMMAND);

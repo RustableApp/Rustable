@@ -351,7 +351,7 @@ mod live_tests {
             database: "rustable_qa".into(),
             user: "postgres".into(),
             password: "rustable_qa_only".into(),
-            tls: false,
+            tls: crate::connection::PostgresTlsMode::Disable,
             ssh: None,
         };
         let mut driver = PostgresDriver::open(&config, Arc::new(AtomicBool::new(false))).unwrap();

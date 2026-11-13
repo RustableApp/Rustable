@@ -796,3 +796,89 @@ performance and isolated 19-case resize/click comparisons passed as documented
 above; they do not turn the combined noisy runs into passes. The user-confirmed
 native resize behavior and unavailable native presentation/display checks remain
 as stated in the preceding section. No database sequencing changed.
+
+### PostgreSQL TLS connection form
+
+Use `python3 scripts/ui-performance.py --base <commit> --postgres-connections`
+for the PostgreSQL connection editor. This focused mode measures the same default
+profile, host changes, wheel input and a 30-second idle gap at 1100×760 and 780×600
+logical points on both revisions. It records 160 samples after 20 warmups per
+case, in five alternating base/candidate pairs. The candidate adds the TLS mode
+explanation and five-option selector; the baseline uses its original two-option
+selector. The workload measures layout and tessellation, not native presentation.
+The companion `postgres_tls_menu_frame_benchmark` opens the actual picker and
+measures its expanded rows at both sizes, including an idle gap. Opening/selection
+is also covered by an input-driven UI test and native screenshots; the benchmark
+does not claim to measure all five selection paths.
+
+2026-11-13 issue #8 validation against `ee5d224579d77456fdd942df00970216471f7327`:
+Apple M4 Max, macOS 27.2.1 arm64, rustc 1.99.1, release profile, 1× headless
+scale. Five serial alternating pairs, 20 warmups + 160 samples per size per run.
+Median run statistics in milliseconds (base → candidate):
+
+| Viewport | p50 | p95 | p99 | Maximum | p95 change |
+| --- | --- | --- | --- | --- | --- |
+| 1100×760 | .042667 → .043417 | .045417 → .046292 | .049958 → .050250 | .051750 → .050833 | +1.9% |
+| 780×600 | .042666 → .043167 | .045667 → .046084 | .051000 → .048834 | .051959 → .051958 | +0.9% |
+
+Both cases passed. Raw runs, environment and fixture are retained in
+`target/issue-8-ui-performance/results.json`. Native dark/light screenshots were
+inspected at wide/narrow sizes, and the picker click test selects Require and
+checks its explanatory text. CPU numbers do not establish input-to-present
+latency. Native 60/120 Hz timing, mixed DPI, monitor reconnect and multi-window
+motion were not measured; event-loop/render scheduling was not changed.
+
+Database execution exchanges are unchanged: one per ordinary editor statement,
+one pipelined exchange for cached/sidebar initial load, refresh and revisit,
+including the existing cold custom-type text path. Metadata fallbacks, transaction
+status, bounded draining and cancellation-worker teardown are unchanged. The
+existing connector is reused for cancellation. MySQL/MariaDB driver TLS and
+execution paths are unchanged. On connection setup, enabled PostgreSQL modes
+use the existing one SSLRequest exchange plus TLS/authentication; Disable skips
+SSLRequest. Correctly importing TablePlus Prefer (0) now negotiates TLS instead
+of incorrectly disabling it. That first-connection negotiation is necessary to
+honor the source encryption policy and cannot be replaced by cached server
+capabilities; it adds no established-session query exchanges.
+
+At 30 ms simulated RTT on the disposable PostgreSQL 17 fixture, serial release
+editor comparisons passed on both revisions: indexed-query p50/p95 43.5/46.4 →
+39.2/46.0 ms; 6,000-row disk-backed results 49.5/55.7 → 47.2/53.8 ms. Browse debug
+regression passed: refresh p50/p95 43.8/49.8 ms, revisit 44.1/49.5 ms, initial load
+48.0/49.6 ms; idle cases also passed. An initial debug editor run failed the
+large-result threshold marginally (spooled median 70.2 ms versus reference
+45.2 ms plus the 25 ms allowance). Its serial debug rerun passed (71.4 versus
+48.4 ms). This marginal result is retained as timing variability, not erased or
+claimed to prove a pre-existing baseline failure. Thresholds were unchanged.
+Logs are retained under `target/issue-8-*`.
+
+#### Muted descriptions in the expanded TLS picker
+
+The follow-up keeps each option and explanation in one selectable row, uses the
+small font and semantic muted color, bounds text layout to the popup width, and
+retains a contrasting selected state. Dark 1280×760 and light 780×760 native
+captures were inspected; the picker input test and Clippy passed.
+
+The same machine/toolchain/release workload above was rerun with the actual open
+menu (20 warmups, 160 samples, five alternating pairs, 1× CPU scale). The base
+has two one-line options; the candidate has five options with explanations.
+Initial results are in `target/issue-8-ui-descriptions`; a serial repeat of the
+same binaries without rebuilding is in `target/issue-8-ui-descriptions-repeat`.
+The initial run classified the narrow menu as a regression and the other cases
+as inconclusive. The repeat passed both closed-form cases; both menu cases were
+inconclusive. No threshold was changed. Median run statistics (milliseconds):
+
+| Scenario | p50 base → candidate | p95 | p99 | Maximum | Repeat status |
+| --- | --- | --- | --- | --- | --- |
+| postgres/connection-profile/1100x760 | 0.047000 → 0.050208 | 0.049542 → 0.050875 | 0.051959 → 0.055167 | 0.053834 → 0.057959 | pass |
+| postgres/connection-profile/780x600 | 0.049583 → 0.051792 | 0.052417 → 0.052958 | 0.056875 → 0.056042 | 0.057958 → 0.056792 | pass |
+| postgres/tls-menu/1100x760 | 0.052584 → 0.056208 | 0.053250 → 0.059500 | 0.057417 → 0.065625 | 0.058834 → 0.065958 | inconclusive |
+| postgres/tls-menu/780x600 | 0.052833 → 0.058209 | 0.055750 → 0.061584 | 0.059708 → 0.067750 | 0.062958 → 0.077958 | inconclusive |
+
+The expanded-menu p95 cost is consistently about 0.006 ms (roughly 10–12%)
+in the repeat. This is an accepted, explicitly recorded cost of presenting the
+five security policies and their differences before selection, not a performance
+pass. The layout is bounded to five entries and egui caches shaped text. Keeping
+only the selected-mode explanation or putting descriptions in hover tooltips
+would reduce drawn text but would not provide the requested at-a-glance comparison.
+The cost is limited to the open popup; the repeated closed-form comparison passed.
+Native input-to-present latency and other display checks remain unmeasured.

@@ -33,7 +33,8 @@ pub struct PostgresProfile {
     pub port: u16,
     pub database: String,
     pub user: String,
-    pub tls: bool,
+    #[serde(default)]
+    pub tls: crate::connection::PostgresTlsMode,
     pub ssh: Option<SshOptions>,
 }
 impl Default for PostgresProfile {
@@ -43,7 +44,7 @@ impl Default for PostgresProfile {
             port: 5432,
             database: "postgres".into(),
             user: "postgres".into(),
-            tls: true,
+            tls: crate::connection::PostgresTlsMode::VerifyFull,
             ssh: None,
         }
     }
@@ -519,6 +520,19 @@ mod tests {
             name.into(),
             ConnectionKind::Postgres(PostgresProfile::default()),
         )
+    }
+
+    #[test]
+    fn legacy_ron_tls_booleans_keep_their_security_policy() {
+        for (legacy, expected) in [("true", crate::connection::PostgresTlsMode::VerifyFull), ("false", crate::connection::PostgresTlsMode::Disable)] {
+            let mut storage = Storage::default();
+            eframe::set_value(&mut storage, "profile", &PostgresProfile::default());
+            let encoded = storage.0.get_mut("profile").unwrap();
+            assert!(encoded.contains("\"verify_full\""));
+            *encoded = encoded.replace("\"verify_full\"", legacy);
+            let restored: PostgresProfile = eframe::get_value(&storage, "profile").unwrap();
+            assert_eq!(restored.tls, expected);
+        }
     }
 
     #[test]

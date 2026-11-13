@@ -121,13 +121,23 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Candidate>, String> {
             .filter(|c| c.is_alphanumeric())
             .flat_map(char::to_lowercase)
             .collect();
-        let tls = match mode.as_str() {
+        let mut tls = match mode.as_str() {
             "" | "disabled" | "disable" => "0",
             "preferred" | "prefer" | "required" | "require" | "verifyca" | "verifyidentity"
             | "verifyfull" => "1",
             _ => return Err("Unknown TLS mode in TablePro export.".into()),
         };
         let kind = text(entry, "type");
+        if kind.eq_ignore_ascii_case("postgresql") || kind.eq_ignore_ascii_case("postgres") {
+            tls = match mode.as_str() {
+                "" | "disabled" | "disable" => "1",
+                "preferred" | "prefer" => "0",
+                "required" | "require" => "2",
+                "verifyca" => "4",
+                "verifyidentity" | "verifyfull" => "5",
+                _ => unreachable!("validated above"),
+            };
+        }
         let database = if kind.eq_ignore_ascii_case("redis") {
             entry.get("redisDatabase").cloned().unwrap_or(json!(0))
         } else {
@@ -212,6 +222,17 @@ mod tests {
     use super::*;
     fn bundle() -> Value {
         json!({"formatVersion":1,"connections":[{"name":"Sample","type":"PostgreSQL","host":"localhost","port":5432,"database":"sample","username":"demo","groupName":"Local"}]})
+    }
+    #[test]
+    fn postgres_tls_modes_survive_import() {
+        use crate::connection::PostgresTlsMode::*;
+        for (name, expected) in [("disabled", Disable), ("preferred", Prefer), ("required", Require), ("verify_ca", VerifyCa), ("verify_identity", VerifyFull)] {
+            let mut data = bundle();
+            data["connections"][0]["sslConfig"] = json!({"mode": name});
+            let rows = parse(&serde_json::to_vec(&data).unwrap()).unwrap();
+            let crate::connection_profiles::ConnectionKind::Postgres(profile) = &rows[0].profile.as_ref().unwrap().connection else { panic!() };
+            assert_eq!(profile.tls, expected);
+        }
     }
     #[test]
     fn supported_engines_groups_credentials_and_duplicate_refs() {

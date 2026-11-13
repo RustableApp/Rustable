@@ -637,3 +637,35 @@ serially, without competing builds or benchmark workloads. The custom-type test
 covers cold and warm enum results over 16 MiB, exactly-once INSERT RETURNING,
 explicit transactions, errors and subsequent connection reuse. The older bounded
 API tests remain separate and continue to assert intentional truncation.
+
+### PostgreSQL encrypt-only TLS (issue #8)
+
+`bash scripts/test-postgres-tls.sh` starts a disposable PostgreSQL 17 server on
+loopback port 54329 with a 10-year, untrusted certificate for the wrong hostname.
+The port must be free. It verifies encrypted Require/Prefer connections, rejection
+by Verify CA/Verify full, explicit plaintext Disable, the real driver, connection
+probe and query monitor. The script deletes its container and certificates.
+The non-ignored protocol test additionally verifies that Require/Verify CA/Verify
+full close the connection without sending startup credentials if TLS is refused.
+
+Capture the actual native connection editor without opening a database:
+
+```sh
+mise exec -- cargo build --features qa
+RUSTABLE_TLS_CAPTURE=/tmp/postgres-tls.ppm target/debug/rustable
+sips -s format png /tmp/postgres-tls.ppm --out /tmp/postgres-tls.png
+```
+
+Use `RUSTABLE_TLS_LIGHT=1`, `RUSTABLE_TLS_WIDTH=780`, or `RUSTABLE_TLS_MENU=1`
+for light mode, a narrow window, or the expanded mode picker, respectively.
+
+The PostgreSQL modes use the driver's existing SSLRequest negotiation. Prefer
+allows plaintext only when the server declines TLS; it does not retry a failed
+TLS handshake as plaintext. Require, Verify CA and Verify full never allow that
+fallback. Verify CA uses the platform trust store without hostname verification;
+Verify full also checks the configured database host, including through SSH.
+Legacy saved `tls: true` remains Verify full and `tls: false` remains Disabled.
+TablePlus PostgreSQL values 0/1/2/4/5 map to Prefer/Disabled/Require/Verify CA/Verify
+full; unsupported Allow (3) and unknown values are rejected for manual review.
+The picker ordering is also documented in TablePro's
+[TablePlus import vocabulary](https://github.com/TableProApp/TablePro/blob/main/apple/TablePro/Core/Services/Export/ForeignApp/TablePlusFormValues.swift).

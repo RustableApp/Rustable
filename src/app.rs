@@ -13191,7 +13191,7 @@ mod transaction_window_tests {
         let ctx = egui::Context::default();
         let config = crate::connection::PostgresConfig {
             host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-            password: "rustable_qa_only".into(), tls: false, ..Default::default()
+            password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable, ..Default::default()
         };
         let mut observer = ::postgres::Client::connect(
             "host=127.0.0.1 port=54329 dbname=rustable_qa user=postgres password=rustable_qa_only",
@@ -13327,7 +13327,7 @@ mod transaction_window_tests {
         let ctx = egui::Context::default();
         let config = crate::connection::PostgresConfig {
             host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-            password: "rustable_qa_only".into(), tls: false, ..Default::default()
+            password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable, ..Default::default()
         };
         let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(),
             Command::OpenPostgres(config), None);
@@ -14092,7 +14092,7 @@ mod postgres_query_result_editing_tests {
         let ctx = egui::Context::default();
         let config = crate::connection::PostgresConfig {
             host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
-            password: "rustable_qa_only".into(), tls: false, ..Default::default()
+            password: "rustable_qa_only".into(), tls: crate::connection::PostgresTlsMode::Disable, ..Default::default()
         };
         let mut app = Rustable::with_initial_connection(&ctx, Preferences::default(), Command::OpenPostgres(config), None);
         let settle = |app: &mut Rustable| {

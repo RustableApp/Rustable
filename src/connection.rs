@@ -1,3 +1,104 @@
+/// PostgreSQL encryption and server identity policy. Old boolean profiles retain
+/// their original behavior: true verifies identity, false disables encryption.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PostgresTlsMode {
+    Disable,
+    Prefer,
+    Require,
+    VerifyCa,
+    #[default]
+    VerifyFull,
+}
+impl serde::Serialize for PostgresTlsMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Disable => "disable",
+            Self::Prefer => "prefer",
+            Self::Require => "require",
+            Self::VerifyCa => "verify_ca",
+            Self::VerifyFull => "verify_full",
+        })
+    }
+}
+impl<'de> serde::Deserialize<'de> for PostgresTlsMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Stored {
+            Legacy(bool),
+            Mode(String),
+        }
+        match Stored::deserialize(deserializer)? {
+            Stored::Legacy(true) => Ok(Self::VerifyFull),
+            Stored::Legacy(false) => Ok(Self::Disable),
+            Stored::Mode(mode) => match mode.as_str() {
+                "disable" => Ok(Self::Disable),
+                "prefer" => Ok(Self::Prefer),
+                "require" => Ok(Self::Require),
+                "verify_ca" => Ok(Self::VerifyCa),
+                "verify_full" => Ok(Self::VerifyFull),
+                _ => Err(serde::de::Error::custom("Unknown PostgreSQL TLS mode")),
+            },
+        }
+    }
+}
+impl PostgresTlsMode {
+    pub const ALL: [Self; 5] = [
+        Self::VerifyFull,
+        Self::VerifyCa,
+        Self::Require,
+        Self::Prefer,
+        Self::Disable,
+    ];
+    pub fn enabled(self) -> bool {
+        self != Self::Disable
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disable => "Disabled (unencrypted)",
+            Self::Prefer => "Prefer",
+            Self::Require => "Require",
+            Self::VerifyCa => "Verify CA",
+            Self::VerifyFull => "Verify full",
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Disable => "Traffic is not encrypted.",
+            Self::Prefer => {
+                "Encryption if available; no server verification. May use plaintext."
+            }
+            Self::Require => {
+                "Requires encryption; no server verification."
+            }
+            Self::VerifyCa => {
+                "Requires encryption and a trusted certificate; no hostname check."
+            }
+            Self::VerifyFull => {
+                "Requires encryption; verifies certificate and hostname."
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn ssl_mode(self) -> tokio_postgres::config::SslMode {
+        match self {
+            Self::Disable => tokio_postgres::config::SslMode::Disable,
+            Self::Prefer => tokio_postgres::config::SslMode::Prefer,
+            _ => tokio_postgres::config::SslMode::Require,
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn connector(self) -> Result<native_tls::TlsConnector, native_tls::Error> {
+        let mut builder = native_tls::TlsConnector::builder();
+        builder.danger_accept_invalid_certs(matches!(self, Self::Prefer | Self::Require));
+        builder.danger_accept_invalid_hostnames(matches!(
+            self,
+            Self::Prefer | Self::Require | Self::VerifyCa
+        ));
+        builder.build()
+    }
+}
+
 /// Ephemeral connection credentials; deliberately excluded from preferences and Debug.
 #[derive(Clone)]
 pub struct PostgresConfig {
@@ -6,7 +107,7 @@ pub struct PostgresConfig {
     pub database: String,
     pub user: String,
     pub password: String,
-    pub tls: bool,
+    pub tls: PostgresTlsMode,
     pub ssh: Option<crate::ssh_tunnel::Config>,
 }
 impl Default for PostgresConfig {
@@ -17,7 +118,7 @@ impl Default for PostgresConfig {
             database: "postgres".into(),
             user: "postgres".into(),
             password: String::new(),
-            tls: true,
+            tls: PostgresTlsMode::VerifyFull,
             ssh: None,
         }
     }
@@ -40,7 +141,7 @@ mod tests {
             password: "secret-value".into(),
             ..Default::default()
         };
-        assert!(config.tls);
+        assert_eq!(config.tls, PostgresTlsMode::VerifyFull);
         assert_eq!(config.label(), "postgres@localhost:5432/postgres");
         assert!(!config.label().contains(&config.password));
     }
@@ -199,5 +300,23 @@ mod mysql_tests {
         let value: String = conn.query_first("SELECT '日本 🦀'").unwrap().unwrap();
         assert_eq!(value, "日本 🦀");
         assert_eq!(conn.transaction_status(), Some(false));
+    }
+}
+#[cfg(test)]
+mod postgres_tls_tests {
+    use super::*;
+    #[test]
+    fn stored_profiles_preserve_legacy_security_and_roundtrip_modes() {
+        for (old, expected) in [(true, PostgresTlsMode::VerifyFull), (false, PostgresTlsMode::Disable)] {
+            let mut value = serde_json::to_value(crate::connection_profiles::PostgresProfile::default()).unwrap();
+            value["tls"] = old.into();
+            let profile: crate::connection_profiles::PostgresProfile = serde_json::from_value(value).unwrap();
+            assert_eq!(profile.with_password(String::new()).tls, expected);
+        }
+        for mode in PostgresTlsMode::ALL {
+            let encoded = serde_json::to_string(&mode).unwrap();
+            assert_eq!(serde_json::from_str::<PostgresTlsMode>(&encoded).unwrap(), mode);
+        }
+        assert!(serde_json::from_str::<PostgresTlsMode>("\"unknown\"").is_err());
     }
 }

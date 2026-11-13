@@ -206,7 +206,7 @@ mod tests {
                 database: "rustable_qa".into(),
                 user: "postgres".into(),
                 password: "rustable_qa_only".into(),
-                tls: false,
+                tls: crate::connection::PostgresTlsMode::Disable,
                 ssh: None,
             },
             Arc::new(AtomicBool::new(false)),
