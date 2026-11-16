@@ -366,6 +366,7 @@ enum FileAction {
 struct CellEdit {
     bulk_rows: Vec<(Vec<Value>, Value)>,
     bulk_changed: bool,
+    undo_initialized: bool,
     insert_id: Option<u64>,
     advance: i8,
     table: String,
@@ -520,6 +521,7 @@ pub struct Rustable {
     paste_requested: bool,
     safe: bool,
     destructive_confirm: Option<DestructiveRun>,
+    close_table_confirmation: Option<u64>,
     /// "Don't ask again" for non-production connections; reset on every connect.
     skip_destructive_confirm: bool,
     status: String,
@@ -637,6 +639,7 @@ impl Rustable {
         requests
     }
     pub(crate) fn manager_shortcut(&mut self, ctx: &egui::Context) {
+        if crate::session_windows::close_confirmation_open(ctx) { return; }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
             if self.child_window {
                 self.manager_requested = true;
@@ -685,13 +688,19 @@ impl Rustable {
         !self.engine.is_empty()
     }
     pub(crate) fn close_blocked(&self) -> bool {
+        self.close_work_blocked() || self.has_pending_edits()
+    }
+    pub(crate) fn close_work_blocked(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         if self.redis_workspace.as_ref().is_some_and(|workspace| workspace.busy()) { return true; }
-        self.worker.transaction_state().blocks_replacement()
-            || !self.changes.is_empty()
-            || self.edit.is_some()
+        self.worker.transaction_state().blocks_replacement() || self.pending.is_some()
+    }
+    pub(crate) fn has_pending_edits(&self) -> bool {
+        !self.changes.is_empty() || self.edit.is_some()
             || (self.rename_inline && self.rename.is_some())
-            || self.pending.is_some()
+    }
+    pub(crate) fn discard_for_close(&mut self) {
+        if !self.close_work_blocked() { self.discard_changes(); }
     }
     // The oldest editor is the connection's persistent scratchpad, even when
     // closed. Other tabs and the reopen stack are only retained in memory.
@@ -1178,6 +1187,7 @@ impl Rustable {
             paste_requested: false,
             safe: false,
             destructive_confirm: None,
+            close_table_confirmation: None,
             skip_destructive_confirm: false,
             status: "Ready".into(),
             error: None,
@@ -2231,13 +2241,14 @@ impl Rustable {
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
         self.query_monitor.open || self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
-            || self.destructive_confirm.is_some()
+            || self.destructive_confirm.is_some() || self.close_table_confirmation.is_some()
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some() || self.alter_column.is_some()
             || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some()
     }
 
     fn workspace_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.close_table_confirmation.is_some() || crate::session_windows::close_confirmation_open(ctx) { return; }
         // Import windows own the keyboard, including their first visible frame.
         if self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() {
             return;
@@ -3414,7 +3425,7 @@ Right-click to inspect or remove individual changes",
                                                         kind = Some((3, crate::date_picker::now_text(date)));
                                                     }
                                                     if let Some((kind, text)) = kind {
-                                                        start_edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: edit_table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text, kind, focus: false, inspector: true });
+                                                        start_edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0, table: edit_table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text, kind, focus: false, inspector: true });
                                                         stage_constant = true;
                                                         ui.close();
                                                     }
@@ -3442,7 +3453,7 @@ Right-click to inspect or remove individual changes",
                                         } else if writable {
                                             // Render the real input before focus, using the same ID as
                                             // the retained draft so the first click places the caret.
-                                            let mut draft = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: edit_table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: false, inspector: true });
+                                            let mut draft = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0, table: edit_table.clone(), row: row.clone(), original_value: original_value.clone(), column: name.clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: false, inspector: true });
                                             let id = cell_edit_id(ui, draft.as_ref().unwrap());
                                             inline_value(ui, &mut draft);
                                             if ui.memory(|memory| memory.has_focus(id)) || draft.as_ref().is_some_and(|draft| draft.bulk_changed) {
@@ -4083,8 +4094,6 @@ Right-click to inspect or remove individual changes",
             // A retained editor can be open while the table workspace is empty.
             self.show_query();
             self.close_tab(self.tab);
-        } else if self.close_blocked() {
-            self.window_error("Finish SQL transactions with COMMIT or ROLLBACK, save or discard pending database changes, and wait for work before closing this window.");
         } else {
             // SessionWindows archives SQL drafts and removes only this viewport.
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -4983,6 +4992,7 @@ Right-click to inspect or remove individual changes",
         } else {
             grid.rows.len()
         };
+        let mut empty_body_click = false;
         let mut visible_rows = 0..0;
         let mut sort = None;
         let mut explicit_sort = None;
@@ -5231,6 +5241,14 @@ Right-click to inspect or remove individual changes",
                         let ui = body.ui_mut();
                         let origin = ui.available_rect_before_wrap().min;
                         let pitch = 22.0 + ui.spacing().item_spacing.y;
+                        // The background response loses hit testing to cells and scrollbars.
+                        // Geometry also excludes the header, gutters between populated cells,
+                        // and pending inserts from the empty-space action.
+                        empty_body_click = grid_focus.interact_pointer_pos().is_some_and(|pos| {
+                            table_clip.contains(pos) && pos.y >= origin.y
+                                && (pos.y >= origin.y + pitch * (logical_rows + insert_ids.len()) as f32
+                                    || pos.x >= origin.x + total_width)
+                        });
                         let press = ui.input(|input| input.events.iter().rev().find_map(|event| {
                             match event {
                                 egui::Event::PointerButton { pos, button, pressed: true, modifiers } if matches!(button, egui::PointerButton::Primary | egui::PointerButton::Secondary) => Some((*pos, *modifiers, *button == egui::PointerButton::Secondary)),
@@ -5379,7 +5397,11 @@ Right-click to inspect or remove individual changes",
                                     {
                                         return;
                                     }
-                                    if deleting {
+                                    if editing {
+                                        // Restore the whole cell, including its gutters, so text
+                                        // selection stands out from the selected row around it.
+                                        paint_cell_background(ui, table_clip, grid_row_fill(ui, global));
+                                    } else if deleting {
                                         let fill = if ui.visuals().dark_mode { Color32::from_rgb(100, 35, 40) } else { Color32::from_rgb(255, 210, 213) };
                                         paint_cell_background(ui, table_clip, fill);
                                     } else if staged.is_some() {
@@ -5549,7 +5571,7 @@ Right-click to inspect or remove individual changes",
                                         }
                                         let writable = editable && !deleting && !edit_columns.as_slice().get(column).is_some_and(|c| c.generated);
                                         if ui.add_enabled(writable && staged.is_some(), egui::Button::new("Revert cell")).clicked() {
-                                            cell_action = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: edit_table.clone(), row: grid.rows[index].clone(), original_value: original_value.clone(), column: grid.columns[column].clone(), text: if matches!(original_value, Value::Null) { String::new() } else { db::display(original_value) }, kind: match original_value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, Value::Blob(_) => 4, _ => 3 }, focus: false, inspector: false });
+                                            cell_action = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0, table: edit_table.clone(), row: grid.rows[index].clone(), original_value: original_value.clone(), column: grid.columns[column].clone(), text: if matches!(original_value, Value::Null) { String::new() } else { db::display(original_value) }, kind: match original_value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, Value::Blob(_) => 4, _ => 3 }, focus: false, inspector: false });
                                             ui.close();
                                         }
                                     });
@@ -5582,7 +5604,7 @@ Right-click to inspect or remove individual changes",
                                         return;
                                     }
                                     edit = Some(CellEdit {
-            bulk_rows: Vec::new(), bulk_changed: false, insert_id: None,                                        advance: 0,                                        table: edit_table.clone(),
+            bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None,                                        advance: 0,                                        table: edit_table.clone(),
                                         focus: true,
                                         inspector: false,
                                         row: grid.rows[index].clone(),
@@ -5685,7 +5707,7 @@ Right-click to inspect or remove individual changes",
                             let original = &grid.rows[index][column];
                             let value = self.changes.iter().find_map(|change| match change { Change::Cell { table, column: name, original: source, value, original_columns } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && table == edit_table.as_str() && name == &grid.columns[column] && source == &grid.rows[index] => Some(value), _ => None }).unwrap_or(original);
                             if !matches!(value, Value::Text(t) if t.len() > 65536) {
-                                self.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0, table: edit_table.clone(), row: grid.rows[index].clone(), original_value: original.clone(), column: grid.columns[column].clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: true, inspector: true });
+                                self.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0, table: edit_table.clone(), row: grid.rows[index].clone(), original_value: original.clone(), column: grid.columns[column].clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: true, inspector: true });
                             }
                         }
                         if matches!(action, "null" | "empty" | "now") {
@@ -5753,6 +5775,13 @@ Right-click to inspect or remove individual changes",
         if cell_action.is_some() && self.finish_cell_edit() {
             self.edit = cell_action;
             self.finish_cell_edit();
+        }
+        if empty_body_click && menu_can_insert
+            && !self.dialog_owns_workspace_shortcuts()
+            && !egui::Popup::is_any_open(ui.ctx())
+            && same_target_double_click(&grid_focus, grid_focus.id.with("empty-body"))
+        {
+            self.add_insert();
         }
     }
 
@@ -6007,7 +6036,7 @@ Right-click to inspect or remove individual changes",
             return;
         }
         let edit = CellEdit {
-            bulk_rows: Vec::new(), bulk_changed: true, insert_id: None, advance: 0,
+            bulk_rows: Vec::new(), bulk_changed: true, undo_initialized: false, insert_id: None, advance: 0,
             table: target.table, row: target.row, original_value: target.original,
             column: target.column, text: String::new(), kind: 3, focus: false, inspector: false,
         };
@@ -6884,6 +6913,8 @@ impl Rustable {
     }
 
     pub(crate) fn render_workspace_frame(&mut self, ctx: &egui::Context) {
+        let key = egui::Id::new((ctx.viewport_id(), "table-close-confirmation-open"));
+        ctx.data_mut(|data| data.insert_temp(key, self.close_table_confirmation.is_some()));
         #[cfg(target_arch = "wasm32")]
         if self.redis_demo_active {
             if self.connections { self.connections_window(ctx); return; }
@@ -6926,19 +6957,9 @@ impl Rustable {
         self.csv_preview_window(ctx);
         self.csv_import_review(ctx);
         self.destructive_confirmation(ctx);
+        self.table_close_confirmation(ctx);
         #[cfg(target_arch = "wasm32")]
         self.browser_query_save_window(ctx);
-        if ctx.input(|i| i.viewport().close_requested())
-            && (!self.changes.is_empty()
-                || self.edit.is_some()
-                || (self.rename_inline && self.rename.is_some())
-                || self.pending.is_some())
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.error = Some(
-                "Save or discard pending changes and wait for database work before closing.".into(),
-            );
-        }
         if self.pending.is_some() {
             // The spinner needs animation only while a task is active.
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
@@ -8051,6 +8072,10 @@ fn paint_grid_text_aligned(ui: &mut egui::Ui, text: &str, color: Color32, fit: b
     ui.painter().galley(pos, galley, color);
 }
 
+fn grid_row_fill(ui: &egui::Ui, row: usize) -> Color32 {
+    if row.is_multiple_of(2) { ui.visuals().faint_bg_color } else { ui.visuals().panel_fill }
+}
+
 fn paint_cell_background(ui: &egui::Ui, table_clip: egui::Rect, fill: Color32) {
     let rect = ui.max_rect().expand2(ui.spacing().item_spacing * 0.5);
     let mut painter = ui.painter().clone();
@@ -8096,6 +8121,14 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
         return false;
     };
     let id = cell_edit_id(ui, draft);
+    if !draft.undo_initialized {
+        draft.undo_initialized = true;
+        // Each cell editing session starts its own typing history.
+        if let Some(mut state) = TextEdit::load_state(ui.ctx(), id) {
+            state.clear_undoer();
+            state.store(ui.ctx(), id);
+        }
+    }
     // Capture navigation before TextEdit/egui's focus traversal consumes Tab.
     // Event modifiers, rather than the frame's final modifier state, define direction.
     let advance = if ui.memory(|m| m.has_focus(id)) {
@@ -8123,6 +8156,10 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
             .background_color(Color32::TRANSPARENT)
             .desired_width(f32::INFINITY),
     );
+    if draft.focus || response.gained_focus() {
+        let key = egui::Id::new((ui.ctx().viewport_id(), "active-cell-editor"));
+        ui.ctx().data_mut(|data| data.insert_temp(key, id));
+    }
     draft.bulk_changed |= response.changed();
     if draft.focus {
         response.scroll_to_me(None);
@@ -8142,7 +8179,7 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
         response.surrender_focus();
         return true;
     }
-    response.lost_focus()
+    response.lost_focus() && !crate::session_windows::close_confirmation_open(ui.ctx())
 }
 
 fn inspector_column_type(column: &Column) -> String {
@@ -8185,7 +8222,7 @@ mod inline_edit_tests {
     fn draft(kind: usize, text: &str) -> CellEdit {
         CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table: "customers".into(),
@@ -8282,7 +8319,7 @@ mod interaction_tests {
     fn draft() -> Option<CellEdit> {
         Some(CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table: "customers".into(),
@@ -9524,6 +9561,8 @@ mod interaction_tests {
         }
     }
 
+    include!("cell_edit_contrast_tests.rs");
+
     #[test]
     fn inline_drafts_stay_neutral_until_staged_and_active_cell_excludes_gutter() {
         let ctx = egui::Context::default();
@@ -9772,7 +9811,7 @@ mod staging_tests {
     fn draft(table: &str) -> CellEdit {
         CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table: table.into(),
@@ -10080,7 +10119,7 @@ fn cell_edit_from_slot(
         }
         return Some(CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table: source.table.clone(),
@@ -10135,7 +10174,7 @@ mod cell_navigation_tests {
         };
         let mut source = CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 1,
             table: "t".into(),
@@ -11524,7 +11563,7 @@ mod tab_lifecycle_tests {
         app.view = View::Data;
         app.edit = Some(CellEdit {
             bulk_rows: vec![],
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table: "customers".into(),
@@ -11677,14 +11716,14 @@ mod close_workspace_keyboard_tests {
     }
 
     #[test]
-    fn command_w_empty_workspace_does_not_close_running_or_staged_session() {
+    fn command_w_empty_workspace_routes_close_through_session_confirmation() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
         app.tabs[0].open = false;
         app.view = View::Data;
         app.browse.table.clear();
         app.pending = Some(Pending::Query(0));
-        assert!(!command_w(&ctx, &mut app));
+        assert!(command_w(&ctx, &mut app));
         app.pending = None;
         app.changes.push(Change::Cell { original_columns: None,
             table: "customers".into(),
@@ -11692,7 +11731,7 @@ mod close_workspace_keyboard_tests {
             original: vec![],
             value: Value::Text("pending".into()),
         });
-        assert!(!command_w(&ctx, &mut app));
+        assert!(command_w(&ctx, &mut app));
         assert_eq!(app.changes.len(), 1);
         app.changes.clear();
         assert!(command_w(&ctx, &mut app));
@@ -12684,7 +12723,7 @@ mod bracket_tab_navigation_tests {
         let (_ctx, mut app) = fixture();
         app.edit = Some(CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table: "table".into(),
@@ -12813,7 +12852,7 @@ mod result_pin_tests {
             truncated: true, ..Default::default()
         });
         app.edit = Some(CellEdit {
-            bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+            bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0,
             table: "customers".into(), row: vec![Value::Integer(1)],
             original_value: Value::Integer(1), column: "id".into(),
             text: "invalid".into(), kind: 1, focus: false, inspector: false,
@@ -12893,7 +12932,7 @@ mod result_pin_tests {
         app.filter_column = "email".into();
         app.filter = "draft filter".into();
         app.edit = Some(CellEdit {
-            bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+            bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0,
             table: "customers".into(), row: vec![Value::Integer(1)],
             original_value: Value::Integer(1), column: "id".into(),
             text: "not an integer".into(), kind: 1, focus: false, inspector: false,
@@ -13395,7 +13434,7 @@ mod mysql_editor_mode_tests {
         fn edit_label(app: &mut Rustable, text: &str) {
             let row = app.table.rows[0].clone();
             app.edit = Some(CellEdit {
-                bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+                bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0,
                 table: app.browse.table.clone(), original_value: row[1].clone(), row,
                 column: "label".into(), text: text.into(), kind: 3, focus: false, inspector: false,
             });
@@ -13787,7 +13826,7 @@ mod query_result_editing_tests {
         let grid = app.grid();
         let index = grid.columns.iter().position(|c| c == column).unwrap();
         CellEdit {
-            bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+            bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0,
             table: app.edit_table().to_owned(), row: grid.rows[row].clone(),
             original_value: grid.rows[row][index].clone(), column: column.into(),
             text: text.into(), kind: 3, focus: false, inspector: false,
@@ -14115,7 +14154,7 @@ mod postgres_query_result_editing_tests {
         let grid = app.grid();
         for (column, text) in [("name", "after"), ("amount", "99.95")] {
             let index = grid.columns.iter().position(|c| c == column).unwrap();
-            app.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+            app.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0,
                 table: app.edit_table().to_owned(), row: grid.rows[0].clone(), original_value: grid.rows[0][index].clone(),
                 column: column.into(), text: text.into(), kind: 3, focus: false, inspector: false });
             assert!(app.finish_cell_edit());
@@ -14273,7 +14312,7 @@ mod date_picker_tests {
         assert!(app.date_picker.is_none());
 
         // The inline editor for a date column shows the calendar button.
-        app.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, insert_id: None, advance: 0,
+        app.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0,
             table: app.edit_table().to_owned(), row: app.grid().rows[0].clone(), original_value: app.grid().rows[0][1].clone(),
             column: "day".into(), text: "2024-02-29".into(), kind: 3, focus: false, inspector: false });
         for _ in 0..2 {

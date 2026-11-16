@@ -592,7 +592,7 @@ impl Rustable {
                 .iter()
                 .map(|i| (grid.rows[*i].clone(), grid.rows[*i][column].clone()))
                 .collect(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table,
@@ -1506,7 +1506,7 @@ mod tests {
         app.pending = None;
         app.edit = Some(CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table: "t".into(),

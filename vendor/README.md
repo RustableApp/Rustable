@@ -290,6 +290,13 @@ no longer imports the legacy `core::f32` module, so `f32::EPSILON` resolves to
 the primitive's associated constant. Numeric values and rendering behavior
 are unchanged; no warning lints are suppressed.
 
+### Cell editor undo availability
+
+`egui::text_edit::TextEditState::has_undo` queries the existing undoer under its
+lock without cloning the retained text history. Rustable calls it only on an
+Undo chord to hand exhausted cell typing history back to staged-change history.
+The upstream text-edit undo/redo algorithm and SQL editor behavior are unchanged.
+
 ### Compact field caret height
 
 `egui::TextEdit::cursor_vertical_padding` controls the extra caret height above

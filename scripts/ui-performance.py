@@ -137,6 +137,7 @@ def measure(binary, source, logs, label, iteration):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--cell-editor', action='store_true', help='Compare selected-cell editing with the identical shared fixture')
     parser.add_argument('--result-search', action='store_true', help='Compare full scans with cancellation checks and result-search panel navigation')
     parser.add_argument('--change-history', action='store_true', help='Compare staged-edit record, undo and redo CPU with identical large values')
     parser.add_argument('--sql-highlight', action='store_true', help='Compare SQL highlighting, retained job storage and large editor layout')
@@ -159,6 +160,9 @@ def main():
         BENCHMARKS = ('postgres_connection_profile_frame_benchmark', 'postgres_tls_menu_frame_benchmark')
         EXPECTED.clear()
         EXPECTED.update(('postgres/connection-profile/1100x760', 'postgres/connection-profile/780x600', 'postgres/tls-menu/1100x760', 'postgres/tls-menu/780x600'))
+    if args.cell_editor:
+        BENCHMARKS += ('selected_cell_edit_frame_benchmark',)
+        EXPECTED.update(('grid/selected-cell-edit/false', 'grid/selected-cell-edit/true'))
     if args.result_search:
         BENCHMARKS += ('result_search_cpu_benchmark',)
         EXPECTED.update(('search/scan/text', 'search/scan/numeric', 'search/scan/large-cell', 'search/panel-navigation'))
@@ -221,6 +225,16 @@ def main():
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
+            if args.cell_editor:
+                fixture = root / 'src' / 'cell_edit_contrast_tests.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                source = base_path / 'src' / 'app.rs'
+                text = source.read_text()
+                if 'include!("cell_edit_contrast_tests.rs");' not in text:
+                    text = text.replace('mod interaction_tests {', 'mod interaction_tests {\n    include!("cell_edit_contrast_tests.rs");', 1)
+                    source.write_text(text)
+                metadata['cell_editor_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.result_search:
                 fixture = root / 'src' / 'result_search_performance.rs'
                 shutil.copy2(fixture, base_path / 'src' / fixture.name)

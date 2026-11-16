@@ -882,3 +882,130 @@ only the selected-mode explanation or putting descriptions in hover tooltips
 would reduce drawn text but would not provide the requested at-a-glance comparison.
 The cost is limited to the open popup; the repeated closed-form comparison passed.
 Native input-to-present latency and other display checks remain unmeasured.
+
+### Empty rows-view double-click insertion — 2026-11-15
+
+Double-clicking unused table-body space stages a row through the existing Add Row
+path. Cell/header interactions, safe mode, loading and query-result guards remain
+intact. Hit testing uses existing viewport/row geometry in constant time; there
+are no added database operations or repaint timers. PostgreSQL, MySQL/MariaDB and
+other driver sequencing is unchanged, so database latency tests were not rerun.
+
+Comparison: `python3 scripts/ui-performance.py --base cad59dcd6ce9b8016795cc92a2d927d8e9851734 --output target/empty-row-ui-performance`.
+Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile, five serial
+alternating pairs; all 19 comparisons passed. Unchanged fixtures and default 1×
+scale: grid 1200×800 (20 warmup/160 samples); workspace/sidebar 1440×900
+(20 warmup/100 samples). Median per-run CPU milliseconds, p50/p95/p99/max:
+
+| Workload | Base | Candidate |
+| --- | --- | --- |
+| Vertical precise grid layout | .23625/.25246/.29996/.33821 | .24350/.26942/.32579/.35642 |
+| 120-column workspace with inspector | .40433/.42417/.45338/.45338 | .40683/.43921/.47267/.47267 |
+
+The new `empty_rows_double_click_frame_benchmark` also passed five serial release
+runs: 600×400, default 1× scale, 20 warmup/160 measured click pairs, repeated
+insertion and a synthetic 30-second idle gap. Median p50/p95/p99/max was
+.01054/.01250/.01350/.01367 ms for activation and .01558/.01813/.02075/.02188 ms
+for the first editable-row frame. These are candidate-only layout+tessellation
+costs; the base has no matching insertion gesture. Raw measurements are retained
+in `target/empty-row-review/interaction-{0..4}.log`.
+
+All eight insertion tests passed, including input-driven checks of empty/populated
+tables, blank space to the right, cells, headers, safe mode, loading and query
+results. Native dark 1280×760 and light 760×760 screenshots at 2× were inspected,
+including the focused staged row. The disposable preview adapter, build log and
+captures are retained under `target/empty-row-review/`; no preview changes remain
+in production source. Native input-to-present timing, frame intervals, 60/120 Hz,
+multiple windows and mixed-DPI behavior were not measured. Event-loop and renderer
+scheduling are unchanged; CPU results do not establish presentation latency.
+
+### Cell Undo and discard-on-close confirmation — 2026-11-15
+
+Cell editors now keep typing undo/redo locally, then hand exhausted Undo to the
+existing staged-change history. An untouched new row can be undone immediately.
+Each editing session initializes its own typing history; refocusing after a
+validation failure retains it. Undo availability is checked only for the shortcut,
+using a vendored accessor that locks the undoer without cloning its history.
+SQL and unrelated text fields retain their independent Undo behavior.
+
+Window close, database-workspace close, quit and dirty table-tab close offer
+Cancel / Discard. Table discard affects only that table. Session close rechecks
+running work and transactions across the affected workspaces before discarding;
+it does not commit, roll back, cancel or replay database operations. SQL drafts
+remain recoverable. No driver/protocol sequencing changes or additional network
+exchanges were introduced; database latency fixtures were not rerun.
+
+`python3 scripts/ui-performance.py --base cad59dcd6ce9b8016795cc92a2d927d8e9851734 --change-history --output target/undo-close-ui-performance`
+passed all 22 comparisons, including the preceding empty-space insertion change.
+Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile, five alternating
+serial pairs. The unchanged grid/workspace/sidebar fixtures and 1× scale are
+listed above; history uses 20 warmups/160 samples with 16 KiB cell values.
+Median per-run CPU milliseconds (p50/p95/p99/max):
+
+| Workload | Base | Candidate |
+| --- | --- | --- |
+| Staged Undo | .02021/.03767/.03996/.04100 | .02025/.03842/.04058/.04333 |
+| 120-column workspace with inspector | .39850/.40163/.41450/.41450 | .39854/.40254/.41292/.41292 |
+
+New candidate-only interaction workloads also passed five serial release runs.
+The Undo handoff measures a production inline editor and shortcut handler through
+180 insert/type/undo sequences (20 warmups/160 measured handoffs), 600×400 at 1×,
+including a synthetic idle gap. Modal rendering uses 760×600 at 1× with
+20 warmups/160 frames and an idle gap, for enabled and blocked Discard states.
+These include layout+tessellation; they are not comparisons with the former error
+or measurements of native input-to-present latency.
+
+| New workload | p50 / p95 / p99 / max ms |
+| --- | --- |
+| Typing-to-staged Undo handoff | .00221/.00238/.00275/.00279 |
+| Discard confirmation | .00721/.00775/.00883/.00954 |
+| Running-work confirmation | .00700/.00725/.00833/.00883 |
+
+838 library tests passed (221 opt-in tests ignored). Coverage includes typing
+undo/redo, history handoff, immediate new-row Undo, explicit Cancel/Discard button
+input, Escape cancellation, no implicit Enter confirmation, scoped table discard,
+and rechecking busy parked workspaces. Native dark 1280×760 and light 760×760
+captures at 2× were inspected, including the disabled Discard state. Fixtures,
+raw interaction samples, tests and captures are in `target/undo-close-review/`;
+comparison logs and raw tails are in `target/undo-close-ui-performance/`.
+Native multi-window close/quit interactions, frame intervals, input-to-present
+latency, 60/120 Hz and mixed-DPI checks were not measured. The existing rendering
+and repaint scheduling remain unchanged; these results make no display-latency
+claim. The screenshot adapter was restored after building the disposable preview.
+
+Strict all-target QA Clippy passed. The locked browser/WASM check also passed
+(with target-specific warnings); logs are retained in the same review directory.
+
+### Neutral background while editing a selected cell — 2026-11-16
+
+The grid restores the active editor's complete cell rectangle to its ordinary
+alternating-row color, including gutters and the calendar-button area. Other
+selected cells stay blue. Pending insert fields use the same treatment while
+editing; their pending fill returns afterward. This adds a rectangle for an
+edited cell, with no extra layout, repaint timer, row scan or database operation.
+
+`python3 scripts/ui-performance.py --base cad59dcd6ce9b8016795cc92a2d927d8e9851734 --cell-editor --output target/cell-contrast-ui-performance`
+passed all 21 comparisons. The new flag injects the identical focused-editor
+fixture into both revisions. Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1,
+release profile, five alternating serial pairs, default 1× scale. The added
+fixture uses two identical rows, two columns and a selected row with inline
+editing at 800×500, 20 warmup/160 measured frames and a synthetic 30-second idle
+gap. Existing grid/workspace/sidebar fixtures are unchanged. Median per-run
+layout+tessellation milliseconds (p50/p95/p99/max):
+
+| Editor theme | Base | Candidate |
+| --- | --- | --- |
+| Light | .01325/.01363/.01383/.01496 | .01308/.01358/.01375/.01379 |
+| Dark | .01338/.01379/.01633/.01683 | .01350/.01379/.01575/.01671 |
+
+839 library tests passed (222 ignored), as did strict all-target QA Clippy and
+all eight performance-runner tests. The geometry test covers both row colors
+and both themes, verifies paint order and full-cell height, and checks that
+neighboring selection remains visible. Native 2× captures of selected text in
+a real grid editor were inspected in dark 900×500 and light 760×500 layouts.
+Screenshots, temporary preview adapter and check logs are retained under
+`target/cell-contrast-review/`; raw timing samples and environment are under
+`target/cell-contrast-ui-performance/`. The preview source was restored after
+capture. CPU timings do not measure input-to-display latency; native frame
+intervals, 60/120 Hz, multiple windows and mixed-DPI behavior were not measured.
+Database/protocol paths and renderer/event-loop scheduling are unchanged.

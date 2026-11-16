@@ -177,6 +177,30 @@ impl Rustable {
             self.close_table_tab_id(id);
         }
     }
+    pub(super) fn table_close_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.close_table_confirmation else { return; };
+        let Some(name) = self.table_tabs.iter().find(|tab| tab.id == id).map(|tab| tab.browse.table.clone()) else {
+            self.close_table_confirmation = None;
+            return;
+        };
+        if let Some(discard) = crate::session_windows::discard_confirmation(ctx,
+            &format!("Discard pending edits to {name} and close this table?"), self.pending.is_some())
+        {
+            self.resolve_table_close(id, discard);
+        }
+    }
+
+    fn resolve_table_close(&mut self, id: u64, discard: bool) {
+        self.close_table_confirmation = None;
+        if !discard || self.pending.is_some() { return; }
+        let Some(name) = self.table_tabs.iter().find(|tab| tab.id == id).map(|tab| tab.browse.table.clone()) else { return; };
+        if self.edit.as_ref().is_some_and(|edit| edit.table == name) { self.edit = None; }
+        if self.browse.table == name { self.rename = None; self.rename_inline = false; }
+        self.changes.retain(|change| change.table() != name);
+        self.record_changes();
+        self.close_table_tab_id(id);
+    }
+
     pub(super) fn close_table_tab_id(&mut self, id: u64) {
         let Some(name) = self
             .table_tabs
@@ -186,14 +210,15 @@ impl Rustable {
         else {
             return;
         };
-        if self.pending.is_some() || !self.finish_cell_edit() {
+        if self.pending.is_some() { return; }
+        if self.changes.iter().any(|c| c.table() == name)
+            || self.edit.as_ref().is_some_and(|edit| edit.table == name)
+            || (self.rename_inline && self.rename.is_some() && self.browse.table == name)
+        {
+            self.close_table_confirmation = Some(id);
             return;
         }
-        if self.changes.iter().any(|c| c.table() == name) {
-            self.error =
-                Some("Save or discard this table's pending changes before closing it.".into());
-            return;
-        }
+        if !self.finish_cell_edit() { return; }
         self.table_tabs.retain(|tab| tab.id != id);
         if self.active_table_tab != Some(id) {
             return;
@@ -238,6 +263,34 @@ mod tests {
             None,
         )
     }
+    #[test]
+    fn dirty_table_close_can_cancel_or_discard_only_that_table() {
+        let mut app = app();
+        app.engine = "SQLite".into();
+        app.prepare_table("first".into());
+        app.keep_table_tab("first");
+        let first = app.active_table_tab.unwrap();
+        app.prepare_table("second".into());
+        app.pending = None;
+        app.changes = vec![
+            Change::InsertRow { id: 100, table: "first".into(), fields: vec![] },
+            Change::InsertRow { id: 101, table: "second".into(), fields: vec![] },
+        ];
+        app.record_changes();
+        app.close_table_tab_id(first);
+        assert_eq!(app.close_table_confirmation, Some(first));
+        assert_eq!(app.changes.len(), 2);
+        assert!(app.error.is_none());
+        app.resolve_table_close(first, false);
+        assert_eq!(app.changes.len(), 2);
+        assert!(app.table_tabs.iter().any(|tab| tab.id == first));
+        app.close_table_tab_id(first);
+        app.resolve_table_close(first, true);
+        assert_eq!(app.changes.len(), 1);
+        assert_eq!(app.changes[0].table(), "second");
+        assert!(!app.table_tabs.iter().any(|tab| tab.id == first));
+    }
+
     #[test]
     fn switching_loaded_tabs_restores_rows_selection_and_view_without_querying() {
         let mut app = app();
@@ -325,7 +378,7 @@ mod tests {
         );
     }
     #[test]
-    fn staged_edits_keep_a_preview_and_block_closing_it() {
+    fn staged_edits_keep_a_preview_and_request_close_confirmation() {
         let mut app = app();
         app.prepare_table("first".into());
         app.changes.push(Change::Cell { original_columns: None,
@@ -340,7 +393,8 @@ mod tests {
         assert_eq!(app.table_tabs.len(), 2);
         app.close_named_table_tab("first");
         assert_eq!(app.table_tabs.len(), 2);
-        assert!(app.error.is_some());
+        assert!(app.error.is_none());
+        assert!(app.close_table_confirmation.is_some());
         app.changes.clear();
         app.close_named_table_tab("first");
         assert_eq!(app.table_tabs.len(), 1);

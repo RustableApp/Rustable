@@ -32,6 +32,62 @@ impl WindowRequest {
         Some(format!("{id}:{database}"))
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseAction {
+    Quit,
+    Window(egui::ViewportId),
+    Database(egui::ViewportId, usize),
+}
+
+#[derive(Clone, Copy)]
+struct CloseConfirmation {
+    action: CloseAction,
+    host: egui::ViewportId,
+}
+
+pub(crate) fn close_confirmation_open(ctx: &egui::Context) -> bool {
+    let key = egui::Id::new((ctx.viewport_id(), "close-confirmation-open"));
+    let table_key = egui::Id::new((ctx.viewport_id(), "table-close-confirmation-open"));
+    ctx.data(|data| data.get_temp::<bool>(key).unwrap_or(false) || data.get_temp::<bool>(table_key).unwrap_or(false))
+}
+
+fn set_close_confirmation_open(ctx: &egui::Context, open: bool) {
+    let key = egui::Id::new((ctx.viewport_id(), "close-confirmation-open"));
+    ctx.data_mut(|data| data.insert_temp(key, open));
+}
+
+fn close_confirmation(ctx: &egui::Context, action: CloseAction, work_blocked: bool) -> Option<bool> {
+    discard_confirmation(ctx, match action {
+        CloseAction::Quit => "Discard pending database edits in all windows and quit Rustable?",
+        CloseAction::Window(_) => "Discard pending database edits in this window and close it?",
+        CloseAction::Database(_, _) => "Discard pending edits and close this database workspace?",
+    }, work_blocked)
+}
+
+pub(crate) fn discard_confirmation(ctx: &egui::Context, message: &str, work_blocked: bool) -> Option<bool> {
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new("discard-before-close")).show(ctx, |ui| {
+        ui.set_width(360.0);
+        ui.heading(if work_blocked { "Work is still in progress" } else { "Discard pending changes?" });
+        ui.add_space(8.0);
+        if work_blocked {
+            ui.label("Wait for running work to finish and end open SQL transactions with COMMIT or ROLLBACK before closing.");
+        } else {
+            ui.label(message);
+            ui.label(format!("To save your edits first, cancel and press {}.", crate::icons::shortcut(ctx, false, "S")));
+        }
+        ui.add_space(8.0);
+        ui.label("SQL drafts are retained.");
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.add_sized([172.0, crate::controls::BUTTON_HEIGHT], egui::Button::new("Cancel")).clicked() { answer = Some(false); }
+            if ui.add_enabled(!work_blocked, egui::Button::new("Discard").min_size(egui::vec2(172.0, crate::controls::BUTTON_HEIGHT))).clicked() { answer = Some(true); }
+        });
+    });
+    if modal.should_close() { answer = Some(false); }
+    answer
+}
+
 struct SessionWindow {
     id: egui::ViewportId,
     title: String,
@@ -110,6 +166,7 @@ pub struct SessionWindows {
     next_id: u64,
     launcher_hidden: bool,
     quitting: bool,
+    close_confirmation: Option<CloseConfirmation>,
     native_menu_installed: bool,
     migrate_launcher_size: bool,
     update_save_error: Option<String>,
@@ -128,6 +185,7 @@ impl SessionWindows {
             next_id: 1,
             launcher_hidden: false,
             quitting: false,
+            close_confirmation: None,
             native_menu_installed: false,
             update_save_error: None,
             migrate_launcher_size: cc.storage.is_none_or(|storage| {
@@ -170,6 +228,52 @@ impl SessionWindows {
         );
     }
 
+    fn close_work_blocked(&self, action: CloseAction) -> bool {
+        if action == CloseAction::Quit && self.root.close_work_blocked() { return true; }
+        self.windows.iter().filter(|window| match action {
+            CloseAction::Quit => true,
+            CloseAction::Window(id) | CloseAction::Database(id, _) => window.id == id,
+        }).any(|window| {
+            if window.request.is_some() { return true; }
+            match action {
+                CloseAction::Database(_, slot) => {
+                    let index = slot.saturating_sub(usize::from(slot > window.active_slot));
+                    let app = if slot == window.active_slot { window.app.as_deref() } else { window.parked.get(index).map(Box::as_ref) };
+                    app.is_none_or(Rustable::close_work_blocked)
+                }
+                _ => window.app.iter().chain(window.parked.iter()).any(|app| app.close_work_blocked()),
+            }
+        })
+    }
+
+    fn confirm_close(&mut self, action: CloseAction, ctx: &egui::Context) {
+        // Recheck every affected workspace before discarding anything.
+        if self.close_work_blocked(action) { return; }
+        if action == CloseAction::Quit { self.root.discard_for_close(); }
+        for window in &mut self.windows {
+            match action {
+                CloseAction::Quit => {
+                    for app in window.app.iter_mut().chain(window.parked.iter_mut()) { app.discard_for_close(); }
+                }
+                CloseAction::Window(id) if id == window.id => {
+                    for app in window.app.iter_mut().chain(window.parked.iter_mut()) { app.discard_for_close(); }
+                    window.closed = true;
+                }
+                CloseAction::Database(id, slot) if id == window.id => {
+                    let index = slot.saturating_sub(usize::from(slot > window.active_slot));
+                    let app = if slot == window.active_slot { window.app.as_deref_mut() } else { window.parked.get_mut(index).map(Box::as_mut) };
+                    if let Some(app) = app { app.discard_for_close(); }
+                    if let Ok(app) = window.close_workspace(slot) { self.root.archive_window(*app); }
+                }
+                _ => {}
+            }
+        }
+        if action == CloseAction::Quit {
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     fn show_launcher(&mut self, ctx: &egui::Context) {
         self.launcher_hidden = false;
         self.root.open_connection_manager();
@@ -197,6 +301,7 @@ impl eframe::App for SessionWindows {
         }
         crate::updates::poll();
         let mut quit_requested = consume_quit(ctx) || crate::native_menu::take_requested();
+        set_close_confirmation_open(ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == egui::ViewportId::ROOT));
         quit_requested |= self.root.render_launcher(ctx);
         if !self.launcher_hidden { crate::ssh_prompt::show(ctx); }
         #[cfg(not(target_arch = "wasm32"))]
@@ -209,6 +314,8 @@ impl eframe::App for SessionWindows {
         let mut closed_database = false;
         let root_close_requested = ctx.input(|input| input.viewport().close_requested());
         let mut manager_requested = false;
+        let mut close_answer = None;
+        let confirmation_work_blocked = self.close_confirmation.is_some_and(|prompt| self.close_work_blocked(prompt.action));
         for window in &mut self.windows {
             ctx.show_viewport_immediate(window.id, window.viewport_builder(), |child_ctx, class| {
                 if class == egui::ViewportClass::Embedded {
@@ -218,6 +325,7 @@ impl eframe::App for SessionWindows {
                     window.closed = true;
                     return;
                 }
+                set_close_confirmation_open(child_ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == window.id));
                 if let Some(rect) = child_ctx.input(|input| input.viewport().inner_rect) {
                     window.remember_size(rect.size(), &mut self.window_sizes);
                 }
@@ -293,8 +401,8 @@ impl eframe::App for SessionWindows {
                             shared_changed = true;
                             child_ctx.memory_mut(|memory| { if let Some(id) = memory.focused() { memory.surrender_focus(id); } });
                         }
-                        Err(message) => {
-                            if let Some(app) = &mut window.app { app.window_error(message); }
+                        Err(_) => {
+                            self.close_confirmation = Some(CloseConfirmation { action: CloseAction::Database(window.id, slot), host: window.id });
                         }
                     }
                     if window.closed { return; }
@@ -305,6 +413,7 @@ impl eframe::App for SessionWindows {
                 app.manager_shortcut(child_ctx);
                 self.root.sync_window_preferences(app);
                 if self.root.sync_window_profile(app) { child_ctx.request_repaint(); }
+                set_close_confirmation_open(child_ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == window.id));
                 app.render_workspace_frame(child_ctx);
                 if self.launcher_hidden { crate::ssh_prompt::show(child_ctx); }
                 if app.has_connection() && window.title != app.active_connection_name() {
@@ -319,11 +428,17 @@ impl eframe::App for SessionWindows {
                 if child_ctx.input(|input| input.viewport().close_requested()) {
                     if app.close_blocked() || parked_blocked {
                         child_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                        app.window_error("Finish SQL transactions with COMMIT or ROLLBACK, save or discard pending database changes, and wait for work in every database workspace before closing. SQL drafts are retained for the next time you open the SQL editor.");
+                        if self.close_confirmation.is_none() {
+                            self.close_confirmation = Some(CloseConfirmation { action: CloseAction::Window(window.id), host: window.id });
+                        }
                     } else { window.closed = true; }
                 }
                 let connected = app.has_connection();
                 window.connection_completed(connected);
+                if let Some(prompt) = self.close_confirmation.filter(|prompt| prompt.host == window.id) {
+                    let local_work_blocked = window.request.is_some() || window.app.iter().chain(window.parked.iter()).any(|app| app.close_work_blocked());
+                    close_answer = close_confirmation(child_ctx, prompt.action, confirmation_work_blocked || local_work_blocked);
+                }
             });
         }
         if shared_changed {
@@ -334,6 +449,18 @@ impl eframe::App for SessionWindows {
                 }
                 ctx.request_repaint_of(window.id);
             }
+        }
+        if let Some(prompt) = self.close_confirmation.filter(|prompt| prompt.host == egui::ViewportId::ROOT) {
+            close_answer = close_confirmation(ctx, prompt.action, confirmation_work_blocked);
+        }
+        if let Some(answer) = close_answer
+            && let Some(prompt) = self.close_confirmation.take()
+        {
+            if answer {
+                if self.close_work_blocked(prompt.action) { self.close_confirmation = Some(prompt); }
+                else { self.confirm_close(prompt.action, ctx); }
+            }
+            ctx.request_repaint_of(prompt.host);
         }
         for window in self.windows.iter_mut().filter(|window| window.closed) {
             if let Some(app) = window.app.take() { self.root.archive_window(*app); }
@@ -352,18 +479,11 @@ impl eframe::App for SessionWindows {
             if self.root.close_blocked() || blocked_window.is_some() {
                 self.quitting = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                if let Some(index) = blocked_window {
-                    let window = &mut self.windows[index];
-                    if let Some(app) = &mut window.app {
-                        app.window_error("Finish SQL transactions with COMMIT or ROLLBACK, save or discard pending database edits, and wait for running work before quitting. SQL drafts will be retained for the next time you open the SQL editor.");
-                    }
-                    ctx.send_viewport_cmd_to(window.id, egui::ViewportCommand::Focus);
-                    ctx.request_repaint_of(window.id);
-                } else {
-                    self.root
-                        .window_error("Wait for the current operation to finish before quitting.");
-                    manager_requested = true;
-                }
+                let host = blocked_window.map(|index| self.windows[index].id).unwrap_or(egui::ViewportId::ROOT);
+                self.close_confirmation = Some(CloseConfirmation { action: CloseAction::Quit, host });
+                if host == egui::ViewportId::ROOT { manager_requested = true; }
+                ctx.send_viewport_cmd_to(host, egui::ViewportCommand::Focus);
+                ctx.request_repaint_of(host);
             } else {
                 self.quitting = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -475,6 +595,105 @@ mod launcher_tests {
                 active_slot: 0,
             closed: false,
             connected: false,
+        }
+    }
+
+    fn test_manager(ctx: &egui::Context) -> SessionWindows {
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        SessionWindows {
+            #[cfg(not(target_arch = "wasm32"))]
+            crash_prompt: None,
+            root: Rustable::new(&cc), windows: vec![], next_id: 1,
+            launcher_hidden: false, quitting: false, close_confirmation: None,
+            native_menu_installed: false, migrate_launcher_size: false,
+            update_save_error: None, window_sizes: Default::default(),
+        }
+    }
+
+    #[test]
+    #[ignore = "manual discard-confirmation CPU benchmark"]
+    fn discard_confirmation_frame_benchmark() {
+        for blocked in [false, true] {
+            let ctx = egui::Context::default();
+            let mut samples = Vec::new();
+            for frame in 0..180 {
+                let start = std::time::Instant::now();
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0, 600.0))),
+                    time: Some(frame as f64 / 120.0 + if frame >= 100 { 30.0 } else { 0.0 }),
+                    ..Default::default()
+                }, |ctx| { close_confirmation(ctx, CloseAction::Quit, blocked); });
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                if frame >= 20 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+            }
+            samples.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("close/confirmation/{blocked}"), &samples);
+        }
+    }
+
+    #[test]
+    fn confirmation_rechecks_all_workspaces_before_closing() {
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut manager = test_manager(&ctx);
+        let mut window = test_window();
+        let id = window.id;
+        window.app = Some(Box::new(Rustable::new(&cc)));
+        window.parked.push(Box::new(Rustable::new_demo(&cc)));
+        manager.windows.push(window);
+        manager.confirm_close(CloseAction::Quit, &ctx);
+        assert!(!manager.quitting);
+        manager.confirm_close(CloseAction::Window(id), &ctx);
+        assert!(!manager.windows[0].closed);
+        // Closing a clean database need not close or discard its busy neighbor.
+        manager.confirm_close(CloseAction::Database(id, 0), &ctx);
+        assert!(!manager.windows[0].closed);
+        assert!(manager.windows[0].app.as_ref().unwrap().close_work_blocked());
+        assert!(manager.windows[0].parked.is_empty());
+        manager.windows[0].app = Some(Box::new(Rustable::new(&cc)));
+        manager.confirm_close(CloseAction::Window(id), &ctx);
+        assert!(manager.windows[0].closed);
+    }
+
+    #[test]
+    fn discard_confirmation_buttons_cancel_or_explicitly_discard() {
+        fn center(shape: &egui::Shape, label: &str) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos + text.galley.size() * 0.5),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| center(shape, label)),
+                _ => None,
+            }
+        }
+        for (blocked, label, expected) in [(false, "Cancel", Some(false)), (false, "Discard", Some(true)), (true, "Cancel", Some(false)), (true, "Discard", None)] {
+            let ctx = egui::Context::default();
+            let mut answer = None;
+            let mut render = |events| ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0, 600.0))),
+                events, ..Default::default()
+            }, |ctx| { answer = close_confirmation(ctx, CloseAction::Quit, blocked); });
+            render(vec![]);
+            let output = render(vec![]);
+            let pos = output.shapes.iter().find_map(|shape| center(&shape.shape, label)).unwrap();
+            for pressed in [true, false] {
+                render(vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                    pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+                }]);
+            }
+            assert_eq!(answer, expected);
+        }
+    }
+
+    #[test]
+    fn close_confirmation_escape_cancels_and_enter_does_not_discard() {
+        for blocked in [false, true] {
+            let ctx = egui::Context::default();
+            let _ = ctx.run(Default::default(), |ctx| { close_confirmation(ctx, CloseAction::Quit, blocked); });
+            for (key, expected) in [(egui::Key::Enter, None), (egui::Key::Escape, Some(false))] {
+                let _ = ctx.run(egui::RawInput {
+                    events: vec![egui::Event::Key { key, physical_key: None, pressed: true,
+                        repeat: false, modifiers: egui::Modifiers::NONE }], ..Default::default()
+                }, |ctx| assert_eq!(close_confirmation(ctx, CloseAction::Quit, blocked), expected));
+            }
         }
     }
 

@@ -182,7 +182,7 @@ impl Rustable {
         }
         self.edit = Some(CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: Some(id),
             advance: 0,
             table: self.browse.table.clone(),
@@ -241,7 +241,7 @@ impl Rustable {
         }
         let source = CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: -1,
             table: self.browse.table.clone(),
@@ -386,7 +386,8 @@ impl Rustable {
         let names = self.table.columns.clone();
         for name in names {
             row.col(|ui| {
-                paint_cell_background(ui, table_clip, pending_fill(ui));
+                let editing = self.edit.as_ref().is_some_and(|edit| !edit.inspector && edit.insert_id == Some(id) && edit.column == name);
+                paint_cell_background(ui, table_clip, if editing { grid_row_fill(ui, index) } else { pending_fill(ui) });
                 self.insert_field(ui, id, &name, false);
             });
         }
@@ -574,6 +575,97 @@ mod tests {
         });
         app
     }
+    #[test]
+    #[ignore = "manual empty-space insertion CPU benchmark"]
+    fn empty_rows_double_click_frame_benchmark() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let mut samples = Vec::new();
+        let mut activation_samples = Vec::new();
+        let _ = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+            time: Some(0.0), ..Default::default()
+        }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+        for frame in 0..900 {
+            let phase = frame % 5;
+            if phase == 0 {
+                app.changes.clear();
+                app.edit = None;
+                app.selected = None;
+                app.row_selection.clear();
+            }
+            let pos = egui::pos2(200.0, 250.0);
+            let events = if phase < 4 {
+                vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                    pos, button: egui::PointerButton::Primary, pressed: phase % 2 == 0,
+                    modifiers: egui::Modifiers::NONE,
+                }]
+            } else { vec![] };
+            let start = std::time::Instant::now();
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                time: Some(frame as f64 * 0.05 + if frame >= 450 { 30.0 } else { 0.0 }),
+                events, ..Default::default()
+            }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+            let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+            if phase == 3 && frame >= 100 { activation_samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+            if phase == 4 {
+                if frame >= 100 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+                assert_eq!(app.insert_ids().len(), 1);
+                assert!(app.edit.as_ref().unwrap().insert_id.is_some());
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        activation_samples.sort_by(f64::total_cmp);
+        crate::ui_benchmark::report("grid/empty-space-insert-activation", &activation_samples);
+        crate::ui_benchmark::report("grid/empty-space-insert-first-edit-frame", &samples);
+    }
+
+    #[test]
+    fn empty_rows_double_click_stages_one_row_and_respects_guards() {
+        for (rows, safe, query, pending, pos, expected) in [
+            (0, false, false, false, egui::pos2(200.0, 250.0), 1),
+            (3, false, false, false, egui::pos2(200.0, 250.0), 1),
+            (3, false, false, false, egui::pos2(580.0, 50.0), 1),
+            (3, false, false, false, egui::pos2(100.0, 50.0), 0),
+            (0, false, false, false, egui::pos2(580.0, 20.0), 0),
+            (0, true, false, false, egui::pos2(200.0, 250.0), 0),
+            (0, false, true, false, egui::pos2(200.0, 250.0), 0),
+            (0, false, false, true, egui::pos2(200.0, 250.0), 0),
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = app();
+            app.safe = safe;
+            Arc::make_mut(&mut app.table).rows = (0..rows)
+                .map(|n| vec![Value::Integer(n), Value::Null, Value::Null]).collect();
+            if query { app.view = View::Query; app.tabs[0].grid = app.table.clone(); }
+            if pending { app.pending = Some(Pending::Table); }
+            let mut time = 30.0; // Also exercise the first interaction after idle.
+            let mut frame = |app: &mut Rustable, events| {
+                time += 0.05;
+                let _ = ctx.run(egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                    events, ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+            };
+            frame(&mut app, vec![]);
+            for click in 0..2 {
+                for pressed in [true, false] {
+                    frame(&mut app, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+                    }]);
+                }
+                assert_eq!(app.changes.len(), if click == 0 { 0 } else { expected });
+            }
+            if expected == 1 {
+                let id = app.selected_insert().unwrap();
+                assert_eq!(app.edit.as_ref().unwrap().insert_id, Some(id));
+                assert!(app.pending.is_none(), "insertion only stages a local draft");
+            }
+        }
+    }
+
     #[test]
     fn tab_bridges_loaded_rows_and_pending_inserts_bidirectionally() {
         let mut app = app();

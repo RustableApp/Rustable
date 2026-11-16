@@ -69,6 +69,11 @@ impl TextEditState {
         ctx.data_mut(|d| d.insert_persisted(id, self));
     }
 
+    /// Inspect undo availability without cloning the retained text history.
+    pub fn has_undo(&self, current: &(CCursorRange, String)) -> bool {
+        self.undoer.lock().has_undo(current)
+    }
+
     pub fn undoer(&self) -> TextEditUndoer {
         self.undoer.lock().clone()
     }

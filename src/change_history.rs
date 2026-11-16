@@ -142,13 +142,36 @@ impl Rustable {
     }
 
     pub(super) fn staged_history_shortcuts(&mut self, ctx: &egui::Context) {
-        // Text fields own their own edit history, including SQL and inspector
-        // drafts. A focused grid also wants keyboard input, so inspect actual
-        // TextEdit state rather than treating every focused widget as text.
-        let text_focused = ctx
-            .memory(|memory| memory.focused())
-            .is_some_and(|id| TextEdit::load_state(ctx, id).is_some());
-        if text_focused || self.edit.is_some() || self.pending.is_some() {
+        if self.pending.is_some() { return; }
+        // Avoid inspecting text history on ordinary rendering/input frames.
+        if !ctx.input(|input| input.events.iter().any(|event| matches!(event,
+            egui::Event::Key { key: egui::Key::Z, pressed: true, repeat: false, modifiers, .. }
+                if modifiers.command && !modifiers.alt && !(modifiers.ctrl && modifiers.mac_cmd)
+        ))) { return; }
+        let focused = ctx.memory(|memory| memory.focused());
+        let key = egui::Id::new((ctx.viewport_id(), "active-cell-editor"));
+        let cell_editor = ctx.data(|data| data.get_temp::<egui::Id>(key));
+        let state = focused.and_then(|id| TextEdit::load_state(ctx, id));
+        if let Some(edit) = &self.edit {
+            let starting = edit.focus && !edit.undo_initialized;
+            if !starting && (focused != cell_editor || focused.is_none()) { return; }
+            // TextEdit keeps typing undo/redo until its undo history is exhausted.
+            // Redo in an active text field always belongs to that field.
+            if ctx.input(|input| input.events.iter().any(|event| matches!(event,
+                egui::Event::Key { key: egui::Key::Z, pressed: true, modifiers, .. } if modifiers.shift
+            ))) || (!starting && state.as_ref().is_some_and(|state| state.has_undo(&(
+                state.cursor.char_range().unwrap_or_default(), edit.text.clone(),
+            )))) { return; }
+            // No typing remains to undo. Drop the unmodified editor rather than
+            // staging it (which could manufacture a history step or fail parsing).
+            self.edit = None;
+            if let Some(id) = focused { ctx.memory_mut(|memory| memory.surrender_focus(id)); }
+            if self.view == View::Data { self.focus_page_grid = true; }
+            else if let Some(id) = self.tabs[self.tab].result_grid_focus {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
+        } else if state.is_some() {
+            // SQL, filters and other text inputs retain their independent history.
             return;
         }
         let mut actions = Vec::new();
@@ -364,7 +387,7 @@ mod tests {
     fn edit(app: &mut Rustable, value: &str) {
         app.edit = Some(CellEdit {
             bulk_rows: Vec::new(),
-            bulk_changed: false,
+            bulk_changed: false, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table: "t".into(),
@@ -466,7 +489,7 @@ mod tests {
                 .iter()
                 .map(|row| (row.clone(), row[1].clone()))
                 .collect(),
-            bulk_changed: true,
+            bulk_changed: true, undo_initialized: false,
             insert_id: None,
             advance: 0,
             table: "t".into(),
@@ -501,6 +524,102 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    #[ignore = "manual cell typing to staged undo CPU benchmark"]
+    fn cell_undo_handoff_frame_benchmark() {
+        let (ctx, _file, mut app) = fixture();
+        let mut samples = Vec::new();
+        for frame in 0..900 {
+            let phase = frame % 5;
+            if phase == 0 {
+                app.edit = None;
+                app.changes.clear();
+                app.clear_change_history();
+                app.add_insert();
+            }
+            let events = match phase {
+                1 => vec![egui::Event::Text("123".into())],
+                3 | 4 => vec![key(false, true), key(false, false)],
+                _ => vec![],
+            };
+            let start = std::time::Instant::now();
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                time: Some(frame as f64 + if frame >= 450 { 30.0 } else { 0.0 }), events,
+                ..Default::default()
+            }, |ctx| {
+                app.staged_history_shortcuts(ctx);
+                egui::CentralPanel::default().show(ctx, |ui| { inline_value(ui, &mut app.edit); });
+            });
+            let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+            if phase == 4 {
+                if frame >= 100 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+                assert!(app.changes.is_empty());
+                assert!(app.edit.is_none());
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        crate::ui_benchmark::report("history/cell-undo-handoff", &samples);
+    }
+
+    #[test]
+    fn cell_typing_undo_then_insert_then_prior_change_and_redo() {
+        let (ctx, _file, mut app) = fixture();
+        edit(&mut app, "earlier");
+        let prior = app.changes.clone();
+        app.add_insert();
+        let inserted = app.changes.clone();
+        let mut time = 0.0;
+        let mut frame = |app: &mut Rustable, events| {
+            time += 1.0;
+            let _ = ctx.run(egui::RawInput { time: Some(time), events, ..Default::default() }, |ctx| {
+                app.staged_history_shortcuts(ctx);
+                egui::CentralPanel::default().show(ctx, |ui| { inline_value(ui, &mut app.edit); });
+            });
+        };
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::Text("123".into())]);
+        frame(&mut app, vec![]);
+        assert_eq!(app.edit.as_ref().unwrap().text, "123");
+        frame(&mut app, vec![key(false, true), key(false, false)]);
+        assert_eq!(app.edit.as_ref().unwrap().text, "");
+        assert_eq!(app.changes, inserted);
+        frame(&mut app, vec![key(true, true), key(true, false)]);
+        assert_eq!(app.edit.as_ref().unwrap().text, "123");
+        frame(&mut app, vec![key(false, true), key(false, false)]);
+        frame(&mut app, vec![key(false, true), key(false, false)]);
+        assert!(app.edit.is_none());
+        assert_eq!(app.changes, prior);
+        frame(&mut app, vec![key(false, true), key(false, false)]);
+        assert!(app.changes.is_empty());
+        frame(&mut app, vec![key(true, true), key(true, false)]);
+        assert_eq!(app.changes, prior);
+        frame(&mut app, vec![key(true, true), key(true, false)]);
+        assert_eq!(app.changes, inserted);
+    }
+
+    #[test]
+    fn undo_can_remove_new_row_before_its_first_editor_frame() {
+        let (ctx, _file, mut app) = fixture();
+        app.add_insert();
+        let _ = ctx.run(egui::RawInput { events: vec![key(false, true)], ..Default::default() }, |ctx| app.staged_history_shortcuts(ctx));
+        assert!(app.edit.is_none());
+        assert!(app.changes.is_empty());
+    }
+
+    #[test]
+    fn untouched_new_row_can_be_undone_from_its_focused_editor() {
+        let (ctx, _file, mut app) = fixture();
+        app.add_insert();
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| { inline_value(ui, &mut app.edit); });
+        });
+        let _ = ctx.run(egui::RawInput { events: vec![key(false, true)], ..Default::default() }, |ctx| app.staged_history_shortcuts(ctx));
+        assert!(app.edit.is_none());
+        assert!(app.changes.is_empty());
+        assert!(app.pending.is_none());
     }
 
     #[test]
