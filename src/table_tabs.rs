@@ -120,6 +120,9 @@ impl Rustable {
         self.restore_table_tab_id(id)
     }
     pub(super) fn activate_table_tab_id(&mut self, id: u64) {
+        if !self.table_tabs.iter().any(|tab| tab.id == id) { return; }
+        if (self.active_table_tab != Some(id) || self.view == View::Query)
+            && self.defer_navigation(NavigationAction::TableTab(id)) { return; }
         if self.pending.is_some() || !self.finish_cell_edit() {
             return;
         }
@@ -184,7 +187,7 @@ impl Rustable {
             return;
         };
         if let Some(discard) = crate::session_windows::discard_confirmation(ctx,
-            &format!("Discard pending edits to {name} and close this table?"), self.pending.is_some())
+            &format!("Discard changes to {name} and close?"), self.pending.is_some())
         {
             self.resolve_table_close(id, discard);
         }
@@ -212,8 +215,8 @@ impl Rustable {
         };
         if self.pending.is_some() { return; }
         if self.changes.iter().any(|c| c.table() == name)
-            || self.edit.as_ref().is_some_and(|edit| edit.table == name)
-            || (self.rename_inline && self.rename.is_some() && self.browse.table == name)
+            || (self.cell_draft_changed() && self.edit.as_ref().is_some_and(|edit| edit.table == name))
+            || (self.inline_rename_changed() && self.browse.table == name)
         {
             self.close_table_confirmation = Some(id);
             return;

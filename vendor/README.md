@@ -292,10 +292,13 @@ are unchanged; no warning lints are suppressed.
 
 ### Cell editor undo availability
 
-`egui::text_edit::TextEditState::has_undo` queries the existing undoer under its
-lock without cloning the retained text history. Rustable calls it only on an
-Undo chord to hand exhausted cell typing history back to staged-change history.
-The upstream text-edit undo/redo algorithm and SQL editor behavior are unchanged.
+`egui::text_edit::TextEditState` exposes undo availability under the existing
+undoer lock without cloning retained text history.
+`has_text_undo` inspects retained text states without copying the history and
+ignores cursor-only undo points when deciding whether to hand off to table Undo.
+`has_redo` retains text Redo until it is exhausted. These accessors run only for
+explicit shortcut events. The upstream text-edit undo/redo algorithm and SQL
+editor behavior are unchanged.
 
 ### Compact field caret height
 

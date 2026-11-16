@@ -74,6 +74,15 @@ impl TextEditState {
         self.undoer.lock().has_undo(current)
     }
 
+    /// Cursor-only changes must not trap a cell editor's table-history handoff.
+    pub fn has_text_undo(&self, current: &str) -> bool {
+        self.undoer.lock().any_undo(|(_, text)| text != current)
+    }
+
+    pub fn has_redo(&self, current: &(CCursorRange, String)) -> bool {
+        self.undoer.lock().has_redo(current)
+    }
+
     pub fn undoer(&self) -> TextEditUndoer {
         self.undoer.lock().clone()
     }

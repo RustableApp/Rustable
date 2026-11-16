@@ -121,6 +121,11 @@ where
         }
     }
 
+    /// Inspect retained undo points without cloning them.
+    pub fn any_undo(&self, predicate: impl Fn(&State) -> bool) -> bool {
+        self.undos.iter().any(predicate)
+    }
+
     pub fn has_redo(&self, current_state: &State) -> bool {
         !self.redos.is_empty() && self.undos.back() == Some(current_state)
     }

@@ -22,6 +22,9 @@ mod query_monitor;
 mod bulk_rows;
 #[path = "change_history.rs"]
 mod change_history;
+#[path = "navigation_confirmation.rs"]
+mod navigation_confirmation;
+use navigation_confirmation::{NavigationAction, NavigationConfirmation};
 #[path = "connections.rs"]
 mod connections;
 #[path = "csv_mapping.rs"]
@@ -522,6 +525,7 @@ pub struct Rustable {
     safe: bool,
     destructive_confirm: Option<DestructiveRun>,
     close_table_confirmation: Option<u64>,
+    navigation_confirmation: Option<NavigationConfirmation>,
     /// "Don't ask again" for non-production connections; reset on every connect.
     skip_destructive_confirm: bool,
     status: String,
@@ -696,8 +700,7 @@ impl Rustable {
         self.worker.transaction_state().blocks_replacement() || self.pending.is_some()
     }
     pub(crate) fn has_pending_edits(&self) -> bool {
-        !self.changes.is_empty() || self.edit.is_some()
-            || (self.rename_inline && self.rename.is_some())
+        !self.changes.is_empty() || self.cell_draft_changed() || self.inline_rename_changed()
     }
     pub(crate) fn discard_for_close(&mut self) {
         if !self.close_work_blocked() { self.discard_changes(); }
@@ -1188,6 +1191,7 @@ impl Rustable {
             safe: false,
             destructive_confirm: None,
             close_table_confirmation: None,
+            navigation_confirmation: None,
             skip_destructive_confirm: false,
             status: "Ready".into(),
             error: None,
@@ -1249,15 +1253,19 @@ impl Rustable {
         if self.pending.is_some() {
             return;
         }
-        if command.replaces_connection()
-            && (self.worker.transaction_state().blocks_replacement()
-                || !self.changes.is_empty()
-                || self.edit.is_some()
-                || (self.rename_inline && self.rename.is_some()))
-        {
-            self.error =
-                Some("Finish SQL transactions with COMMIT or ROLLBACK and save or discard pending changes before switching connections.".into());
-            return;
+        if command.replaces_connection() {
+            if self.worker.transaction_state().blocks_replacement() {
+                self.error = Some("Finish SQL transactions with COMMIT or ROLLBACK before switching connections.".into());
+                return;
+            }
+            if self.has_pending_edits() {
+                if self.navigation_confirmation.is_none() {
+                    self.navigation_confirmation = Some(NavigationConfirmation::connection(command, pending));
+                    self.error = None;
+                }
+                return;
+            }
+            self.clear_untouched_editors();
         }
         #[cfg(target_arch = "wasm32")]
         if matches!(command, Command::Open(None)) { self.worker.restart_if_failed(); }
@@ -1738,6 +1746,8 @@ impl Rustable {
     }
 
     fn open_table(&mut self, name: String) {
+        if (self.browse.table != name || self.view == View::Query)
+            && self.defer_navigation(NavigationAction::Table(name.clone())) { return; }
         self.compact_panel = 0;
         if self.pending.is_some() {
             return;
@@ -2225,13 +2235,7 @@ impl Rustable {
         if self.pending.is_some() || self.review.is_some() {
             return;
         }
-        if !self.changes.is_empty()
-            || self.edit.is_some()
-            || (self.rename_inline && self.rename.is_some())
-        {
-            self.error = Some("Save or discard pending changes before refreshing.".into());
-            return;
-        }
+        if self.defer_navigation(NavigationAction::Refresh) { return; }
         if self.view == View::Query || self.browse.table.is_empty() {
             self.dispatch(Command::RefreshSchema, Pending::Export);
         } else {
@@ -2241,7 +2245,7 @@ impl Rustable {
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
         self.query_monitor.open || self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
-            || self.destructive_confirm.is_some() || self.close_table_confirmation.is_some()
+            || self.destructive_confirm.is_some() || self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some()
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some() || self.alter_column.is_some()
             || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some()
@@ -3614,7 +3618,9 @@ Right-click to inspect or remove individual changes",
                         ui.spacing_mut().item_spacing.x = 6.0;
                         ui.scope_builder(egui::UiBuilder::new().max_rect(control_geometry.left.translate(origin)), |ui| {
                           ui.horizontal_wrapped(|ui| {
-                            table_view_switch(ui, &mut self.view);
+                            let mut requested_view = self.view;
+                            table_view_switch(ui, &mut requested_view);
+                            self.change_table_view(requested_view);
                             if self.view == View::Data && ui
                                     .add_enabled(self.can_insert(), crate::icons::widget("plus"))
                                     .on_hover_text(format!("Add row · {}", crate::icons::shortcut(ui.ctx(), false, "I")))
@@ -3985,6 +3991,7 @@ Right-click to inspect or remove individual changes",
     }
 
     fn show_query(&mut self) {
+        if self.view != View::Query && self.defer_navigation(NavigationAction::ShowQuery) { return; }
         if !self.tabs.iter().any(|tab| tab.open) {
             if !self.window_recovery.is_empty() {
                 self.tabs = std::mem::take(&mut self.window_recovery);
@@ -4063,13 +4070,15 @@ Right-click to inspect or remove individual changes",
             None if next => 0,
             None => visible.len() - 1,
         };
-        if !self.finish_cell_edit() { return; }
         let (query, index) = visible[target];
         if query { self.activate_query(index); }
         else { self.activate_table_tab_id(self.table_tabs[index].id); }
     }
 
     fn activate_query(&mut self, index: usize) {
+        if index >= self.tabs.len() { return; }
+        if (self.view != View::Query || self.tab != index)
+            && self.defer_navigation(NavigationAction::Query(index)) { return; }
         self.compact_panel = 0;
         if index >= self.tabs.len() || !self.finish_cell_edit() {
             return;
@@ -4106,6 +4115,7 @@ Right-click to inspect or remove individual changes",
     }
 
     fn new_tab(&mut self) {
+        if self.defer_navigation(NavigationAction::NewQuery) { return; }
         if !self.finish_cell_edit() {
             return;
         }
@@ -5683,7 +5693,7 @@ Right-click to inspect or remove individual changes",
         }
         if let Some((action, column, index)) = menu_action {
             match action {
-                "refresh" => { if self.finish_cell_edit() { self.refresh(); } }
+                "refresh" => self.refresh_current_view(),
                 "json" => self.open_json_editor(index, column),
                 "date" => self.open_date_picker(index, column),
                 "add" => self.add_insert(),
@@ -5739,19 +5749,20 @@ Right-click to inspect or remove individual changes",
             self.browse.cycle_sort(column);
             self.refresh();
         }
-        if finish && self.finish_cell_edit()
-            && self.edit.is_none()
-            && ui.memory(|memory| memory.focused().is_none() || memory.has_focus(grid_focus.id))
-        {
-            // Enter/blur stages the value after row rendering, so the row's
-            // release handler could not restore focus while the editor existed.
-            // Leave focus alone when the user moved into another input.
-            grid_focus.request_focus();
-            ui.memory_mut(|memory| memory.set_focus_lock_filter(grid_focus.id, egui::EventFilter {
-                horizontal_arrows: true, vertical_arrows: true, tab: true,
-                ..Default::default()
-            }));
+        if finish && self.finish_cell_edit() && self.edit.is_none() {
+            // Replace the retired TextEdit's hit-test region even when focus
+            // moved to another input. Otherwise the next click can hit it.
             ui.ctx().request_repaint();
+            if ui.memory(|memory| memory.focused().is_none() || memory.has_focus(grid_focus.id)) {
+                // Enter/blur stages the value after row rendering, so the row's
+                // release handler could not restore focus while the editor existed.
+                // Leave focus alone when the user moved into another input.
+                grid_focus.request_focus();
+                ui.memory_mut(|memory| memory.set_focus_lock_filter(grid_focus.id, egui::EventFilter {
+                    horizontal_arrows: true, vertical_arrows: true, tab: true,
+                    ..Default::default()
+                }));
+            }
         }
         if edit.is_some() && self.finish_cell_edit() {
             self.edit = edit;
@@ -6369,6 +6380,7 @@ Right-click to inspect or remove individual changes",
     }
 
     fn finish_cell_edit(&mut self) -> bool {
+        if self.navigation_confirmation.is_some() { return false; }
         if let Some(name) = self.edit.as_ref().map(|edit| edit.table.clone()) { self.keep_table_tab(&name); }
         if !self.finish_inline_rename() {
             return false;
@@ -6914,7 +6926,7 @@ impl Rustable {
 
     pub(crate) fn render_workspace_frame(&mut self, ctx: &egui::Context) {
         let key = egui::Id::new((ctx.viewport_id(), "table-close-confirmation-open"));
-        ctx.data_mut(|data| data.insert_temp(key, self.close_table_confirmation.is_some()));
+        ctx.data_mut(|data| data.insert_temp(key, self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some()));
         #[cfg(target_arch = "wasm32")]
         if self.redis_demo_active {
             if self.connections { self.connections_window(ctx); return; }
@@ -6958,6 +6970,7 @@ impl Rustable {
         self.csv_import_review(ctx);
         self.destructive_confirmation(ctx);
         self.table_close_confirmation(ctx);
+        self.navigation_confirmation(ctx);
         #[cfg(target_arch = "wasm32")]
         self.browser_query_save_window(ctx);
         if self.pending.is_some() {
@@ -8124,10 +8137,13 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
     if !draft.undo_initialized {
         draft.undo_initialized = true;
         // Each cell editing session starts its own typing history.
-        if let Some(mut state) = TextEdit::load_state(ui.ctx(), id) {
-            state.clear_undoer();
-            state.store(ui.ctx(), id);
-        }
+        let mut state = egui::text_edit::TextEditState::default();
+        let cursor = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
+        state.cursor.set_char_range(Some(cursor));
+        let mut undoer = state.undoer();
+        undoer.add_undo(&(cursor, draft.text.clone()));
+        state.set_undoer(undoer);
+        state.store(ui.ctx(), id);
     }
     // Capture navigation before TextEdit/egui's focus traversal consumes Tab.
     // Event modifiers, rather than the frame's final modifier state, define direction.
@@ -11556,7 +11572,7 @@ mod tab_lifecycle_tests {
         assert_eq!(tab.saved_sql.as_deref().unwrap(), "SELECT 1;");
     }
     #[test]
-    fn tab_switch_stages_valid_draft_but_keeps_invalid_draft_visible() {
+    fn tab_switch_prompts_for_valid_or_invalid_drafts_and_cancel_preserves_them() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
         app.pending = None;
@@ -11578,17 +11594,19 @@ mod tab_lifecycle_tests {
         let count = app.tabs.len();
         app.new_tab();
         assert_eq!(app.tabs.len(), count);
-        app.show_query();
+        assert!(app.navigation_confirmation.is_some());
+        app.resolve_navigation(false);
         assert!(app.view == View::Data);
         assert!(app.edit.as_ref().unwrap().focus);
         assert!(app.changes.is_empty());
         app.edit.as_mut().unwrap().text = "42".into();
         app.show_query();
+        assert!(app.view == View::Data);
+        assert!(app.navigation_confirmation.is_some());
+        app.resolve_navigation(true);
         assert!(app.view == View::Query);
         assert!(app.edit.is_none());
-        assert!(
-            matches!(&app.changes[0], Change::Cell { value: Value::Integer(42), table, .. } if table == "customers")
-        );
+        assert!(app.changes.is_empty());
     }
 
     #[test]
@@ -12719,7 +12737,7 @@ mod bracket_tab_navigation_tests {
         assert_eq!(app.tab, 0);
     }
     #[test]
-    fn invalid_inline_value_blocks_switch_and_valid_value_stages_before_switch() {
+    fn tab_navigation_prompts_without_parsing_and_discard_resumes_switch() {
         let (_ctx, mut app) = fixture();
         app.edit = Some(CellEdit {
             bulk_rows: Vec::new(),
@@ -12739,17 +12757,16 @@ mod bracket_tab_navigation_tests {
         assert!(app.view == View::Data);
         assert!(app.edit.is_some());
         assert!(app.changes.is_empty());
+        assert!(app.navigation_confirmation.is_some());
+        assert!(app.error.is_none());
+        app.resolve_navigation(false);
         app.edit.as_mut().unwrap().text = "2".into();
         app.navigate_workspace_tab(true);
+        assert!(app.view == View::Data);
+        app.resolve_navigation(true);
         assert!(app.view == View::Query);
         assert!(app.edit.is_none());
-        assert!(matches!(
-            &app.changes[0],
-            Change::Cell {
-                value: Value::Integer(2),
-                ..
-            }
-        ));
+        assert!(app.changes.is_empty());
     }
     fn event(
         key: egui::Key,

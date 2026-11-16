@@ -1009,3 +1009,104 @@ Screenshots, temporary preview adapter and check logs are retained under
 capture. CPU timings do not measure input-to-display latency; native frame
 intervals, 60/120 Hz, multiple windows and mixed-DPI behavior were not measured.
 Database/protocol paths and renderer/event-loop scheduling are unchanged.
+
+### Cell Undo continuation and staged-cell reediting — 2026-11-16
+
+Cell typing history now starts with a caret at character zero. The handoff checks
+text changes independently of cursor-only undo points, then reopens the affected
+visible cell as staged Undo/Redo traverses earlier changes. Fresh typing retains
+ownership of Redo. Each reopened editor resets its cursor/scroll/IME state, and
+staging requests one redraw even when another input took focus, retiring the old
+editor's hit-test region. History inspection/navigation runs only on explicit
+shortcuts; no network operations, periodic repaint timers or full-result rendering
+were added.
+
+`python3 scripts/ui-performance.py --base a427eef --cell-editor --change-history --output target/cell-undo-reedit-performance`
+passed all 24 comparisons. Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1,
+release profile, five alternating serial pairs, default 1× scale. Existing
+workloads and fixtures are unchanged. Selected-editor workloads use 800×500,
+20 warmup/160 measured frames, both themes and a synthetic idle gap. Median
+per-run CPU milliseconds (p50/p95/p99/max):
+
+| Workload | Base | Candidate |
+| --- | --- | --- |
+| Selected editor, light | .01342/.01383/.01579/.01675 | .01329/.01358/.01525/.01567 |
+| Selected editor, dark | .01342/.01388/.01617/.01708 | .01354/.01488/.01642/.01704 |
+| Staged Undo | .01908/.03612/.03804/.03812 | .01942/.03617/.03783/.03963 |
+
+A new candidate-only populated-cell navigation workload passed five serial runs.
+Each iteration stages edits in two populated rows, opens a cell, types and undoes
+that typing, then measures two Undo/navigation frames including tessellation.
+It asserts that staged changes are cleared and the earlier row's editor is open.
+Viewport 800×500 at 1×, 20 warmups/160 samples, including a synthetic 30-second
+idle gap. Median per-run p50/p95/p99/max: .03117/.03233/.03558/.03621 ms. This is
+an absolute interaction measurement, not a comparison with the former behavior.
+
+841 library tests passed (223 opt-in tests ignored), along with strict all-target
+QA Clippy and locked browser compilation (target-specific warnings remain).
+Regression tests use real grid pointer/key events to reopen and modify a staged
+cell, traverse populated cells with Undo/Redo, check caret zero, preserve fresh
+typing on Redo, and retain unrelated text input history. Native 2× screenshots
+were inspected in dark 900×500 and light 760×500 layouts. Temporary capture source
+was restored. Checks, interaction samples and captures are retained under
+`target/cell-undo-reedit-review/`; comparison samples/environment are retained
+under `target/cell-undo-reedit-performance/`.
+
+These CPU results do not measure input-to-present latency. Native 60/120 Hz,
+multiple windows, mixed DPI and monitor transitions were not measured. Database
+execution and renderer/event-loop scheduling are unchanged.
+
+### Untouched editors and navigation discard prompts — 2026-11-16
+
+Refresh, table/query navigation and table-view changes distinguish an open editor
+from a changed value. Untouched text/numeric/NULL drafts and unchanged inline
+renames do not block navigation or close checks. Actual changes use the shared
+Cancel/Discard modal; invalid drafts need not parse before they can be discarded.
+Cancel retains edits, and Discard resumes the stored action. Table-scoped actions
+preserve other tables' staged changes. Connection replacement still checks open
+transactions, and confirmation rechecks running work before discarding.
+
+The dirty check avoids formatting/cloning text, and scoped history scans run on
+navigation requests. No new timer, background polling, database operation or
+protocol sequencing was added: accepted actions dispatch their existing operation
+once. Database latency fixtures were not rerun for these UI-only guards.
+
+`python3 scripts/ui-performance.py --base a427eef --cell-editor --change-history --output target/navigation-discard-performance`
+passed all 24 comparisons. This includes the preceding local cell Undo/reediting
+fixes. Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile, five
+alternating serial pairs, default 1× scale and unchanged shared fixtures. Cell
+editors use 800×500 with 20 warmup/160 measured frames and a synthetic idle gap.
+Median per-run CPU milliseconds (p50/p95/p99/max):
+
+| Workload | Base | Candidate |
+| --- | --- | --- |
+| Selected editor, light | .01342/.01371/.01504/.01625 | .01350/.01379/.01492/.01633 |
+| Selected editor, dark | .01350/.01508/.01658/.01679 | .01346/.01538/.01642/.01717 |
+| 120-column workspace, inspector open | .40563/.40971/.42183/.42183 | .40212/.40554/.43767/.43767 |
+
+The new navigation-discard modal workload passed five serial release runs at
+760×600, 20 warmup/160 measured frames, with a synthetic 30-second idle gap.
+Candidate-only layout+tessellation p50/p95/p99/max: .00817/.00867/.00979/.01063 ms.
+It confirms that rendering leaves the draft and pending action intact and does
+not dispatch database work. This is an absolute measurement, not a comparison
+against the old error banner.
+
+847 library tests passed (224 opt-in tests ignored). Strict all-target QA Clippy
+and locked browser compilation passed (existing target-specific warnings remain).
+Tests cover grid/inspector untouched editors, Cancel/Discard, invalid values,
+staged changes, numeric equivalence, empty text versus NULL, connection switching,
+busy-work rechecks and preservation of unrelated table edits. Native dark 900×500
+and light 760×500 dialog screenshots at 2× were inspected. The temporary capture
+adapter was restored. Logs/captures/interaction samples are retained under
+`target/navigation-discard-review/`; comparison raw samples and environment are
+under `target/navigation-discard-performance/`.
+
+CPU timings do not establish input-to-present latency. Native 60/120 Hz,
+multi-window, mixed-DPI and monitor-transition acceptance remain unmeasured.
+
+Compact-dialog follow-up: reduced the content width from 360 to 244 logical
+points, used rounded framing/buttons and shortened the warning/save hint. Removed
+the redundant SQL-draft paragraph. Dark/light native captures were inspected in
+`target/compact-discard-review/`; existing Cancel/Discard and Escape/Enter tests
+passed. This static dialog styling does not change ordinary rendering/input paths;
+the timings above precede this copy/layout adjustment and were not rerun.

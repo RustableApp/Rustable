@@ -58,30 +58,31 @@ fn set_close_confirmation_open(ctx: &egui::Context, open: bool) {
 
 fn close_confirmation(ctx: &egui::Context, action: CloseAction, work_blocked: bool) -> Option<bool> {
     discard_confirmation(ctx, match action {
-        CloseAction::Quit => "Discard pending database edits in all windows and quit Rustable?",
-        CloseAction::Window(_) => "Discard pending database edits in this window and close it?",
-        CloseAction::Database(_, _) => "Discard pending edits and close this database workspace?",
+        CloseAction::Quit => "Discard changes in all windows and quit?",
+        CloseAction::Window(_) => "Discard changes and close this window?",
+        CloseAction::Database(_, _) => "Discard changes and close this database?",
     }, work_blocked)
 }
 
 pub(crate) fn discard_confirmation(ctx: &egui::Context, message: &str, work_blocked: bool) -> Option<bool> {
     let mut answer = None;
-    let modal = egui::Modal::new(egui::Id::new("discard-before-close")).show(ctx, |ui| {
-        ui.set_width(360.0);
-        ui.heading(if work_blocked { "Work is still in progress" } else { "Discard pending changes?" });
+    let frame = egui::Frame::popup(&ctx.style()).inner_margin(16).corner_radius(16);
+    let modal = egui::Modal::new(egui::Id::new("discard-before-close")).frame(frame).show(ctx, |ui| {
+        ui.set_width(244.0);
+        ui.label(egui::RichText::new(if work_blocked { "Work in progress" } else { "Warning" }).strong());
         ui.add_space(8.0);
         if work_blocked {
-            ui.label("Wait for running work to finish and end open SQL transactions with COMMIT or ROLLBACK before closing.");
+            ui.label("Wait for running work and finish open transactions before continuing.");
         } else {
             ui.label(message);
-            ui.label(format!("To save your edits first, cancel and press {}.", crate::icons::shortcut(ctx, false, "S")));
+            ui.label(format!("Save changes with {}.", crate::icons::shortcut(ctx, false, "S")));
         }
-        ui.add_space(8.0);
-        ui.label("SQL drafts are retained.");
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if ui.add_sized([172.0, crate::controls::BUTTON_HEIGHT], egui::Button::new("Cancel")).clicked() { answer = Some(false); }
-            if ui.add_enabled(!work_blocked, egui::Button::new("Discard").min_size(egui::vec2(172.0, crate::controls::BUTTON_HEIGHT))).clicked() { answer = Some(true); }
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let size = egui::vec2(118.0, crate::controls::BUTTON_HEIGHT);
+            if ui.add_sized(size, egui::Button::new("Cancel").corner_radius(14)).clicked() { answer = Some(false); }
+            if ui.add_enabled(!work_blocked, egui::Button::new("Discard").min_size(size).corner_radius(14)).clicked() { answer = Some(true); }
         });
     });
     if modal.should_close() { answer = Some(false); }

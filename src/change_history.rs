@@ -72,6 +72,15 @@ impl ChangeHistory {
         Some(self.current.clone())
     }
 
+    fn cell_target(&self, redo: bool) -> Option<Change> {
+        let index = if redo { self.position } else { self.position.checked_sub(1)? };
+        let step = self.steps.get(index)?;
+        self.current[step.start..step.start + step.len].iter()
+            .chain(&step.replacement)
+            .find(|change| matches!(change, Change::Cell { .. }))
+            .cloned()
+    }
+
     fn clear(&mut self) {
         // A successful commit/discard releases the session's history storage.
         *self = Self::default();
@@ -141,6 +150,34 @@ impl Rustable {
         .into();
     }
 
+    fn focus_history_cell(&mut self, change: Change) {
+        let Change::Cell { table, column, original, original_columns, .. } = change else { return; };
+        let grid = self.grid();
+        if table != self.edit_table() || !self.can_edit_rows()
+            || original_columns.as_ref().is_some_and(|columns| columns != &grid.columns) { return; }
+        let Some(row) = grid.rows.iter().position(|row| row == &original) else { return; };
+        let Some(col) = grid.columns.iter().position(|name| name == &column) else { return; };
+        if self.edit_columns().get(col).is_some_and(|column| column.generated)
+            || row_is_deleted(&self.changes, &table, &original) { return; }
+        let value = self.changes.iter().find_map(|change| match change {
+            Change::Cell { table: t, column: c, original: r, value, original_columns: columns }
+                if t == &table && c == &column && r == &original && columns == &original_columns => Some(value),
+            _ => None,
+        }).unwrap_or(&original[col]);
+        if matches!(value, Value::Blob(_)) { return; }
+        let text = if matches!(value, Value::Null) { String::new() } else { db::display(value) };
+        if text.len() > 65536 { return; }
+        self.edit = Some(CellEdit {
+            bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false,
+            insert_id: None, advance: 0, table, column, original_value: original[col].clone(),
+            kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 },
+            row: original, text, focus: true, inspector: false,
+        });
+        self.selected = self.row_selection.click(row, false, false, self.selected);
+        self.row_selection.cell_column = col;
+        self.row_selection.pending_cell_scroll = true;
+    }
+
     pub(super) fn staged_history_shortcuts(&mut self, ctx: &egui::Context) {
         if self.pending.is_some() { return; }
         // Avoid inspecting text history on ordinary rendering/input frames.
@@ -154,14 +191,15 @@ impl Rustable {
         let state = focused.and_then(|id| TextEdit::load_state(ctx, id));
         if let Some(edit) = &self.edit {
             let starting = edit.focus && !edit.undo_initialized;
+            if starting && state.is_some() && focused != cell_editor { return; }
             if !starting && (focused != cell_editor || focused.is_none()) { return; }
-            // TextEdit keeps typing undo/redo until its undo history is exhausted.
-            // Redo in an active text field always belongs to that field.
-            if ctx.input(|input| input.events.iter().any(|event| matches!(event,
+            let redo = ctx.input(|input| input.events.iter().any(|event| matches!(event,
                 egui::Event::Key { key: egui::Key::Z, pressed: true, modifiers, .. } if modifiers.shift
-            ))) || (!starting && state.as_ref().is_some_and(|state| state.has_undo(&(
-                state.cursor.char_range().unwrap_or_default(), edit.text.clone(),
-            )))) { return; }
+            )));
+            if !starting && state.as_ref().is_some_and(|state| {
+                if redo { state.has_text_undo(&edit.text) || state.has_redo(&(state.cursor.char_range().unwrap_or_default(), edit.text.clone())) }
+                else { state.has_text_undo(&edit.text) }
+            }) { return; }
             // No typing remains to undo. Drop the unmodified editor rather than
             // staging it (which could manufacture a history step or fail parsing).
             self.edit = None;
@@ -196,7 +234,10 @@ impl Rustable {
             })
         });
         for redo in actions {
+            self.edit = None;
+            let target = self.change_history.cell_target(redo);
             self.restore_change_history(redo);
+            if let Some(target) = target { self.focus_history_cell(target); }
         }
     }
 }
@@ -562,6 +603,136 @@ mod tests {
         }
         samples.sort_by(f64::total_cmp);
         crate::ui_benchmark::report("history/cell-undo-handoff", &samples);
+    }
+
+    fn grid_frame(ctx: &egui::Context, app: &mut Rustable, time: &mut f64, events: Vec<egui::Event>) -> egui::FullOutput {
+        *time += 0.05;
+        ctx.run(egui::RawInput {
+            time: Some(*time), events,
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 500.0))),
+            ..Default::default()
+        }, |ctx| {
+            app.staged_history_shortcuts(ctx);
+            egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui));
+        })
+    }
+
+    fn click_grid(ctx: &egui::Context, app: &mut Rustable, time: &mut f64, pos: egui::Pos2) {
+        for pressed in [true, false] {
+            grid_frame(ctx, app, time, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default(),
+            }]);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual populated cell history navigation CPU benchmark"]
+    fn populated_cell_history_frame_benchmark() {
+        let (ctx, _file, mut app) = fixture();
+        let mut samples = Vec::new();
+        let mut time = 0.0;
+        for iteration in 0..180 {
+            app.edit = None;
+            app.changes.clear();
+            app.clear_change_history();
+            edit(&mut app, "earlier");
+            let later = Change::Cell {
+                original_columns: None, table: "t".into(), column: "name".into(),
+                original: app.table.rows[1].clone(), value: Value::Text("later".into()),
+            };
+            app.changes.push(later.clone());
+            app.record_changes();
+            app.focus_history_cell(later);
+            grid_frame(&ctx, &mut app, &mut time, vec![]);
+            grid_frame(&ctx, &mut app, &mut time, vec![]);
+            grid_frame(&ctx, &mut app, &mut time, vec![egui::Event::Text("typing".into())]);
+            grid_frame(&ctx, &mut app, &mut time, vec![key(false, true), key(false, false)]);
+            if iteration == 90 { time += 30.0; }
+            let start = Instant::now();
+            for _ in 0..2 {
+                let output = grid_frame(&ctx, &mut app, &mut time, vec![key(false, true), key(false, false)]);
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+            }
+            if iteration >= 20 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+            assert!(app.changes.is_empty());
+            assert_eq!(app.selected, Some(0));
+            assert_eq!(app.edit.as_ref().unwrap().text, "original");
+        }
+        samples.sort_by(f64::total_cmp);
+        crate::ui_benchmark::report("history/populated-cell-navigation", &samples);
+    }
+
+    #[test]
+    fn undo_nonempty_cells_follows_history_and_places_caret_at_start() {
+        let (ctx, _file, mut app) = fixture();
+        edit(&mut app, "earlier");
+        let first = app.changes.clone();
+        // Stage a second row, then reopen it and type more.
+        app.edit = Some(CellEdit {
+            bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false,
+            insert_id: None, advance: 0, table: "t".into(), column: "name".into(),
+            row: app.table.rows[1].clone(), original_value: app.table.rows[1][1].clone(),
+            text: "later".into(), kind: 3, focus: true, inspector: false,
+        });
+        assert!(app.finish_cell_edit());
+        let second = app.changes.clone();
+        app.focus_history_cell(second[1].clone());
+        let mut time = 0.0;
+        grid_frame(&ctx, &mut app, &mut time, vec![]);
+        grid_frame(&ctx, &mut app, &mut time, vec![]);
+        grid_frame(&ctx, &mut app, &mut time, vec![egui::Event::Text("typing".into())]);
+        let typed = app.edit.as_ref().unwrap().text.clone();
+        grid_frame(&ctx, &mut app, &mut time, vec![key(true, true), key(true, false)]);
+        assert_eq!(app.edit.as_ref().unwrap().text, typed, "Redo must not discard fresh typing");
+        grid_frame(&ctx, &mut app, &mut time, vec![key(false, true), key(false, false)]);
+        assert_eq!(app.edit.as_ref().unwrap().text, "later");
+        assert_eq!(app.changes, second);
+        let id = ctx.memory(|m| m.focused()).unwrap();
+        assert_eq!(TextEdit::load_state(&ctx, id).unwrap().cursor.char_range().unwrap().primary.index, 0);
+        // Cursor movement and an idle history point must not trap Cmd+Z.
+        grid_frame(&ctx, &mut app, &mut time, vec![egui::Event::Key {
+            key: egui::Key::End, physical_key: None, pressed: true, repeat: false, modifiers: Default::default(),
+        }]);
+        time += 2.0;
+        grid_frame(&ctx, &mut app, &mut time, vec![]);
+        grid_frame(&ctx, &mut app, &mut time, vec![key(false, true), key(false, false)]);
+        assert_eq!(app.changes, first);
+        assert_eq!(app.edit.as_ref().unwrap().text, "second");
+        grid_frame(&ctx, &mut app, &mut time, vec![key(false, true), key(false, false)]);
+        assert!(app.changes.is_empty());
+        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.edit.as_ref().unwrap().text, "original");
+        grid_frame(&ctx, &mut app, &mut time, vec![key(true, true), key(true, false)]);
+        assert_eq!(app.changes, first);
+        grid_frame(&ctx, &mut app, &mut time, vec![key(true, true), key(true, false)]);
+        assert_eq!(app.changes, second);
+    }
+
+    #[test]
+    fn staged_cell_can_be_reopened_and_edited_with_real_grid_clicks() {
+        let (ctx, _file, mut app) = fixture();
+        let mut time = 0.0;
+        grid_frame(&ctx, &mut app, &mut time, vec![]);
+        let output = grid_frame(&ctx, &mut app, &mut time, vec![]);
+        let pos = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == "original" => Some(text.pos + egui::vec2(10.0, 6.0)),
+            _ => None,
+        }).unwrap();
+        for value in ["first", "second"] {
+            click_grid(&ctx, &mut app, &mut time, pos);
+            click_grid(&ctx, &mut app, &mut time, pos);
+            assert!(app.edit.is_some(), "could not reopen editor for {value}");
+            grid_frame(&ctx, &mut app, &mut time, vec![]);
+            // Replace through the text widget, then blur to stage.
+            grid_frame(&ctx, &mut app, &mut time, vec![egui::Event::Key {
+                key: egui::Key::A, physical_key: None, pressed: true, repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            }, egui::Event::Text(value.into())]);
+            click_grid(&ctx, &mut app, &mut time, egui::pos2(600.0, 250.0));
+            assert!(app.edit.is_none());
+            grid_frame(&ctx, &mut app, &mut time, vec![]);
+            assert!(matches!(&app.changes[0], Change::Cell { value: Value::Text(text), .. } if text == value));
+        }
     }
 
     #[test]
