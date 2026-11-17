@@ -26,6 +26,8 @@ mod fonts;
 mod icons;
 mod json_editor;
 mod line_comment;
+#[cfg(not(target_arch = "wasm32"))]
+mod mcp;
 mod native_menu;
 mod pane_sizes;
 mod query_notification;
@@ -111,6 +113,24 @@ mod ssh_tunnel;
 pub use ssh_prompt::helper as ssh_askpass_helper;
 mod updates;
 
+/// Window title and eframe storage identity. Saved connections live under this
+/// name, so headless entry points must resolve storage with the same value.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const APP_NAME: &str = if cfg!(feature = "qa") {
+    "Rustable QA"
+} else if cfg!(debug_assertions) {
+    "Rustable Development"
+} else {
+    "Rustable"
+};
+
+/// Headless read-only Model Context Protocol server over stdio.
+/// Returns the process exit status; never opens a window.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_mcp(args: Vec<String>) -> i32 {
+    mcp::run(args)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn application_icon() -> eframe::egui::IconData {
     // Keep macOS in charge of the packaged icon's sizing and appearance in
@@ -191,13 +211,7 @@ pub fn run_native() -> eframe::Result {
         );
     }
     eframe::run_native(
-        if cfg!(feature = "qa") {
-            "Rustable QA"
-        } else if cfg!(debug_assertions) {
-            "Rustable Development"
-        } else {
-            "Rustable"
-        },
+        APP_NAME,
         eframe::NativeOptions {
             viewport: eframe::egui::ViewportBuilder::default()
                 .with_icon(application_icon())

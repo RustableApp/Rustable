@@ -58,6 +58,16 @@ impl Backend for Native {
     }
 }
 
+/// Synchronous lookup for headless processes (MCP) that have no UI thread to
+/// protect. The secret is returned to the caller only; never logged or stored.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_blocking(id: ProfileId, purpose: Purpose) -> Result<Option<String>, String> {
+    #[cfg(not(test))]
+    return Native.read(&account(id, purpose));
+    #[cfg(test)]
+    return MemoryBackend::default().read(&account(id, purpose));
+}
+
 pub enum Operation {
     Read,
     Write(String),

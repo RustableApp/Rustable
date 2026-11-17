@@ -3611,6 +3611,7 @@ dependencies = [
  "reqwest",
  "rfd",
  "ring",
+ "ron",
  "rusqlite",
  "same-file",
  "serde",

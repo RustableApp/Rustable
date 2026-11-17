@@ -25,6 +25,8 @@ pub mod progress;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use postgres::async_client_config as probe_client_config;
 mod sqlite;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod read_only;
 #[cfg(any(test, target_arch = "wasm32"))]
 pub(crate) mod transport;
 #[cfg(target_arch = "wasm32")]

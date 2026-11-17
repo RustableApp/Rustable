@@ -35,6 +35,8 @@ Rustable is actively developed and still has rough edges. Support varies by data
 
 Exports include loaded results, not automatically the entire database. On Windows, SSH connections require an external tunnel.
 
+AI assistants such as Claude can browse and query your saved connections through Rustable's [read-only MCP server](docs/MCP.md) (`rustable mcp`).
+
 ## Feedback and contributing
 
 [Report a bug or request a feature](https://github.com/RustableApp/Rustable/issues). Include your OS, database engine, and steps to reproduce the issue.

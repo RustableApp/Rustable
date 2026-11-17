@@ -27,6 +27,16 @@ impl SqliteDriver {
         .map_err(|e| e.to_string())?;
         Self::from_connection(connection, cancel)
     }
+    /// Headless automation sessions never receive a writable file handle.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn open_read_only(path: &std::path::Path, cancel: Arc<AtomicBool>) -> Result<Self, String> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+        // Confine the session to the saved file: ATTACH could read other files.
+        connection.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0)
+            .map_err(|e| e.to_string())?;
+        Self::from_connection(connection, cancel)
+    }
     #[cfg(any(test, target_arch = "wasm32"))]
     pub(super) fn open_bytes(bytes: &[u8], cancel: Arc<AtomicBool>) -> Result<Self, String> {
         if bytes.len() > 8 * 1024 * 1024 { return Err("Browser SQLite files are limited to 8 MiB".into()); }

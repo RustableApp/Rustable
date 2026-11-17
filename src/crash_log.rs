@@ -7,14 +7,7 @@ use std::{
 };
 
 fn report_path() -> Option<std::path::PathBuf> {
-    let app = if cfg!(feature = "qa") {
-        "Rustable QA"
-    } else if cfg!(debug_assertions) {
-        "Rustable Development"
-    } else {
-        "Rustable"
-    };
-    eframe::storage_dir(app).map(|directory| directory.join("last-panic.log"))
+    eframe::storage_dir(crate::APP_NAME).map(|directory| directory.join("last-panic.log"))
 }
 
 pub fn install() {

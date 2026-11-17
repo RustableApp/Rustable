@@ -25,6 +25,11 @@ mod native {
         stopped: Arc<AtomicBool>,
     }
     static CONTEXT: OnceLock<Mutex<Option<eframe::egui::Context>>> = OnceLock::new();
+    /// Headless processes cannot show a prompt; refuse instead of waiting.
+    static HEADLESS: AtomicBool = AtomicBool::new(false);
+    pub fn refuse_prompts() {
+        HEADLESS.store(true, Ordering::Relaxed);
+    }
     static PROMPTS: OnceLock<Mutex<std::collections::VecDeque<Prompt>>> = OnceLock::new();
     fn prompts() -> &'static Mutex<std::collections::VecDeque<Prompt>> {
         PROMPTS.get_or_init(Default::default)
@@ -69,7 +74,7 @@ mod native {
                     }
                     let label = String::from_utf8_lossy(&bytes).into_owned();
                     // Never answer host verification or unrelated askpass questions.
-                    if !label.to_ascii_lowercase().contains("passphrase") {
+                    if HEADLESS.load(Ordering::Relaxed) || !label.to_ascii_lowercase().contains("passphrase") {
                         continue;
                     }
                     let (reply, receive) = mpsc::channel();
@@ -291,3 +296,5 @@ pub fn helper() -> Option<i32> {
 }
 #[cfg(not(unix))]
 pub fn show(_: &eframe::egui::Context) {}
+#[cfg(not(unix))]
+pub fn refuse_prompts() {}
