@@ -1,11 +1,15 @@
-# v0.4.31 candidate verification
+# v0.4.31 release verification
 
-Verified November 17, 2026. **Draft only; not published.** GitHub draft
-`449135819` contains seven verified assets. Publication is blocked by the
-matching website deployment: Cloudflare rejected the existing private ops token
-(code 9109), and no saved Wrangler OAuth login was available. The user was asked
-to restore the existing deployment credential. The public stable release and
-live demo remain v0.4.30. No credentials were printed or committed.
+Published November 17, 2026 at `2026-11-17T20:47:09Z` as GitHub release
+`449135819`: [v0.4.31](https://github.com/RustableApp/Rustable/releases/tag/v0.4.31).
+The user explicitly authorized publication without the matching live demo and
+without further icon changes. All seven versioned and latest asset URLs returned
+HTTP 200; the public latest updater feed exactly matches the verified signed feed.
+
+The web demo remains v0.4.30: Cloudflare rejected the existing private ops token
+(code 9109), and no saved Wrangler OAuth login was available. The prepared
+v0.4.31 website bundle remains committed for later deployment. No credentials
+were printed or committed.
 
 Source: immutable tag `v0.4.31`, commit
 `e9718bf44c902965e9f25ff6b3a560bc52ef8e80`.
@@ -27,7 +31,7 @@ team `624KJV575U`, updater URL and Ed25519 public key match the prior release.
 The Sparkle signature verifies against the exact ZIP, with immutable v0.4.31
 URL, correct length and embedded release notes. ARM64 Mac, x64 Windows PE and
 x64 Linux ELF architectures, portable archive integrity, bundled licenses and
-Mac icon passed. The draft is explicitly bound to the existing tag and source;
+Mac icon passed. The release is explicitly bound to the existing tag and source;
 the tag has not moved.
 
 ## Correctness and performance
@@ -61,7 +65,7 @@ blank canvas; Safari acceptance is not claimed. The installed local Wrangler
 runtime required a command-line-only compatibility date of 2026-10-03;
 production configuration remains 2026-10-31.
 
-Live deployment, live query/provenance/header/checksum checks, publication and
-public download/updater checks remain outstanding. Per [RELEASES.md](RELEASES.md),
-the desktop draft stays unpublished until the matching live demo is verified.
+Live website deployment and its query/provenance/header/checksum checks remain
+outstanding. The user explicitly overrode the matching-demo publication requirement
+in [RELEASES.md](RELEASES.md). Public desktop downloads and updater checks passed.
 Logs, assets, checks and provenance are retained in `target/release-v0.4.31/`.
