@@ -1,3 +1,5 @@
+#[cfg(unix)]
+mod matrix;
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "qa")))]
 #[path = "result_pages_qa.rs"]
 mod result_pages_qa;
@@ -473,6 +475,8 @@ impl ColumnDraft {
 }
 
 pub struct Rustable {
+    #[cfg(unix)]
+    matrix: Option<crate::matrix::Bridge>,
     child_window: bool,
     draft_scope: Option<String>,
     recover_next_window: bool,
@@ -1142,6 +1146,8 @@ impl Rustable {
         let worker = Worker::new(ctx.clone());
         let (files_tx, files_rx) = mpsc::channel();
         let mut app = Self {
+            #[cfg(unix)]
+            matrix: None,
             child_window: false,
             draft_scope: None,
             recover_next_window: false,
@@ -7083,6 +7089,8 @@ impl Rustable {
         if self.redis_workspace.is_some() { return; }
         let start = Instant::now();
         self.poll_with_notifications(ctx);
+        #[cfg(unix)]
+        self.matrix_frame(ctx);
         self.workspace_shortcuts(ctx);
         self.toolbar(ctx);
         self.frame_ms = start.elapsed().as_secs_f32() * 1000.0;

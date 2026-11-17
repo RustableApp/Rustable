@@ -2,6 +2,8 @@
 //! Native and browser entry points must host this UI rather than duplicate it.
 
 mod app;
+#[cfg(unix)]
+pub mod matrix;
 #[cfg(target_arch = "wasm32")]
 mod browser_jobs;
 #[cfg(target_arch = "wasm32")]
@@ -247,3 +249,47 @@ mod redis_value_editor;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod redis_vector_benchmark;
+
+/// Experimental single-window workspace on a disposable in-memory database.
+#[cfg(unix)]
+pub fn run_matrix(path: std::path::PathBuf) -> eframe::Result {
+    eframe::run_native(
+        "Rustable Matrix Experiment",
+        eframe::NativeOptions {
+            viewport: eframe::egui::ViewportBuilder::default()
+                .with_title("Rustable · Matrix experiment")
+                .with_inner_size([1280.0, 820.0])
+                .with_min_inner_size([760.0, 560.0]),
+            ..Default::default()
+        },
+        Box::new(move |cc| {
+            crate::scroll_response::install(&cc.egui_ctx);
+            let bridge =
+                matrix::listen(&path, cc.egui_ctx.clone()).map_err(std::io::Error::other)?;
+            let mut app = app::Rustable::new_demo(cc);
+            app.attach_matrix(bridge);
+            #[cfg(feature = "qa")]
+            if let Some(path) = std::env::var_os("RUSTABLE_MATRIX_CAPTURE") {
+                cc.egui_ctx
+                    .set_theme(if std::env::var_os("RUSTABLE_MATRIX_LIGHT").is_some() {
+                        eframe::egui::Theme::Light
+                    } else {
+                        eframe::egui::Theme::Dark
+                    });
+                if std::env::var_os("RUSTABLE_MATRIX_NARROW").is_some() {
+                    cc.egui_ctx
+                        .send_viewport_cmd(eframe::egui::ViewportCommand::InnerSize(
+                            eframe::egui::vec2(760.0, 760.0),
+                        ));
+                }
+                return Ok(Box::new(matrix::Capture {
+                    app,
+                    path: path.into(),
+                    requested: false,
+                    saved: None,
+                }));
+            }
+            Ok(Box::new(app))
+        }),
+    )
+}
