@@ -1110,3 +1110,242 @@ the redundant SQL-draft paragraph. Dark/light native captures were inspected in
 `target/compact-discard-review/`; existing Cancel/Discard and Escape/Enter tests
 passed. This static dialog styling does not change ordinary rendering/input paths;
 the timings above precede this copy/layout adjustment and were not rerun.
+
+### Blank-area deselection and table Select All — 2026-11-16
+
+Blank table-body regions now have two bounded hit targets inside the scroll
+container. The former outer background response could lose these clicks after
+scrolling. A primary blank click finishes a valid edit, clears row/cell and retained
+result selection, and gives keyboard focus to the grid. Invalid edits retain their
+validation path. Double-click-to-insert remains available. The main table also
+accepts Cmd/Ctrl+A when no widget owns focus; focused text fields, editors and
+modal controls retain their shortcuts. Selection remains limited to loaded table
+rows; disk-backed query results retain their existing logical Select All behavior.
+No database or protocol operations changed, and no polling timer was added.
+
+`python3 scripts/ui-performance.py --base deeed9b1498377412b169ccaae521fdc6dd976b8 --grid-selection --output target/grid-selection-performance`
+compared five alternating serial pairs on Apple M4 Max, macOS 27.2.1 arm64,
+Rust 1.99.1, release profile, default headless scale 1×. The identical new fixture
+is copied into both revisions: 500 rows × 3 columns at 1200×800 logical points,
+20 warmups/160 measured iterations, a cell click, Select All and a blank click,
+including a synthetic 30-second idle jump. Existing scrolling/workspace/sidebar
+fixtures are unchanged. All builds finished before serial measurement.
+
+Twenty of 21 comparisons passed. Blank-click p95 increased **16.2%**, from
+0.100875 to 0.117167 ms (+0.016292 ms), a retained correctness cost, not a blanket
+performance pass. The baseline leaves all 500 rows selected; the candidate clears
+them and paints the deselected state in that frame. Keeping the old background
+response fails the scrolled-click regression test. Deferring clearing until after
+painting would retain stale highlighting for a frame and move the work rather
+than remove it. Hit testing adds at most two widgets, clearing runs only on a click,
+and row/column virtualization is preserved. No thresholds were weakened.
+
+Median per-run CPU milliseconds (p50/p95/p99), followed by the worst individual
+sample across all runs:
+
+| Workload | Base p50 / p95 / p99 / max | Candidate p50 / p95 / p99 / max |
+| --- | --- | --- |
+| Blank click | .097250 / .100875 / .105250 / .125833 | .113125 / .117167 / .123542 / .286666 |
+| Select All | .088250 / .091875 / .098625 / .118375 | .087625 / .090959 / .093833 / .588625 |
+| Vertical precise scrolling, layout | .230792 / .241708 / .290667 / .357958 | .233125 / .243167 / .292209 / .395208 |
+| 120-column workspace, inspector open | .400125 / .411666 / .415833 / .442375 | .396875 / .401583 / .406541 / .425667 |
+
+The largest selection samples occurred in one candidate run; the other four
+Select All maxima were .090–.100 ms. The p95 pass does not establish rare-stall
+behavior. All raw samples, environment and fixture source remain in the report.
+
+848 library tests passed (225 opt-in tests ignored), strict all-target QA Clippy
+passed, and all eight performance-runner tests passed. Locked WASM library
+compilation passed with 83 target-build warnings. Regression coverage includes
+blank space below/right of cells, main-table and query-grid focus, a focused text
+field's Select All, offscreen disk-backed selection and logical Select All clearing,
+and the existing double-click insertion guards. Native screenshots at 2× scale,
+dark 900×500 and light 760×500, were inspected after synthetic input for both
+selected and cleared states. The temporary capture adapter was restored; captures
+and validation logs are in `target/grid-selection-review/`.
+
+These CPU timings and synthetic native captures do not measure physical-key input
+to presentation, sustained FPS, GPU/compositor work, 60/120 Hz, mixed-DPI or
+multi-window/monitor transitions. Database latency fixtures were not rerun because
+execution and protocol sequencing are unchanged.
+
+### Pending-row colors, selection and reediting — 2026-11-16
+
+Pending inserts use green in the grid and inspector; existing-value edits retain
+orange. Active inline editors retain neutral backgrounds. Pending-cell selection
+uses the shared outline, including clicks on cell padding. Draft IDs remain separate
+from loaded-row bulk mutation identities. Double-click activation combines the cell
+and label responses and uses the shared same-target/system-interval helper. Blur
+requests one redraw to retire the old TextEdit hit target. Generated/binary/oversize
+fields retain their editing guards. The footer identifies a pending new row instead
+of counting it as a loaded row. No polling timer or database operation was added.
+
+Baseline `5dcee13a51cfa676cda8d9d3861d9c8645eaafc0` is an unreferenced snapshot of
+the exact working tree before this change, including the preceding blank-selection
+fixes; HEAD and the index were not changed. Command:
+`python3 scripts/ui-performance.py --base 5dcee13a51cfa676cda8d9d3861d9c8645eaafc0 --pending-rows --grid-selection --output target/insert-row-performance-final`.
+Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile, default headless
+scale 1×. Five alternating serial pairs, with no overlapping builds or benchmarks.
+The identical pending-row fixture is copied to both revisions: 50 draft rows ×
+3 columns, 1000×600 logical points, idle and active editing, 20 warmups/160 samples
+and a synthetic 30-second idle jump. Existing SQL scrolling/workspace/sidebar and
+shared grid-selection workloads are unchanged.
+
+The first attempt (`target/insert-row-performance/`) stopped because the old
+version could not complete the double-click reopening assertion. That action is
+now measured separately on the candidate, retaining its correctness assertion;
+it is not presented as a before/after speedup. Both revisions received the same
+revised rendering fixture in the final comparison. Five candidate-only reopening
+runs measured p50/p95/p99 .097541/.108541/.127084 ms, maximum .404125 ms.
+
+**Overall performance remains inconclusive.** The first completed comparison had
+14 passes and 9 inconclusive metrics. A fresh five-pair repeat of the exact built
+binaries had 3 passes and 20 inconclusive metrics. Neither run established a
+repeatable regression under the gate, but this is not a performance pass.
+Substantial unrelated application, indexing and storage-analysis CPU load was
+observed. The repeat retains process snapshots and binary paths, hashes and mtimes
+in `target/insert-row-performance-repeat/`; its orchestrator is retained in
+`target/insert-row-review/repeat-performance.py`. No thresholds were changed.
+A quiet-machine comparison is still needed before asserting performance parity.
+
+Repeat-run CPU milliseconds below are median per-run p50/p95/p99 and the worst
+individual sample across all runs; these noisy measurements are descriptive only:
+
+| Workload | Base p50 / p95 / p99 / max | Candidate p50 / p95 / p99 / max |
+| --- | --- | --- |
+| Pending rows, idle | .092083 / .103292 / .134083 / .187750 | .094375 / .114167 / .168583 / .247625 |
+| Pending rows, editing | .093959 / .105291 / .118500 / .210667 | .094666 / .117959 / .129458 / .393459 |
+| Vertical precise scrolling, layout | .244291 / .264584 / .341959 / .532042 | .245208 / .336667 / .384500 / .490166 |
+
+850 library tests passed (227 opt-in tests ignored), strict all-target QA Clippy
+passed, all eight performance-runner tests passed, and locked WASM library
+compilation passed with 83 target-build warnings. Tests cover green versus orange,
+selection outline geometry, label/padding activation, typing followed by blur and
+reopening the same draft, and generated-field protection. Native 2× screenshots
+were inspected in dark 1100×600 and light 900×600 layouts, with selected and active
+pending cells and the inspector visible. Capture adapters were restored afterward;
+logs, fixtures and images are in `target/insert-row-review/`.
+
+Native physical-input-to-present latency, frame intervals, 60/120 Hz, multiple
+windows and mixed-DPI/monitor transitions were not measured. No database driver,
+transaction, network or protocol sequencing changed; latency fixtures were not rerun.
+
+### Pending-row keyboard navigation and row-tail selection — 2026-11-16
+
+Pending drafts now participate in the grid cursor and its vertical/horizontal
+scroll targets, including crossing the loaded/pending boundary. Enter opens the
+selected writable draft field; committing or cancelling returns keyboard ownership
+to the grid. Consumed arrows cancel egui's queued spatial focus traversal, which
+otherwise steals focus when a key arrives immediately after an editor closes.
+Draft IDs remain outside loaded-row bulk mutation identities. The right-hand space
+beside a row selects that row; only space below all rows clears selection.
+Disk-backed results retain their asynchronous row-loading path for tail clicks.
+No timers, database operations or protocol changes were introduced.
+
+Baseline `889f26c02dbbc82667b3a2077f8a26986e607be8` captures the working tree
+immediately before these changes, including the preceding green/double-click fixes.
+HEAD and the index remain unchanged. Comparison command:
+`python3 scripts/ui-performance.py --base 889f26c02dbbc82667b3a2077f8a26986e607be8 --pending-rows --grid-selection --output target/insert-navigation-performance`.
+The shared right-side click metric is now named `grid/selection/row-tail-click`;
+the exact same fixture is installed on both builds (500 rows, 3 columns,
+1200×800, 20 warmups, 160 samples). Its intended outcome changes from clearing
+selection to selecting the clicked row. Pending idle/editing comparisons retain
+50 drafts, 3 columns, 1000×600, 20 warmups and 160 samples. Existing scrolling,
+workspace and sidebar workloads remain unchanged. The candidate-only navigation
+workload uses 50 drafts at 800×500, alternates Up/Down, verifies Enter opens the
+correct draft and Escape closes it, and includes navigation after a synthetic
+30-second idle jump. Its 160 measured samples follow 20 warmups; it is not a
+before/after speedup because the baseline cannot complete this interaction.
+
+853 library tests passed, with 228 opt-in tests ignored. Strict all-target QA
+Clippy, eight performance-runner tests and locked WASM library compilation passed
+(the latter with 83 existing warnings). An initial WASM command without `--lib`
+attempted to compile the native-only executable and failed at `run_native`; the
+correct library target passed. Correctness coverage includes empty/loaded tables,
+multiple drafts, generated fields, Enter/typing/commit/Escape, immediately arriving
+arrows after editor focus, offscreen rows/columns, row tails and below-row clearing.
+Logs and temporary native capture adapters are retained under
+`target/insert-navigation-review/`.
+
+The five alternating release pairs on Apple M4 Max / macOS 27.2.1 arm64 /
+Rust 1.99.1, headless scale 1×, produced **20 passes and 3 inconclusive metrics**.
+All directly affected workloads passed; no regression was reported. Overall this
+is not an unconditional performance pass: vertical mouse wheel layout and both
+inspector-open workspace scenarios were noisy. Background storage analysis,
+browser and streaming-application CPU activity was observed and retained in
+`target/insert-navigation-review/process-load.txt`. No thresholds were changed,
+and no builds or benchmark workloads overlapped measurement. Raw samples, complete
+environment/fixtures and results remain in `target/insert-navigation-performance/`.
+
+Median per-run CPU milliseconds (p50 / p95 / p99), then worst individual sample:
+
+| Workload | Base p50 / p95 / p99 / max | Candidate p50 / p95 / p99 / max |
+| --- | --- | --- |
+| Pending rows, idle | .094166 / .106250 / .111125 / .152250 | .092417 / .097542 / .102000 / .157584 |
+| Pending rows, editing | .096959 / .108708 / .112750 / .161750 | .096167 / .099583 / .108584 / .135666 |
+| Row-tail click | .112750 / .126583 / .130584 / .156292 | .088917 / .091917 / .098084 / .212833 |
+| Vertical precise scrolling, layout | .238958 / .258916 / .293458 / .430417 | .238750 / .251291 / .294542 / .408792 |
+
+Five candidate-only keyboard runs measured .078458 / .081250 / .086208 ms,
+maximum .097875 ms. These measure CPU layout/tessellation for the navigation
+frame; Enter/Escape correctness is checked in the same workload but those frames
+are not included in that timing. These results do not establish physical-input
+latency, native idle process CPU, sustained FPS or GPU/compositor performance.
+Native 60/120 Hz, mixed-DPI, monitor and multi-window transitions were not measured.
+Database latency fixtures were not rerun because driver/protocol paths are unchanged.
+
+Native 2× screenshots were inspected in dark 1100×600 and light 900×600 layouts:
+loaded-row tail selection, pending-row tail selection, the arrow-moved pending-cell
+outline and Enter-opened inline editing. The final capture adapter asserts a draft
+is selected (and a draft editor is active in the editing case) after synthetic input.
+The initial capture targeted the last loaded row; it established loaded-tail behavior
+before the input coordinate was corrected for pending-row captures. The temporary
+source adapter was restored; native screenshots are not physical-input latency tests.
+
+### Pending labels and history selection — 2026-11-16
+
+Pending-cell display labels explicitly disable text selection, including inspector
+labels; inline editors retain normal text selection. Staged undo/redo sets the
+exact loaded-cell range and both scroll targets. Draft-field history compares the
+changed insert's before/after fields, then selects that field by stable draft ID.
+Row deletion history selects the affected loaded row. No database path or repaint
+timer changed.
+
+To avoid another redundant baseline build, this iteration reuses the exact prior
+candidate release executable, copied and SHA-256 recorded before any source edits.
+Its corresponding snapshot is `96986397c35428aaaa536a08bd1b14faa4e0d527`.
+`target/history-selection-review/compare.py` uses the build/measure/compare functions
+from `scripts/ui-performance.py`, preserves five alternating pairs and the 10% gate,
+and rebuilds only the candidate. Existing pending idle/editing, populated-cell
+history navigation, typing-to-staged-undo, scrolling, workspace and sidebar fixtures
+run unchanged on both binaries. Builds finish before serial measurements.
+Baseline provenance, capture adapter and validation logs are retained in
+`target/history-selection-review/`; raw CPU samples are in
+`target/history-selection-performance/`. Hardware/toolchain/profile are unchanged
+from the preceding comparison. Native dark/light captures verify the selector on
+the draft name field after undo and redo; the temporary adapter was restored.
+
+855 library tests pass (228 ignored), including text-drag/Copy without entering
+edit mode, loaded-cell selection ranges and undo/redo targeting another draft's
+changed field. Strict all-target QA Clippy passes. The initial new undo/redo test
+omitted key release and therefore generated a held-key repeat; after correcting
+the event sequence, the targeted test and complete suite passed. No WASM-specific
+code changed; that target was not rebuilt in this iteration. Native idle process
+CPU, input-to-present latency, refresh-rate and multi-monitor checks were not run.
+
+The release comparison was **inconclusive for all 23 metrics** under the unchanged
+noise gate. Substantial browser/storage-analysis CPU load was present. No parity
+or improvement is claimed, and no repeat build was run just to obtain a pass.
+Median per-run p50 / p95 / p99 and worst sample, in CPU milliseconds:
+
+| Workload | Base | Candidate |
+| --- | --- | --- |
+| Pending idle | .113500 / .132125 / .171250 / .629833 | .124042 / .145917 / .226958 / .289084 |
+| Pending editing | .114917 / .133458 / .168500 / .779667 | .125917 / .154958 / .187000 / .296917 |
+| Typing-to-staged-undo | .002167 / .002375 / .002750 / .020667 | .002292 / .002917 / .003791 / .016917 |
+| Populated-cell history navigation | .036083 / .042916 / .067500 / .277042 | .039791 / .048916 / .065709 / .159416 |
+
+The descriptive p95 increases above 10% are not accepted regressions or passes:
+run-to-run noise prevents attributing them to this change. A quiet-machine repeat
+using the retained binaries is needed to establish performance parity. This run
+saved the baseline rebuild; the single candidate release build took 3m07s.

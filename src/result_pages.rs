@@ -141,6 +141,12 @@ impl Pages {
     pub fn is_preview(&self, index: usize) -> bool {
         self.previews.get(index).copied().unwrap_or(false)
     }
+    pub fn clear_selection(&mut self) {
+        self.all_selected = false;
+        self.selection = None;
+        self.selection_rows.clear();
+        self.focus = None;
+    }
     pub fn pin_selection(
         &mut self,
         selected: Option<usize>,

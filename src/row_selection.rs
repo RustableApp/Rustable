@@ -22,6 +22,15 @@ impl RowSelection {
         self.cell_column = 0;
         self.pending_cell_scroll = false;
     }
+    /// Pending drafts share the grid cursor, but not loaded-row bulk identities.
+    pub fn focus_pending(&mut self, index: usize) {
+        let column = self.cell_column;
+        let columns = self.cell_columns;
+        self.clear();
+        self.focused = Some(index);
+        self.cell_column = column;
+        self.cell_columns = columns;
+    }
     pub fn click(
         &mut self,
         index: usize,

@@ -48,16 +48,16 @@ impl Rustable {
             || self.row_selection.rows.is_empty()
     }
 
-    pub(super) fn select_all_rows_shortcut(&mut self, ctx: &egui::Context, focused: Option<usize>) {
-        let Some(focused) = focused else { return };
+    pub(super) fn select_all_rows_shortcut(&mut self, ctx: &egui::Context, focused: Option<usize>) -> bool {
+        let Some(focused) = focused else { return false };
         if self.edit.is_some() || self.dialog_owns_workspace_shortcuts() || self.rename.is_some()
             || egui::Popup::is_any_open(ctx) || !matches!(self.view, View::Data | View::Query)
         {
-            return;
+            return false;
         }
         let count = self.grid().rows.len();
         if focused >= count {
-            return;
+            return false;
         }
         if ctx.input_mut(|input| {
             !input.modifiers.shift
@@ -70,7 +70,9 @@ impl Rustable {
                 self.selected = None;
             }
             ctx.request_repaint();
+            return true;
         }
+        false
     }
 
     pub(super) fn restore_grid_keyboard_focus(
@@ -94,9 +96,10 @@ impl Rustable {
         }
     }
 
-    pub(super) fn navigate_rows_shortcut(&mut self, response: &egui::Response, index: usize) {
-        if !response.has_focus()
-            || self.row_shortcuts_blocked()
+    pub(super) fn navigate_rows_shortcut(&mut self, response: &egui::Response, index: usize, pending_rows: usize) {
+        if !response.enabled() || !response.has_focus()
+            || self.edit.is_some() || self.dialog_owns_workspace_shortcuts() || self.rename.is_some()
+            || self.pending.is_some()
             || egui::Popup::is_any_open(&response.ctx)
             || !matches!(self.view, View::Data | View::Query)
         {
@@ -114,7 +117,9 @@ impl Rustable {
             )
         });
         let grid = self.grid();
-        let count = grid.rows.len();
+        let loaded = grid.rows.len();
+        let count = loaded + pending_rows;
+        if index >= count { return; }
         let column_count = grid.columns.len();
         let mut focused = index;
         let mut moved = false;
@@ -151,20 +156,27 @@ impl Rustable {
                         } else {
                             self.row_selection.cell_column.saturating_sub(1)
                         };
-                        if self.row_selection.cell_columns.is_some() {
+                        if self.row_selection.cell_columns.is_some() || focused >= loaded {
                             let column = self.row_selection.cell_column;
                             self.row_selection.cell_columns = Some((column, column));
                         }
                         self.row_selection.pending_focus = Some(focused);
                         self.row_selection.pending_cell_scroll = true;
                         moved = true;
-                    } else if let Some(next) = self.row_selection.move_vertical(
-                        focused,
-                        *key == egui::Key::ArrowDown,
-                        modifiers.shift,
-                        count,
-                    ) {
+                    } else {
+                        let next = if *key == egui::Key::ArrowDown { focused.saturating_add(1).min(count - 1) } else { focused.saturating_sub(1) };
+                        if next >= loaded {
+                            self.row_selection.focus_pending(next);
+                        } else if focused >= loaded {
+                            let columns = self.row_selection.cell_columns;
+                            self.row_selection.click(next, false, false, None);
+                            self.row_selection.cell_columns = columns;
+                        } else {
+                            self.row_selection.move_vertical(focused, *key == egui::Key::ArrowDown, modifiers.shift, loaded);
+                        }
                         focused = next;
+                        self.row_selection.pending_focus = Some(next);
+                        self.row_selection.pending_cell_scroll = true;
                         moved = true;
                     }
                     false
@@ -174,8 +186,12 @@ impl Rustable {
             });
         });
         if moved {
-            self.selected = (self.row_selection.rows.len() == 1)
-                .then(|| *self.row_selection.rows.first().unwrap());
+            // A key arriving immediately after editor focus returns can precede
+            // egui's focus-lock filter. Cancel its queued spatial focus traversal.
+            response.ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+            self.selected = if focused >= loaded { Some(focused) } else {
+                (self.row_selection.rows.len() == 1).then(|| *self.row_selection.rows.first().unwrap())
+            };
             response.ctx.request_repaint();
         }
     }
@@ -1160,7 +1176,7 @@ mod tests {
                         if popup {
                             egui::Popup::open_id(ctx, egui::Id::new("column-choice"));
                         }
-                        app.navigate_rows_shortcut(&response, 0);
+                        app.navigate_rows_shortcut(&response, 0, 0);
                         remains = ctx.input(|input| {
                             input.events.iter().any(|event| {
                                 matches!(
@@ -1235,7 +1251,7 @@ mod tests {
                     );
                     // Simulate the first dialog frame while grid focus still exists.
                     response.request_focus();
-                    app.navigate_rows_shortcut(&response, 0);
+                    app.navigate_rows_shortcut(&response, 0, 0);
                     app.select_all_rows_shortcut(ctx, Some(0));
                     app.copy_rows_shortcut(ctx, true);
                     assert!(!app.row_delete_shortcut(ctx, true));
@@ -1357,7 +1373,7 @@ mod tests {
                     }],
                     ..Default::default()
                 },
-                |ctx| app.select_all_rows_shortcut(ctx, focused),
+                |ctx| { app.select_all_rows_shortcut(ctx, focused); },
             );
         };
         frame(&mut app, None);

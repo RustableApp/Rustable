@@ -72,13 +72,24 @@ impl ChangeHistory {
         Some(self.current.clone())
     }
 
-    fn cell_target(&self, redo: bool) -> Option<Change> {
+    fn cell_target(&self, redo: bool) -> Option<(Change, Option<String>)> {
         let index = if redo { self.position } else { self.position.checked_sub(1)? };
         let step = self.steps.get(index)?;
-        self.current[step.start..step.start + step.len].iter()
-            .chain(&step.replacement)
-            .find(|change| matches!(change, Change::Cell { .. }))
-            .cloned()
+        let current = &self.current[step.start..step.start + step.len];
+        let change = current.iter().chain(&step.replacement)
+            .find(|change| matches!(change, Change::Cell { .. } | Change::InsertRow { .. } | Change::DeleteRow { .. }))?;
+        let column = if let Change::InsertRow { id, fields, .. } = change {
+            let other = step.replacement.iter().find_map(|change| match change {
+                Change::InsertRow { id: other, fields, .. } if other == id => Some(fields),
+                _ => None,
+            });
+            other.and_then(|other| fields.iter().chain(other).find_map(|(name, _)| {
+                let before = fields.iter().find(|(field, _)| field == name).map(|(_, value)| value);
+                let after = other.iter().find(|(field, _)| field == name).map(|(_, value)| value);
+                (before != after).then(|| name.clone())
+            }))
+        } else { None };
+        Some((change.clone(), column))
     }
 
     fn clear(&mut self) {
@@ -175,6 +186,8 @@ impl Rustable {
         });
         self.selected = self.row_selection.click(row, false, false, self.selected);
         self.row_selection.cell_column = col;
+        self.row_selection.cell_columns = Some((col, col));
+        self.row_selection.pending_focus = Some(row);
         self.row_selection.pending_cell_scroll = true;
     }
 
@@ -237,7 +250,29 @@ impl Rustable {
             self.edit = None;
             let target = self.change_history.cell_target(redo);
             self.restore_change_history(redo);
-            if let Some(target) = target { self.focus_history_cell(target); }
+            if let Some((target, column)) = target {
+                match target {
+                    Change::InsertRow { id, table, .. } if table == self.browse.table && self.view == View::Data => {
+                        if let Some(index) = self.insert_ids().iter().position(|item| *item == id) {
+                            let row = self.table.rows.len() + index;
+                            let col = column.and_then(|name| self.table.columns.iter().position(|c| c == &name)).unwrap_or(0);
+                            self.selected = Some(row);
+                            self.row_selection.focus_pending(row);
+                            self.row_selection.cell_column = col;
+                            self.row_selection.cell_columns = Some((col, col));
+                            self.row_selection.pending_focus = Some(row);
+                            self.row_selection.pending_cell_scroll = true;
+                        }
+                    }
+                    Change::DeleteRow { table, original } if table == self.edit_table() => {
+                        if let Some(row) = self.grid().rows.iter().position(|r| r == &original) {
+                            self.selected = self.row_selection.click(row, false, false, None);
+                            self.row_selection.pending_focus = Some(row);
+                        }
+                    }
+                    target => self.focus_history_cell(target),
+                }
+            }
         }
     }
 }
@@ -657,6 +692,7 @@ mod tests {
             assert!(app.changes.is_empty());
             assert_eq!(app.selected, Some(0));
             assert_eq!(app.edit.as_ref().unwrap().text, "original");
+        assert_eq!(app.row_selection.cell_columns, Some((1, 1)));
         }
         samples.sort_by(f64::total_cmp);
         crate::ui_benchmark::report("history/populated-cell-navigation", &samples);
@@ -698,10 +734,12 @@ mod tests {
         grid_frame(&ctx, &mut app, &mut time, vec![key(false, true), key(false, false)]);
         assert_eq!(app.changes, first);
         assert_eq!(app.edit.as_ref().unwrap().text, "second");
+        assert_eq!(app.row_selection.cell_columns, Some((1, 1)));
         grid_frame(&ctx, &mut app, &mut time, vec![key(false, true), key(false, false)]);
         assert!(app.changes.is_empty());
         assert_eq!(app.selected, Some(0));
         assert_eq!(app.edit.as_ref().unwrap().text, "original");
+        assert_eq!(app.row_selection.cell_columns, Some((1, 1)));
         grid_frame(&ctx, &mut app, &mut time, vec![key(true, true), key(true, false)]);
         assert_eq!(app.changes, first);
         grid_frame(&ctx, &mut app, &mut time, vec![key(true, true), key(true, false)]);

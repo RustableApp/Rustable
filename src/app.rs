@@ -3606,7 +3606,11 @@ Right-click to inspect or remove individual changes",
             if self.view != View::Query {
                 let grid = self.grid();
                 let selected_count = self.row_selection.rows.len().max(usize::from(self.selected.is_some()));
-                let page_range = table_status_label(self.browse.offset, &grid, selected_count);
+                let page_range = if self.view == View::Data && self.selected.is_some_and(|index| index >= grid.rows.len()) {
+                    "New row · pending save".to_owned()
+                } else {
+                    table_status_label(self.browse.offset, &grid, selected_count)
+                };
                 let control_geometry = table_control_geometry(ui, self.view, &page_range);
                 egui::TopBottomPanel::bottom(egui::Id::new((ctx.viewport_id(), "table-view-controls")))
                     .exact_height(control_geometry.height)
@@ -4911,6 +4915,7 @@ Right-click to inspect or remove individual changes",
             }
             self.tabs[self.tab].result_pages.rendering = false;
             if let Some((selected, selection)) = retained
+                && self.tabs[self.tab].result_pages.selection_outside_viewport()
                 && self.selected.is_none()
                 && self.row_selection.rows.is_empty()
             {
@@ -5002,7 +5007,7 @@ Right-click to inspect or remove individual changes",
         } else {
             grid.rows.len()
         };
-        let mut empty_body_click = false;
+        let mut empty_body_double_click = false;
         let mut visible_rows = 0..0;
         let mut sort = None;
         let mut explicit_sort = None;
@@ -5023,7 +5028,7 @@ Right-click to inspect or remove individual changes",
             .row_selection
             .pending_focus
             .take()
-            .filter(|i| *i < grid.rows.len());
+            .filter(|i| *i < grid.rows.len() + insert_ids.len());
         let mut finish = false;
         let editable = self.can_edit_rows();
         // Staged edits are keyed by table. Query results only participate when
@@ -5031,7 +5036,7 @@ Right-click to inspect or remove individual changes",
         let edit_table = self.staged_table().unwrap_or_default().to_owned();
         let edit_columns = self.edit_columns().to_vec();
         let missing_result_key = self.query_edit_target().is_some_and(|target| target.missing_key);
-        let start_edit_key = (editable || missing_result_key)
+        let start_edit_key = (editable || missing_result_key || menu_can_insert)
             && grid_focus.has_focus()
             && self.edit.is_none()
             && self.review.is_none()
@@ -5251,14 +5256,36 @@ Right-click to inspect or remove individual changes",
                         let ui = body.ui_mut();
                         let origin = ui.available_rect_before_wrap().min;
                         let pitch = 22.0 + ui.spacing().item_spacing.y;
-                        // The background response loses hit testing to cells and scrollbars.
-                        // Geometry also excludes the header, gutters between populated cells,
-                        // and pending inserts from the empty-space action.
-                        empty_body_click = grid_focus.interact_pointer_pos().is_some_and(|pos| {
-                            table_clip.contains(pos) && pos.y >= origin.y
-                                && (pos.y >= origin.y + pitch * (logical_rows + insert_ids.len()) as f32
-                                    || pos.x >= origin.x + total_width)
-                        });
+                        // Row tails are selectable row space; only space below all
+                        // loaded/pending rows is empty body space.
+                        let content_right = origin.x + total_width;
+                        let content_bottom = origin.y + pitch * (logical_rows + insert_ids.len()) as f32;
+                        let below = egui::Rect::from_min_max(egui::pos2(table_clip.left(), content_bottom), table_clip.max).intersect(table_clip);
+                        if below.is_positive() {
+                            let blank = ui.interact(below, grid_focus.id.with("blank-below-rows"), egui::Sense::click());
+                            if !self.dialog_owns_workspace_shortcuts() && !egui::Popup::is_any_open(ui.ctx()) {
+                                if blank.clicked() && self.finish_cell_edit() {
+                                    self.selected = None;
+                                    self.row_selection.clear();
+                                    if stored { self.tabs[self.tab].result_pages.clear_selection(); }
+                                    grid_focus.request_focus();
+                                    ui.ctx().request_repaint();
+                                }
+                                empty_body_double_click |= menu_can_insert
+                                    && same_target_double_click(&blank, grid_focus.id.with("empty-body"));
+                            }
+                        }
+                        let tail = egui::Rect::from_min_max(egui::pos2(content_right, origin.y.max(table_clip.top())),
+                            egui::pos2(table_clip.right(), content_bottom.min(table_clip.bottom()))).intersect(table_clip);
+                        if tail.is_positive() {
+                            let response = ui.interact(tail, grid_focus.id.with("row-tails"), egui::Sense::click());
+                            if response.clicked() && !self.dialog_owns_workspace_shortcuts()
+                                && !egui::Popup::is_any_open(ui.ctx()) && self.finish_cell_edit()
+                            {
+                                grid_focus.request_focus();
+                                ui.ctx().request_repaint();
+                            }
+                        }
                         let press = ui.input(|input| input.events.iter().rev().find_map(|event| {
                             match event {
                                 egui::Event::PointerButton { pos, button, pressed: true, modifiers } if matches!(button, egui::PointerButton::Primary | egui::PointerButton::Secondary) => Some((*pos, *modifiers, *button == egui::PointerButton::Secondary)),
@@ -5268,11 +5295,11 @@ Right-click to inspect or remove individual changes",
                         if let Some((pos, modifiers, secondary)) = press
                             && ui.is_enabled() && !ui.is_sizing_pass()
                             && ui.rect_contains_pointer(table_clip)
-                            && pos.x >= origin.x && pos.x < origin.x + total_width
+                            && pos.x >= origin.x && pos.x < table_clip.right()
                             && pos.y >= origin.y
                         {
                             let index = (((pos.y - origin.y) / pitch).floor() as usize).checked_sub(row_offset).unwrap_or(usize::MAX);
-                            if index < grid.rows.len()
+                            if index < grid.rows.len() + insert_ids.len()
                                 && (!self.edit.as_ref().is_some_and(|e| !e.bulk_rows.is_empty()) || self.finish_cell_edit())
                             {
                                 let mut clicked_column = None;
@@ -5284,13 +5311,34 @@ Right-click to inspect or remove individual changes",
                                         break;
                                     }
                                 }
-                                self.selected = if secondary { self.row_selection.context_click(index) } else { self.row_selection.click(index, modifiers.shift, modifiers.command,
-                                    self.selected.filter(|i| *i < grid.rows.len())) };
-                                if !secondary && !modifiers.shift && !modifiers.command {
+                                if index >= grid.rows.len() {
+                                    // Pending rows have stable draft IDs, not loaded-row identities.
+                                    // Keep them out of loaded-row bulk actions while sharing cell geometry.
+                                    self.row_selection.focus_pending(index);
+                                    self.selected = Some(index);
+                                    if let Some(column) = clicked_column { self.row_selection.cell_column = column; }
+                                    self.row_selection.cell_columns = clicked_column.map(|column| (column, column));
+                                } else {
+                                    self.selected = if secondary { self.row_selection.context_click(index) } else { self.row_selection.click(index, modifiers.shift, modifiers.command,
+                                        self.selected.filter(|i| *i < grid.rows.len())) };
+                                }
+                                if index < grid.rows.len() && !secondary && !modifiers.shift && !modifiers.command {
                                     self.row_selection.cell_columns = clicked_column.map(|c| (c, c));
                                     self.row_selection.drag_anchor = Some((index, clicked_column));
                                 }
                                 if self.edit.is_none() { grid_focus.request_focus(); }
+                            } else if stored && pos.x >= content_right {
+                                let global = ((pos.y - origin.y) / pitch).floor() as usize;
+                                if global < logical_rows && self.finish_cell_edit() {
+                                    self.selected = None;
+                                    self.row_selection.clear();
+                                    let tab = &mut self.tabs[self.tab];
+                                    tab.result_pages.clear_selection();
+                                    if let Some((row, _)) = tab.result_pages.select(&tab.grid, global, 0, ui.ctx()) {
+                                        self.selected = self.row_selection.click(row, false, false, None);
+                                    }
+                                    grid_focus.request_focus();
+                                }
                             }
                         }
                         if self.row_selection.drag_anchor.is_some() && self.edit.is_none()
@@ -5325,7 +5373,8 @@ Right-click to inspect or remove individual changes",
                                     .filter(|_| stored && self.tabs[self.tab].result_pages.all_selected)));
                         selection_overlays = grid_selection_rects(body.ui_mut(), &widths,
                             self.row_selection.cell_columns,
-                            self.row_selection.rows.iter().copied().filter(|index| *index < grid.rows.len()).map(|index| index + row_offset))
+                            self.row_selection.rows.iter().copied().filter(|index| *index < grid.rows.len()).map(|index| index + row_offset)
+                                .chain(self.selected.filter(|index| *index >= grid.rows.len() && *index < grid.rows.len() + insert_ids.len())))
                             .into_iter().map(|rect| (rect, table_clip)).collect();
                         body.rows(22.0, logical_rows + insert_ids.len(), |mut row| {
                             let global = row.index();
@@ -5357,7 +5406,9 @@ Right-click to inspect or remove individual changes",
                             }
                             let index = global - row_offset;
                             if index >= grid.rows.len() {
-                                self.insert_grid_row(&mut row, insert_ids[index - grid.rows.len()], index, table_clip);
+                                if let Some(rect) = self.insert_grid_row(&mut row, insert_ids[index - grid.rows.len()], index, table_clip, &grid_focus, start_edit_key) {
+                                    horizontal_scroll_target = Some(rect);
+                                }
                                 return;
                             }
                             let deleting = !edit_table.is_empty() && row_is_deleted(&self.changes, &edit_table, &grid.rows[index]);
@@ -5669,9 +5720,20 @@ Right-click to inspect or remove individual changes",
         }
         self.page_grid_shortcut(&grid_focus);
         let focused_row = self.row_selection.focused.filter(|i| *i < grid.rows.len()).unwrap_or(0);
-        self.select_all_rows_shortcut(&grid_focus.ctx, grid_focus.has_focus().then_some(focused_row));
-        if let Some(index) = self.row_selection.focused.filter(|i| *i < grid.rows.len()) {
-            self.navigate_rows_shortcut(&grid_focus, index);
+        // A newly opened table may have no focused widget yet. Its grid owns
+        // Select All in that case; an editor/search field or another focused
+        // control keeps its own shortcut. Query views still require grid focus.
+        let select_all_focused = grid_focus.has_focus()
+            || (self.view == View::Data && ui.is_enabled()
+                && ui.input(|input| input.focused)
+                && ui.memory(|memory| memory.focused().is_none()));
+        if self.select_all_rows_shortcut(&grid_focus.ctx, select_all_focused.then_some(focused_row)) {
+            grid_focus.request_focus();
+        }
+        if let Some(index) = self.row_selection.focused.or(self.selected).filter(|i| *i < grid.rows.len() + insert_ids.len()) {
+            self.navigate_rows_shortcut(&grid_focus, index, insert_ids.len());
+        }
+        if self.row_selection.focused.is_some_and(|i| i < grid.rows.len()) {
             self.copy_rows_shortcut(&grid_focus.ctx, grid_focus.has_focus());
             if self.row_delete_shortcut(&grid_focus.ctx, grid_focus.has_focus()) {
                 bulk_delete = Some(true);
@@ -5787,10 +5849,9 @@ Right-click to inspect or remove individual changes",
             self.edit = cell_action;
             self.finish_cell_edit();
         }
-        if empty_body_click && menu_can_insert
+        if empty_body_double_click && menu_can_insert
             && !self.dialog_owns_workspace_shortcuts()
             && !egui::Popup::is_any_open(ui.ctx())
-            && same_target_double_click(&grid_focus, grid_focus.id.with("empty-body"))
         {
             self.add_insert();
         }
@@ -8110,6 +8171,14 @@ fn paint_active_cell(ui: &egui::Ui, rect: egui::Rect, table_clip: egui::Rect) {
     painter.circle_filled(rect.right_bottom(), 2.5, coral);
 }
 
+fn insert_fill(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(29, 73, 52)
+    } else {
+        Color32::from_rgb(218, 245, 224)
+    }
+}
+
 fn pending_fill(ui: &egui::Ui) -> Color32 {
     if ui.visuals().dark_mode {
         Color32::from_rgb(89, 73, 24)
@@ -8303,6 +8372,7 @@ fn arrow_button(ui: &mut egui::Ui, descending: bool, label: &str) -> egui::Respo
 
 #[cfg(test)]
 mod interaction_tests {
+    include!("grid_selection_benchmark.rs");
     use super::*;
     fn key(key: egui::Key) -> egui::Event {
         egui::Event::Key {
@@ -13011,14 +13081,61 @@ mod result_pin_tests {
         assert!(!app.tabs[0].result_search.open);
     }
     #[test]
-    fn select_all_results_after_clicking_empty_grid_space() {
+    fn below_grid_clears_and_row_tails_select_with_select_all_available() {
+        for query in [false, true] {
+            for pos in [egui::pos2(200.0, 250.0), egui::pos2(580.0, 50.0)] {
+                let ctx = egui::Context::default();
+                let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+                app.connections = false;
+                app.view = if query { View::Query } else { View::Data };
+                app.tabs[0].focus_editor = false;
+                let grid = Arc::new(Grid {
+                    columns: vec!["id".into(), "name".into()],
+                    rows: (0..3).map(|n| vec![Value::Integer(n), Value::Text(format!("Item {n}"))]).collect(),
+                    ..Default::default()
+                });
+                app.table = grid.clone();
+                app.tabs[0].grid = grid;
+                let frame = |app: &mut Rustable, events| {
+                    ctx.run(egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                        events, ..Default::default()
+                    }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); })
+                };
+                frame(&mut app, vec![]);
+                app.selected = app.row_selection.click(1, false, false, None);
+                app.row_selection.cell_columns = Some((1, 1));
+                for pressed in [true, false] {
+                    frame(&mut app, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+                    }]);
+                }
+                if pos.y < 100.0 {
+                    assert_eq!(app.selected, Some(0), "row tail selects its row, query={query}");
+                    assert_eq!(app.row_selection.rows.iter().copied().collect::<Vec<_>>(), vec![0]);
+                } else {
+                    assert_eq!(app.selected, None, "space below rows clears, query={query}");
+                    assert!(app.row_selection.rows.is_empty());
+                }
+                assert_eq!(app.row_selection.cell_columns, None);
+                frame(&mut app, vec![egui::Event::Key {
+                    key: egui::Key::A, physical_key: None, pressed: true, repeat: false,
+                    modifiers: egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND,
+                }]);
+                assert_eq!(app.row_selection.rows.len(), 3);
+                assert_eq!(app.row_selection.cell_columns, None, "Select All includes every column");
+            }
+        }
+    }
+
+    #[test]
+    fn main_table_select_all_without_prior_cell_focus() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
         app.connections = false;
-        app.show_query();
-        app.tabs[0].focus_editor = false;
-        app.tabs[0].grid = Arc::new(Grid {
-            columns: vec!["answer".into()],
+        app.view = View::Data;
+        app.table = Arc::new(Grid {
+            columns: vec!["id".into()],
             rows: (0..3).map(|n| vec![Value::Integer(n)]).collect(),
             ..Default::default()
         });
@@ -13029,23 +13146,33 @@ mod result_pin_tests {
             }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
         };
         frame(&mut app, vec![]);
-        for already_selected in [false, true] {
-            app.row_selection.clear();
-            if already_selected { app.selected = app.row_selection.click(1, false, false, Some(0)); }
-            ctx.memory_mut(|memory| memory.surrender_focus(app.tabs[0].result_grid_focus.unwrap()));
-            let pos = egui::pos2(200.0, 250.0);
-            for pressed in [true, false] {
-                frame(&mut app, vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
-                    pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
-                }]);
-            }
-            assert!(ctx.memory(|memory| memory.has_focus(app.tabs[0].result_grid_focus.unwrap())));
-            frame(&mut app, vec![egui::Event::Key {
-                key: egui::Key::A, physical_key: None, pressed: true, repeat: false,
-                modifiers: egui::Modifiers::COMMAND,
-            }]);
-            assert_eq!(app.row_selection.rows.len(), 3);
+        assert!(ctx.memory(|m| m.focused().is_none()));
+        frame(&mut app, vec![egui::Event::Key {
+            key: egui::Key::A, physical_key: None, pressed: true, repeat: false,
+            modifiers: egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND,
+        }]);
+        assert_eq!(app.row_selection.rows.len(), 3);
+        app.row_selection.clear();
+        app.selected = None;
+        let field = egui::Id::new("selection-test-filter");
+        let mut text = String::from("filter text");
+        for key in [false, true] {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                events: if key { vec![egui::Event::Key {
+                    key: egui::Key::A, physical_key: None, pressed: true, repeat: false,
+                    modifiers: egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND,
+                }] } else { vec![] },
+                ..Default::default()
+            }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| {
+                let response = ui.add(TextEdit::singleline(&mut text).id(field));
+                if !key { response.request_focus(); }
+                app.data_grid(ui);
+            }); });
         }
+        assert!(app.row_selection.rows.is_empty(), "focused text field owns Cmd+A");
+        let state = TextEdit::load_state(&ctx, field).unwrap();
+        assert_eq!(state.cursor.char_range().unwrap().as_sorted_char_range(), 0..text.len());
     }
 
     #[test]

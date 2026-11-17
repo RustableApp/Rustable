@@ -137,6 +137,8 @@ def measure(binary, source, logs, label, iteration):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--pending-rows', action='store_true', help='Compare pending-row rendering and reediting with the identical fixture')
+    parser.add_argument('--grid-selection', action='store_true', help='Compare Select All and row-tail-click CPU with identical grid input')
     parser.add_argument('--cell-editor', action='store_true', help='Compare selected-cell editing with the identical shared fixture')
     parser.add_argument('--result-search', action='store_true', help='Compare full scans with cancellation checks and result-search panel navigation')
     parser.add_argument('--change-history', action='store_true', help='Compare staged-edit record, undo and redo CPU with identical large values')
@@ -160,6 +162,12 @@ def main():
         BENCHMARKS = ('postgres_connection_profile_frame_benchmark', 'postgres_tls_menu_frame_benchmark')
         EXPECTED.clear()
         EXPECTED.update(('postgres/connection-profile/1100x760', 'postgres/connection-profile/780x600', 'postgres/tls-menu/1100x760', 'postgres/tls-menu/780x600'))
+    if args.pending_rows:
+        BENCHMARKS += ('pending_rows_frame_benchmark',)
+        EXPECTED.update(f'grid/pending/{mode}' for mode in ('idle', 'editing'))
+    if args.grid_selection:
+        BENCHMARKS += ('grid_selection_frame_benchmark',)
+        EXPECTED.update(('grid/selection/select-all', 'grid/selection/row-tail-click'))
     if args.cell_editor:
         BENCHMARKS += ('selected_cell_edit_frame_benchmark',)
         EXPECTED.update(('grid/selected-cell-edit/false', 'grid/selected-cell-edit/true'))
@@ -225,6 +233,25 @@ def main():
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
+            if args.pending_rows:
+                fixture = root / 'src' / 'insert_row_benchmark.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                source = base_path / 'src' / 'inserts.rs'
+                text = source.read_text()
+                if 'include!("insert_row_benchmark.rs");' not in text:
+                    source.write_text(text.replace('mod tests {', 'mod tests {\n    include!("insert_row_benchmark.rs");', 1))
+                metadata['pending_rows_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
+            if args.grid_selection:
+                fixture = root / 'src' / 'grid_selection_benchmark.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                source = base_path / 'src' / 'app.rs'
+                text = source.read_text()
+                if 'include!("grid_selection_benchmark.rs");' not in text:
+                    source.write_text(text.replace('mod interaction_tests {', 'mod interaction_tests {\n    include!("grid_selection_benchmark.rs");', 1))
+                metadata['grid_selection_fixture'] = fixture.read_text()
+                metadata['grid_selection_scope'] = 'Identical click/Select All/row-tail-click inputs; baseline retains selection on blank clicks. 500 rows, 3 columns, 1200x800, 20 warmups/160 samples, synthetic idle jump. CPU layout+tessellation, not presentation.'
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.cell_editor:
                 fixture = root / 'src' / 'cell_edit_contrast_tests.rs'
                 shutil.copy2(fixture, base_path / 'src' / fixture.name)
@@ -374,6 +401,28 @@ def main():
                         raise ValueError('missing 100-entry editing workload')
                     absolute.append(parsed)
                 (logs / 'editing-new-workload.json').write_text(json.dumps(dict(scope='Candidate-only 100-entry scrolling/after-idle workload; no pre-existing feature comparison', runs=absolute), indent=2))
+            if args.pending_rows:
+                absolute = []
+                for index in range(args.runs):
+                    result = run([str(head_binary), 'pending_row_reopen_frame_benchmark', '--ignored', '--nocapture', '--test-threads=1'], root, capture_output=True)
+                    output = result.stdout + result.stderr
+                    (logs / f'head-pending-reopen-{index}.log').write_text(output)
+                    parsed = parse_output(output)
+                    if set(parsed) != {'grid/pending/reopen'}:
+                        raise ValueError('missing pending-row reediting workload')
+                    absolute.append(parsed)
+                (logs / 'pending-reopen-new-workload.json').write_text(json.dumps(dict(scope='Candidate-only pending-row double-click reopening; baseline cannot complete this interaction', runs=absolute), indent=2))
+            if args.pending_rows:
+                absolute = []
+                for index in range(args.runs):
+                    result = run([str(head_binary), 'pending_row_navigation_frame_benchmark', '--ignored', '--nocapture', '--test-threads=1'], root, capture_output=True)
+                    output = result.stdout + result.stderr
+                    (logs / f'head-pending-navigation-{index}.log').write_text(output)
+                    parsed = parse_output(output)
+                    if set(parsed) != {'grid/pending/navigation'}:
+                        raise ValueError('missing pending-row keyboard workload')
+                    absolute.append(parsed)
+                (logs / 'pending-navigation-new-workload.json').write_text(json.dumps(dict(scope='Candidate-only pending-row arrows, Enter, Escape and first navigation after idle; baseline cannot complete this interaction', runs=absolute), indent=2))
             comparisons = compare(base_runs, head_runs)
             report = dict(environment=metadata, base_runs=base_runs, head_runs=head_runs, comparisons=comparisons)
             (logs / 'results.json').write_text(json.dumps(report, indent=2))

@@ -237,6 +237,32 @@ mod tests {
             "inspector selection changed while scrolling"
         );
         assert!(app.tabs[0].result_pages.selection_outside_viewport());
+        // Establish the standalone grid's hit-test regions before sending input.
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 760.0))),
+                ..Default::default()
+            }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+        }
+        // A row-tail click replaces both an offscreen selection and logical Select All.
+        for all_selected in [false, true] {
+            app.tabs[0].result_pages.all_selected = all_selected;
+            for pressed in [true, false] {
+                let pos = egui::pos2(1150.0, 250.0);
+                let _ = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 760.0))),
+                    events: vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                        pos, pressed, button: egui::PointerButton::Primary, modifiers: egui::Modifiers::NONE,
+                    }], ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+            }
+            assert!(app.selected.is_some());
+            assert_eq!(app.row_selection.rows.len(), 1);
+            assert_eq!(app.row_selection.cell_columns, None);
+            assert!(!app.tabs[0].result_pages.all_selected);
+            assert!(!app.tabs[0].result_pages.selection_outside_viewport());
+            assert_eq!(app.tabs[0].result_pages.retained_selection().count(), 0);
+        }
     }
 
     #[test]
@@ -283,7 +309,7 @@ mod tests {
                 modifiers: egui::Modifiers::COMMAND,
                 ..Default::default()
             },
-            |ctx| app.select_all_rows_shortcut(ctx, Some(0)),
+            |ctx| { app.select_all_rows_shortcut(ctx, Some(0)); },
         );
         assert!(app.tabs[0].result_pages.all_selected);
         assert!(app.row_selection.rows.len() <= 256);

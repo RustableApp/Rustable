@@ -16,6 +16,12 @@ three-column reports; use the SQL grid or styled `TableBuilder` for interactive 
 - Use monospace for identifiers and code, regular UI text for labels and metrics.
 - Clip long cells and offer the full value on hover or in a detail view. Never let
   long names push actions offscreen. Headers and cells share alignment and padding.
+- Use green for pending new rows and their inspector fields; keep orange for
+  changes to existing values. Selected pending cells use the shared selection
+  outline. Active inline editors retain a neutral background for text selection.
+- The space to the right of a row selects that row; space below all loaded and
+  pending rows clears selection. Pending rows share the grid cursor: arrows reveal
+  the selected cell and Enter edits writable fields.
 - Make selection and hover intentional. Only give a row a pointer affordance if it
   performs an action. Group lists in surfaces with a heading and count; provide
   loading, empty, error and populated states, not just the happy path.
