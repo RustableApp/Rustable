@@ -15,6 +15,9 @@ use std::{
 const MAX_SESSIONS: usize = 4;
 /// Response size budget so one call cannot flood the client's context.
 const OUTPUT_BUDGET: usize = 256 * 1024;
+/// Hard cap on a complete serialized tool response: the row budget plus room
+/// for small metadata fields. Anything larger becomes an error, never output.
+pub(super) const RESPONSE_LIMIT: usize = OUTPUT_BUDGET + 16 * 1024;
 const CELL_CHARACTERS: usize = 2_000;
 const MAX_QUERY_ROWS: usize = 1_000;
 const MAX_PAGE_ROWS: usize = 500;
@@ -191,6 +194,17 @@ pub(super) fn cell(value: &Value) -> Json {
 /// Converts up to `max_rows` rows while staying inside the shared byte budget.
 /// Reads spilled results from their local store without loading them all.
 fn render(grid: &Grid, max_rows: usize, budget: &mut usize, cancel: &AtomicBool) -> Result<Json, String> {
+    // Headers count too: a zero-row result can still have huge column names.
+    let columns = Json::Array(grid.columns.iter().map(|name| truncate(name)).collect());
+    let header = columns.to_string().len();
+    if header > *budget {
+        return Err(format!(
+            "The result's {} column names do not fit in the {} KiB response limit. Select fewer or shorter columns.",
+            grid.columns.len(),
+            OUTPUT_BUDGET / 1024
+        ));
+    }
+    *budget -= header;
     let mut rows = Vec::new();
     let mut cut = false;
     grid.visit_rows(cancel, |_, row| {
@@ -209,7 +223,7 @@ fn render(grid: &Grid, max_rows: usize, budget: &mut usize, cancel: &AtomicBool)
         Ok(true)
     })?;
     let mut result = Map::new();
-    result.insert("columns".into(), json!(grid.columns));
+    result.insert("columns".into(), columns);
     result.insert("returned_rows".into(), json!(rows.len()));
     result.insert("rows".into(), Json::Array(rows));
     // Cut by max_rows or the response budget; drivers' own bounds are added by callers.
@@ -627,5 +641,31 @@ mod tests {
         assert!(tools.call("read_table", &json!({"connection": "Fixture", "table": "missing"})).unwrap_err().contains("list_tables"));
         assert!(tools.call("read_table", &json!({"connection": "Fixture", "table": "people", "order_by": "nope"})).is_err());
         assert!(tools.call("query", &json!({"sql": "SELECT 1"})).unwrap_err().contains("connection"));
+    }
+
+    #[test]
+    fn column_headers_count_against_the_response_budget() {
+        let (_directory, _database, mut tools) = tools();
+        let aliases = |count: usize| {
+            (0..count).map(|i| format!("{i} AS \"{i}{}\"", "c".repeat(1_995))).collect::<Vec<_>>().join(", ")
+        };
+        // Zero rows, ~400 KiB of headers: previously returned in full.
+        let wide = format!("SELECT {} WHERE 0", aliases(200));
+        let error = tools.call("query", &json!({"connection": "Fixture", "sql": wide})).unwrap_err();
+        assert!(error.contains("column names"), "{error}");
+        // ~120 KiB of headers leave less room for the following rows.
+        let mixed = format!(
+            "SELECT {} WHERE 0; SELECT printf('%.5000c', 'x') AS wide FROM people",
+            aliases(60)
+        );
+        let result = tools
+            .call("query", &json!({"connection": "Fixture", "sql": mixed, "max_rows": 1000}))
+            .unwrap();
+        assert_eq!(result["results"][1]["truncated"], true);
+        assert!(result.to_string().len() <= RESPONSE_LIMIT, "{}", result.to_string().len());
+        // Long single names are shortened like cell text.
+        let long = format!("SELECT 1 AS \"{}\"", "n".repeat(10_000));
+        let result = tools.call("query", &json!({"connection": "Fixture", "sql": long})).unwrap();
+        assert!(result["results"][0]["columns"][0].as_str().unwrap().contains("more characters"));
     }
 }

@@ -440,9 +440,11 @@ impl Client {
 
     /// Pipelines built-in-type metadata with bounded text results. Drains both
     /// responses concurrently; unknown data types never trigger catalog queries.
+    /// `prefix` (non-row-returning commands such as `SET LOCAL`) precedes both
+    /// requests inside each request's own Sync group.
     pub fn query_text_with_metadata<P, I>(
         &mut self, metadata: &str, metadata_params: &[(&(dyn ToSql + Sync), Type)],
-        query: &str, params: I, max_rows: usize, max_bytes: usize,
+        query: &str, params: I, prefix: &[&str], max_rows: usize, max_bytes: usize,
     ) -> Result<(Vec<Row>, Result<(Vec<SimpleQueryMessage>, bool), Error>), Error>
     where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
     {
@@ -451,11 +453,11 @@ impl Client {
             let (metadata, data) = futures_util::future::join(
                 async {
                     self.client.query_typed_raw_bounded_with_prefix(metadata,
-                        metadata_params.iter().map(|(v,t)| (*v,t.clone())), &[], 1, max_bytes)
+                        metadata_params.iter().map(|(v,t)| (*v,t.clone())), prefix, 1, max_bytes)
                         .await?.try_collect::<Vec<Row>>().await
                 },
                 async {
-                    let stream = self.client.query_text_raw(query, params).await?;
+                    let stream = self.client.query_text_raw_with_prefix(query, params, prefix).await?;
                     futures_util::pin_mut!(stream);
                     let mut messages = Vec::new();
                     let mut bytes = 0usize;
@@ -491,6 +493,7 @@ impl Client {
         metadata_params: &[(&(dyn ToSql + Sync), Type)],
         query: &str,
         params: I,
+        prefix: &[&str],
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<(Vec<Row>, Result<RowIter<'_>, Error>), Error>
@@ -504,10 +507,10 @@ impl Client {
                     use futures_util::TryStreamExt;
                     self.client.query_typed_raw_bounded_with_prefix(
                         metadata, metadata_params.iter().map(|(value, ty)| (*value, ty.clone())),
-                        &[], 1, max_bytes,
+                        prefix, 1, max_bytes,
                     ).await?.try_collect::<Vec<Row>>().await
                 },
-                self.client.query_typed_raw_bounded_with_prefix(query, params, &[], max_rows, max_bytes),
+                self.client.query_typed_raw_bounded_with_prefix(query, params, prefix, max_rows, max_bytes),
             ).await;
             Ok((metadata?, stream))
         })?;

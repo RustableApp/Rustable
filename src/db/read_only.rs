@@ -29,7 +29,7 @@ impl ReadOnlySession {
         config: &crate::connection::PostgresConfig,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, String> {
-        let driver = super::postgres::PostgresDriver::open(config, cancel.clone())?;
+        let driver = super::postgres::PostgresDriver::open_read_only(config, cancel.clone())?;
         Ok(Self { driver: Box::new(driver), cancel })
     }
 
@@ -37,7 +37,7 @@ impl ReadOnlySession {
         config: &crate::connection::MysqlConfig,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, String> {
-        let mut driver = super::mysql::open(config, &cancel)?;
+        let mut driver = super::mysql::open_read_only(config, &cancel)?;
         driver.set_cancellation(cancel.clone());
         Ok(Self { driver, cancel })
     }
@@ -151,7 +151,11 @@ mod tests {
             .batch_execute(
                 "DROP SCHEMA IF EXISTS rustable_mcp_qa CASCADE; CREATE SCHEMA rustable_mcp_qa;
                  CREATE TABLE rustable_mcp_qa.items(id serial PRIMARY KEY, label text);
-                 INSERT INTO rustable_mcp_qa.items(label) VALUES ('a'), ('b');",
+                 INSERT INTO rustable_mcp_qa.items(label) VALUES ('a'), ('b');
+                 CREATE TABLE rustable_mcp_qa.audit(n int);
+                 CREATE FUNCTION rustable_mcp_qa.touch() RETURNS int LANGUAGE plpgsql VOLATILE AS
+                   $$ BEGIN INSERT INTO rustable_mcp_qa.audit VALUES (1); RETURN 1; END $$;
+                 CREATE VIEW rustable_mcp_qa.touching AS SELECT rustable_mcp_qa.touch() AS n;",
             )
             .unwrap();
         let config = crate::connection::PostgresConfig {
@@ -194,6 +198,25 @@ mod tests {
         let page = session.browse(&Browse { table: items.name.clone(), limit: 1, ..Browse::default() }).unwrap();
         assert_eq!(page.grid.rows.len(), 1);
         assert!(page.grid.truncated);
+        // Table browsing must be read-only too: a view can call a function that
+        // writes. Cover the cold (catalog-first) and warm (hinted/pipelined) paths,
+        // including after SQL turned the session default off.
+        let touching = objects.iter().find(|o| o.display_name() == "touching").unwrap().name.clone();
+        let view = Browse { table: touching, limit: 10, ..Browse::default() };
+        for attempt in 0..3 {
+            if attempt == 2 {
+                assert!(session.query("SELECT set_config('default_transaction_read_only', 'off', false)").error.is_none());
+            }
+            let error = session.browse(&view).err().unwrap_or_else(|| panic!("browse {attempt} wrote through a view"));
+            assert!(error.contains("read-only"), "{error}");
+        }
+        let writes: i64 = admin.query_one("SELECT count(*) FROM rustable_mcp_qa.audit", &[]).unwrap().get(0);
+        assert_eq!(writes, 0);
+        assert!(session.browse(&Browse { table: items.name.clone(), limit: 1, ..Browse::default() }).is_ok());
+        // Ordinary desktop sessions are unchanged (no read-only prefix).
+        let mut desktop = crate::db::postgres::PostgresDriver::open(&config, Arc::new(AtomicBool::new(false))).unwrap();
+        desktop.select_schema("rustable_mcp_qa").unwrap();
+        assert!(desktop.browse(&view).is_ok());
         admin.batch_execute("DROP SCHEMA rustable_mcp_qa CASCADE").unwrap();
     }
 
@@ -217,9 +240,20 @@ mod tests {
             .query_drop(
                 "DROP TABLE IF EXISTS rustable_mcp_items;
                  CREATE TABLE rustable_mcp_items(id INT AUTO_INCREMENT PRIMARY KEY, label TEXT);
-                 INSERT INTO rustable_mcp_items(label) VALUES ('a'), ('b');",
+                 INSERT INTO rustable_mcp_items(label) VALUES ('a'), ('b');
+                 DROP VIEW IF EXISTS rustable_mcp_touching;
+                 DROP FUNCTION IF EXISTS rustable_mcp_touch;
+                 DROP TABLE IF EXISTS rustable_mcp_audit;
+                 CREATE TABLE rustable_mcp_audit(n INT);",
             )
             .unwrap();
+        admin
+            .query_drop(
+                "CREATE FUNCTION rustable_mcp_touch() RETURNS INT DETERMINISTIC MODIFIES SQL DATA
+                 BEGIN INSERT INTO rustable_mcp_audit VALUES (1); RETURN 1; END",
+            )
+            .unwrap();
+        admin.query_drop("CREATE VIEW rustable_mcp_touching AS SELECT rustable_mcp_touch() AS n").unwrap();
         let mut session = ReadOnlySession::mysql(&config, Arc::new(AtomicBool::new(false))).unwrap();
         let report = session.query("SELECT label FROM rustable_mcp_items ORDER BY id");
         assert!(report.error.is_none(), "{:?}", report.error);
@@ -242,7 +276,21 @@ mod tests {
         let count: Option<i64> = admin.query_first("SELECT count(*) FROM rustable_mcp_items WHERE label IN ('a','b')").unwrap();
         assert_eq!(count, Some(2));
         assert!(session.objects().unwrap().iter().any(|o| o.display_name() == "rustable_mcp_items"));
-        admin.query_drop("DROP TABLE rustable_mcp_items").unwrap();
+        // Table browsing runs in autocommit, not the editor's READ ONLY wrapper:
+        // the session itself must refuse a view's write.
+        let view = Browse { table: "rustable_mcp_touching".into(), limit: 10, ..Browse::default() };
+        for attempt in 0..2 {
+            assert!(session.browse(&view).is_err(), "browse {attempt} wrote through a view");
+        }
+        let writes: Option<i64> = admin.query_first("SELECT count(*) FROM rustable_mcp_audit").unwrap();
+        assert_eq!(writes, Some(0));
+        assert!(session.browse(&Browse { table: "rustable_mcp_items".into(), limit: 1, ..Browse::default() }).is_ok());
+        admin
+            .query_drop(
+                "DROP VIEW rustable_mcp_touching; DROP FUNCTION rustable_mcp_touch;
+                 DROP TABLE rustable_mcp_audit; DROP TABLE rustable_mcp_items",
+            )
+            .unwrap();
     }
 
     #[test]

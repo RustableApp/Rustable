@@ -62,21 +62,26 @@ claude mcp add rustable -- /Applications/Rustable.app/Contents/MacOS/rustable mc
 | `read_table` | Reads one page of rows (`limit` up to 500, `offset`, `order_by`, `descending`). Only the requested page is fetched. |
 | `query` | Runs read-only SQL: `SELECT`, `WITH`, `VALUES`, `SHOW` and `EXPLAIN`, with several statements allowed. Each result set is cut to `max_rows` (up to 1000). |
 
-Each response is limited to about 256 KiB. Long text values are shortened to
-2,000 characters, and binary values are summarized. `truncated: true` means rows
-were left out of the response.
+Each response is limited to about 256 KiB, column names included. Long text
+values and column names are shortened to 2,000 characters, and binary values are
+summarized. `truncated: true` means rows were left out of the response. A
+response that still would not fit (for example a very long view definition)
+returns an error asking for a narrower request instead.
 
 ## How read-only is enforced
 
 The server uses the same Safe mode as the desktop editor. The database server
-enforces it, not just Rustable's statement parsing:
+enforces it, not just Rustable's statement parsing. This covers `read_table` as
+well as `query`, so a view that calls a data-modifying function cannot write:
 
-- **PostgreSQL:** each statement runs in an implicit transaction with
-  `SET LOCAL transaction_read_only = on`. Write statements, data-modifying CTEs,
-  `nextval()` and attempts to turn read-only off are rejected.
-- **MySQL/MariaDB:** statements are checked, then wrapped in
+- **PostgreSQL:** each statement and each table page runs in an implicit
+  transaction with `SET LOCAL transaction_read_only = on`, and the session
+  starts with `default_transaction_read_only`. Write statements, data-modifying
+  CTEs, `nextval()` and attempts to turn read-only off are rejected.
+- **MySQL/MariaDB:** the session is opened with `SET SESSION TRANSACTION READ
+  ONLY`. Statements are also checked, then wrapped in
   `START TRANSACTION READ ONLY … ROLLBACK`. `SELECT … INTO`, executable comments
-  and session changes are rejected.
+  and session changes (including any `SET`) are rejected.
 - **SQLite:** the file is opened with `SQLITE_OPEN_READ_ONLY`, `query_only` is
   on, and `ATTACH` is disabled so a session cannot reach other files.
 
@@ -110,6 +115,8 @@ read-only privileges.
 - `query` reads the complete result on the server side, as the editor does.
   Large results spill to a temporary file before being cut to `max_rows`. Add
   `LIMIT` to large queries, or use `read_table`, which fetches only one page.
-- Clients can cancel a running call with `notifications/cancelled`. Calls that
+- Calls run one at a time. Up to 32 more can wait; further calls fail at once
+  with an error instead of stalling the server.
+- Clients can cancel a running or waiting call with `notifications/cancelled`. Calls that
   run longer than `--timeout` are cancelled with the driver's existing
   cancellation path.

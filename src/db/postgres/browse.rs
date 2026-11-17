@@ -60,8 +60,9 @@ FROM pg_catalog.pg_class r WHERE r.oid=pg_catalog.to_regclass($1)
 pub(super) fn details(driver: &mut PostgresDriver, table: &str) -> Result<(Vec<Index>, Vec<Object>), String> {
     driver.check_tunnel()?;
     let _watch = driver.watch();
+    let prefix = driver.browse_prefix();
     let row = driver.client.query_typed_raw_bounded_with_prefix(
-        DETAILS, [(table, Type::TEXT)], &[], 1, BYTE_LIMIT,
+        DETAILS, [(table, Type::TEXT)], prefix, 1, BYTE_LIMIT,
     ).map_err(error)?.collect::<Vec<_>>().map_err(error)?
         .into_iter().next().ok_or("Table no longer exists")?;
     parse_details(row.get(0), row.get(1))
@@ -89,12 +90,13 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         })
         .map(|(_, row)| row.clone());
     let pipelined = cached.is_some();
+    let prefix = driver.browse_prefix();
     let mut row = match cached {
         Some(row) => row,
         None => driver
             .client
             .query_typed_raw_bounded_with_prefix(
-                CATALOG, [(&request.table, Type::TEXT)], &[], 1, BYTE_LIMIT,
+                CATALOG, [(&request.table, Type::TEXT)], prefix, 1, BYTE_LIMIT,
             )
             .map_err(error)?
             .collect::<Vec<_>>()
@@ -157,7 +159,7 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         let (fresh, rows) = driver
             .client
             .query_typed_raw_with_metadata(
-                CATALOG, &[(&request.table, Type::TEXT)], &sql, values,
+                CATALOG, &[(&request.table, Type::TEXT)], &sql, values, prefix,
                 request.page_size() + 1, BYTE_LIMIT,
             )
             .map_err(error)?;
@@ -185,7 +187,7 @@ pub(super) fn browse(driver: &mut PostgresDriver, request: &Browse) -> Result<Ta
         rows.map_err(error)?
     } else {
         driver.client.query_typed_raw_bounded_with_prefix(
-            &sql, values, &[], request.page_size() + 1, BYTE_LIMIT,
+            &sql, values, prefix, request.page_size() + 1, BYTE_LIMIT,
         ).map_err(error)?
     };
     let names = rows.columns().iter().map(|c| c.name().to_owned()).collect();

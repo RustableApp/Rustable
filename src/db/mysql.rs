@@ -41,6 +41,14 @@ pub(super) fn open(config: &MysqlConfig, cancel: &AtomicBool) -> Result<Box<dyn 
     MysqlDriver::connect_with_cancel(config, cancel).map(|driver| Box::new(driver) as Box<dyn Driver>)
 }
 
+/// Headless read-only sessions (MCP). The session's transactions, including
+/// autocommit table browsing, are read-only. Safe mode rejects every SET, so
+/// SQL cannot lift it; editor statements keep their READ ONLY wrapper.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn open_read_only(config: &MysqlConfig, cancel: &AtomicBool) -> Result<Box<dyn Driver>, String> {
+    MysqlDriver::connect_with_options(config, cancel, true).map(|driver| Box::new(driver) as Box<dyn Driver>)
+}
+
 impl TryFrom<&MysqlConfig> for Box<dyn Driver> {
     type Error = String;
     fn try_from(config: &MysqlConfig) -> Result<Self, String> {
@@ -53,6 +61,9 @@ impl MysqlDriver {
         Self::connect_with_cancel(config, &AtomicBool::new(false))
     }
     fn connect_with_cancel(config: &MysqlConfig, cancel: &AtomicBool) -> Result<Self, String> {
+        Self::connect_with_options(config, cancel, false)
+    }
+    fn connect_with_options(config: &MysqlConfig, cancel: &AtomicBool, read_only: bool) -> Result<Self, String> {
         crate::connection_profiles::MysqlProfile::from(config).validate()?;
         if cancel.load(Ordering::Acquire) { return Err("Connection cancelled".into()); }
         let tunnel = if let Some(ssh) = &config.ssh {
@@ -63,7 +74,12 @@ impl MysqlDriver {
         } else { None };
         let destination = tunnel.as_ref().map(|t| std::net::SocketAddr::from(([127,0,0,1],t.local_port())));
         let mut connection = Conn::new(OptsBuilder::from(config).tcp_destination(destination)).map_err(|e| error_message(&e))?;
-        connection.query_drop("SET SESSION session_track_system_variables = 'sql_mode'").map_err(|e| error_message(&e))?;
+        // One multi-statement exchange either way: read-only adds no round trip.
+        connection.query_drop(if read_only {
+            "SET SESSION session_track_system_variables = 'sql_mode'; SET SESSION TRANSACTION READ ONLY"
+        } else {
+            "SET SESSION session_track_system_variables = 'sql_mode'"
+        }).map_err(|e| error_message(&e))?;
         let (version, database, sql_mode, account): (String, Option<String>, String, String) = connection.query_first(
             "SELECT VERSION(), DATABASE(), @@SESSION.sql_mode, CURRENT_USER()").map_err(|e| error_message(&e))?
             .ok_or("Server did not return session metadata")?;

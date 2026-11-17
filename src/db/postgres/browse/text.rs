@@ -23,6 +23,7 @@ pub(super) fn browse(
             return super::browse(driver, request);
         }
     };
+    let prefix = driver.browse_prefix();
     let (metadata, data) = driver
         .client
         .query_text_with_metadata(
@@ -30,6 +31,7 @@ pub(super) fn browse(
             &[(&request.table, Type::TEXT)],
             &sql,
             bind_values(&parameters),
+            prefix,
             request.page_size() + 1,
             BYTE_LIMIT,
         )

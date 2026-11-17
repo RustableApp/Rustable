@@ -615,6 +615,15 @@ impl Client {
         simple_query::query_text(&self.inner, query, params).await
     }
 
+    /// `query_text_raw` preceded by non-row-returning commands in the same Sync group.
+    pub async fn query_text_raw_with_prefix<P, I>(
+        &self, query: &str, params: I, prefix: &[&str],
+    ) -> Result<SimpleQueryStream, Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        simple_query::query_text_with_prefix(&self.inner, query, params, prefix).await
+    }
+
     /// Executes a statement, returning the number of rows modified.
     ///
     /// A statement may contain parameters, specified by `$n`, where `n` is the index of the parameter of the list

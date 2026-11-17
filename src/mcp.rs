@@ -24,6 +24,9 @@ use std::{
 const PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 /// Largest accepted JSON-RPC message; bounds memory for a single request.
 const MAX_MESSAGE: u64 = 4 * 1024 * 1024;
+/// Calls waiting behind the running one. Further calls fail immediately so the
+/// stdin reader never blocks and can still process cancellations.
+const MAX_QUEUED: usize = 32;
 const DEFAULT_TIMEOUT: u64 = 60;
 
 const INSTRUCTIONS: &str = "Read-only access to the SQL connections saved in the Rustable desktop app. \
@@ -79,7 +82,7 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
 }
 
 #[derive(Clone)]
-struct Output(Arc<Mutex<std::io::Stdout>>);
+struct Output(Arc<Mutex<Box<dyn Write + Send>>>);
 impl Output {
     fn send(&self, message: &Json) {
         let mut line = message.to_string();
@@ -131,10 +134,10 @@ pub(crate) fn run(args: Vec<String>) -> i32 {
     crate::ssh_prompt::refuse_prompts();
     let settings = options.settings.clone().or_else(catalog::Catalog::default_path);
     let catalog = catalog::Catalog::new(settings, options.allow.clone());
-    let output = Output(Arc::new(Mutex::new(std::io::stdout())));
+    let output = Output(Arc::new(Mutex::new(Box::new(std::io::stdout()))));
     let cancel = Arc::new(AtomicBool::new(false));
     let pending = Arc::new(Mutex::new(Pending::default()));
-    let (calls, queue) = mpsc::sync_channel::<Call>(32);
+    let (calls, queue) = mpsc::sync_channel::<Call>(MAX_QUEUED);
 
     let worker = {
         let output = output.clone();
@@ -286,8 +289,20 @@ fn handle(
                 arguments: params.get("arguments").cloned().unwrap_or_else(|| json!({})),
             };
             pending.lock().unwrap().queued.insert(key(&id));
-            if calls.send(call).is_err() {
-                output.error(&id, -32603, "The MCP worker stopped");
+            // Never block: the reader must keep handling cancellations while
+            // the worker is busy.
+            match calls.try_send(call) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    pending.lock().unwrap().queued.remove(&key(&id));
+                    output.result(&id, tool_result(Err(format!(
+                        "{MAX_QUEUED} calls are already waiting. Retry after earlier calls finish."
+                    ))));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    pending.lock().unwrap().queued.remove(&key(&id));
+                    output.error(&id, -32603, "The MCP worker stopped");
+                }
             }
         }
         _ => output.error(&id, -32601, &format!("Method not found: {method}")),
@@ -311,7 +326,15 @@ fn tool_result(outcome: Result<Json, String>) -> Json {
     match outcome {
         Ok(value) => {
             let failed = value.get("error").is_some();
-            json!({"content": [{"type": "text", "text": value.to_string()}], "isError": failed})
+            let text = value.to_string();
+            if text.len() > tools::RESPONSE_LIMIT {
+                return tool_result(Err(format!(
+                    "The response would be {} KiB, over the {} KiB limit. Narrow the request: fewer rows or columns, a name_filter, or a smaller table.",
+                    text.len().div_ceil(1024),
+                    tools::RESPONSE_LIMIT / 1024
+                )));
+            }
+            json!({"content": [{"type": "text", "text": text}], "isError": failed})
         }
         Err(error) => json!({"content": [{"type": "text", "text": error}], "isError": true}),
     }
@@ -351,5 +374,55 @@ mod tests {
         assert_eq!(tool_result(Err("nope".into()))["isError"], true);
         assert_eq!(tool_result(Ok(json!({"results": []})))["isError"], false);
         assert_eq!(tool_result(Ok(json!({"results": [], "error": "x"})))["isError"], true);
+    }
+
+    #[test]
+    fn oversized_responses_become_errors() {
+        let huge = json!({"definition": "x".repeat(tools::RESPONSE_LIMIT)});
+        let result = tool_result(Ok(huge));
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.len() < 1024 && text.contains("limit"), "{text}");
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().write(bytes) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn full_queue_rejects_calls_without_blocking_cancellation() {
+        let captured = Captured::default();
+        let output = Output(Arc::new(Mutex::new(Box::new(captured.clone()))));
+        // Nobody drains the queue, as when the worker is busy with a long call.
+        let (calls, _queue) = mpsc::sync_channel::<Call>(MAX_QUEUED);
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        let cancel = AtomicBool::new(false);
+        let (done, finished) = mpsc::channel();
+        let reader = {
+            let pending = pending.clone();
+            std::thread::spawn(move || {
+                for id in 0..=MAX_QUEUED {
+                    let call = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+                        "params": {"name": "list_connections", "arguments": {}}});
+                    handle(call, &output, &calls, &pending, &cancel);
+                }
+                handle(json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 3}}),
+                    &output, &calls, &pending, &cancel);
+                done.send(()).unwrap();
+            })
+        };
+        finished.recv_timeout(Duration::from_secs(5)).expect("the reader blocked on a full queue");
+        reader.join().unwrap();
+        let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let replies: Vec<Json> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(replies.len(), 1, "{text}");
+        assert_eq!(replies[0]["id"], MAX_QUEUED);
+        assert_eq!(replies[0]["result"]["isError"], true);
+        let state = pending.lock().unwrap();
+        assert!(state.cancelled.contains("3"), "cancellation after a full queue must still be recorded");
+        assert!(!state.queued.contains(&MAX_QUEUED.to_string()));
     }
 }

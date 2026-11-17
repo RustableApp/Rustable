@@ -26,12 +26,42 @@ pub(super) struct PostgresDriver {
     browse_catalog: Vec<(String, Row)>,
     browse_hints: Vec<Object>,
     result_origins: std::collections::HashMap<u32, (String, String)>,
+    /// Headless read-only sessions (MCP): every browse request carries
+    /// `READ_ONLY` in its own Sync group, and the session default is read-only.
+    read_only: bool,
 }
+
+/// Pipelined with the request; adds no exchange.
+const READ_ONLY: &[&str] = &["SET LOCAL transaction_read_only = on"];
 
 impl PostgresDriver {
     pub(super) fn open(
         config: &crate::connection::PostgresConfig,
         cancel: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        Self::open_with(config, cancel, false)
+    }
+
+    /// The startup option is a session default that SQL could change, so
+    /// browse paths also send `READ_ONLY` per request. Editor queries always
+    /// run with Safe mode's per-statement `transaction_read_only`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn open_read_only(
+        config: &crate::connection::PostgresConfig,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        Self::open_with(config, cancel, true)
+    }
+
+    /// Prefix for browse requests; empty for ordinary desktop sessions.
+    fn browse_prefix(&self) -> &'static [&'static str] {
+        if self.read_only { READ_ONLY } else { &[] }
+    }
+
+    fn open_with(
+        config: &crate::connection::PostgresConfig,
+        cancel: Arc<AtomicBool>,
+        read_only: bool,
     ) -> Result<Self, String> {
         let tunnel = if let Some(ssh) = &config.ssh {
             let mut ssh = ssh.clone();
@@ -43,6 +73,9 @@ impl PostgresDriver {
             None
         };
         let mut connection = client_config(config, tunnel.as_ref().map(|t| t.local_port()));
+        if read_only {
+            connection.options("-c statement_timeout=0 -c lock_timeout=0 -c default_transaction_read_only=on");
+        }
         let tls = if config.tls.enabled() {
             connection.ssl_mode(config.tls.ssl_mode());
             Some(MakeTlsConnector::new(
@@ -67,6 +100,7 @@ impl PostgresDriver {
             browse_catalog: Vec::new(),
             browse_hints: Vec::new(),
             result_origins: Default::default(),
+            read_only,
         })
     }
 
@@ -194,7 +228,7 @@ impl Driver for PostgresDriver {
         }
         // Only a new user operation reconnects. Never replay an operation after
         // a transport error: the server may already have committed its writes.
-        let mut replacement = Self::open(&self.config, self.cancel.clone())
+        let mut replacement = Self::open_with(&self.config, self.cancel.clone(), self.read_only)
             .map_err(|error| format!("Could not reconnect to PostgreSQL: {error}. Try again when the connection is available."))?;
         replacement.schemas = self.schemas.clone();
         *self = replacement;

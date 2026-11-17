@@ -50,8 +50,19 @@ pub async fn simple_query(client: &InnerClient, query: &str) -> Result<SimpleQue
 pub async fn query_text<P, I>(client: &InnerClient, query: &str, params: I) -> Result<SimpleQueryStream, Error>
 where P: crate::types::BorrowToSql, I: IntoIterator<Item = (P, crate::types::Type)>,
 {
+    query_text_with_prefix(client, query, params, &[]).await
+}
+
+/// Rustable: non-row-returning prefix commands share the query's Sync group,
+/// so a failed prefix skips the query (see `query::query_typed_with_prefix`).
+pub async fn query_text_with_prefix<P, I>(
+    client: &InnerClient, query: &str, params: I, prefix: &[&str],
+) -> Result<SimpleQueryStream, Error>
+where P: crate::types::BorrowToSql, I: IntoIterator<Item = (P, crate::types::Type)>,
+{
     let params = params.into_iter().collect::<Vec<_>>();
     let buf = client.with_buf(|buf| {
+        crate::query::encode_prefix(prefix, buf)?;
         frontend::parse("", query, params.iter().map(|(_, ty)| ty.oid()), buf).map_err(Error::encode)?;
         crate::query::encode_bind_format("", params, "", 0, buf)?;
         frontend::describe(b'P', "", buf).map_err(Error::encode)?;
@@ -60,6 +71,11 @@ where P: crate::types::BorrowToSql, I: IntoIterator<Item = (P, crate::types::Typ
         Ok(buf.split().freeze())
     })?;
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    for _ in prefix {
+        match responses.next().await? { Message::ParseComplete => {}, _ => return Err(Error::unexpected_message()) }
+        match responses.next().await? { Message::BindComplete => {}, _ => return Err(Error::unexpected_message()) }
+        match responses.next().await? { Message::CommandComplete(_) => {}, _ => return Err(Error::unexpected_message()) }
+    }
     match responses.next().await? { Message::ParseComplete => {}, _ => return Err(Error::unexpected_message()) }
     match responses.next().await? { Message::BindComplete => {}, _ => return Err(Error::unexpected_message()) }
     Ok(SimpleQueryStream { responses, columns: None })

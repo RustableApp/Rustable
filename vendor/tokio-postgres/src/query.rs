@@ -289,7 +289,7 @@ where
     })
 }
 
-fn encode_prefix(prefix: &[&str], buf: &mut BytesMut) -> Result<(), Error> {
+pub(crate) fn encode_prefix(prefix: &[&str], buf: &mut BytesMut) -> Result<(), Error> {
     for command in prefix {
         frontend::parse("", command, std::iter::empty(), buf).map_err(Error::parse)?;
         encode_bind_raw("", std::iter::empty::<(&dyn crate::types::ToSql, Type)>(), "", buf)?;

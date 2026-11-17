@@ -126,6 +126,14 @@ and retry through the fresh sequential path. This fast path is disabled inside
 explicit transactions and while transaction status is unknown. It does not open
 a second session or cache displayed metadata across refreshes.
 
+Both paired-query APIs (`query_text_with_metadata`, `query_typed_raw_with_metadata`)
+and the async `query_text_raw_with_prefix` accept a prefix of non-row-returning
+commands, encoded like the editor's: Parse/Bind/Execute per command inside each
+request's own Sync group, so a failed prefix skips that request. The desktop app
+passes an empty prefix, leaving its wire traffic unchanged. Headless read-only
+(MCP) sessions pass `SET LOCAL transaction_read_only = on`, so a view that calls
+a data-modifying function cannot write while browsing. This adds no exchange.
+
 ## eframe checked persistence
 
 ### macOS resize presentation
