@@ -1349,3 +1349,191 @@ The descriptive p95 increases above 10% are not accepted regressions or passes:
 run-to-run noise prevents attributing them to this change. A quiet-machine repeat
 using the retained binaries is needed to establish performance parity. This run
 saved the baseline rebuild; the single candidate release build took 3m07s.
+
+### Editor indentation and text undo — 2026-11-17
+
+Tab/Shift+Tab preserve selected logical lines and selection direction. Text undo
+ignores cursor-only changes, preserves redo across navigation, and groups adjacent
+typing/deletion with explicit boundaries for paste, cut, indentation, newline and
+replacement. Navigation, focus loss and pauses break typing groups. IME composition
+remains one step through commit. History retains its existing 100-checkpoint bound.
+No database, event-loop, repaint scheduling or renderer path changed.
+
+Compared the working tree against `1b4c0c419da87454f86760fb53004420f57720a0`
+using `python3 scripts/ui-performance.py --base <commit> --query-editor
+--output target/editor-undo-performance`. Apple M4 Max, macOS 27.2.1 arm64,
+Rust 1.99.1, release profile, five alternating serial pairs, default headless 1×
+scale. All **24 metrics passed** the unchanged noise and 10% regression gates.
+Background macOS storage activity was observed and recorded; the paired samples
+nonetheless met the gate. Raw samples, environment and build logs are retained in
+`target/editor-undo-performance/`.
+
+The identical query fixture was copied into the baseline. Existing query layout
+cases retain 20 warmups/160 samples, 760 logical point height and the existing
+result counts and widths. Added history workload: 200 SQL lines at 1200×800,
+20 warmups/160 samples per run, type/undo/redo after a synthetic 30-second idle
+interval; both revisions assert identical final text. Timings include CPU layout
+and tessellation, with fixture reset excluded. Median per-run p50/p95/p99 and the
+worst individual sample, milliseconds:
+
+| Workload | Base p50 / p95 / p99 / max | Candidate p50 / p95 / p99 / max |
+| --- | --- | --- |
+| Typing/undo/redo | .211667 / .217875 / .221875 / .233667 | .213584 / .223958 / .228500 / .277292 |
+| Query 0 results / 1280 | .020583 / .022125 / .024583 / .027125 | .020833 / .023750 / .026792 / .034833 |
+| Query 4 results / 1280 | .052625 / .055083 / .057750 / .063083 | .052542 / .056375 / .059500 / .065708 |
+| Query 128 results / 760 | .055167 / .061125 / .064417 / .069041 | .054584 / .060167 / .063417 / .071084 |
+| Query 4 results / 500 | .052459 / .056833 / .060875 / .064791 | .052208 / .056416 / .060042 / .064833 |
+
+The candidate-only block workload performs Tab then Shift+Tab over 40 Unicode SQL
+lines and asserts exact restoration on every pair, including after synthetic idle.
+20 warmups/160 measured pairs: CPU layout p50 .048208, p95 .054375, p99 .057791,
+max .058083 ms. This is not a speedup comparison: the baseline deletes the block.
+It uses the test context's default viewport and excludes tessellation.
+
+863 release library tests passed, 229 opt-in tests skipped; the block workload also
+passed separately. Strict all-target QA Clippy passed. Focused event tests cover
+both selection directions, character limits, partial indentation, Unicode, immediate
+undo/redo, ordinary key-plus-text events, navigation, replacement, deletion, pauses,
+redo invalidation and IME composition. The performance runner's own tests passed.
+Native screenshots at 2× were inspected for dark 1280×760 after Tab/Undo/Redo and
+light 760×760 after Tab/Undo; the temporary adapter asserted exact text and was
+restored. Captures and adapter sources remain in `target/editor-undo-review/`.
+These checks do not establish exact AppKit grouping parity, physical-input latency,
+60/120 Hz presentation, idle process CPU, mixed-DPI or multi-window behavior.
+Database latency fixtures were not run because database/protocol code is unchanged.
+
+### Sidebar export and table actions (2026-11-17)
+
+Added Command/Shift selection, single and batch CSV/JSON export, definition/name
+commands, and reviewed truncate/drop actions. The context menu has no Select all
+command. Destructive actions always require review, respect safe mode and pending
+edits, and invalidate affected cached table results. No CASCADE or foreign-key
+bypass is added. SQLite truncate uses DELETE and retains sequence state. MySQL
+review explicitly describes implicit commits, including an open transaction.
+
+Baseline `313137447908abd65250e2de583b5fc6cd95132e` is an isolated snapshot of
+HEAD plus the preceding editor fixes, so this comparison isolates sidebar work.
+The prescribed runner output is in `target/table-export-performance/` (18 pass,
+one noisy/inconclusive). A second five-pair comparison passed all 19 metrics in
+`target/table-export-performance-final/`. After the final Query-view selection
+guard, all three sidebar metrics passed again in
+`target/table-export-sidebar-final/`, using the identical preserved baseline
+binary and a rebuilt candidate. Thresholds and fixtures were unchanged.
+
+Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release, headless 1×;
+serial runs, five alternating pairs, 100 measured samples per sidebar case.
+Viewport, warmups, raw samples and environment are retained in the artifacts and
+benchmark source. Background system load was recorded in the review directory.
+Median per-run p50/p95/p99 and worst individual sample, milliseconds:
+
+| Catalog | Base p50 / p95 / p99 / max | Candidate p50 / p95 / p99 / max |
+| --- | --- | --- |
+| 20 | .022500 / .025209 / .026958 / .065750 | .024791 / .026041 / .027875 / .032791 |
+| 200 | .033417 / .036042 / .038875 / .043375 | .035250 / .038583 / .043125 / .046083 |
+| 2000 | .046959 / .050291 / .054417 / .077667 | .048833 / .052584 / .054958 / .058875 |
+
+New candidate-only interaction workloads use 20 warmups and 160 measured frames,
+including layout/tessellation and a synthetic 30-second idle interval. These are
+coverage of new behavior, not baseline speedup claims:
+
+| Workload | p50 / p95 / p99 / max (ms) |
+| --- | --- |
+| Export review, 20 tables | .099416 / .110042 / .116834 / .120167 |
+| Export checkbox, 20 | .101209 / .111083 / .119583 / .123208 |
+| Export review, 2000 | .097333 / .107334 / .110708 / .116833 |
+| Export checkbox, 2000 | .348375 / .381625 / .400709 / .438917 |
+| Destructive review, 20 | .018959 / .021667 / .026666 / .027542 |
+| Destructive review, 2000 | .019042 / .021250 / .021334 / .021416 |
+| Command-click, 20 | .024375 / .027958 / .032042 / .032709 |
+| Command-click, 2000 | .045417 / .053000 / .059500 / .063125 |
+
+Command-click first/after-idle CPU samples were .047333/.024750 ms (20) and
+.049541/.042125 ms (2000). Tests assert actual selection changes without loading
+a table, right-click preservation, review contents, and no hidden prior selection
+from a SQL tab. Review lists are virtualized; filename planning happens only on
+selection/format changes. Native dark 1120×720 and light 820×720 screenshots at
+2× were inspected, with synthetic catalog data and actual pointer events;
+`target/table-export-review/` contains single/bulk menus, export and destructive
+review. Captures perform no database writes. No physical input-to-present,
+60/120 Hz, mixed-DPI, multiple-window, or idle process CPU claim is made.
+
+873 release tests passed, 234 opt-in tests skipped; all three new interaction
+benchmarks passed separately. Strict all-target QA Clippy passed. WASM check
+passed with 83 existing warnings. Disposable SQLite tests cover batch cleanup,
+cancellation, exact output, confirmation and cache invalidation after truncate
+and drop. Disposable MySQL/MariaDB batch and existing full-export tests passed;
+PostgreSQL CSV/JSON and all five release latency tests passed.
+
+The new worker repeats existing bounded export routines, with zero additional
+per-table network exchanges. PostgreSQL healthy built-in-result export remains
+8+B exchanges (begin 1, relation metadata 2, columns 2, prepare 1, bind 1,
+B portal fetches including final empty fetch, commit 1), plus the existing
+conditional Sync when queued cleanup leaves transaction status unknown. Cold and
+warm exports prepare per table; custom values are exported as built-in text.
+Queued Close/Sync cleanup and cancellation-worker teardown are unchanged.
+MySQL/MariaDB remains 3 cold / 2 cached exchanges (combined metadata 1,
+SELECT prepare+execute 2 cold / execute 1 cached), with existing permission/error
+fallbacks unchanged. SQLite has no network. N-table batch repeats these paths N
+times; no preflight or preview queries were introduced. Truncate/drop uses the
+existing query/DDL refresh path, with PostgreSQL targets combined in one statement
+and MySQL truncate using the same statements as equivalent manual SQL. Ordinary
+editor and browse budgets are unchanged.
+
+With 30 ms simulated RTT, PostgreSQL equivalent individual exports had a median
+921.455 ms versus batch 908.280 ms, checking exact numeric/Unicode output and an
+empty table. The first debug latency suite had one pre-existing large-result
+spooling threshold failure (72.7 versus 45.5 ms reference). Investigation retained
+the thresholds: the same release test passed on baseline (49.2 versus 42.2 ms)
+and candidate (47.4 versus 43.7 ms); all five candidate release tests passed.
+Raw debug and release logs, baseline executable provenance and comparison scripts
+are retained under `target/table-export-review/`. Tests used disposable fixtures,
+never a user database.
+
+### Context-menu and confirmation styling follow-up (2026-11-17)
+
+The sidebar was restoring the global widget style after egui had applied its
+menu style. It now reapplies the same `menu_style` used by grid context menus,
+retaining normal hover colors while removing boxed row backgrounds and excess
+button padding. Destructive confirmation uses a responsive width, connection
+subtitle, specific action title/button, aligned affected-table rows and the
+shared cached SQL highlighter. Long previews explicitly disclose truncation;
+execution, confirmation gates and driver paths are unchanged.
+
+Native captures were inspected in `target/table-menu-style-review/`: single and
+bulk menus, dark confirmation at 1120×720 and light confirmation at 820×720,
+2× scale. Shared SQL highlighting is cached and operates on the existing bounded
+statement previews, not the complete catalog or generated bulk SQL. No extra
+repaint loop, network request or database protocol change is introduced.
+
+The focused release comparison uses the preserved pre-styling release executable
+(`target/table-export-review/style-base-tests`) and the same runner build/measure/
+compare functions, unchanged workloads and thresholds, five alternating pairs.
+Raw samples and source hashes are retained in `target/table-menu-style-performance/`
+and `target/table-menu-style-review/`. Hardware, toolchain and measurement scope
+are unchanged from the preceding sidebar comparison. This measures CPU layout
+and tessellation, not physical input-to-present latency.
+
+Median per-run p50/p95/p99 and worst sample, milliseconds:
+
+| Workload | Before p50 / p95 / p99 / max | After p50 / p95 / p99 / max |
+| --- | --- | --- |
+| sidebar/20 | 0.023417 / 0.026250 / 0.030125 / 0.046000 | 0.024750 / 0.025750 / 0.027958 / 0.045750 |
+| sidebar/200 | 0.034583 / 0.038458 / 0.041958 / 0.044166 | 0.035458 / 0.038333 / 0.040958 / 0.088459 |
+| sidebar/2000 | 0.048209 / 0.052083 / 0.056375 / 0.062458 | 0.047917 / 0.052458 / 0.061500 / 0.071583 |
+| sidebar/action-review/20 | 0.021042 / 0.023833 / 0.025042 / 0.026791 | 0.023916 / 0.026375 / 0.028333 / 0.031916 |
+| sidebar/action-review/2000 | 0.021292 / 0.023750 / 0.024417 / 0.053542 | 0.024375 / 0.027250 / 0.027750 / 0.031083 |
+
+All three sidebar p95 comparisons passed. The 20-table confirmation was
+inconclusive (+10.7% median); the 2000-table confirmation showed a repeatable
++14.7% regression, from .023750 to .027250 ms (+.003500 ms). This is an accepted
+cost of clearer connection/action context, a separated action footer and shared
+syntax-highlighted SQL. Plain text would avoid some work but would not meet the
+requested SQL preview design. The shared highlighter already caches syntax and
+layout; the preview is bounded and table rows remain virtualized. No threshold
+was relaxed. The cost is limited to an open confirmation dialog, not typing,
+scrolling results or database execution. Worst samples are retained above;
+there is no claim of improved native presentation latency.
+
+Final release suite: 873 passed, 234 opt-in tests ignored. Strict all-target QA
+Clippy and `git diff --check` passed. Database latency tests were not repeated
+for this presentation-only follow-up; no execution/driver path changed.

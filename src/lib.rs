@@ -161,6 +161,10 @@ pub fn run_native() -> eframe::Result {
         return app::Rustable::run_result_pages_preview();
     }
     #[cfg(feature = "qa")]
+    if std::env::var_os("RUSTABLE_TABLE_EXPORT_CAPTURE").is_some() {
+        return app::Rustable::run_table_export_preview();
+    }
+    #[cfg(feature = "qa")]
     if std::env::var_os("RUSTABLE_QUERY_CAPTURE").is_some() {
         return app::Rustable::run_query_layout_preview();
     }

@@ -17,7 +17,7 @@ use crate::{
     vec2,
 };
 
-use super::{TextEditOutput, TextEditState};
+use super::{TextEditOutput, TextEditState, state::EditKind};
 
 type LayouterFn<'t> = &'t mut dyn FnMut(&Ui, &dyn TextBuffer, f32) -> Arc<Galley>;
 
@@ -816,6 +816,9 @@ impl TextEdit<'_> {
         }
 
         // Ensures correct IME behavior when the text input area gains or loses focus.
+        if response.lost_focus() {
+            state.edit_group = None;
+        }
         if state.ime_enabled && (response.gained_focus() || response.lost_focus()) {
             state.ime_enabled = false;
             if let Some(mut ccursor_range) = state.cursor.char_range() {
@@ -928,10 +931,12 @@ fn events(
 
     // We feed state to the undoer both before and after handling input
     // so that the undoer creates automatic saves even when there are no events for a while.
-    state.undoer.lock().feed_state(
-        ui.input(|i| i.time),
-        &(cursor_range, text.as_str().to_owned()),
-    );
+    if !state.ime_enabled {
+        state
+            .undoer
+            .lock()
+            .feed_text(ui.input(|i| i.time), cursor_range, text.as_str());
+    }
 
     let copy_if_not_password = |ui: &Ui, text: String| {
         if !password {
@@ -950,9 +955,60 @@ fn events(
     }
 
     for event in &events {
+        let time = ui.input(|i| i.time);
+        let history_key = matches!(event, Event::Key { key: Key::Z | Key::Y, pressed: true, modifiers, .. } if modifiers.command);
+        let kind = match event {
+            Event::Text(value) if !value.is_empty() => Some(EditKind::Typing),
+            Event::Key {
+                key: Key::Backspace,
+                pressed: true,
+                modifiers,
+                ..
+            } if !modifiers.any() => Some(EditKind::Backspace),
+            Event::Key {
+                key: Key::Delete,
+                pressed: true,
+                modifiers,
+                ..
+            } if !modifiers.any() => Some(EditKind::Delete),
+            Event::Key {
+                key: Key::H | Key::K | Key::U | Key::W,
+                pressed: true,
+                modifiers,
+                ..
+            } if modifiers.ctrl => Some(EditKind::Action),
+            Event::Ime(ImeEvent::Enabled | ImeEvent::Preedit(_)) => Some(EditKind::Composition),
+            Event::Paste(_) | Event::Cut | Event::Ime(_) => Some(EditKind::Action),
+            Event::Key {
+                key: Key::Tab | Key::Enter | Key::Backspace | Key::Delete,
+                pressed: true,
+                ..
+            } => Some(EditKind::Action),
+            _ => None,
+        };
+        let discrete = kind == Some(EditKind::Action) || !cursor_range.is_empty();
+        let boundary = discrete
+            || !state
+                .edit_group
+                .is_some_and(|(last_kind, last_cursor, last_time)| {
+                    Some(last_kind) == kind && last_cursor == cursor_range && time - last_time < 1.0
+                });
+        if kind.is_some()
+            && boundary
+            && !history_key
+            && !(state.ime_enabled && matches!(event, Event::Ime(_)))
+        {
+            state
+                .undoer
+                .lock()
+                .add_undo(&(cursor_range, text.as_str().to_owned()));
+        }
         let did_mutate_text = match event {
             // First handle events that only changes the selection cursor, not the text:
-            event if cursor_range.on_event(os, event, galley, id) => None,
+            event if cursor_range.on_event(os, event, galley, id) => {
+                state.edit_group = None;
+                None
+            }
 
             Event::Copy => {
                 if !cursor_range.is_empty() {
@@ -1000,16 +1056,12 @@ fn events(
                 pressed: true,
                 modifiers,
                 ..
-            } if multiline => {
-                let mut ccursor = text.delete_selected(&cursor_range);
-                if modifiers.shift {
-                    // TODO(emilk): support removing indentation over a selection?
-                    text.decrease_indentation(&mut ccursor);
-                } else {
-                    text.insert_text_at(&mut ccursor, "\t", char_limit);
-                }
-                Some(CCursorRange::one(ccursor))
-            }
+            } if multiline => Some(indent_selection(
+                text,
+                cursor_range,
+                modifiers.shift,
+                char_limit,
+            )),
             Event::Key {
                 key,
                 pressed: true,
@@ -1133,20 +1185,113 @@ fn events(
 
             // Set cursor_range using new galley:
             cursor_range = new_ccursor_range;
+            if kind.is_some() && !history_key {
+                // Finish explicit actions and words; adjacent typing/deletion
+                // coalesces until navigation, a pause, or another edit kind.
+                let word_end =
+                    matches!(event, Event::Text(value) if value.ends_with(char::is_whitespace));
+                if (discrete || word_end) && kind != Some(EditKind::Composition) {
+                    let snapshot = (cursor_range, text.as_str().to_owned());
+                    let mut undoer = state.undoer.lock();
+                    undoer.feed_state(time, &snapshot); // invalidate redo after new text
+                    undoer.add_undo(&snapshot);
+                    state.edit_group = None;
+                } else {
+                    state.edit_group = kind.map(|kind| (kind, cursor_range, time));
+                }
+            } else {
+                state.edit_group = None;
+            }
+        } else if history_key || matches!(event, Event::PointerButton { pressed: true, .. }) {
+            state.edit_group = None;
         }
     }
 
     state.cursor.set_char_range(Some(cursor_range));
 
-    state.undoer.lock().feed_state(
-        ui.input(|i| i.time),
-        &(cursor_range, text.as_str().to_owned()),
-    );
+    if !state.ime_enabled {
+        state
+            .undoer
+            .lock()
+            .feed_text(ui.input(|i| i.time), cursor_range, text.as_str());
+    }
 
     (any_change, cursor_range)
 }
 
 // ----------------------------------------------------------------------------
+
+/// Indent logical lines, preserving selection direction and character offsets.
+/// A selection ending at the next line's start does not include that line.
+fn indent_selection(
+    text: &mut dyn TextBuffer,
+    mut selection: CCursorRange,
+    unindent: bool,
+    char_limit: usize,
+) -> CCursorRange {
+    if selection.is_empty() && !unindent {
+        text.insert_text_at(&mut selection.primary, "\t", char_limit);
+        selection.secondary = selection.primary;
+        return selection;
+    }
+    let original_selection = selection;
+    let range = selection.as_sorted_char_range();
+    let source = text.as_str();
+    let mut result = String::with_capacity(source.len());
+    let mut offset = 0;
+    let mut delta: isize = 0;
+    let mut inserted = 0;
+    for line in source
+        .split_inclusive('\n')
+        .chain(source.ends_with('\n').then_some(""))
+    {
+        let len = line.chars().count();
+        let affected = offset <= range.end
+            && (offset + len > range.start
+                || (range.is_empty() && offset + len == range.start && !line.ends_with('\n')))
+            && (offset < range.end || range.is_empty());
+        if affected {
+            let removed = if unindent {
+                if line.starts_with('\t') {
+                    1
+                } else {
+                    line.chars()
+                        .take(crate::text::TAB_SIZE)
+                        .take_while(|&c| c == ' ')
+                        .count()
+                }
+            } else {
+                0
+            };
+            let added = usize::from(!unindent);
+            for cursor in [&mut selection.primary, &mut selection.secondary] {
+                let start = offset.wrapping_add_signed(delta);
+                if cursor.index >= start {
+                    cursor.index = cursor
+                        .index
+                        .saturating_sub(removed.min(cursor.index - start))
+                        + added;
+                }
+            }
+            if added != 0 {
+                result.push('\t');
+            }
+            // Removed indentation is ASCII, so its byte and character lengths match.
+            result.push_str(&line[removed..]);
+            delta += added as isize - removed as isize;
+            inserted += added;
+        } else {
+            result.push_str(line);
+        }
+        offset += len;
+    }
+    // Keep a block edit atomic when a bounded editor cannot fit every indent.
+    if inserted > char_limit.saturating_sub(offset) {
+        return original_selection;
+    }
+    text.replace_with(&result);
+    selection
+}
 
 fn remove_ime_incompatible_events(events: &mut Vec<Event>) {
     // Remove key events which cause problems while 'IME' is being used.

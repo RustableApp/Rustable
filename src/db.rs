@@ -13,8 +13,9 @@ mod mysql_results;
 mod mysql_values;
 pub mod result_store;
 mod row_export;
+pub(crate) mod table_export;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum ExportFormat { Csv, Json }
 pub mod csv_import;
@@ -333,6 +334,12 @@ pub enum Command {
     },
     #[cfg(target_arch = "wasm32")]
     DownloadTable { format: ExportFormat, browse: Browse },
+    #[cfg(not(target_arch = "wasm32"))]
+    ExportTables {
+        directory: PathBuf,
+        tables: Vec<(String, String)>,
+        format: ExportFormat,
+    },
     ExportTable {
         format: ExportFormat,
         path: PathBuf,
@@ -701,6 +708,10 @@ fn handle(
         Command::DownloadTable { browse, format } => {
             let bytes = driver.export_table_bytes(&browse, cancel, format)?;
             Ok(Payload::Download { bytes, format })
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        Command::ExportTables { directory, tables, format } => {
+            table_export::export(driver.as_mut(), &directory, &tables, format, cancel).map(Payload::Exported)
         }
         Command::ExportTable { path, browse, format } => {
             driver.export_table(&path, &browse, cancel, format)?;

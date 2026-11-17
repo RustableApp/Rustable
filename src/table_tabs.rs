@@ -26,6 +26,16 @@ struct TableSnapshot {
     foreign_keys: Vec<db::foreign_keys::ForeignKey>,
 }
 impl Rustable {
+    /// Context DDL can invalidate cached data even when a later statement fails.
+    /// Mark only affected snapshots stale; reload on revisit, never during review.
+    pub(super) fn invalidate_context_table_snapshots(&mut self, names: &[String]) {
+        if names.is_empty() { return; }
+        for tab in &mut self.table_tabs {
+            if names.contains(&tab.browse.table) { tab.snapshot = None; }
+        }
+        if names.contains(&self.browse.table) { self.table_loaded = false; }
+    }
+
     pub(super) fn remember_table_tab(&mut self) {
         if self.browse.table.is_empty() || self.view == View::Query {
             return;

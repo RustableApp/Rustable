@@ -685,3 +685,92 @@ fn catalog_wan_latency_comparison() {
     drop(driver);
     proxy.join().unwrap();
 }
+
+#[test]
+#[ignore = "opted-in disposable PostgreSQL bulk export latency comparison"]
+fn bulk_export_wan_latency_comparison() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let proxy = std::thread::spawn(move || {
+        let (downstream, _) = listener.accept().unwrap();
+        let upstream = TcpStream::connect("127.0.0.1:54329").unwrap();
+        upstream.set_nodelay(true).unwrap();
+        downstream.set_nodelay(true).unwrap();
+        fn forward(mut source: TcpStream, mut target: TcpStream) {
+            // Delay arrival, not every sequential read: packets already in
+            // flight must overlap just as they do on a real network link.
+            let shutdown = source.try_clone().unwrap();
+            let (send, receive) = std::sync::mpsc::sync_channel(64);
+            let reader = std::thread::spawn(move || {
+                let mut bytes = [0u8; 65536];
+                while let Ok(length) = source.read(&mut bytes) {
+                    if length == 0 {
+                        break;
+                    }
+                    let deadline = Instant::now() + Duration::from_millis(15);
+                    if send.send((deadline, bytes[..length].to_vec())).is_err() {
+                        break;
+                    }
+                }
+            });
+            while let Ok((deadline, bytes)) = receive.recv() {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                if target.write_all(&bytes).is_err() {
+                    break;
+                }
+            }
+            drop(receive);
+            let _ = shutdown.shutdown(std::net::Shutdown::Both);
+            let _ = target.shutdown(std::net::Shutdown::Both);
+            reader.join().unwrap();
+        }
+
+        let reverse_source = upstream.try_clone().unwrap();
+        let reverse_target = downstream.try_clone().unwrap();
+        let reverse = std::thread::spawn(move || forward(reverse_source, reverse_target));
+        forward(downstream, upstream);
+        reverse.join().unwrap();
+    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig {
+        host: "127.0.0.1".into(), port, database:"rustable_qa".into(), user:"postgres".into(),
+        password:"rustable_qa_only".into(), tls:crate::connection::PostgresTlsMode::Disable, ssh:None,
+    }, cancel.clone()).unwrap();
+    driver.client.batch_execute("CREATE TEMP TABLE bulk_export_rows(id integer PRIMARY KEY, value numeric, label text); INSERT INTO bulk_export_rows SELECT n, 12345678901234567890.12, '日本' FROM generate_series(1,130) n; CREATE TEMP TABLE bulk_export_empty(value text)").unwrap();
+    let tables = vec![("bulk_export_rows".into(), "rows".into()), ("bulk_export_empty".into(), "empty".into())];
+    let destination = tempfile::tempdir().unwrap();
+    let mut individual = Vec::new();
+    let mut batch = Vec::new();
+    for iteration in 0..4 {
+        for bulk in if iteration % 2 == 0 { [false, true] } else { [true, false] } {
+            let started = Instant::now();
+            let paths = if bulk {
+                let directory = crate::db::table_export::export(&mut driver, destination.path(), &tables, ExportFormat::Json, &cancel).unwrap();
+                tables.iter().enumerate().map(|(index, (_, label))| directory.join(crate::db::table_export::filename(label, index, ExportFormat::Json))).collect::<Vec<_>>()
+            } else {
+                tables.iter().enumerate().map(|(index, (name, _))| {
+                    let path = destination.path().join(format!("individual-{index}.json"));
+                    driver.export_table(&path, &Browse { table:name.clone(), ..Default::default() }, &cancel, ExportFormat::Json).unwrap();
+                    path
+                }).collect::<Vec<_>>()
+            };
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("bulk export iteration={iteration} batch={bulk} complete_ms={elapsed:.3}");
+            if iteration > 0 { if bulk { batch.push(elapsed); } else { individual.push(elapsed); } }
+            let rows: serde_json::Value = serde_json::from_slice(&std::fs::read(&paths[0]).unwrap()).unwrap();
+            assert_eq!(rows.as_array().unwrap().len(),130);
+            assert_eq!(rows[0]["value"],"12345678901234567890.12");
+            assert_eq!(rows[0]["label"],"日本");
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&paths[1]).unwrap()).unwrap(),serde_json::json!([]));
+        }
+    }
+    individual.sort_by(f64::total_cmp);
+    batch.sort_by(f64::total_cmp);
+    eprintln!("30ms RTT, two full exports: individual median={:.3}ms batch median={:.3}ms", individual[1], batch[1]);
+    assert!(batch[1] < individual[1] * 1.15, "batch orchestration added a serial network wait");
+    drop(driver);
+    proxy.join().unwrap();
+}

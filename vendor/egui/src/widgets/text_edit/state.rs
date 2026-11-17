@@ -7,7 +7,71 @@ use crate::{
     text_selection::{CCursorRange, TextCursorState},
 };
 
-pub type TextEditUndoer = crate::util::undoer::Undoer<(CCursorRange, String)>;
+/// Text history compares content, never cursor movement. Cursor snapshots are
+/// still retained so undo restores the selection belonging to the edit.
+#[derive(Clone, Debug, Default)]
+pub struct TextEditUndoer(crate::util::undoer::Undoer<TextSnapshot>);
+
+#[derive(Clone, Debug)]
+struct TextSnapshot((CCursorRange, String));
+
+impl PartialEq for TextSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.1 == other.0.1
+    }
+}
+
+impl TextEditUndoer {
+    pub fn has_undo(&self, current: &(CCursorRange, String)) -> bool {
+        self.any_undo(|(_, text)| text != &current.1)
+    }
+
+    pub fn any_undo(&self, predicate: impl Fn(&(CCursorRange, String)) -> bool) -> bool {
+        self.0.any_undo(|snapshot| predicate(&snapshot.0))
+    }
+
+    pub fn has_redo(&self, current: &(CCursorRange, String)) -> bool {
+        self.0.has_redo(&TextSnapshot(current.clone()))
+    }
+
+    pub fn undo(&mut self, current: &(CCursorRange, String)) -> Option<&(CCursorRange, String)> {
+        self.0
+            .undo(&TextSnapshot(current.clone()))
+            .map(|snapshot| &snapshot.0)
+    }
+
+    pub fn redo(&mut self, current: &(CCursorRange, String)) -> Option<&(CCursorRange, String)> {
+        self.0
+            .redo(&TextSnapshot(current.clone()))
+            .map(|snapshot| &snapshot.0)
+    }
+
+    pub fn add_undo(&mut self, current: &(CCursorRange, String)) {
+        let snapshot = TextSnapshot(current.clone());
+        // An explicit edit boundary should remember its current selection even
+        // when the text matches the preceding checkpoint.
+        self.0.refresh_latest(&snapshot);
+        self.0.add_undo(&snapshot);
+    }
+
+    pub(crate) fn feed_text(&mut self, time: f64, cursor: CCursorRange, text: &str) {
+        self.0
+            .feed_state(time, &TextSnapshot((cursor, text.to_owned())));
+    }
+
+    pub fn feed_state(&mut self, time: f64, current: &(CCursorRange, String)) {
+        self.0.feed_state(time, &TextSnapshot(current.clone()));
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditKind {
+    Typing,
+    Backspace,
+    Delete,
+    Action,
+    Composition,
+}
 
 /// The text edit state stored between frames.
 ///
@@ -40,6 +104,10 @@ pub struct TextEditState {
     /// Wrapped in Arc for cheaper clones.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) undoer: Arc<Mutex<TextEditUndoer>>,
+
+    /// Last coalescible edit: kind, resulting cursor and timestamp. No text copy.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) edit_group: Option<(EditKind, CCursorRange, f64)>,
 
     // If IME candidate window is shown on this text edit.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -90,6 +158,7 @@ impl TextEditState {
     #[expect(clippy::needless_pass_by_ref_mut)] // Intentionally hide interiority of mutability
     pub fn set_undoer(&mut self, undoer: TextEditUndoer) {
         *self.undoer.lock() = undoer;
+        self.edit_group = None;
     }
 
     pub fn clear_undoer(&mut self) {

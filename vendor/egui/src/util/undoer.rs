@@ -165,6 +165,13 @@ where
         }
     }
 
+    /// Refresh metadata that is intentionally excluded from state equality.
+    pub(crate) fn refresh_latest(&mut self, state: &State) {
+        if self.undos.back() == Some(state) {
+            *self.undos.back_mut().unwrap() = state.clone();
+        }
+    }
+
     /// Add an undo point if, and only if, there has been a change since the latest undo point.
     pub fn add_undo(&mut self, current_state: &State) {
         if self.undos.back() != Some(current_state) {

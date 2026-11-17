@@ -302,5 +302,48 @@ mod tests {
             samples.sort_by(f64::total_cmp);
             crate::ui_benchmark::report(&format!("query/editor-results/{count}/{width}"), &samples);
         }
+
+        // Same input and text on both revisions; includes first input after idle.
+        let ctx = egui::Context::default();
+        let id = egui::Id::new("history-benchmark");
+        let original = "SELECT id, name FROM customers;\n".repeat(200);
+        let mut text = original.clone();
+        let mut samples = Vec::new();
+        for index in 0..180 {
+            text.clone_from(&original);
+            let time = index as f64 * 31.0;
+            let mut state = egui::TextEdit::load_state(&ctx, id).unwrap_or_default();
+            state.clear_undoer();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+            state.store(&ctx, id);
+            ctx.memory_mut(|m| m.request_focus(id));
+            for measured in [false, true] {
+                let mut events = Vec::new();
+                if measured {
+                    events.push(egui::Event::Text("a".into()));
+                    for modifiers in [egui::Modifiers::COMMAND, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT] {
+                        for pressed in [true, false] {
+                            events.push(egui::Event::Key { key: egui::Key::Z, physical_key: None, pressed, repeat: false, modifiers });
+                        }
+                    }
+                }
+                let started = std::time::Instant::now();
+                let output = ctx.run(egui::RawInput {
+                    events, time: Some(time + if measured { 30.0 } else { 0.0 }),
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                    ..Default::default()
+                }, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        egui::TextEdit::multiline(&mut text).id(id).code_editor()
+                            .layouter(&mut crate::editor::editor_layout).show(ui);
+                    });
+                });
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                if measured && index >= 20 { samples.push(started.elapsed().as_secs_f64() * 1000.0); }
+            }
+            assert_eq!(text, format!("a{original}"));
+        }
+        samples.sort_by(f64::total_cmp);
+        crate::ui_benchmark::report("query/editor-history", &samples);
     }
 }

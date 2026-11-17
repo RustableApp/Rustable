@@ -297,8 +297,30 @@ undoer lock without cloning retained text history.
 `has_text_undo` inspects retained text states without copying the history and
 ignores cursor-only undo points when deciding whether to hand off to table Undo.
 `has_redo` retains text Redo until it is exhausted. These accessors run only for
-explicit shortcut events. The upstream text-edit undo/redo algorithm and SQL
-editor behavior are unchanged.
+explicit shortcut events.
+
+### Text editor indentation and undo grouping
+
+The shared `egui::TextEdit` indents selected logical lines without deleting them;
+Shift+Tab removes a tab or up to `TAB_SIZE` leading spaces. Selection direction
+and Unicode character offsets are preserved. A selection ending at the next
+line's start excludes that line. Block edits respect character limits atomically
+and rebuild the buffer in one linear pass, rather than shifting it per line.
+
+Text history compares text, retaining cursor snapshots for restoration without
+creating cursor-only undo steps or clearing redo on navigation. Typing coalesces
+within words and deletion coalesces by direction; selection replacement, paste,
+cut, newline and indentation have explicit boundaries. Navigation, a one-second
+pause and programmatic edits break coalescing. IME preedit is retained as one
+composition through commit, including pauses. The existing 100-checkpoint bound
+is preserved. This is a shared editor policy inspired by native editing, not an
+AppKit undo manager or a claim of identical grouping in every macOS application.
+
+`src/editor.rs` exercises real focused TextEdit events, selection, Unicode,
+immediate undo/redo, navigation, replacement, limits and composition. The query
+layout performance fixture also measures typing/undo/redo on identical content
+in both revisions; block indentation has a candidate-only workload because the
+baseline destroys the selected text.
 
 ### Compact field caret height
 

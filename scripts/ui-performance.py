@@ -183,6 +183,7 @@ def main():
         EXPECTED.update(f'sql/layout/{name}/{editing}' for name in ('query', 'whitespace') for editing in ('false', 'true', 'resize'))
     if args.query_editor:
         BENCHMARKS += ('query_editor_results_frame_benchmark',)
+        EXPECTED.add('query/editor-history')
         EXPECTED.update(f'query/editor-results/{count}/{width}' for count, width in ((0,1280),(4,1280),(128,760),(4,500)))
     if args.redis:
         BENCHMARKS += ('redis_key_grid_frame_benchmark', 'redis_hash_inspector_frame_benchmark', 'redis_string_inspector_frame_benchmark', 'redis_browser_chrome_frame_benchmark')

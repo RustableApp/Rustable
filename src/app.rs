@@ -12,6 +12,8 @@ mod query_result_tabs;
 #[cfg(any(test, feature = "qa"))]
 #[path = "query_layout_qa.rs"]
 mod query_layout_qa;
+#[path = "table_export.rs"]
+mod table_export;
 #[path = "table_tabs.rs"]
 mod table_tabs;
 #[path = "navigator.rs"]
@@ -97,6 +99,7 @@ impl Default for ConnectionStyle {
 /// Editor SQL held back until the user confirms its destructive statements.
 struct DestructiveRun {
     tab_id: u64,
+    invalidate_tables: Vec<String>,
     sql: String,
     source: (String, usize),
     findings: Vec<crate::sql::destructive::Finding>,
@@ -364,6 +367,8 @@ enum FileAction {
     Open(PathBuf),
     Export(PathBuf, Arc<Grid>, db::ExportFormat),
     ExportTable(PathBuf, Browse, String, db::ExportFormat),
+    #[cfg(not(target_arch = "wasm32"))]
+    SidebarExportDestination(u64, Option<PathBuf>),
 }
 #[derive(Clone)]
 struct CellEdit {
@@ -494,6 +499,9 @@ pub struct Rustable {
     connected_database: Option<String>,
     table_display_name: Option<(String, String)>,
     objects: Vec<Object>,
+    sidebar_selection: table_export::Selection,
+    sidebar_export: Option<table_export::Dialog>,
+    sidebar_export_epoch: u64,
     browse: Browse,
     columns: Vec<Column>,
     details_loaded: bool,
@@ -1206,6 +1214,9 @@ impl Rustable {
             csv_empty_as_null: false,
             csv_postgres_inserts: false,
             csv_review: None,
+            sidebar_selection: Default::default(),
+            sidebar_export: None,
+            sidebar_export_epoch: 0,
             inspector: true,
             history: false,
             query_library: Default::default(),
@@ -1269,6 +1280,11 @@ impl Rustable {
         }
         #[cfg(target_arch = "wasm32")]
         if matches!(command, Command::Open(None)) { self.worker.restart_if_failed(); }
+        if command.replaces_connection() || matches!(command, Command::SelectSchema(_)) {
+            self.sidebar_selection = Default::default();
+            self.sidebar_export = None;
+            self.sidebar_export_epoch = self.sidebar_export_epoch.wrapping_add(1);
+        }
         let history_sql = match &command { Command::Query { sql, .. } => Some(sql.clone()), _ => None };
         let description = activity_description(&command, crate::sql::Dialect::for_engine(&self.engine));
         match self.worker.send(command) {
@@ -1685,6 +1701,11 @@ impl Rustable {
                 }
                 action => action,
             };
+            #[cfg(not(target_arch = "wasm32"))]
+            if let FileAction::SidebarExportDestination(epoch, path) = action {
+                self.finish_sidebar_export(epoch, path);
+                continue;
+            }
             if self.pending.is_some() {
                 self.error = Some(
                     "A database operation is running. Try the file action again when it finishes."
@@ -1728,6 +1749,8 @@ impl Rustable {
                     Command::Open(Some(path.clone())),
                     Pending::Connect(Some(path)),
                 ),
+                #[cfg(not(target_arch = "wasm32"))]
+                FileAction::SidebarExportDestination(..) => unreachable!(),
                 FileAction::ExportTable(path, browse, label, format) => {
                     if self.label != label {
                         self.error = Some("Connection changed while choosing the export destination. Start export again.".into());
@@ -1901,6 +1924,7 @@ impl Rustable {
             return;
         }
         let run = DestructiveRun {
+            invalidate_tables: Vec::new(),
             tab_id: self.tabs[self.tab].id,
             source: (self.tabs[self.tab].sql.clone(), source_offset),
             findings: if self.safe_mode_active() {
@@ -1930,7 +1954,7 @@ impl Rustable {
             return;
         };
         self.tab = tab;
-        let DestructiveRun { sql, source, .. } = run;
+        let DestructiveRun { sql, source, invalidate_tables, .. } = run;
         self.tabs[self.tab].error_highlight = None;
         self.tabs[self.tab].execution_source = Some(source);
         self.tabs[self.tab].executed_sql = Some(sql.clone());
@@ -1942,6 +1966,7 @@ impl Rustable {
         self.prefs.history.truncate(100);
         self.shared_preferences_dirty = true;
         self.show_query();
+        self.invalidate_context_table_snapshots(&invalidate_tables);
         self.dispatch(
             Command::Query {
                 sql,
@@ -2248,13 +2273,13 @@ impl Rustable {
             || self.destructive_confirm.is_some() || self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some()
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some() || self.alter_column.is_some()
-            || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some()
+            || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() || self.sidebar_export.is_some()
     }
 
     fn workspace_shortcuts(&mut self, ctx: &egui::Context) {
         if self.close_table_confirmation.is_some() || crate::session_windows::close_confirmation_open(ctx) { return; }
         // Import windows own the keyboard, including their first visible frame.
-        if self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() {
+        if self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() || self.sidebar_export.is_some() {
             return;
         }
         if self.destructive_confirm.is_some() {
@@ -2460,38 +2485,69 @@ impl Rustable {
         let mut confirmed = false;
         let mut cancelled = false;
         let modal = egui::Modal::new(egui::Id::new((ctx.viewport_id(), "destructive-sql-confirmation"))).show(ctx, |ui| {
-            ui.set_max_width(620.0);
-            ui.heading(if run.findings.len() == 1 { "Run a destructive statement?" } else { "Run destructive statements?" });
-            ui.label(format!(
-                "{} on {name}. Changes commit immediately unless you started a transaction, and cannot be undone from Rustable.",
-                if run.findings.len() == 1 { "This statement can remove or rewrite data".to_owned() } else { format!("These {} statements can remove or rewrite data", run.findings.len()) },
-            ));
+            ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 580.0));
+            let context_action = !run.invalidate_tables.is_empty();
+            let dropping = context_action && run.sql.starts_with("DROP TABLE");
+            let count = run.invalidate_tables.len();
+            let action_label = if context_action {
+                format!("{} {} {}", if dropping { "Drop" } else { "Truncate" }, count, if count == 1 { "table" } else { "tables" })
+            } else { "Run anyway".to_owned() };
+            ui.heading(if context_action { format!("{action_label}?") } else { "Review destructive SQL".to_owned() });
+            ui.add(egui::Label::new(RichText::new(format!("{name} · {}", self.engine)).weak()).truncate()).on_hover_text(&name);
+            ui.add_space(10.0);
+            ui.label(if dropping { "Permanently remove the selected tables and all their data." }
+                else if context_action { "Remove every row from the selected tables. Table structures are kept." }
+                else { "These statements can remove or rewrite data." });
+            ui.add_space(4.0);
+            if context_action && matches!(self.engine.as_str(), "MySQL" | "MariaDB") {
+                ui.weak("Commits immediately, including any open SQL transaction. This cannot be undone from Rustable.");
+            } else {
+                ui.weak("Changes commit immediately unless you started a transaction. This cannot be undone from Rustable.");
+            }
+            if !run.invalidate_tables.is_empty() {
+                ui.add_space(6.0);
+                crate::controls::table_surface(ui, |ui| {
+                    crate::controls::table_header_background(ui, 26.0);
+                    TableBuilder::new(ui).id_salt("affected-context-tables").striped(true)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(TableColumn::remainder().clip(true)).max_scroll_height(96.0)
+                        .header(26.0, |mut row| { row.col(|ui| { ui.strong(format!("Affected tables ({})", run.invalidate_tables.len())); }); })
+                        .body(|body| body.rows(24.0, run.invalidate_tables.len(), |mut row| {
+                            let name = &run.invalidate_tables[row.index()];
+                            row.col(|ui| { ui.add(egui::Label::new(RichText::new(name).monospace()).truncate()).on_hover_text(name); });
+                        }));
+                });
+            }
             if production {
                 ui.colored_label(ui.visuals().warn_fg_color, "This is a Production connection.");
             }
-            ui.add_space(6.0);
-            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+            ui.add_space(10.0);
+            ui.strong("SQL preview");
+            egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 400.0).clamp(80.0, 220.0)).show(ui, |ui| {
                 for (index, finding) in run.findings.iter().enumerate() {
                     ui.push_id(("destructive-finding", index), |ui| {
                         egui::Frame::new().fill(ui.visuals().extreme_bg_color).inner_margin(8.0).corner_radius(5).show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.strong(finding.reason);
-                            ui.add(egui::Label::new(RichText::new(&finding.statement).monospace()).wrap().selectable(true));
+                            if !context_action { ui.label(finding.reason); ui.add_space(4.0); }
+                            ui.add(egui::Label::new(crate::editor::layout(ui, &finding.statement.as_str(), ui.available_width())).selectable(true));
                         });
                     });
                     ui.add_space(4.0);
                 }
             });
-            if !production {
+            if context_action && run.findings.first().is_some_and(|finding| finding.statement.ends_with('…')) {
+                ui.weak("Preview shortened. The full SQL is in the query tab.");
+            }
+            if !production && run.invalidate_tables.is_empty() {
                 ui.checkbox(&mut run.skip_for_session, "Don't ask again for this connection until it reconnects");
             }
+            ui.add_space(12.0);
+            ui.separator();
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                // No keyboard shortcut confirms: a repeated Run chord must not
-                // fall through into executing the statements under review.
-                confirmed = ui
-                    .add(egui::Button::new(RichText::new("Run anyway").color(Color32::WHITE)).fill(ui.visuals().error_fg_color))
-                    .clicked();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // No keyboard shortcut confirms: repeated Run must never execute this review.
+                confirmed = ui.add(egui::Button::new(RichText::new(action_label).color(Color32::WHITE))
+                    .fill(ui.visuals().error_fg_color).min_size(egui::vec2(0.0, crate::controls::BUTTON_HEIGHT))).clicked();
                 cancelled = ui.add(crate::icons::shortcut_button("Cancel", false, ".", None)).on_hover_text("Escape").clicked();
             });
         });
@@ -3204,6 +3260,10 @@ Right-click to inspect or remove individual changes",
                 let changed_tables: std::collections::HashSet<&str> =
                     self.changes.iter().map(Change::table).collect();
                 let mut open = None;
+                let mut export = false;
+                let mut table_action = None;
+                let can_modify = self.supports_table_export() && !self.safe_mode_active() && !self.has_pending_edits();
+                let can_export = self.supports_table_export() && !cfg!(target_arch = "wasm32");
                 enum CatalogRow<'a> {
                     Heading(&'static str, usize),
                     Object(&'a Object),
@@ -3224,8 +3284,9 @@ Right-click to inspect or remove individual changes",
                             }
                             CatalogRow::Object(object) => object,
                         };
-                        let selected =
-                            self.browse.table == object.name && self.view != View::Query;
+                        let selected = if self.sidebar_selection.names.is_empty() {
+                            self.browse.table == object.name && self.view != View::Query
+                        } else { self.sidebar_selection.names.contains(&object.name) };
                         let changed = changed_tables.contains(object.name.as_str());
                         ui.add_enabled_ui(self.pending.is_none(), |ui| {
                             let (rect, response) = ui.allocate_exact_size(
@@ -3237,6 +3298,10 @@ Right-click to inspect or remove individual changes",
                             if !ui.is_rect_visible(rect) { return; }
                             // Item backgrounds reflect committed selection or pending edits,
                             // never hover state. Primary press below commits selection.
+                            #[cfg(feature = "qa")]
+                            if ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("table-export-capture"))).unwrap_or(false) {
+                                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new(("export-row", &object.name)), rect));
+                            }
                             paint_sidebar_item(ui, rect, object.display_name(), selected, changed);
                             navigator::paint_object_icon(ui.painter(), rect.left_center() + egui::vec2(14.0, 0.0), &object.kind, 13.0);
                             let response = response.on_hover_text(match &object.schema {
@@ -3264,15 +3329,70 @@ Right-click to inspect or remove individual changes",
                             };
                             if same_target_double_click(&response, egui::Id::new(("sidebar-table", &object.name)))
                                 && let Some(tab) = self.table_tabs.iter_mut().find(|tab| Some(tab.id) == self.active_table_tab && tab.browse.table == object.name) { tab.kept = true; }
-                            if primary_pressed(&response) && (self.browse.table != object.name || self.view == View::Query) {
-                                open = Some(object.name.clone());
+                            if primary_pressed(&response) {
+                                let modifiers = ui.input(|i| i.modifiers);
+                                if (modifiers.command || modifiers.shift) && self.sidebar_selection.names.is_empty() && self.view != View::Query && !self.browse.table.is_empty() {
+                                    self.sidebar_selection.context(&self.browse.table);
+                                }
+                                self.sidebar_selection.click(&object.name, modifiers.command, modifiers.shift,
+                                    || rows.iter().filter_map(|row| match row { CatalogRow::Object(o) => Some(o.name.as_str()), _ => None }).collect());
+                                if !modifiers.command && !modifiers.shift && (self.browse.table != object.name || self.view == View::Query) {
+                                    open = Some(object.name.clone());
+                                }
                             }
+                            if response.secondary_clicked() {
+                                self.sidebar_selection.context(&object.name);
+                            }
+                            response.context_menu(|ui| {
+                                // Restore sidebar hover colors, then retain the same menu styling as grid cells.
+                                ui.set_style(ui.ctx().style());
+                                egui::containers::menu::menu_style(ui.style_mut());
+                                let count = self.sidebar_selection.names.len().max(1);
+                                if ui.add_enabled(count == 1, egui::Button::new("Open in New Tab")).clicked() {
+                                    table_action = Some(table_export::Action::Open);
+                                    ui.close();
+                                }
+                                if ui.add_enabled(count == 1, egui::Button::new("Show Definition")).clicked() {
+                                    table_action = Some(table_export::Action::Definition);
+                                    ui.close();
+                                }
+                                let copy_id = egui::Id::new(("sidebar-copy-names", &object.name, count));
+                                let now = ui.input(|i| i.time);
+                                let copied = ui.data(|d| d.get_temp::<f64>(copy_id)).is_some_and(|until| now < until);
+                                let label = if copied { "Copied" } else if count == 1 { "Copy Name" } else { "Copy Names" };
+                                if ui.add(egui::Button::new(label).min_size(egui::vec2(150.0, 0.0))).clicked() {
+                                    ui.ctx().copy_text(self.sidebar_selection.names.iter().cloned().collect::<Vec<_>>().join("\n"));
+                                    ui.data_mut(|d| d.insert_temp(copy_id, now + 1.5));
+                                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(1500));
+                                }
+                                ui.separator();
+                                let label = if count > 1 { format!("Export {count} tables…") } else { "Export…".into() };
+                                if ui.add_enabled(can_export, egui::Button::new(label)).clicked() {
+                                    self.sidebar_selection.context(&object.name);
+                                    export = true;
+                                    ui.close();
+                                }
+                                ui.separator();
+                                let only_tables = self.objects.iter().filter(|o| self.sidebar_selection.names.contains(&o.name))
+                                    .all(|o| o.kind == "table");
+                                for (action, verb) in [(table_export::Action::Truncate, "Truncate"), (table_export::Action::Drop, "Drop")] {
+                                    let label = if count == 1 { format!("{verb} Table…") } else { format!("{verb} {count} Tables…") };
+                                    if ui.add_enabled(can_modify && only_tables,
+                                        egui::Button::new(RichText::new(label).color(ui.visuals().error_fg_color)))
+                                        .on_hover_text("Review SQL before running. Requires safe mode off and no unsaved table edits.").clicked() {
+                                        table_action = Some(action);
+                                        ui.close();
+                                    }
+                                }
+                            });
                         });
                     }
                 });
                 if let Some(name) = open {
                     self.open_table(name);
                 }
+                if export { self.begin_sidebar_export(); }
+                if let Some(action) = table_action { self.sidebar_table_action(action); }
             });
         if !compact { self.shared_preferences_dirty |=
             crate::pane_sizes::record_drag(ctx, id, &mut self.prefs.pane_sizes.sidebar, 0); }
@@ -4020,6 +4140,7 @@ Right-click to inspect or remove individual changes",
             || self.index_draft.is_some()
             || self.csv_preview.is_some()
             || self.csv_review.is_some()
+            || self.sidebar_export.is_some()
         {
             return;
         }
@@ -7029,6 +7150,7 @@ impl Rustable {
         self.date_window(ctx);
         self.csv_preview_window(ctx);
         self.csv_import_review(ctx);
+        self.sidebar_export_window(ctx);
         self.destructive_confirmation(ctx);
         self.table_close_confirmation(ctx);
         self.navigation_confirmation(ctx);

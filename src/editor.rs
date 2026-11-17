@@ -280,3 +280,435 @@ mod line_tests {
         assert_eq!(LineIndex::new("").line_column(0), (1, 1));
     }
 }
+
+#[cfg(test)]
+mod indentation_tests {
+    use super::*;
+    use egui::text::{CCursor, CCursorRange};
+
+    fn frame(
+        ctx: &egui::Context,
+        text: &mut String,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) -> CCursorRange {
+        let mut cursor = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                time: Some(time),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let output = egui::TextEdit::multiline(text)
+                        .id(egui::Id::new("indent-test"))
+                        .code_editor()
+                        .char_limit(1000)
+                        .show(ui);
+                    cursor = output.cursor_range;
+                });
+            },
+        );
+        cursor.unwrap_or_default()
+    }
+
+    fn select(ctx: &egui::Context, primary: usize, secondary: usize) -> CCursorRange {
+        let id = egui::Id::new("indent-test");
+        ctx.memory_mut(|m| m.request_focus(id));
+        let mut state = egui::TextEdit::load_state(ctx, id).unwrap();
+        let range = CCursorRange::two(CCursor::new(secondary), CCursor::new(primary));
+        state.cursor.set_char_range(Some(range));
+        state.store(ctx, id);
+        range
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> Vec<egui::Event> {
+        [true, false]
+            .into_iter()
+            .map(|pressed| egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn block_indentation_preserves_text_selection_and_immediate_history() {
+        for reversed in [false, true] {
+            let ctx = egui::Context::default();
+            let original = "SELECT 'é🙂',\n  name\nFROM customers;";
+            let mut text = original.to_owned();
+            frame(&ctx, &mut text, vec![], 0.0);
+            let end = original.chars().position(|c| c == 'F').unwrap();
+            let before = if reversed {
+                select(&ctx, 2, end)
+            } else {
+                select(&ctx, end, 2)
+            };
+            frame(&ctx, &mut text, vec![], 0.005);
+            let after = frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Tab, egui::Modifiers::NONE),
+                0.01,
+            );
+            assert_eq!(text, "\tSELECT 'é🙂',\n\t  name\nFROM customers;");
+            assert_eq!(
+                after.primary.index,
+                before.primary.index + if reversed { 1 } else { 2 }
+            );
+            assert_eq!(
+                after.secondary.index,
+                before.secondary.index + if reversed { 2 } else { 1 }
+            );
+            let indented = text.clone();
+            let undone = frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Z, egui::Modifiers::COMMAND),
+                0.02,
+            );
+            assert_eq!(text, original);
+            assert_eq!(undone, before);
+            let redone = frame(
+                &ctx,
+                &mut text,
+                key(
+                    egui::Key::Z,
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                ),
+                0.03,
+            );
+            assert_eq!(text, indented);
+            assert_eq!(redone, after);
+            frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Tab, egui::Modifiers::NONE),
+                0.04,
+            );
+            frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Z, egui::Modifiers::COMMAND),
+                0.05,
+            );
+            assert_eq!(text, indented);
+            frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Tab, egui::Modifiers::SHIFT),
+                30.0,
+            );
+            assert_eq!(text, original);
+            frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Z, egui::Modifiers::COMMAND),
+                30.01,
+            );
+            assert_eq!(text, indented);
+        }
+    }
+
+    #[test]
+    fn unindent_handles_partial_spaces_blank_lines_and_unicode() {
+        for (original, expected) in [
+            ("  é\n\t🙂\n\n x", "é\n🙂\n\nx"),
+            ("a\nb", "a\nb"),
+            (" ", ""),
+        ] {
+            let ctx = egui::Context::default();
+            let mut text = original.to_owned();
+            frame(&ctx, &mut text, vec![], 0.0);
+            select(&ctx, original.chars().count(), 0);
+            frame(&ctx, &mut text, vec![], 0.005);
+            frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Tab, egui::Modifiers::SHIFT),
+                0.01,
+            );
+            assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn tab_after_typing_undoes_only_the_indentation() {
+        let ctx = egui::Context::default();
+        let mut text = "a".to_owned();
+        frame(&ctx, &mut text, vec![], 0.0);
+        select(&ctx, 1, 1);
+        frame(&ctx, &mut text, vec![], 0.005);
+        frame(&ctx, &mut text, vec![egui::Event::Text("b".into())], 0.01);
+        frame(
+            &ctx,
+            &mut text,
+            key(egui::Key::Tab, egui::Modifiers::NONE),
+            0.02,
+        );
+        assert_eq!(text, "ab\t");
+        frame(
+            &ctx,
+            &mut text,
+            key(egui::Key::Z, egui::Modifiers::COMMAND),
+            0.03,
+        );
+        assert_eq!(text, "ab");
+    }
+    #[test]
+    fn text_undo_ignores_navigation_and_redo_survives_selection() {
+        let ctx = egui::Context::default();
+        let mut text = "SELECT ".to_owned();
+        frame(&ctx, &mut text, vec![], 0.0);
+        select(&ctx, 7, 7);
+        frame(&ctx, &mut text, vec![], 0.005);
+        for (index, character) in ["n", "a", "m", "e"].into_iter().enumerate() {
+            frame(
+                &ctx,
+                &mut text,
+                {
+                    let mut events = key(egui::Key::N, egui::Modifiers::NONE);
+                    events.push(egui::Event::Text(character.into()));
+                    events
+                },
+                0.01 + index as f64 * 0.01,
+            );
+        }
+        frame(
+            &ctx,
+            &mut text,
+            key(egui::Key::ArrowLeft, egui::Modifiers::NONE),
+            0.06,
+        );
+        frame(&ctx, &mut text, vec![], 2.0);
+        frame(
+            &ctx,
+            &mut text,
+            key(egui::Key::Z, egui::Modifiers::COMMAND),
+            2.01,
+        );
+        assert_eq!(text, "SELECT ");
+        select(&ctx, 0, 3);
+        frame(&ctx, &mut text, vec![], 4.0);
+        frame(
+            &ctx,
+            &mut text,
+            key(
+                egui::Key::Z,
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            ),
+            4.01,
+        );
+        assert_eq!(text, "SELECT name");
+    }
+
+    #[test]
+    fn paste_replacement_and_deletion_have_distinct_undo_steps() {
+        let ctx = egui::Context::default();
+        let mut text = "abc".to_owned();
+        frame(&ctx, &mut text, vec![], 0.0);
+        select(&ctx, 3, 0);
+        frame(&ctx, &mut text, vec![], 0.005);
+        frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Paste("é🙂".into())],
+            0.01,
+        );
+        frame(&ctx, &mut text, vec![egui::Event::Text("xy".into())], 0.02);
+        frame(
+            &ctx,
+            &mut text,
+            key(egui::Key::Backspace, egui::Modifiers::NONE),
+            0.03,
+        );
+        frame(
+            &ctx,
+            &mut text,
+            key(egui::Key::Backspace, egui::Modifiers::NONE),
+            0.04,
+        );
+        assert_eq!(text, "é🙂");
+        for (index, expected) in ["é🙂xy", "é🙂", "abc"].into_iter().enumerate() {
+            frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Z, egui::Modifiers::COMMAND),
+                0.05 + index as f64 * 0.01,
+            );
+            assert_eq!(text, expected);
+        }
+        for (index, expected) in ["é🙂", "é🙂xy", "é🙂"].into_iter().enumerate() {
+            frame(
+                &ctx,
+                &mut text,
+                key(
+                    egui::Key::Z,
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                ),
+                0.1 + index as f64 * 0.01,
+            );
+            assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn new_edit_after_undo_clears_redo_and_pause_splits_typing() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        frame(&ctx, &mut text, vec![], 0.0);
+        select(&ctx, 0, 0);
+        frame(&ctx, &mut text, vec![], 0.005);
+        frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Text("first".into())],
+            0.01,
+        );
+        frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Text("second".into())],
+            30.0,
+        );
+        frame(
+            &ctx,
+            &mut text,
+            key(egui::Key::Z, egui::Modifiers::COMMAND),
+            30.01,
+        );
+        assert_eq!(text, "first");
+        frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Paste("third".into())],
+            30.02,
+        );
+        frame(
+            &ctx,
+            &mut text,
+            key(
+                egui::Key::Z,
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            ),
+            30.03,
+        );
+        assert_eq!(text, "firstthird");
+    }
+
+    #[test]
+    fn composition_is_one_undo_step_even_after_a_pause() {
+        let ctx = egui::Context::default();
+        let mut text = "SELECT ".to_owned();
+        frame(&ctx, &mut text, vec![], 0.0);
+        select(&ctx, 7, 7);
+        frame(&ctx, &mut text, vec![], 0.005);
+        frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Ime(egui::ImeEvent::Enabled)],
+            0.01,
+        );
+        frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Ime(egui::ImeEvent::Preedit("に".into()))],
+            0.02,
+        );
+        frame(&ctx, &mut text, vec![], 3.0);
+        frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Ime(egui::ImeEvent::Preedit("日本".into()))],
+            3.01,
+        );
+        frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Ime(egui::ImeEvent::Commit("日本".into()))],
+            3.02,
+        );
+        assert_eq!(text, "SELECT 日本");
+        frame(
+            &ctx,
+            &mut text,
+            key(egui::Key::Z, egui::Modifiers::COMMAND),
+            3.03,
+        );
+        assert_eq!(text, "SELECT ");
+    }
+
+    #[test]
+    fn bounded_block_indent_is_atomic_and_single_line_selection_is_preserved() {
+        for (original, primary, secondary, expected) in [
+            ("SELECT name", 9, 7, "\tSELECT name".to_owned()),
+            ("  x", 3, 3, "  x\t".to_owned()),
+            ("", 0, 0, "\t".to_owned()),
+        ] {
+            let ctx = egui::Context::default();
+            let mut text = original.to_owned();
+            frame(&ctx, &mut text, vec![], 0.0);
+            select(&ctx, primary, secondary);
+            frame(&ctx, &mut text, vec![], 0.005);
+            frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Tab, egui::Modifiers::NONE),
+                0.01,
+            );
+            assert_eq!(text, expected);
+        }
+        let ctx = egui::Context::default();
+        let original = format!("{}\nb", "a".repeat(997)); // 999 characters, two indents cannot fit.
+        let mut text = original.clone();
+        frame(&ctx, &mut text, vec![], 0.0);
+        let selection = select(&ctx, 999, 0);
+        frame(&ctx, &mut text, vec![], 0.005);
+        let after = frame(
+            &ctx,
+            &mut text,
+            key(egui::Key::Tab, egui::Modifiers::NONE),
+            0.01,
+        );
+        assert_eq!(text, original);
+        assert_eq!(after, selection);
+    }
+
+    #[test]
+    #[ignore = "manual block indentation CPU benchmark; baseline deletes the selection"]
+    fn block_indentation_frame_benchmark() {
+        let ctx = egui::Context::default();
+        let original = "SELECT 'é🙂', name;\n".repeat(40);
+        let mut text = original.clone();
+        frame(&ctx, &mut text, vec![], 0.0);
+        select(&ctx, text.chars().count(), 0);
+        frame(&ctx, &mut text, vec![], 0.005);
+        let mut samples = Vec::new();
+        for index in 0..180 {
+            let started = std::time::Instant::now();
+            frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Tab, egui::Modifiers::NONE),
+                index as f64 * 31.0 + 1.0,
+            );
+            frame(
+                &ctx,
+                &mut text,
+                key(egui::Key::Tab, egui::Modifiers::SHIFT),
+                index as f64 * 31.0 + 1.01,
+            );
+            if index >= 20 {
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            assert_eq!(text, original);
+        }
+        samples.sort_by(f64::total_cmp);
+        crate::ui_benchmark::report("editor/block-indentation", &samples);
+    }
+}
