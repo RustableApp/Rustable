@@ -90,6 +90,8 @@ pub struct TextEdit<'t> {
     char_limit: usize,
     return_key: Option<KeyboardShortcut>,
     background_color: Option<Color32>,
+    auto_indent: bool,
+    parenthesis_pairing: Option<&'t dyn Fn(&str) -> bool>,
 }
 
 impl WidgetWithState for TextEdit<'_> {
@@ -150,6 +152,8 @@ impl<'t> TextEdit<'t> {
             char_limit: usize::MAX,
             return_key: Some(KeyboardShortcut::new(Modifiers::NONE, Key::Enter)),
             background_color: None,
+            auto_indent: false,
+            parenthesis_pairing: None,
         }
     }
 
@@ -159,6 +163,19 @@ impl<'t> TextEdit<'t> {
     /// - focus lock (tab will insert a tab character instead of moving focus)
     pub fn code_editor(self) -> Self {
         self.font(TextStyle::Monospace).lock_focus(true)
+    }
+
+    /// Preserve leading spaces and tabs on Enter. Opt-in for source editors.
+    pub fn auto_indent(mut self, enabled: bool) -> Self {
+        self.auto_indent = enabled;
+        self
+    }
+
+    /// Pair typed parentheses only when the predicate accepts the prefix at the caret.
+    /// Paste and IME input are unchanged.
+    pub fn parenthesis_pairing(mut self, predicate: &'t dyn Fn(&str) -> bool) -> Self {
+        self.parenthesis_pairing = Some(predicate);
+        self
     }
 
     /// Use if you want to set an explicit [`Id`] for this widget.
@@ -503,6 +520,8 @@ impl TextEdit<'_> {
             char_limit,
             return_key,
             background_color: _,
+            auto_indent,
+            parenthesis_pairing,
         } = self;
 
         let text_color = text_color
@@ -649,6 +668,8 @@ impl TextEdit<'_> {
                 char_limit,
                 event_filter,
                 return_key,
+                auto_indent,
+                parenthesis_pairing,
             );
 
             if changed {
@@ -924,6 +945,8 @@ fn events(
     char_limit: usize,
     event_filter: EventFilter,
     return_key: Option<KeyboardShortcut>,
+    auto_indent: bool,
+    parenthesis_pairing: Option<&dyn Fn(&str) -> bool>,
 ) -> (bool, CCursorRange) {
     let os = ui.ctx().os();
 
@@ -957,7 +980,15 @@ fn events(
     for event in &events {
         let time = ui.input(|i| i.time);
         let history_key = matches!(event, Event::Key { key: Key::Z | Key::Y, pressed: true, modifiers, .. } if modifiers.command);
+        let pair_event = parenthesis_pairing.is_some() && (matches!(event, Event::Text(value) if matches!(value.as_str(), "(" | ")"))
+            || matches!(event, Event::Key {key: Key::Backspace, pressed: true, modifiers, ..} if !modifiers.any())
+                && cursor_range.is_empty() && cursor_range.primary.index > 0
+                && text.char_range(cursor_range.primary.index - 1..cursor_range.primary.index + 1) == "()");
+        let pairing_allowed = !state.ime_enabled && pair_event
+            && parenthesis_pairing.is_some_and(|allows| allows(text.char_range(0..cursor_range.as_sorted_char_range().start)));
         let kind = match event {
+            Event::Text(_) if pairing_allowed => Some(EditKind::Action),
+            Event::Key {key: Key::Backspace, ..} if pairing_allowed => Some(EditKind::Action),
             Event::Text(value) if !value.is_empty() => Some(EditKind::Typing),
             Event::Key {
                 key: Key::Backspace,
@@ -1039,6 +1070,36 @@ fn events(
                     None
                 }
             }
+            Event::Text(value) if pairing_allowed => {
+                let range = cursor_range.as_sorted_char_range();
+                if value == "(" && text.as_str().chars().count().saturating_add(2) <= char_limit {
+                    let mut end = CCursor::new(range.end);
+                    text.insert_text_at(&mut end, ")", char_limit);
+                    let mut start = CCursor::new(range.start);
+                    text.insert_text_at(&mut start, "(", char_limit);
+                    Some(if range.is_empty() { CCursorRange::one(start) } else {
+                        let mut selection = cursor_range;
+                        selection.primary.index += 1;
+                        selection.secondary.index += 1;
+                        selection
+                    })
+                } else if value == "(" {
+                    Some(cursor_range)
+                } else if value == ")" && range.is_empty() && text.as_str().chars().nth(range.start) == Some(')') {
+                    state.edit_group = None;
+                    cursor_range = CCursorRange::one(CCursor::new(range.start + 1));
+                    None
+                } else {
+                    let mut cursor = text.delete_selected(&cursor_range);
+                    text.insert_text_at(&mut cursor, value, char_limit);
+                    Some(CCursorRange::one(cursor))
+                }
+            }
+            Event::Key { key: Key::Backspace, pressed: true, .. } if pairing_allowed => {
+                let index = cursor_range.primary.index - 1;
+                text.delete_char_range(index..index + 2);
+                Some(CCursorRange::one(CCursor::new(index)))
+            }
             Event::Text(text_to_insert) => {
                 // Newlines are handled by `Key::Enter`.
                 if !text_to_insert.is_empty() && text_to_insert != "\n" && text_to_insert != "\r" {
@@ -1072,10 +1133,7 @@ fn events(
             }) =>
             {
                 if multiline {
-                    let mut ccursor = text.delete_selected(&cursor_range);
-                    text.insert_text_at(&mut ccursor, "\n", char_limit);
-                    // TODO(emilk): if code editor, auto-indent by same leading tabs, + one if the lines end on an opening bracket
-                    Some(CCursorRange::one(ccursor))
+                    Some(insert_newline(text, cursor_range, auto_indent, parenthesis_pairing, char_limit))
                 } else {
                     ui.memory_mut(|mem| mem.surrender_focus(id)); // End input with enter
                     break;
@@ -1223,6 +1281,35 @@ fn events(
 
 /// Indent logical lines, preserving selection direction and character offsets.
 /// A selection ending at the next line's start does not include that line.
+fn insert_newline(
+    text: &mut dyn TextBuffer,
+    selection: CCursorRange,
+    auto_indent: bool,
+    pairing: Option<&dyn Fn(&str) -> bool>,
+    char_limit: usize,
+) -> CCursorRange {
+    if !auto_indent {
+        let mut cursor = text.delete_selected(&selection);
+        text.insert_text_at(&mut cursor, "\n", char_limit);
+        return CCursorRange::one(cursor);
+    }
+    let range = selection.as_sorted_char_range();
+    let prefix = text.char_range(0..range.start);
+    let line = prefix.rsplit('\n').next().unwrap_or("");
+    let indent: String = if auto_indent { line.chars().take_while(|c| matches!(c, ' ' | '\t')).collect() } else { String::new() };
+    let between = auto_indent && range.is_empty() && prefix.ends_with('(')
+        && text.as_str().chars().nth(range.start) == Some(')')
+        && pairing.is_some_and(|allows| allows(&prefix[..prefix.len() - 1]));
+    let mut insert = format!("\n{indent}");
+    if between { insert.push_str(if indent.contains('\t') || indent.is_empty() { "\t" } else { "    " }); }
+    let advance = insert.chars().count();
+    if between { insert.push('\n'); insert.push_str(&indent); }
+    if text.as_str().chars().count().saturating_sub(range.len()).saturating_add(insert.chars().count()) > char_limit { return selection; }
+    let mut cursor = text.delete_selected(&selection);
+    text.insert_text_at(&mut cursor, &insert, char_limit);
+    CCursorRange::one(CCursor::new(range.start + advance))
+}
+
 fn indent_selection(
     text: &mut dyn TextBuffer,
     mut selection: CCursorRange,

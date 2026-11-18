@@ -1,8 +1,8 @@
 //! SQLite adapter. SQLite-specific SQL, binding, and transaction rules stay here.
-mod export_path;
-mod schema;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod browser_limits;
+mod export_path;
+mod schema;
 use super::*;
 use rusqlite::{Connection, OpenFlags, fallible_iterator::FallibleIterator, params_from_iter};
 use web_time::Instant;
@@ -67,6 +67,35 @@ impl SqliteDriver {
 }
 
 impl Driver for SqliteDriver {
+    fn export_definition(&mut self, name: &str) -> Result<String, String> {
+        let (before, after) = self.export_definition_parts(name)?;
+        Ok(format!("{before}\n{after}"))
+    }
+    fn export_definition_parts(&mut self, name: &str) -> Result<(String, String), String> {
+        let mut query = self.connection.prepare("SELECT type,sql FROM sqlite_schema WHERE (name=?1 AND type IN ('table','view') OR tbl_name=?1 AND type IN ('index','trigger')) AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'view' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name").map_err(|e| e.to_string())?;
+        let statements = query
+            .query_map([name], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        if statements.is_empty() {
+            return Err("The table or view no longer exists".into());
+        }
+        let (mut before, mut after) = (String::new(), String::new());
+        for (kind, sql) in statements {
+            let destination = if kind == "trigger" {
+                &mut after
+            } else {
+                &mut before
+            };
+            destination.push_str(sql.trim_end().trim_end_matches(';'));
+            destination.push_str(";\n\n");
+        }
+        Ok((before, after))
+    }
+
     fn transaction_state(&mut self) -> TransactionState {
         if self.connection.is_autocommit() { TransactionState::Idle } else { TransactionState::Active }
     }
@@ -365,7 +394,8 @@ fn script(conn: &Connection, sql: &str, safe: bool, cancel: &AtomicBool) -> Scri
             break;
         }
         match query_with_budget(conn, &sql[range.clone()], safe, budget) {
-            Ok(grid) => {
+            Ok(mut grid) => {
+                grid.query_source = Some(super::QuerySource::statement(&sql[range.clone()]));
                 let used = grid
                     .rows
                     .iter()
@@ -445,8 +475,13 @@ fn query_into(
     let source = metadata.first().and_then(|first| {
         let schema = first.database_name()?;
         let table = first.table_name()?;
-        metadata.iter().all(|column| column.database_name() == Some(schema)
-            && column.table_name() == Some(table) && column.origin_name() == Some(column.name()))
+        metadata
+            .iter()
+            .all(|column| {
+                column.database_name() == Some(schema)
+                    && column.table_name() == Some(table)
+                    && column.origin_name() == Some(column.name())
+            })
             .then(|| (schema.to_owned(), table.to_owned()))
     });
     let mut rows = statement.query([])?;
@@ -566,7 +601,9 @@ fn export_table(
     cancel: &AtomicBool,
     format: ExportFormat,
 ) -> std::io::Result<()> {
-    csv::publish(path, cancel, |writer| export_table_to(conn, writer, browse, cancel, format))
+    csv::publish(path, cancel, |writer| {
+        export_table_to(conn, writer, browse, cancel, format)
+    })
 }
 
 fn export_table_to(
@@ -576,6 +613,20 @@ fn export_table_to(
     cancel: &AtomicBool,
     format: ExportFormat,
 ) -> std::io::Result<()> {
+    if format == ExportFormat::Sql {
+        let kind: String = conn
+            .query_row(
+                "SELECT type FROM sqlite_schema WHERE name=?1",
+                [&browse.table],
+                |row| row.get(0),
+            )
+            .map_err(std::io::Error::other)?;
+        if kind != "table" {
+            return Err(std::io::Error::other(
+                "SQL inserts require a table, not a view",
+            ));
+        }
+    }
     let metadata = columns(conn, &browse.table).map_err(std::io::Error::other)?;
     for column in browse.filter_column.iter().chain(browse.sort.iter().map(|(column, _)| column)) {
         if !metadata.iter().any(|field| &field.name == column) {
@@ -623,7 +674,20 @@ fn export_table_to(
         .query(params_from_iter(&parameters))
         .map_err(std::io::Error::other)?;
     {
-        let mut writer = row_export::Writer::new(output, &header.columns, cancel, format)?;
+        let mut writer =
+            row_export::Writer::table(output, &header.columns, cancel, format, || {
+                super::sql_export::Spec {
+                    after: String::new(),
+                    dialect: super::sql_export::Dialect::Sqlite,
+                    table: quote(&browse.table),
+                    columns: header.columns.iter().map(|name| quote(name)).collect(),
+                    included: header
+                        .columns
+                        .iter()
+                        .map(|name| metadata.iter().any(|c| c.name == *name && !c.generated))
+                        .collect(),
+                }
+            })?;
         while let Some(row) = rows.next().map_err(std::io::Error::other)? {
             // SQLite owns these buffers until rows.next(); encode them before
             // advancing, without cloning an entire row or a large cell.
@@ -746,7 +810,17 @@ fn browse_table_after(
         .query_map([&browse.table],|r| Ok(Object { schema:None, display_name:None, metadata_error: None, columns: vec![], name:r.get(0)?,kind:r.get(1)?,ddl:r.get(2)? }))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut foreign_keys: Vec<foreign_keys::ForeignKey> = Vec::new();
     let mut statement = conn.prepare(r#"SELECT id, seq, "table", "from", "to" FROM pragma_foreign_key_list(?1) ORDER BY id, seq"#)?;
-    let links = statement.query_map([&browse.table], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, Option<String>>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let links = statement
+        .query_map([&browse.table], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     for (id, seq, table, source, target) in links {
         let target = if let Some(target) = target { target } else {
             conn.query_row("SELECT name FROM pragma_table_info(?1) WHERE pk=?2", rusqlite::params![&table, seq + 1], |r| r.get(0))?
@@ -884,9 +958,9 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
                         .into(),
                 );
             }
-            let index = rows
-                .iter()
-                .position(|(t, r, _, names)| t == table && r == original && names == original_columns);
+            let index = rows.iter().position(|(t, r, _, names)| {
+                t == table && r == original && names == original_columns
+            });
             let index = index.unwrap_or_else(|| {
                 rows.push((table.to_owned(), original.clone(), Vec::new(), original_columns.clone()));
                 rows.len() - 1
@@ -3451,12 +3525,14 @@ mod full_export_tests {
         match format {
             ExportFormat::Csv => assert_eq!(line, "\"id\",\"label\",\"score\"\n"),
             ExportFormat::Json => assert_eq!(line, "[\n"),
+            ExportFormat::Sql | ExportFormat::CsvCustom(_) => unreachable!(),
         }
         for id in 1..=count {
             line.clear();
             assert!(reader.read_line(&mut line).unwrap() > 0);
             match format {
                 ExportFormat::Csv => assert!(line.starts_with(&format!("\"{id}\","))),
+                ExportFormat::Sql | ExportFormat::CsvCustom(_) => unreachable!(),
                 ExportFormat::Json => {
                     let row: serde_json::Value = serde_json::from_str(line.trim().trim_end_matches(',')).unwrap();
                     assert_eq!(row["id"], id);
@@ -3834,9 +3910,58 @@ mod foreign_key_navigation_tests {
         let source = browse_table(&conn, &Browse { table:"child".into(), ..Default::default() }).unwrap();
         assert_eq!(source.foreign_keys.len(),1);
         let key = &source.foreign_keys[0];
-        assert_eq!(key.referenced_columns,vec!["tenant","id"]);
-        let filters = key.filters(&source.grid.columns,&source.grid.rows[0]).unwrap();
-        let target = browse_table(&conn,&Browse { table:key.table.clone(), filters, ..Default::default() }).unwrap();
-        assert_eq!(target.grid.rows,vec![vec![Value::Text("a".into()),Value::Integer(3)]]);
+        assert_eq!(key.referenced_columns, vec!["tenant", "id"]);
+        let filters = key
+            .filters(&source.grid.columns, &source.grid.rows[0])
+            .unwrap();
+        let target = browse_table(
+            &conn,
+            &Browse {
+                table: key.table.clone(),
+                filters,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            target.grid.rows,
+            vec![vec![Value::Text("a".into()), Value::Integer(3)]]
+        );
+    }
+}
+
+#[cfg(test)]
+mod share_provenance_tests {
+    use super::*;
+    #[test]
+    fn retained_results_keep_exact_statement_and_browse_bindings() {
+        let conn = Connection::open_in_memory().unwrap();
+        let sql = "SELECT ';' AS value; SELECT 2 AS value;";
+        let report = script(&conn, sql, false, &AtomicBool::new(false));
+        assert!(report.error.is_none());
+        let ranges = crate::sql::statements(sql);
+        for (grid, range) in report.grids.iter().zip(ranges) {
+            assert_eq!(grid.query_source.as_ref().unwrap().sql, sql[range]);
+        }
+        conn.execute_batch(
+            "CREATE TABLE share_probe(id INTEGER); INSERT INTO share_probe VALUES(1)",
+        )
+        .unwrap();
+        let table = browse_table(
+            &conn,
+            &Browse {
+                table: "share_probe".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let expected_sql = table.sql.clone();
+        let expected_parameters = table.parameters.clone();
+        let Payload::Table { grid, .. } = Payload::from(table) else {
+            panic!("table expected")
+        };
+        let source = grid.query_source.unwrap();
+        assert_eq!(source.sql, expected_sql);
+        assert_eq!(source.parameters, expected_parameters);
     }
 }

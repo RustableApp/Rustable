@@ -587,6 +587,7 @@ impl Rustable {
             || self.index_draft.is_some()
             || self.date_picker.is_some()
             || self.sidebar_export.is_some()
+            || self.result_share.is_some()
             || self.history
         {
             return Err(

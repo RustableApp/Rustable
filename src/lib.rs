@@ -33,44 +33,35 @@ mod line_comment;
 mod native_menu;
 mod pane_sizes;
 mod query_notification;
+mod redis_analysis;
+#[cfg(not(target_arch = "wasm32"))]
+mod redis_analysis_view;
 mod redis_analytics;
 #[cfg(not(target_arch = "wasm32"))]
 mod redis_archive;
 #[cfg(not(target_arch = "wasm32"))]
-mod redis_topology;
-#[cfg(not(target_arch = "wasm32"))]
-mod redis_cluster;
-#[cfg(not(target_arch = "wasm32"))]
-mod redis_sentinel;
+mod redis_archive_view;
 #[cfg(not(target_arch = "wasm32"))]
 mod redis_bulk_view;
-#[cfg(not(target_arch = "wasm32"))]
-mod redis_archive_view;
-mod redis_commands;
-mod redis_command_editor;
-mod redis_completion;
 mod redis_capabilities;
+#[cfg(not(target_arch = "wasm32"))]
+mod redis_cluster;
+mod redis_command_editor;
+mod redis_command_results;
+mod redis_commands;
+mod redis_completion;
 #[cfg(any(test, target_arch = "wasm32"))]
 mod redis_demo;
 mod redis_diagnostics;
-mod redis_analysis;
-#[cfg(not(target_arch = "wasm32"))]
-mod redis_analysis_view;
-mod redis_vector_element;
-mod redis_vector_matches;
-mod redis_vector_search;
+mod redis_edit;
+mod redis_history;
+mod redis_json_path;
 #[cfg(not(target_arch = "wasm32"))]
 mod redis_module_info;
 #[cfg(not(target_arch = "wasm32"))]
-mod redis_vectors;
-mod redis_edit;
-#[cfg(not(target_arch = "wasm32"))]
 mod redis_monitor;
 mod redis_mutation;
-mod redis_json_path;
 mod redis_preferences;
-mod redis_history;
-mod redis_command_results;
 #[cfg(all(feature = "qa", not(target_arch = "wasm32")))]
 mod redis_preview;
 #[cfg(not(target_arch = "wasm32"))]
@@ -83,12 +74,21 @@ mod redis_search;
 mod redis_search_catalog;
 mod redis_search_manage;
 #[cfg(not(target_arch = "wasm32"))]
+mod redis_sentinel;
+#[cfg(not(target_arch = "wasm32"))]
 mod redis_session;
 mod redis_settings;
 #[cfg(not(target_arch = "wasm32"))]
 mod redis_stream;
-mod redis_value;
 mod redis_timeseries_chart;
+#[cfg(not(target_arch = "wasm32"))]
+mod redis_topology;
+mod redis_value;
+mod redis_vector_element;
+mod redis_vector_matches;
+mod redis_vector_search;
+#[cfg(not(target_arch = "wasm32"))]
+mod redis_vectors;
 mod redis_workspace;
 mod result_chart;
 mod result_edit;
@@ -168,6 +168,10 @@ fn run_native_mode(#[cfg(unix)] matrix_socket: Option<std::path::PathBuf>) -> ef
     #[cfg(feature = "qa")]
     if std::env::var_os("RUSTABLE_RESULT_CAPTURE").is_some() {
         return app::Rustable::run_result_pages_preview();
+    }
+    #[cfg(feature = "qa")]
+    if std::env::var_os("RUSTABLE_SHARE_CAPTURE").is_some() {
+        return app::Rustable::run_share_preview();
     }
     #[cfg(feature = "qa")]
     if std::env::var_os("RUSTABLE_TABLE_EXPORT_CAPTURE").is_some() {

@@ -59,27 +59,89 @@ struct Entry {
     selected: bool,
     filename: String,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Contents {
+    Data,
+    Schema,
+    SchemaAndData,
+}
+
 pub(super) struct Dialog {
+    contents: Contents,
     entries: Vec<Entry>,
     format: db::ExportFormat,
+    csv_options: db::csv_options::Options,
     count: usize,
+    preview: String,
     choosing: bool,
     #[cfg(not(target_arch = "wasm32"))]
     epoch: u64,
 }
 impl Dialog {
+    fn effective_format(&self) -> db::ExportFormat {
+        if self.format.is_csv() {
+            db::ExportFormat::CsvCustom(self.csv_options)
+        } else {
+            self.format
+        }
+    }
+    fn single_file(&self) -> bool {
+        self.format == db::ExportFormat::Sql
+            || (self.count == 1 && self.contents != Contents::SchemaAndData)
+    }
     fn update_files(&mut self) {
         self.count = 0;
+        self.preview.clear();
         for entry in &mut self.entries {
             entry.filename = if entry.selected {
-                let name = db::table_export::filename(&entry.label, self.count, self.format);
+                let data = db::table_export::filename(&entry.label, self.count, self.format);
+                let name = if self.contents == Contents::Data {
+                    data
+                } else {
+                    let schema = PathBuf::from(&data)
+                        .with_extension("sql")
+                        .to_string_lossy()
+                        .into_owned();
+                    if self.contents == Contents::Schema || self.format == db::ExportFormat::Sql {
+                        schema
+                    } else {
+                        format!("schema.sql + {data}")
+                    }
+                };
                 self.count += 1;
+                if self.count == 1 {
+                    self.preview.clone_from(&name);
+                }
                 name
             } else {
                 String::new()
             };
         }
+        if self.format == db::ExportFormat::Sql && self.count > 1 {
+            self.preview = "tables.sql".into();
+        }
     }
+}
+
+fn export_choice<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut T,
+    options: &[(T, &str)],
+) {
+    let label = options
+        .iter()
+        .find(|(candidate, _)| candidate == value)
+        .map(|(_, label)| *label)
+        .unwrap_or_default();
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label)
+        .width(150.0)
+        .show_ui(ui, |ui| {
+            for (choice, label) in options {
+                ui.selectable_value(value, *choice, *label);
+            }
+        });
 }
 
 impl Rustable {
@@ -89,6 +151,7 @@ impl Rustable {
         }
         self.sidebar_export_epoch = self.sidebar_export_epoch.wrapping_add(1);
         let mut dialog = Dialog {
+            contents: Contents::Data,
             entries: self
                 .objects
                 .iter()
@@ -101,7 +164,9 @@ impl Rustable {
                 })
                 .collect(),
             count: 0,
+            preview: String::new(),
             format: db::ExportFormat::Csv,
+            csv_options: Default::default(),
             choosing: false,
             #[cfg(not(target_arch = "wasm32"))]
             epoch: self.sidebar_export_epoch,
@@ -120,120 +185,129 @@ impl Rustable {
         let modal = egui::Modal::new(egui::Id::new((ctx.viewport_id(), "sidebar-export"))).show(
             ctx,
             |ui| {
-                ui.set_width((ctx.content_rect().width() - 64.0).clamp(280.0, 600.0));
-                ui.heading("Export tables");
-                ui.weak("Export all saved rows, across every page.");
+                let width = (ctx.content_rect().width() - 48.0).clamp(480.0, 680.0);
+                let panel_height = (ctx.content_rect().height() - 180.0).clamp(240.0, 370.0);
+                ui.set_width(width);
+                ui.strong("Export tables");
                 ui.add_space(10.0);
-                ui.add_enabled_ui(!dialog.choosing, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Format");
-                        changed |= ui
-                            .selectable_value(&mut dialog.format, db::ExportFormat::Csv, "CSV")
-                            .changed();
-                        changed |= ui
-                            .selectable_value(&mut dialog.format, db::ExportFormat::Json, "JSON")
-                            .changed();
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("Select none").clicked() {
-                                for entry in &mut dialog.entries {
-                                    entry.selected = false;
-                                }
-                                changed = true;
-                            }
-                            if ui.small_button("Select all").clicked() {
-                                for entry in &mut dialog.entries {
-                                    entry.selected = true;
-                                }
-                                changed = true;
-                            }
+                ui.horizontal_top(|ui| {
+                    let left_width = (width * 0.40).floor();
+                    ui.allocate_ui_with_layout(egui::vec2(left_width, panel_height + 32.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_width(left_width);
+                        ui.add_enabled_ui(!dialog.choosing, |ui| {
+                            crate::controls::table_surface(ui, |ui| {
+                                crate::controls::table_header_background(ui, 26.0);
+                                TableBuilder::new(ui)
+                                    .id_salt("export-tables-list")
+                                    .striped(true)
+                                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                                    .column(TableColumn::remainder().clip(true))
+                                    .auto_shrink([false, false])
+                                    .min_scrolled_height(panel_height + 24.0)
+                                    .max_scroll_height(panel_height + 24.0)
+                                    .header(26.0, |mut header| { header.col(|ui| { ui.strong("Items"); }); })
+                                    .body(|body| {
+                                        body.rows(24.0, dialog.entries.len(), |mut row| {
+                                            let entry = &mut dialog.entries[row.index()];
+                                            row.col(|ui| {
+                                                changed |= ui.add(egui::Checkbox::new(&mut entry.selected, &entry.label))
+                                                    .on_hover_text(&entry.name).changed();
+                                            });
+                                        });
+                                    });
+                                if dialog.entries.is_empty() { ui.weak("No tables in this schema."); }
+                            });
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.small_button("All").clicked() { for entry in &mut dialog.entries { entry.selected = true; } changed = true; }
+                                if ui.small_button("None").clicked() { for entry in &mut dialog.entries { entry.selected = false; } changed = true; }
+                                ui.weak(format!("{} selected", dialog.count));
+                            });
                         });
                     });
-                    ui.add_space(8.0);
-                    crate::controls::table_surface(ui, |ui| {
-                        crate::controls::table_header_background(ui, 28.0);
-                        TableBuilder::new(ui)
-                            .id_salt("export-tables-list")
-                            .striped(true)
-                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                            .column(TableColumn::remainder().at_least(100.0).clip(true))
-                            .column(TableColumn::remainder().at_least(100.0).clip(true))
-                            .max_scroll_height(
-                                (ctx.content_rect().height() - 300.0).clamp(80.0, 264.0),
-                            )
-                            .header(28.0, |mut header| {
-                                header.col(|ui| {
-                                    ui.strong("Table / view");
-                                });
-                                header.col(|ui| {
-                                    ui.strong("Output file");
-                                });
-                            })
-                            .body(|body| {
-                                body.rows(28.0, dialog.entries.len(), |mut row| {
-                                    let entry = &mut dialog.entries[row.index()];
-                                    row.col(|ui| {
-                                        changed |= ui
-                                            .add(egui::Checkbox::new(
-                                                &mut entry.selected,
-                                                &entry.label,
-                                            ))
-                                            .on_hover_text(&entry.name)
-                                            .changed();
-                                    });
-                                    row.col(|ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(if entry.filename.is_empty() {
-                                                    "—"
-                                                } else {
-                                                    &entry.filename
-                                                })
-                                                .monospace()
-                                                .weak(),
-                                            )
-                                            .truncate(),
-                                        )
-                                        .on_hover_text(&entry.filename);
-                                    });
-                                });
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.set_width((width - left_width - 16.0).max(260.0));
+                        ui.add_enabled_ui(!dialog.choosing, |ui| {
+                            ui.horizontal(|ui| {
+                                for (format, label) in [(db::ExportFormat::Csv,"CSV"),(db::ExportFormat::Json,"JSON"),(db::ExportFormat::Sql,"SQL")] {
+                                    if ui.selectable_value(&mut dialog.format,format,label).changed() {
+                                        if format != db::ExportFormat::Sql && dialog.contents == Contents::Schema { dialog.contents = Contents::Data; }
+                                        changed = true;
+                                    }
+                                }
                             });
-                        if dialog.entries.is_empty() {
-                            ui.weak("No tables available in this schema.");
-                        }
-                    });
-                });
-                if changed {
-                    dialog.update_files();
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.strong(format!("{} selected", dialog.count));
-                    ui.weak(if dialog.count == 1 {
-                        "One file"
-                    } else {
-                        "One file per table · new export folder"
-                    });
-                });
-                ui.weak("Current filters and unsaved edits are not included.");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if dialog.choosing {
-                        ui.spinner();
-                        ui.weak("Choosing destination…");
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        crate::controls::rounded_action_buttons(ui);
-                        choose = ui
-                            .add_enabled(
-                                dialog.count > 0 && !dialog.choosing && self.pending.is_none(),
-                                egui::Button::new(if dialog.count == 1 {
-                                    "Choose file…"
+                            ui.add_space(6.0);
+                            egui::Frame::group(ui.style()).inner_margin(16.0).show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.set_min_height(panel_height - 64.0);
+                                ui.strong(match dialog.format { db::ExportFormat::Csv | db::ExportFormat::CsvCustom(_) => "CSV options", db::ExportFormat::Json => "JSON options", db::ExportFormat::Sql => "SQL options" });
+                                ui.add_space(16.0);
+                                if dialog.format == db::ExportFormat::Sql {
+                                    changed |= ui.radio_value(&mut dialog.contents,Contents::Data,"Data only").changed();
+                                    changed |= ui.radio_value(&mut dialog.contents,Contents::Schema,"Schema only").changed();
+                                    changed |= ui.radio_value(&mut dialog.contents,Contents::SchemaAndData,"Schema + data").changed();
+                                    ui.add_space(16.0);
+                                    ui.weak(match dialog.contents {
+                                        Contents::Data => "INSERT statements for all saved rows.",
+                                        Contents::Schema => "CREATE definitions for selected objects.",
+                                        Contents::SchemaAndData => "CREATE definitions and INSERT statements for all selected tables in one SQL file.",
+                                    });
                                 } else {
-                                    "Choose folder…"
-                                }),
-                            )
-                            .clicked();
-                        close = ui.button("Cancel").clicked();
+                                    let mut schema = dialog.contents == Contents::SchemaAndData;
+                                    if ui.checkbox(&mut schema,"Include SQL schema").changed() {
+                                        dialog.contents = if schema { Contents::SchemaAndData } else { Contents::Data }; changed = true;
+                                    }
+                                    ui.add_space(16.0);
+                                    if dialog.format.is_csv() {
+                                        use db::csv_options::{Delimiter,Quoting,LineEnding};
+                                        ui.checkbox(&mut dialog.csv_options.null_to_empty,"Convert NULL to empty").on_hover_text("When off, NULL values are written as the unquoted text NULL.");
+                                        ui.checkbox(&mut dialog.csv_options.flatten_lines,"Convert line breaks to spaces");
+                                        ui.checkbox(&mut dialog.csv_options.header,"Field names in the first row");
+                                        ui.add_space(12.0);
+                                        egui::Grid::new("export-csv-options").spacing(egui::vec2(12.0,6.0)).show(ui,|ui| {
+                                            ui.label("Delimiter"); export_choice(ui,"csv-delimiter",&mut dialog.csv_options.delimiter,&[(Delimiter::Comma,"Comma (,)"),(Delimiter::Semicolon,"Semicolon (;)"),(Delimiter::Tab,"Tab"),(Delimiter::Pipe,"Pipe (|)")]); ui.end_row();
+                                            ui.label("Quoting"); export_choice(ui,"csv-quoting",&mut dialog.csv_options.quoting,&[(Quoting::IfNeeded,"Quote if needed"),(Quoting::Always,"Always quote")]); ui.end_row();
+                                            ui.label("Line break"); export_choice(ui,"csv-lines",&mut dialog.csv_options.line_ending,&[(LineEnding::Lf,"LF (\\n)"),(LineEnding::CrLf,"CRLF (\\r\\n)"),(LineEnding::Cr,"CR (\\r)")]); ui.end_row();
+                                            ui.label("Decimal"); export_choice(ui,"csv-decimal",&mut dialog.csv_options.decimal_comma,&[(false,"Point (.)"),(true,"Comma (,)")]); ui.end_row();
+                                        });
+                                    } else {
+                                        egui::Grid::new("export-json-details").spacing(egui::vec2(16.0,8.0)).show(ui,|ui| {
+                                            for (label,value) in [("Rows","Array of objects"),("Binary values","Byte arrays"),("NULL values","null")] { ui.weak(label); ui.label(value); ui.end_row(); }
+                                        });
+                                    }
+                                }
+                                ui.add_space(16.0);
+                                if dialog.contents != Contents::Schema { ui.weak("All saved rows · every page").on_hover_text("Current filters and unsaved edits are not included."); }
+                                if dialog.contents != Contents::Data {
+                                    let details = match self.engine.as_str() {
+                                        "PostgreSQL" => "Selected-object definitions only. Ownership and grants are excluded. Referenced types, sequences and trigger functions must already exist. Partitioned/inherited tables are not supported. Restore referenced tables first.",
+                                        "MySQL" | "MariaDB" => "Selected-object SHOW CREATE definitions only. External dependencies, ownership, grants, triggers and routines are not included. Restore referenced tables first.",
+                                        _ => "Selected-object definitions only. External dependencies, ownership and grants are not included. Restore referenced tables first.",
+                                    };
+                                    ui.weak("Schema scope (details)").on_hover_text(details);
+                                }
+                            });
+                        });
+                        if changed { dialog.update_files(); }
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            ui.label("File name:");
+                            ui.add(egui::Label::new(RichText::new(if dialog.count == 0 { "No tables selected" } else { &dialog.preview }).monospace()).truncate())
+                                .on_hover_text(&dialog.preview);
+                        });
+                        ui.weak(if dialog.single_file() {
+                            "Choose a name and location on export."
+                        } else { "Separate files in a new export folder." });
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if dialog.choosing { ui.spinner(); }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                crate::controls::rounded_action_buttons(ui);
+                                choose = ui.add_enabled(dialog.count > 0 && !dialog.choosing && self.pending.is_none(), egui::Button::new("Export…")).clicked();
+                                close = ui.button("Cancel").clicked();
+                            });
+                        });
                     });
                 });
             },
@@ -253,24 +327,24 @@ impl Rustable {
         #[cfg(not(target_arch = "wasm32"))]
         {
             dialog.choosing = true;
-            let count = dialog.count;
-            let filename = dialog
-                .entries
-                .iter()
-                .find(|entry| entry.selected)
-                .map(|entry| entry.filename.clone())
-                .unwrap_or_default();
+            let single_file = dialog.single_file();
+            let filename = dialog.preview.clone();
             let epoch = dialog.epoch;
-            let (label, extension) = match dialog.format {
-                db::ExportFormat::Csv => ("CSV", "csv"),
-                db::ExportFormat::Json => ("JSON", "json"),
+            let (label, extension) = if dialog.contents == Contents::Schema {
+                ("SQL schema", "sql")
+            } else {
+                match dialog.format {
+                    db::ExportFormat::Csv | db::ExportFormat::CsvCustom(_) => ("CSV", "csv"),
+                    db::ExportFormat::Json => ("JSON", "json"),
+                    db::ExportFormat::Sql => ("SQL inserts", "sql"),
+                }
             };
             let tx = self.files_tx.clone();
             let viewport = ctx.viewport_id();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
                 let picker = rfd::FileDialog::new().set_title("Export tables");
-                let path = if count == 1 {
+                let path = if single_file {
                     picker
                         .add_filter(label, &[extension])
                         .set_file_name(filename)
@@ -305,6 +379,7 @@ impl Rustable {
             return;
         }
         let dialog = self.sidebar_export.take().unwrap();
+        let format = dialog.effective_format();
         let tables: Vec<_> = dialog
             .entries
             .into_iter()
@@ -315,10 +390,23 @@ impl Rustable {
         if count == 0 {
             return;
         }
-        let command = if count == 1 {
+        let command = if format == db::ExportFormat::Sql {
+            Command::ExportSql {
+                path,
+                tables,
+                schema: dialog.contents != Contents::Data,
+                data: dialog.contents != Contents::Schema,
+            }
+        } else if dialog.contents != Contents::Data {
+            Command::ExportSchema {
+                path,
+                tables,
+                data_format: (dialog.contents == Contents::SchemaAndData).then_some(format),
+            }
+        } else if count == 1 {
             Command::ExportTable {
                 path,
-                format: dialog.format,
+                format,
                 browse: Browse {
                     table: tables[0].0.clone(),
                     ..Default::default()
@@ -328,7 +416,7 @@ impl Rustable {
             Command::ExportTables {
                 directory: path,
                 tables,
-                format: dialog.format,
+                format,
             }
         };
         self.dispatch(command, Pending::Export);

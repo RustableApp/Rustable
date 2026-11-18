@@ -75,7 +75,9 @@ pub(super) fn write_row<'a>(
                     "JSON cannot represent non-finite numbers. Cast these values to text in the query, or export as CSV.",
                 ));
             }
-            csv::Cell::Text(value) => serde_json::to_writer(&mut writer, value)?,
+            csv::Cell::Text(value) | csv::Cell::Decimal(value) => {
+                serde_json::to_writer(&mut writer, value)?
+            }
             csv::Cell::Blob(value) => serde_json::to_writer(&mut writer, value)?,
         }
     }

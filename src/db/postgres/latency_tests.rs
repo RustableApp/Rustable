@@ -742,35 +742,263 @@ fn bulk_export_wan_latency_comparison() {
     driver.client.batch_execute("CREATE TEMP TABLE bulk_export_rows(id integer PRIMARY KEY, value numeric, label text); INSERT INTO bulk_export_rows SELECT n, 12345678901234567890.12, '日本' FROM generate_series(1,130) n; CREATE TEMP TABLE bulk_export_empty(value text)").unwrap();
     let tables = vec![("bulk_export_rows".into(), "rows".into()), ("bulk_export_empty".into(), "empty".into())];
     let destination = tempfile::tempdir().unwrap();
-    let mut individual = Vec::new();
-    let mut batch = Vec::new();
-    for iteration in 0..4 {
-        for bulk in if iteration % 2 == 0 { [false, true] } else { [true, false] } {
-            let started = Instant::now();
-            let paths = if bulk {
-                let directory = crate::db::table_export::export(&mut driver, destination.path(), &tables, ExportFormat::Json, &cancel).unwrap();
-                tables.iter().enumerate().map(|(index, (_, label))| directory.join(crate::db::table_export::filename(label, index, ExportFormat::Json))).collect::<Vec<_>>()
+    for format in [
+        ExportFormat::Json,
+        ExportFormat::Sql,
+        ExportFormat::CsvCustom(crate::db::csv_options::Options {
+            decimal_comma: true,
+            ..Default::default()
+        }),
+    ] {
+        let mut individual = Vec::new();
+        let mut batch = Vec::new();
+        for iteration in 0..4 {
+            for bulk in if iteration % 2 == 0 {
+                [false, true]
             } else {
-                tables.iter().enumerate().map(|(index, (name, _))| {
-                    let path = destination.path().join(format!("individual-{index}.json"));
-                    driver.export_table(&path, &Browse { table:name.clone(), ..Default::default() }, &cancel, ExportFormat::Json).unwrap();
-                    path
-                }).collect::<Vec<_>>()
-            };
+                [true, false]
+            } {
+                let started = Instant::now();
+                let paths = if bulk {
+                    let directory = crate::db::table_export::export(
+                        &mut driver,
+                        destination.path(),
+                        &tables,
+                        format,
+                        &cancel,
+                    )
+                    .unwrap();
+                    tables
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (_, label))| {
+                            directory.join(crate::db::table_export::filename(label, index, format))
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    tables
+                        .iter()
+                        .enumerate()
+                        .map(|(index, (name, _))| {
+                            let path = destination.path().join(format!("individual-{index}.json"));
+                            driver
+                                .export_table(
+                                    &path,
+                                    &Browse {
+                                        table: name.clone(),
+                                        ..Default::default()
+                                    },
+                                    &cancel,
+                                    format,
+                                )
+                                .unwrap();
+                            path
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+                eprintln!(
+                    "bulk export format={format:?} iteration={iteration} batch={bulk} complete_ms={elapsed:.3}"
+                );
+                if iteration > 0 {
+                    if bulk {
+                        batch.push(elapsed);
+                    } else {
+                        individual.push(elapsed);
+                    }
+                }
+                if format == ExportFormat::Sql {
+                    let sql = std::fs::read_to_string(&paths[0]).unwrap();
+                    assert_eq!(
+                        sql.lines()
+                            .filter(|line| line.starts_with("INSERT INTO"))
+                            .count(),
+                        130
+                    );
+                    assert!(sql.contains("12345678901234567890.12"));
+                    assert!(
+                        !std::fs::read_to_string(&paths[1])
+                            .unwrap()
+                            .contains("INSERT INTO")
+                    );
+                } else if format.is_csv() {
+                    let mut reader = ::csv::Reader::from_path(&paths[0]).unwrap();
+                    let records = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+                    assert_eq!(records.len(), 130);
+                    assert_eq!(&records[0][1], "12345678901234567890,12");
+                    assert_eq!(
+                        ::csv::Reader::from_path(&paths[1])
+                            .unwrap()
+                            .records()
+                            .count(),
+                        0
+                    );
+                } else {
+                    let rows: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&paths[0]).unwrap()).unwrap();
+                    assert_eq!(rows.as_array().unwrap().len(), 130);
+                    assert_eq!(rows[0]["value"], "12345678901234567890.12");
+                    assert_eq!(rows[0]["label"], "日本");
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(
+                            &std::fs::read(&paths[1]).unwrap()
+                        )
+                        .unwrap(),
+                        serde_json::json!([])
+                    );
+                }
+            }
+        }
+        individual.sort_by(f64::total_cmp);
+        batch.sort_by(f64::total_cmp);
+        eprintln!(
+            "30ms RTT, two full {format:?} exports: individual median={:.3}ms batch median={:.3}ms",
+            individual[1], batch[1]
+        );
+        assert!(
+            batch[1] < individual[1] * 1.15,
+            "batch orchestration added a serial network wait"
+        );
+    }
+    let (mut separate_sql, mut bundled_sql) = (Vec::new(), Vec::new());
+    for iteration in 0..4 {
+        for bundle in if iteration % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let started = Instant::now();
+            if bundle {
+                let path = destination.path().join("all.sql");
+                crate::db::table_export::sql_bundle(
+                    &mut driver,
+                    &path,
+                    &tables,
+                    true,
+                    true,
+                    &cancel,
+                )
+                .unwrap();
+                let script = std::fs::read_to_string(path).unwrap();
+                assert_eq!(
+                    script
+                        .lines()
+                        .filter(|line| line.starts_with("INSERT INTO"))
+                        .count(),
+                    130
+                );
+            } else {
+                crate::db::table_export::export_schema(
+                    &mut driver,
+                    destination.path(),
+                    &tables,
+                    Some(ExportFormat::Sql),
+                    &cancel,
+                )
+                .unwrap();
+            }
             let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-            eprintln!("bulk export iteration={iteration} batch={bulk} complete_ms={elapsed:.3}");
-            if iteration > 0 { if bulk { batch.push(elapsed); } else { individual.push(elapsed); } }
-            let rows: serde_json::Value = serde_json::from_slice(&std::fs::read(&paths[0]).unwrap()).unwrap();
-            assert_eq!(rows.as_array().unwrap().len(),130);
-            assert_eq!(rows[0]["value"],"12345678901234567890.12");
-            assert_eq!(rows[0]["label"],"日本");
-            assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&paths[1]).unwrap()).unwrap(),serde_json::json!([]));
+            eprintln!(
+                "combined SQL iteration={iteration} bundle={bundle} complete_ms={elapsed:.3}"
+            );
+            if iteration > 0 {
+                if bundle {
+                    bundled_sql.push(elapsed);
+                } else {
+                    separate_sql.push(elapsed);
+                }
+            }
         }
     }
-    individual.sort_by(f64::total_cmp);
-    batch.sort_by(f64::total_cmp);
-    eprintln!("30ms RTT, two full exports: individual median={:.3}ms batch median={:.3}ms", individual[1], batch[1]);
-    assert!(batch[1] < individual[1] * 1.15, "batch orchestration added a serial network wait");
+    separate_sql.sort_by(f64::total_cmp);
+    bundled_sql.sort_by(f64::total_cmp);
+    eprintln!(
+        "30ms RTT SQL separate={:.3}ms single-file={:.3}ms",
+        separate_sql[1], bundled_sql[1]
+    );
+    assert!(
+        bundled_sql[1] < separate_sql[1] * 1.15,
+        "SQL bundle added a sequential wait"
+    );
+    let mut direct_schema = Vec::new();
+    let mut file_schema = Vec::new();
+    for iteration in 0..4 {
+        for to_file in if iteration % 2 == 0 {
+            [false, true]
+        } else {
+            [true, false]
+        } {
+            let started = Instant::now();
+            if to_file {
+                let directory = crate::db::table_export::export_schema(
+                    &mut driver,
+                    destination.path(),
+                    &tables,
+                    None,
+                    &cancel,
+                )
+                .unwrap();
+                let ddl = std::fs::read_to_string(directory.join("001_rows.sql")).unwrap();
+                assert!(ddl.contains("PRIMARY KEY"));
+                assert!(ddl.contains("numeric"));
+            } else {
+                // Match the export's atomic disk writes; comparing against only
+                // in-memory DDL would measure fsync cost as a network regression.
+                let directory = tempfile::tempdir_in(destination.path()).unwrap();
+                for (index, (name, label)) in tables.iter().enumerate() {
+                    let ddl = driver.export_definition(name).unwrap();
+                    assert!(ddl.contains("CREATE"));
+                    let path = directory.path().join(
+                        std::path::Path::new(&crate::db::table_export::filename(
+                            label,
+                            index,
+                            crate::db::ExportFormat::Csv,
+                        ))
+                        .with_extension("sql"),
+                    );
+                    crate::db::csv::publish(&path, &cancel, |writer| {
+                        use std::io::Write;
+                        writer.write_all(b"-- Rustable selected-object schema export.\n-- Restore dependencies first. This is not a complete database backup.\n\n")?;
+                        writer.write_all(ddl.trim_end().as_bytes())?;
+                        if !ddl.trim_end().ends_with(';') { writer.write_all(b";")?; }
+                        writer.write_all(b"\n")
+                    }).unwrap();
+                }
+            }
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("schema iteration={iteration} to_file={to_file} complete_ms={elapsed:.3}");
+            if iteration > 0 {
+                if to_file {
+                    file_schema.push(elapsed);
+                } else {
+                    direct_schema.push(elapsed);
+                }
+            }
+        }
+    }
+    direct_schema.sort_by(f64::total_cmp);
+    file_schema.sort_by(f64::total_cmp);
+    eprintln!(
+        "30ms RTT schema direct={:.3}ms file={:.3}ms",
+        direct_schema[1], file_schema[1]
+    );
+    assert!(
+        file_schema[1] < direct_schema[1] * 1.15,
+        "schema file export added a network wait"
+    );
+    let ddl = driver
+        .definition("bulk_export_rows")
+        .unwrap()
+        .replace("bulk_export_rows", "bulk_schema_restore_rows");
+    driver.client.batch_execute(&ddl).unwrap();
+    assert_eq!(
+        driver
+            .client
+            .query_one("SELECT count(*) FROM bulk_schema_restore_rows", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
     drop(driver);
     proxy.join().unwrap();
 }

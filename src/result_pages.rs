@@ -126,6 +126,22 @@ impl Pages {
     pub fn is_loading(&self) -> bool {
         self.worker.is_some()
     }
+    pub fn share_page_range(&self, source: &Arc<Grid>) -> std::ops::Range<usize> {
+        if self.source.ptr_eq(&Arc::downgrade(source))
+            && let Some(page) = &self.page
+        {
+            self.offset..self.offset + page.rows.len()
+        } else {
+            0..source.rows.len()
+        }
+    }
+    pub fn share_offset(&self) -> usize {
+        if !self.rendering && self.selection.is_some() {
+            self.selection_offset
+        } else {
+            self.offset
+        }
+    }
     pub fn grid(&self, source: &Arc<Grid>) -> Arc<Grid> {
         if self.source.ptr_eq(&Arc::downgrade(source)) {
             if !self.rendering

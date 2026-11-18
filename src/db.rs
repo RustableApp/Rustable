@@ -2,6 +2,7 @@
 #[cfg(any(test, target_arch = "wasm32"))]
 pub(crate) mod browser_export;
 mod csv;
+pub mod csv_options;
 pub mod filters;
 pub mod foreign_keys;
 mod json;
@@ -13,11 +14,21 @@ mod mysql_results;
 mod mysql_values;
 pub mod result_store;
 mod row_export;
+mod sql_export;
 pub(crate) mod table_export;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
-pub enum ExportFormat { Csv, Json }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExportFormat {
+    Csv,
+    CsvCustom(csv_options::Options),
+    Json,
+    Sql,
+}
+impl ExportFormat {
+    pub fn is_csv(self) -> bool {
+        matches!(self, Self::Csv | Self::CsvCustom(_))
+    }
+}
 pub mod csv_import;
 pub mod csv_preview;
 #[cfg(not(target_arch = "wasm32"))]
@@ -25,11 +36,11 @@ pub(crate) mod postgres;
 pub mod progress;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use postgres::async_client_config as probe_client_config;
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod browser;
 mod sqlite;
 #[cfg(any(test, target_arch = "wasm32"))]
 pub(crate) mod transport;
-#[cfg(target_arch = "wasm32")]
-pub(crate) mod browser;
 #[cfg(target_arch = "wasm32")]
 pub use browser::Worker;
 
@@ -44,8 +55,7 @@ use std::{
 };
 
 /// Driver-independent cell values. Adapters own conversion and parameter binding.
-#[derive(Clone, Debug, PartialEq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Null,
     Integer(i64),
@@ -91,8 +101,18 @@ trait Driver: Send {
             .map(|object| object.ddl).filter(|ddl| !ddl.trim().is_empty())
             .ok_or_else(|| "No definition is available for this object".into())
     }
-    fn databases(&mut self) -> Result<Vec<String>, String> { Ok(Vec::new()) }
-    fn transaction_state(&mut self) -> TransactionState { TransactionState::Idle }
+    fn export_definition(&mut self, name: &str) -> Result<String, String> {
+        self.definition(name)
+    }
+    fn export_definition_parts(&mut self, name: &str) -> Result<(String, String), String> {
+        Ok((self.export_definition(name)?, String::new()))
+    }
+    fn databases(&mut self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+    fn transaction_state(&mut self) -> TransactionState {
+        TransactionState::Idle
+    }
     fn engine_name(&self) -> &'static str;
     fn sql_dialect(&self) -> crate::sql::Dialect { crate::sql::Dialect::for_engine(self.engine_name()) }
     fn objects(&mut self) -> Result<Vec<Object>, String>;
@@ -143,8 +163,7 @@ pub const PAGE_SIZE: usize = 500;
 pub const QUERY_LIMIT: usize = 5_000;
 const BYTE_LIMIT: usize = 16 * 1024 * 1024;
 
-#[derive(Clone, Debug)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Object {
     pub schema: Option<String>,
     pub display_name: Option<String>,
@@ -159,15 +178,13 @@ impl Object {
         self.display_name.as_deref().unwrap_or(&self.name)
     }
 }
-#[derive(Clone, Debug, Default)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SchemaCatalog {
     pub names: Vec<String>,
     pub selected: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Column {
     pub name: String,
     pub data_type: String,
@@ -177,9 +194,11 @@ pub struct Column {
     pub generated: bool,
 }
 
-#[derive(Clone, Debug, Default)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Grid {
+    /// Exact executed statement and bindings; retained with pages and pinned results.
+    #[serde(default)]
+    pub query_source: Option<Arc<QuerySource>>,
     /// Server-provided origin shared by every result column, when available.
     /// Used to keep query edits tied to their actual source, not a name guess.
     #[serde(default)]
@@ -195,8 +214,21 @@ pub struct Grid {
     pub total_rows: Option<RowTotal>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct QuerySource {
+    pub sql: String,
+    pub parameters: Vec<Value>,
+}
+impl QuerySource {
+    pub fn statement(sql: &str) -> Arc<Self> {
+        Arc::new(Self {
+            sql: sql.into(),
+            parameters: Vec::new(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RowTotal {
     pub rows: u64,
     pub estimated: bool,
@@ -238,7 +270,11 @@ struct TableData {
 }
 
 impl From<TableData> for Payload {
-    fn from(table: TableData) -> Self {
+    fn from(mut table: TableData) -> Self {
+        table.grid.query_source = Some(Arc::new(QuerySource {
+            sql: table.sql.clone(),
+            parameters: table.parameters.clone(),
+        }));
         Self::Table {
             details_loaded: table.details_loaded,
             sql: table.sql,
@@ -252,8 +288,7 @@ impl From<TableData> for Payload {
     }
 }
 
-#[derive(Debug, Default)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ScriptResult {
     /// UTF-8 byte offset in the submitted script, only when reported by the database.
     pub error_offset: Option<usize>,
@@ -262,8 +297,7 @@ pub struct ScriptResult {
     pub elapsed: Duration,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Browse {
     #[serde(default)]
     pub filters: Vec<filters::Filter>,
@@ -333,7 +367,23 @@ pub enum Command {
         grid: Arc<Grid>,
     },
     #[cfg(target_arch = "wasm32")]
-    DownloadTable { format: ExportFormat, browse: Browse },
+    DownloadTable {
+        format: ExportFormat,
+        browse: Browse,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    ExportSql {
+        path: PathBuf,
+        tables: Vec<(String, String)>,
+        schema: bool,
+        data: bool,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    ExportSchema {
+        path: PathBuf,
+        tables: Vec<(String, String)>,
+        data_format: Option<ExportFormat>,
+    },
     #[cfg(not(target_arch = "wasm32"))]
     ExportTables {
         directory: PathBuf,
@@ -680,8 +730,11 @@ fn handle(
         }
         match format {
             ExportFormat::Csv => csv::export(&path, &grid, cancel),
+            ExportFormat::CsvCustom(options) => csv_options::export(&path, &grid, cancel, options),
             ExportFormat::Json => json::export(&path, &grid, cancel),
-        }.map_err(|e| e.to_string())?;
+            ExportFormat::Sql => Err(std::io::Error::other("SQL export requires a source table")),
+        }
+        .map_err(|e| e.to_string())?;
         return Ok(Payload::Exported(path));
     }
     let driver = connection.as_mut().ok_or("Open a database first")?;
@@ -710,10 +763,32 @@ fn handle(
             Ok(Payload::Download { bytes, format })
         }
         #[cfg(not(target_arch = "wasm32"))]
-        Command::ExportTables { directory, tables, format } => {
-            table_export::export(driver.as_mut(), &directory, &tables, format, cancel).map(Payload::Exported)
-        }
-        Command::ExportTable { path, browse, format } => {
+        Command::ExportSql {
+            path,
+            tables,
+            schema,
+            data,
+        } => table_export::sql_bundle(driver.as_mut(), &path, &tables, schema, data, cancel)
+            .map(Payload::Exported),
+        #[cfg(not(target_arch = "wasm32"))]
+        Command::ExportSchema {
+            path,
+            tables,
+            data_format,
+        } => table_export::export_schema(driver.as_mut(), &path, &tables, data_format, cancel)
+            .map(Payload::Exported),
+        #[cfg(not(target_arch = "wasm32"))]
+        Command::ExportTables {
+            directory,
+            tables,
+            format,
+        } => table_export::export(driver.as_mut(), &directory, &tables, format, cancel)
+            .map(Payload::Exported),
+        Command::ExportTable {
+            path,
+            browse,
+            format,
+        } => {
             driver.export_table(&path, &browse, cancel, format)?;
             Ok(Payload::Exported(path))
         }
@@ -734,8 +809,18 @@ fn handle(
             }
             Ok(Payload::ImportTarget(object))
         }
-        Command::TableDetails(name) => driver.table_details(&name).map(|(indexes,triggers)| Payload::TableDetails { name, indexes, triggers }),
-        Command::Definition(name) => driver.definition(&name).map(|sql| Payload::Definition { name, sql }),
+        Command::TableDetails(name) => {
+            driver
+                .table_details(&name)
+                .map(|(indexes, triggers)| Payload::TableDetails {
+                    name,
+                    indexes,
+                    triggers,
+                })
+        }
+        Command::Definition(name) => driver
+            .definition(&name)
+            .map(|sql| Payload::Definition { name, sql }),
         Command::ListDatabases => driver.databases().map(Payload::Databases),
         Command::RefreshSchema => {
             let objects = driver.objects()?;
@@ -1472,8 +1557,7 @@ mod worker_tests {
 }
 
 /// Immutable review data: execution uses these exact statements and parameters.
-#[derive(Clone, Debug, PartialEq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Change {
     /// Omitted fields use database defaults; explicit Value::Null remains NULL.
     /// Each entry represents a distinct row, including identical entries.
@@ -1536,8 +1620,7 @@ impl Change {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChangePlan {
     #[serde(default)]
     pub refresh_results: bool,
@@ -1552,23 +1635,20 @@ pub struct ChangePlan {
     pub preconditions: Vec<PlannedPrecondition>,
     pub schemas: Vec<(String, String)>,
 }
-#[derive(Clone, Debug)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlannedPrecondition {
     pub before_statement: usize,
     pub sql: String,
     pub parameters: Vec<Value>,
 }
-#[derive(Clone, Debug)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlannedStatement {
     pub sql: String,
     pub parameters: Vec<Value>,
     pub expected_rows: Option<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColumnDefinition {
     pub name: String,
     pub data_type: String,
@@ -1577,8 +1657,7 @@ pub struct ColumnDefinition {
     pub default: Option<Value>,
 }
 
-#[derive(Clone, Debug)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Index {
     pub name: String,
     pub unique: bool,
@@ -1712,8 +1791,12 @@ pub struct RefreshedRow {
 }
 impl ChangePlan {
     fn readback_batch(&mut self, table: &str, columns: Vec<String>) -> &mut RowReadback {
-        let index = self.readbacks.iter().position(|batch| batch.table == table && batch.columns == columns
-            && batch.originals.len() < 64 && batch.parameters.len() < 400);
+        let index = self.readbacks.iter().position(|batch| {
+            batch.table == table
+                && batch.columns == columns
+                && batch.originals.len() < 64
+                && batch.parameters.len() < 400
+        });
         let index = index.unwrap_or_else(|| {
             self.readbacks.push(RowReadback { table: table.into(), columns, ..Default::default() });
             self.readbacks.len() - 1
@@ -1726,8 +1809,24 @@ impl RowReadback {
         if !self.sql.is_empty() { self.sql.push_str(" UNION ALL "); }
         let mysql = table_sql.starts_with('`');
         let quote = if mysql { '`' } else { '"' };
-        let projection = self.columns.iter().map(|name| format!("rustable_saved.{quote}{}{quote}", name.replace(quote, &format!("{quote}{quote}")))).collect::<Vec<_>>().join(", ");
-        self.sql.push_str(&format!("SELECT {} AS __rustable_row, {} FROM {} AS rustable_saved WHERE {}", self.originals.len(), projection, table_sql, predicate));
+        let projection = self
+            .columns
+            .iter()
+            .map(|name| {
+                format!(
+                    "rustable_saved.{quote}{}{quote}",
+                    name.replace(quote, &format!("{quote}{quote}"))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.sql.push_str(&format!(
+            "SELECT {} AS __rustable_row, {} FROM {} AS rustable_saved WHERE {}",
+            self.originals.len(),
+            projection,
+            table_sql,
+            predicate
+        ));
         self.originals.push(original.to_vec());
     }
 }
@@ -1744,18 +1843,36 @@ fn read_saved_rows(driver: &mut dyn Driver, plan: &ChangePlan) -> Result<Vec<Ref
         }
         let mut seen = vec![false; batch.originals.len()];
         for mut row in grid.rows {
-            let Some(Value::Integer(index)) = row.first() else { return Err("Invalid saved-row identity".into()) };
+            let Some(Value::Integer(index)) = row.first() else {
+                return Err("Invalid saved-row identity".into());
+            };
             let index = usize::try_from(*index).map_err(|_| "Invalid saved-row identity")?;
             if index >= seen.len() || seen[index] { return Err("Saved-row identity changed. Rerun the query.".into()); }
             seen[index] = true;
             row.remove(0);
-            let bytes = row.iter().map(|value| match value {
-                Value::Text(text) => text.len(), Value::Blob(bytes) => bytes.len(), _ => 8,
-            }).sum::<usize>();
-            remaining = remaining.checked_sub(bytes).ok_or("Saved rows exceeded the refresh limit")?;
-            result.push(RefreshedRow { columns: batch.columns.clone(), table: batch.table.clone(), original: batch.originals[index].clone(), values: row });
+            let bytes = row
+                .iter()
+                .map(|value| match value {
+                    Value::Text(text) => text.len(),
+                    Value::Blob(bytes) => bytes.len(),
+                    _ => 8,
+                })
+                .sum::<usize>();
+            remaining = remaining
+                .checked_sub(bytes)
+                .ok_or("Saved rows exceeded the refresh limit")?;
+            result.push(RefreshedRow {
+                columns: batch.columns.clone(),
+                table: batch.table.clone(),
+                original: batch.originals[index].clone(),
+                values: row,
+            });
         }
-        if seen.iter().any(|seen| !seen) { return Err("A saved row was deleted, hidden or its key changed. Rerun the query.".into()); }
+        if seen.iter().any(|seen| !seen) {
+            return Err(
+                "A saved row was deleted, hidden or its key changed. Rerun the query.".into(),
+            );
+        }
     }
     Ok(result)
 }

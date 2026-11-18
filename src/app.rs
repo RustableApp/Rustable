@@ -10,30 +10,33 @@ mod matrix;
 mod result_pages_qa;
 use crate::controls::rounded_action_buttons;
 use web_time::Instant;
-#[path = "query_library.rs"]
-mod query_library;
-#[path = "query_history.rs"]
-mod query_history;
-#[path = "query_result_tabs.rs"]
-mod query_result_tabs;
-#[cfg(any(test, feature = "qa"))]
-#[path = "query_layout_qa.rs"]
-mod query_layout_qa;
-#[path = "table_export.rs"]
-mod table_export;
-#[path = "table_tabs.rs"]
-mod table_tabs;
-#[path = "navigator.rs"]
-pub(crate) mod navigator;
-#[path = "query_monitor.rs"]
-mod query_monitor;
 #[path = "bulk_rows.rs"]
 mod bulk_rows;
 #[path = "change_history.rs"]
 mod change_history;
 #[path = "navigation_confirmation.rs"]
 mod navigation_confirmation;
+#[path = "navigator.rs"]
+pub(crate) mod navigator;
+#[path = "query_history.rs"]
+mod query_history;
+#[cfg(any(test, feature = "qa"))]
+#[path = "query_layout_qa.rs"]
+mod query_layout_qa;
+#[path = "query_library.rs"]
+mod query_library;
+#[path = "query_monitor.rs"]
+mod query_monitor;
+#[path = "query_result_tabs.rs"]
+mod query_result_tabs;
+#[path = "table_export.rs"]
+mod table_export;
+#[path = "table_tabs.rs"]
+mod table_tabs;
 use navigation_confirmation::{NavigationAction, NavigationConfirmation};
+#[cfg(target_arch = "wasm32")]
+#[path = "browser_files.rs"]
+mod browser_files;
 #[path = "connections.rs"]
 mod connections;
 #[path = "csv_mapping.rs"]
@@ -42,13 +45,12 @@ mod csv_mapping;
 mod inserts;
 #[path = "pane_toggles.rs"]
 mod pane_toggles;
+#[path = "result_share.rs"]
+mod result_share;
 #[path = "row_copy.rs"]
 mod row_copy;
 #[path = "row_selection.rs"]
 mod row_selection;
-#[cfg(target_arch = "wasm32")]
-#[path = "browser_files.rs"]
-mod browser_files;
 use crate::db::{self, Browse, Column, Command, Grid, Object, Payload, Worker};
 use crate::db::{Change, ChangePlan, Value};
 use eframe::egui::{self, Color32, RichText, Stroke, TextEdit};
@@ -66,20 +68,28 @@ fn error_toast(ctx: &egui::Context, error: &str, actions: impl FnOnce(&mut egui:
         .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -48.0])
         .order(egui::Order::Foreground).movable(false)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).inner_margin(14).corner_radius(8).show(ui, |ui| {
-                ui.set_width((ctx.content_rect().width() - 64.0).clamp(120.0, 420.0));
-                ui.horizontal(|ui| {
-                    ui.colored_label(ui.visuals().error_fg_color, "Unable to complete action");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        dismissed = ui.small_button("×").on_hover_text("Dismiss error").clicked();
+            egui::Frame::popup(ui.style())
+                .inner_margin(14)
+                .corner_radius(8)
+                .show(ui, |ui| {
+                    ui.set_width((ctx.content_rect().width() - 64.0).clamp(120.0, 420.0));
+                    ui.horizontal(|ui| {
+                        ui.colored_label(ui.visuals().error_fg_color, "Unable to complete action");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            dismissed = ui
+                                .small_button("×")
+                                .on_hover_text("Dismiss error")
+                                .clicked();
+                        });
                     });
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .max_height((ctx.content_rect().height() * 0.35).clamp(60.0, 220.0))
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new(error).wrap().selectable(true));
+                        });
+                    actions(ui);
                 });
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() * 0.35).clamp(60.0, 220.0)).show(ui, |ui| {
-                    ui.add(egui::Label::new(error).wrap().selectable(true));
-                });
-                actions(ui);
-            });
         });
     dismissed
 }
@@ -156,6 +166,7 @@ struct Preferences {
     pane_sizes: crate::pane_sizes::PaneSizes,
     redis_browser: crate::redis_preferences::Preferences,
     page_size: usize,
+    result_share: result_share::Options,
 }
 
 /// Session data contains drafts, never query results. A clean file uses `sql`
@@ -510,6 +521,7 @@ pub struct Rustable {
     objects: Vec<Object>,
     sidebar_selection: table_export::Selection,
     sidebar_export: Option<table_export::Dialog>,
+    result_share: Option<result_share::Dialog>,
     sidebar_export_epoch: u64,
     browse: Browse,
     columns: Vec<Column>,
@@ -775,6 +787,7 @@ impl Rustable {
         }
         child.prefs.activity_visible = self.prefs.activity_visible;
         child.prefs.page_size = self.prefs.page_size;
+        child.prefs.result_share = self.prefs.result_share;
         child.shared_preferences_revision = self.shared_preferences_revision;
     }
     pub(crate) fn merge_window_preferences(&mut self, child: &mut Self) -> bool {
@@ -796,6 +809,7 @@ impl Rustable {
         }
         self.prefs.activity_visible = child.prefs.activity_visible;
         self.prefs.page_size = child.prefs.page_size;
+        self.prefs.result_share = child.prefs.result_share;
         self.prefs.history.truncate(100);
         self.shared_preferences_revision = self.shared_preferences_revision.wrapping_add(1);
         child.shared_preferences_revision = self.shared_preferences_revision;
@@ -819,6 +833,7 @@ impl Rustable {
             pane_sizes: self.prefs.pane_sizes,
             redis_browser: self.prefs.redis_browser.clone(),
             page_size: self.prefs.page_size,
+            result_share: self.prefs.result_share,
             connections_migrated: true,
             ..Default::default()
         };
@@ -939,7 +954,9 @@ impl Rustable {
         let dialect = self
             .session_dialect
             .unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine));
-        let Some(tab) = self.tabs.get_mut(index) else { return };
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
         let sql = tab.executed_sql.take();
         tab.edit_target = match (sql, tab.results.as_slice()) {
             (Some(sql), [grid]) if tab.result_error.is_none() && !grid.columns.is_empty() => {
@@ -951,15 +968,22 @@ impl Rustable {
                         grid.source.as_ref().map(|(schema, _)| schema.as_str())
                     } else { self.schemas.selected.as_deref() },
                     &grid.columns,
-                ).filter(|target| {
-                    match dialect {
-                        crate::sql::Dialect::Sqlite => grid.source.as_ref().is_some_and(|(schema, table)|
-                            schema == "main" && table == &target.table),
-                        crate::sql::Dialect::Postgres => grid.source.as_ref().is_some_and(|(schema, table)|
-                            self.objects.iter().any(|object| object.schema.as_ref() == Some(schema)
-                                && object.display_name() == table && object.name == target.table)),
-                        _ => true,
+                )
+                .filter(|target| match dialect {
+                    crate::sql::Dialect::Sqlite => grid
+                        .source
+                        .as_ref()
+                        .is_some_and(|(schema, table)| schema == "main" && table == &target.table),
+                    crate::sql::Dialect::Postgres => {
+                        grid.source.as_ref().is_some_and(|(schema, table)| {
+                            self.objects.iter().any(|object| {
+                                object.schema.as_ref() == Some(schema)
+                                    && object.display_name() == table
+                                    && object.name == target.table
+                            })
+                        })
                     }
+                    _ => true,
                 })
             }
             _ => None,
@@ -970,9 +994,15 @@ impl Rustable {
     /// re-execute the original SQL or replay writes after a read-back failure.
     fn apply_saved_rows_to_query_results(&mut self, saved: &[Change], refreshed: Option<&Result<Vec<db::RefreshedRow>, String>>) {
         for tab in &mut self.tabs {
-            let Some(target) = &tab.edit_target else { continue };
-            if !saved.iter().any(|change| change.table() == target.table) { continue; }
-            let Some(grid) = tab.results.first() else { continue };
+            let Some(target) = &tab.edit_target else {
+                continue;
+            };
+            if !saved.iter().any(|change| change.table() == target.table) {
+                continue;
+            }
+            let Some(grid) = tab.results.first() else {
+                continue;
+            };
             let result = match refreshed {
                 Some(Ok(rows)) => saved_query_rows(grid, &target.table, saved, rows),
                 Some(Err(error)) => Err(error.clone()),
@@ -1231,6 +1261,7 @@ impl Rustable {
             csv_review: None,
             sidebar_selection: Default::default(),
             sidebar_export: None,
+            result_share: None,
             sidebar_export_epoch: 0,
             inspector: true,
             history: false,
@@ -1349,8 +1380,12 @@ impl Rustable {
             let elapsed = self.started.elapsed().as_secs_f64() * 1000.0;
             self.last_operation_ms = Some(elapsed);
             match &result {
-                Ok(Payload::Table { grid, .. }) => self.last_operation_ms = Some(grid.elapsed.as_secs_f64() * 1000.0),
-                Ok(Payload::Query { report, .. }) => self.last_operation_ms = Some(report.elapsed.as_secs_f64() * 1000.0),
+                Ok(Payload::Table { grid, .. }) => {
+                    self.last_operation_ms = Some(grid.elapsed.as_secs_f64() * 1000.0)
+                }
+                Ok(Payload::Query { report, .. }) => {
+                    self.last_operation_ms = Some(report.elapsed.as_secs_f64() * 1000.0)
+                }
                 _ => {}
             }
             if let Ok(Payload::Table {
@@ -1384,7 +1419,13 @@ impl Rustable {
                     self.review_sql = plan
                         .statements
                         .iter()
-                        .map(|s| crate::review_sql::readable_dialect(&s.sql, &s.parameters, crate::sql::Dialect::for_engine(&self.engine)))
+                        .map(|s| {
+                            crate::review_sql::readable_dialect(
+                                &s.sql,
+                                &s.parameters,
+                                crate::sql::Dialect::for_engine(&self.engine),
+                            )
+                        })
                         .collect();
                     self.review = Some(plan);
                     self.status = "Review generated changes".into();
@@ -1937,12 +1978,21 @@ impl Rustable {
         ) else {
             return;
         };
-        let source_offset = range.start + tab.sql[range.clone()].len() - tab.sql[range.clone()].trim_start().len();
-        let sql = match self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)) {
-            crate::sql::Dialect::Mysql(mode) => match crate::sql::mysql::execution_text(&tab.sql, range, mode) {
-                Ok(sql) => sql,
-                Err(error) => { self.error = Some(error); return; }
-            },
+        let source_offset =
+            range.start + tab.sql[range.clone()].len() - tab.sql[range.clone()].trim_start().len();
+        let sql = match self
+            .session_dialect
+            .unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine))
+        {
+            crate::sql::Dialect::Mysql(mode) => {
+                match crate::sql::mysql::execution_text(&tab.sql, range, mode) {
+                    Ok(sql) => sql,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
+                }
+            }
             _ => tab.sql[range].trim().to_owned(),
         };
         if sql.is_empty() {
@@ -2299,8 +2349,13 @@ impl Rustable {
         self.query_monitor.open || self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
             || self.destructive_confirm.is_some() || self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some()
             || (self.rename.is_some() && !self.rename_inline)
-            || self.add_column.is_some() || self.alter_column.is_some()
-            || self.index_draft.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() || self.sidebar_export.is_some()
+            || self.add_column.is_some()
+            || self.alter_column.is_some()
+            || self.index_draft.is_some()
+            || self.csv_preview.is_some()
+            || self.csv_review.is_some()
+            || self.sidebar_export.is_some()
+            || self.result_share.is_some()
     }
 
     fn workspace_shortcuts(&mut self, ctx: &egui::Context) {
@@ -2308,7 +2363,14 @@ impl Rustable {
         if self.matrix_interaction_locked() || self.matrix_connector_open() { return; }
         if self.close_table_confirmation.is_some() || crate::session_windows::close_confirmation_open(ctx) { return; }
         // Import windows own the keyboard, including their first visible frame.
-        if self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() || self.sidebar_export.is_some() {
+        if self.ddl_preview.is_some()
+            || self.json_editor.is_some()
+            || self.date_picker.is_some()
+            || self.csv_preview.is_some()
+            || self.csv_review.is_some()
+            || self.sidebar_export.is_some()
+            || self.result_share.is_some()
+        {
             return;
         }
         if self.destructive_confirm.is_some() {
@@ -2329,7 +2391,12 @@ impl Rustable {
         if self.review.is_some() {
             // Review owns confirmation; Run All must never execute the editor
             // behind it, including on the first frame before egui assigns focus.
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Enter));
+            ctx.input_mut(|i| {
+                i.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::Enter,
+                )
+            });
             let save = ctx.input_mut(|i| {
                 i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S)
                     || i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
@@ -2364,6 +2431,17 @@ impl Rustable {
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::K)) {
             self.open_navigator(true);
+            return;
+        }
+        if !self.dialog_owns_workspace_shortcuts()
+            && ctx.input_mut(|i| {
+                i.consume_key(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::J,
+                )
+            })
+        {
+            self.open_result_share(ctx, false, None);
             return;
         }
         self.workspace_tab_shortcuts(ctx);
@@ -2450,13 +2528,9 @@ impl Rustable {
             self.file_dialog(ctx, false);
         }
         let activity_modifiers = activity_shortcut_modifiers(ctx);
-        if ctx.input_mut(|i| {
-            i.consume_key(
-                activity_modifiers,
-                egui::Key::C,
-            )
-        }) {
-            self.prefs.activity_visible = !self.prefs.activity_visible; self.shared_preferences_dirty = true;
+        if ctx.input_mut(|i| i.consume_key(activity_modifiers, egui::Key::C)) {
+            self.prefs.activity_visible = !self.prefs.activity_visible;
+            self.shared_preferences_dirty = true;
         }
         if self.view == View::Data
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F))
@@ -2704,7 +2778,11 @@ impl Rustable {
         let ctx = ctx.clone();
         let browse = self.browse.clone();
         let label = self.label.clone();
-        let (name, extension) = match format { db::ExportFormat::Csv => ("CSV", "csv"), db::ExportFormat::Json => ("JSON", "json") };
+        let (name, extension) = match format {
+            db::ExportFormat::Csv | db::ExportFormat::CsvCustom(_) => ("CSV", "csv"),
+            db::ExportFormat::Json => ("JSON", "json"),
+            db::ExportFormat::Sql => ("SQL inserts", "sql"),
+        };
         std::thread::spawn(move || {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter(name, &[extension])
@@ -3002,16 +3080,31 @@ impl Rustable {
         let supported = self.supports_safe_mode();
         let mut on = self.safe_mode_active();
         let name = if on { "lock" } else { "lock-open" };
-        let response = ui.add_enabled_ui(supported && self.pending.is_none() && self.has_connection(), |ui| {
-            match width {
-                Some(width) => crate::icons::button(ui, name, egui::vec2(width, crate::icons::TOOLBAR_BUTTON.y), on),
-                None => ui.horizontal(|ui| {
-                    let response = crate::icons::button(ui, name, crate::icons::TOOLBAR_BUTTON, on);
-                    let label = ui.selectable_label(on, if on { "Safe mode on" } else { "Safe mode off" });
-                    response.union(label)
-                }).inner,
-            }
-        }).inner;
+        let response = ui
+            .add_enabled_ui(
+                supported && self.pending.is_none() && self.has_connection(),
+                |ui| match width {
+                    Some(width) => crate::icons::button(
+                        ui,
+                        name,
+                        egui::vec2(width, crate::icons::TOOLBAR_BUTTON.y),
+                        on,
+                    ),
+                    None => {
+                        ui.horizontal(|ui| {
+                            let response =
+                                crate::icons::button(ui, name, crate::icons::TOOLBAR_BUTTON, on);
+                            let label = ui.selectable_label(
+                                on,
+                                if on { "Safe mode on" } else { "Safe mode off" },
+                            );
+                            response.union(label)
+                        })
+                        .inner
+                    }
+                },
+            )
+            .inner;
         let response = if supported {
             response.on_hover_text(if on {
                 "Safe mode on: the database session rejects writes, and table edits, imports and schema changes are disabled. Click to allow writes."
@@ -3031,22 +3124,46 @@ impl Rustable {
     fn edit_toolbar(&mut self, ui: &mut egui::Ui) {
         let editable = self.pending.is_none() && (!self.changes.is_empty() || self.edit.is_some());
         crate::icons::toolbar_group(ui, 3, |ui| {
-            let discard = ui.add_enabled_ui(editable, |ui|
-                crate::icons::button(ui, "circle-x", crate::icons::TOOLBAR_BUTTON, false)).inner;
-            if discard.on_hover_text(format!("Discard all changes · {}", crate::icons::shortcut(ui.ctx(), true, "Backspace"))).clicked() {
+            let discard = ui
+                .add_enabled_ui(editable, |ui| {
+                    crate::icons::button(ui, "circle-x", crate::icons::TOOLBAR_BUTTON, false)
+                })
+                .inner;
+            if discard
+                .on_hover_text(format!(
+                    "Discard all changes · {}",
+                    crate::icons::shortcut(ui.ctx(), true, "Backspace")
+                ))
+                .clicked()
+            {
                 self.discard_changes();
             }
-            let preview = ui.add_enabled_ui(editable, |ui|
-                crate::icons::button(ui, "eye", crate::icons::TOOLBAR_BUTTON, false)).inner;
-            if preview.clicked() { self.preview_changes(); }
+            let preview = ui
+                .add_enabled_ui(editable, |ui| {
+                    crate::icons::button(ui, "eye", crate::icons::TOOLBAR_BUTTON, false)
+                })
+                .inner;
+            if preview.clicked() {
+                self.preview_changes();
+            }
             preview.context_menu(|ui| self.staged_changes_list(ui));
             preview.on_hover_text(format!("Preview changes as SQL ({}) · {}
 Right-click to inspect or remove individual changes",
-                self.changes.len(), crate::icons::shortcut(ui.ctx(), true, "P")));
-            let save = ui.add_enabled_ui(editable && !self.safe, |ui|
-                crate::icons::button(ui, "list-upload", crate::icons::TOOLBAR_BUTTON, false)).inner;
-            if save.on_hover_text(format!("Save changes · {} · Review before committing",
-                crate::icons::shortcut(ui.ctx(), false, "S"))).clicked() {
+                self.changes.len(),
+                crate::icons::shortcut(ui.ctx(), true, "P")
+            ));
+            let save = ui
+                .add_enabled_ui(editable && !self.safe, |ui| {
+                    crate::icons::button(ui, "list-upload", crate::icons::TOOLBAR_BUTTON, false)
+                })
+                .inner;
+            if save
+                .on_hover_text(format!(
+                    "Save changes · {} · Review before committing",
+                    crate::icons::shortcut(ui.ctx(), false, "S")
+                ))
+                .clicked()
+            {
                 self.save_changes(false);
             }
         });
@@ -3093,17 +3210,11 @@ Right-click to inspect or remove individual changes",
                             } => {
                                 format!("Rename {table}.{from} → {to}")
                             }
-                            Change::AlterColumn {
-                                table,
-                                column,
-                                ..
-                            } => format!("Alter {table}.{column}"),
-                            Change::CreateIndex {
-                                table, name, ..
-                            } => {
-                                format!(
-                                    "Create index {name} on {table}"
-                                )
+                            Change::AlterColumn { table, column, .. } => {
+                                format!("Alter {table}.{column}")
+                            }
+                            Change::CreateIndex { table, name, .. } => {
+                                format!("Create index {name} on {table}")
                             }
                             Change::DropIndex { table, name } => {
                                 format!("Drop index {name} on {table}")
@@ -3205,30 +3316,51 @@ Right-click to inspect or remove individual changes",
                         );
                         self.shared_preferences_dirty |= activity_before != self.prefs.activity_visible;
                         toolbar_group(ui, |ui| {
-                            if toolbar_action(ui, 4, false).on_hover_text(format!("Find anything · {}", crate::icons::shortcut(ui.ctx(), false, "P"))).clicked() { self.open_navigator(false); }
-                            if ui.add_enabled_ui(self.pending.is_none(), |ui| toolbar_action(ui, 3, false)).inner.on_hover_text(format!("Refresh · {}", crate::icons::shortcut(ui.ctx(), false, "R"))).clicked() { self.refresh_current_view(); }
-                        let before = self.prefs.appearance;
-                        let settings = toolbar_action(ui, 5, false).on_hover_text("Appearance");
-                        egui::Popup::menu(&settings).show(|ui| {
-                            ui.label("Appearance");
-                            for choice in [Appearance::System, Appearance::Light, Appearance::Dark]
+                            if toolbar_action(ui, 4, false)
+                                .on_hover_text(format!(
+                                    "Find anything · {}",
+                                    crate::icons::shortcut(ui.ctx(), false, "P")
+                                ))
+                                .clicked()
                             {
-                                if ui
-                                    .selectable_value(
-                                        &mut self.prefs.appearance,
-                                        choice,
-                                        choice.label(),
-                                    )
-                                    .clicked()
-                                {
-                                    ui.close();
-                                }
+                                self.open_navigator(false);
                             }
-                        });
-                        if before != self.prefs.appearance {
-                            self.shared_preferences_dirty = true;
-                            ctx.set_theme(self.prefs.appearance.preference());
-                        }
+                            if ui
+                                .add_enabled_ui(self.pending.is_none(), |ui| {
+                                    toolbar_action(ui, 3, false)
+                                })
+                                .inner
+                                .on_hover_text(format!(
+                                    "Refresh · {}",
+                                    crate::icons::shortcut(ui.ctx(), false, "R")
+                                ))
+                                .clicked()
+                            {
+                                self.refresh_current_view();
+                            }
+                            let before = self.prefs.appearance;
+                            let settings = toolbar_action(ui, 5, false).on_hover_text("Appearance");
+                            egui::Popup::menu(&settings).show(|ui| {
+                                ui.label("Appearance");
+                                for choice in
+                                    [Appearance::System, Appearance::Light, Appearance::Dark]
+                                {
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.prefs.appearance,
+                                            choice,
+                                            choice.label(),
+                                        )
+                                        .clicked()
+                                    {
+                                        ui.close();
+                                    }
+                                }
+                            });
+                            if before != self.prefs.appearance {
+                                self.shared_preferences_dirty = true;
+                                ctx.set_theme(self.prefs.appearance.preference());
+                            }
                         });
                     });
                 });
@@ -3777,7 +3909,10 @@ Right-click to inspect or remove individual changes",
                 let editor_id = egui::Id::new((ctx.viewport_id(), "query-editor-pane"));
                 crate::pane_sizes::restore(ctx, editor_id, self.prefs.pane_sizes.query_editor, 260.0, 1);
                 egui::TopBottomPanel::top(editor_id)
-                    .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(0))
+                    .frame(egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin {
+                        bottom: 4,
+                        ..Default::default()
+                    }))
                     .resizable(true)
                     .default_height(260.0)
                     .height_range(120.0..=max_height)
@@ -4112,6 +4247,10 @@ Right-click to inspect or remove individual changes",
                                 if ui.button(if grid.truncated { "Loaded rows as JSON…" } else { "All result rows as JSON…" }).on_hover_text(if grid.truncated { "JSON objects; binary values are byte arrays. Exports loaded rows only." } else { "JSON objects; binary values are byte arrays. Exports every result row." }).clicked() { self.json_export_dialog(ui.ctx()); ui.close(); }
                             });
                         });
+                        if ui.add_enabled(!grid.columns.is_empty(), egui::Button::new("Share…"))
+                            .on_hover_text(format!("Share query and results · {}", crate::icons::shortcut(ui.ctx(), true, "J"))).clicked() {
+                            self.open_result_share(ui.ctx(), false, None);
+                        }
                         if ui.add_enabled(!grid.columns.is_empty(), result_search_button())
                             .on_hover_text(format!("Find in all result rows · {} when results are focused", crate::icons::shortcut(ui.ctx(), false, "F"))).clicked() {
                             let tab = &mut self.tabs[self.tab];
@@ -4147,28 +4286,73 @@ Right-click to inspect or remove individual changes",
     fn query_result_message(&self, ui: &mut egui::Ui) {
         let tab = &self.tabs[self.tab];
         egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
-                if tab.selected_pin.is_none() && matches!(self.pending, Some(Pending::Query(index)) if index == self.tab) {
-                    ui.label("Running query…");
-                    return;
-                }
-                if tab.results.is_empty() && tab.selected_pin.is_none() {
-                    if let Some(error) = &tab.result_error {
-                        ui.add(egui::Label::new(RichText::new(error).color(ui.visuals().error_fg_color)).wrap().selectable(true));
+            egui::Frame::new()
+                .inner_margin(egui::Margin::symmetric(14, 12))
+                .show(ui, |ui| {
+                    if tab.selected_pin.is_none()
+                        && matches!(self.pending, Some(Pending::Query(index)) if index == self.tab)
+                    {
+                        ui.label("Running query…");
+                        return;
                     }
-                    return;
-                }
-                ui.label(format!("Statement {} completed in {:.1} ms.", tab.selected_pin.map_or(tab.result_index, |index| tab.pins.items[index].statement) + 1, tab.grid.elapsed.as_secs_f64() * 1000.0));
-                ui.label(if tab.grid.columns.is_empty() {
-                    format!("{} {} affected.", tab.grid.affected, if tab.grid.affected == 1 { "row" } else { "rows" })
-                } else {
-                    format!("{} {} returned{}.", tab.grid.row_count(), if tab.grid.row_count() == 1 { "row" } else { "rows" }, if tab.grid.truncated { "; result limit reached" } else { "" })
+                    if tab.results.is_empty() && tab.selected_pin.is_none() {
+                        if let Some(error) = &tab.result_error {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(error).color(ui.visuals().error_fg_color),
+                                )
+                                .wrap()
+                                .selectable(true),
+                            );
+                        }
+                        return;
+                    }
+                    ui.label(format!(
+                        "Statement {} completed in {:.1} ms.",
+                        tab.selected_pin
+                            .map_or(tab.result_index, |index| tab.pins.items[index].statement)
+                            + 1,
+                        tab.grid.elapsed.as_secs_f64() * 1000.0
+                    ));
+                    ui.label(if tab.grid.columns.is_empty() {
+                        format!(
+                            "{} {} affected.",
+                            tab.grid.affected,
+                            if tab.grid.affected == 1 {
+                                "row"
+                            } else {
+                                "rows"
+                            }
+                        )
+                    } else {
+                        format!(
+                            "{} {} returned{}.",
+                            tab.grid.row_count(),
+                            if tab.grid.row_count() == 1 {
+                                "row"
+                            } else {
+                                "rows"
+                            },
+                            if tab.grid.truncated {
+                                "; result limit reached"
+                            } else {
+                                ""
+                            }
+                        )
+                    });
+                    if let Some(error) = &tab.result_error
+                        && tab.selected_pin.is_none()
+                    {
+                        ui.add_space(8.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(error).color(ui.visuals().error_fg_color),
+                            )
+                            .wrap()
+                            .selectable(true),
+                        );
+                    }
                 });
-                if let Some(error) = &tab.result_error && tab.selected_pin.is_none() {
-                    ui.add_space(8.0);
-                    ui.add(egui::Label::new(RichText::new(error).color(ui.visuals().error_fg_color)).wrap().selectable(true));
-                }
-            });
         });
     }
 
@@ -4207,6 +4391,7 @@ Right-click to inspect or remove individual changes",
             || self.csv_preview.is_some()
             || self.csv_review.is_some()
             || self.sidebar_export.is_some()
+            || self.result_share.is_some()
         {
             return;
         }
@@ -4440,7 +4625,13 @@ Right-click to inspect or remove individual changes",
             let tab = &mut self.tabs[self.tab];
             let was_open = tab.search.open;
             let action = ui
-                .push_id(("query-find", tab.id), |ui| if ui.is_enabled() { tab.search.show(ui, &tab.sql) } else { None })
+                .push_id(("query-find", tab.id), |ui| {
+                    if ui.is_enabled() {
+                        tab.search.show(ui, &tab.sql)
+                    } else {
+                        None
+                    }
+                })
                 .inner;
             if was_open && !tab.search.open {
                 tab.focus_editor = true;
@@ -4493,14 +4684,32 @@ Right-click to inspect or remove individual changes",
                                 ui.make_persistent_id(egui::Id::new(("query-editor", tab.id)));
                             #[cfg(unix)]
                             matrix_edit::sync_editor(&mut self.matrix, tab, ui.ctx(), editor_id);
-                            if ui.is_enabled() && ui.memory(|m| m.has_focus(editor_id))
-                                && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I)) {
-                                tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
+                            if ui.is_enabled()
+                                && ui.memory(|m| m.has_focus(editor_id))
+                                && ui.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::I)
+                                })
+                            {
+                                tab.formatter.start(
+                                    ui.ctx(),
+                                    &tab.sql,
+                                    tab.cursor.clone(),
+                                    self.session_dialect.unwrap_or_else(|| {
+                                        crate::sql::Dialect::for_engine(&self.engine)
+                                    }),
+                                );
                             }
-                            if ui.is_enabled() && ui.memory(|m| m.has_focus(editor_id))
-                                && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash)) {
-                                let dialect = self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine));
-                                let mut state = egui::TextEdit::load_state(ui.ctx(), editor_id).unwrap_or_default();
+                            if ui.is_enabled()
+                                && ui.memory(|m| m.has_focus(editor_id))
+                                && ui.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::Slash)
+                                })
+                            {
+                                let dialect = self.session_dialect.unwrap_or_else(|| {
+                                    crate::sql::Dialect::for_engine(&self.engine)
+                                });
+                                let mut state = egui::TextEdit::load_state(ui.ctx(), editor_id)
+                                    .unwrap_or_default();
                                 toggle_line_comments(tab, dialect, &mut state);
                                 state.store(ui.ctx(), editor_id);
                             }
@@ -4519,11 +4728,19 @@ Right-click to inspect or remove individual changes",
                                 accept_completion(tab, &value, &mut state);
                                 state.store(ui.ctx(), editor_id);
                             }
+                            let pairing_dialect = self
+                                .session_dialect
+                                .unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine));
+                            let pair_parentheses = |prefix: &str| {
+                                crate::editor::parentheses_allowed(prefix, pairing_dialect)
+                            };
                             let mut output = TextEdit::multiline(&mut tab.sql)
                                 .frame(false)
                                 .id_salt(("query-editor", tab.id))
                                 .font(egui::TextStyle::Monospace)
                                 .code_editor()
+                                .auto_indent(true)
+                                .parenthesis_pairing(&pair_parentheses)
                                 .layouter(&mut crate::editor::editor_layout)
                                 .desired_rows(1)
                                 .min_size(egui::vec2(0.0, editor_height))
@@ -4550,8 +4767,16 @@ Right-click to inspect or remove individual changes",
                             if output.response.changed() {
                                 tab.refresh_dirty();
                             }
-                            let typed = ui.input(|i| i.events.iter().any(|event| matches!(event,
-                                egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Ime(egui::ImeEvent::Commit(_)))));
+                            let typed = ui.input(|i| {
+                                i.events.iter().any(|event| {
+                                    matches!(
+                                        event,
+                                        egui::Event::Text(_)
+                                            | egui::Event::Paste(_)
+                                            | egui::Event::Ime(egui::ImeEvent::Commit(_))
+                                    )
+                                })
+                            });
                             if output.response.changed() && !typed {
                                 tab.completion.dismiss();
                             }
@@ -4566,7 +4791,9 @@ Right-click to inspect or remove individual changes",
                                     &self.objects,
                                     &self.columns,
                                     explicit_completion,
-                                    self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)),
+                                    self.session_dialect.unwrap_or_else(|| {
+                                        crate::sql::Dialect::for_engine(&self.engine)
+                                    }),
                                 );
                             }
                             if output.response.has_focus()
@@ -4594,7 +4821,9 @@ Right-click to inspect or remove individual changes",
                                 &output,
                                 &tab.sql,
                                 tab.cursor.clone(),
-                                self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)),
+                                self.session_dialect.unwrap_or_else(|| {
+                                    crate::sql::Dialect::for_engine(&self.engine)
+                                }),
                             );
                             #[cfg(unix)]
                             matrix_edit::paint_edit(&self.matrix, tab, ui, &output);
@@ -4701,36 +4930,76 @@ Right-click to inspect or remove individual changes",
                 ui.add_space(8.0);
                 ui.scope(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    let caret = ui.scope(|ui| {
-                        ui.spacing_mut().button_padding.x = 3.0;
-                        let height = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
-                        ui.add_enabled(run_enabled, egui::Button::image(
-                        egui::Image::new(egui::include_image!("../assets/icons/lucide/chevron-down.svg"))
-                            .fit_to_exact_size(egui::vec2(12.0, 12.0)))
-                        .fill(BLUE)
-                        .min_size(egui::vec2(18.0, height.max(ui.spacing().interact_size.y)))
-                        .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }))
-                    }).inner;
-                    caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && run_enabled, "Run options"));
-                    ui.painter().line_segment([
-                        caret.rect.left_top() + egui::vec2(0.0, 4.0),
-                        caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
-                    ], Stroke::new(1.0_f32, Color32::from_white_alpha(70)));
+                    let caret = ui
+                        .scope(|ui| {
+                            ui.spacing_mut().button_padding.x = 3.0;
+                            let height = ui.text_style_height(&egui::TextStyle::Button)
+                                + 2.0 * ui.spacing().button_padding.y;
+                            ui.add_enabled(
+                                run_enabled,
+                                egui::Button::image(
+                                    egui::Image::new(egui::include_image!(
+                                        "../assets/icons/lucide/chevron-down.svg"
+                                    ))
+                                    .fit_to_exact_size(egui::vec2(12.0, 12.0)),
+                                )
+                                .fill(BLUE)
+                                .min_size(egui::vec2(
+                                    18.0,
+                                    height.max(ui.spacing().interact_size.y),
+                                ))
+                                .corner_radius(
+                                    egui::CornerRadius {
+                                        nw: 0,
+                                        sw: 0,
+                                        ne: 5,
+                                        se: 5,
+                                    },
+                                ),
+                            )
+                        })
+                        .inner;
+                    caret.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Button,
+                            ui.is_enabled() && run_enabled,
+                            "Run options",
+                        )
+                    });
+                    ui.painter().line_segment(
+                        [
+                            caret.rect.left_top() + egui::vec2(0.0, 4.0),
+                            caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
+                        ],
+                        Stroke::new(1.0_f32, Color32::from_white_alpha(70)),
+                    );
                     egui::Popup::menu(&caret)
                         .frame(egui::Frame::popup(ui.style()).inner_margin(4.0))
                         .show(|ui| {
-                        ui.set_width(140.0);
-                        ui.spacing_mut().interact_size.y = 20.0;
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        if ui.add_enabled(run_enabled, crate::icons::shortcut_menu_item("Run current", false, "Enter")).clicked() {
-                            self.run_query(false);
-                            ui.close();
-                        }
-                        if ui.add_enabled(run_enabled, crate::icons::shortcut_menu_item("Run all", true, "Enter")).clicked() {
-                            self.run_query(true);
-                            ui.close();
-                        }
-                    });
+                            ui.set_width(140.0);
+                            ui.spacing_mut().interact_size.y = 20.0;
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            if ui
+                                .add_enabled(
+                                    run_enabled,
+                                    crate::icons::shortcut_menu_item("Run current", false, "Enter"),
+                                )
+                                .clicked()
+                            {
+                                self.run_query(false);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    run_enabled,
+                                    crate::icons::shortcut_menu_item("Run all", true, "Enter"),
+                                )
+                                .clicked()
+                            {
+                                self.run_query(true);
+                                ui.close();
+                            }
+                        });
                     caret.on_hover_text("Run options");
                     let widgets = &mut ui.visuals_mut().widgets;
                     for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active, &mut widgets.noninteractive] {
@@ -5128,6 +5397,7 @@ Right-click to inspect or remove individual changes",
     }
 
     fn data_grid_body(&mut self, ui: &mut egui::Ui) {
+        let mut share_request = None;
         let grid = self.grid();
         if self.pending.is_some() {
             let names;
@@ -5213,7 +5483,16 @@ Right-click to inspect or remove individual changes",
         let mut menu_action = None;
         let mut quick_filter = None;
         let mut follow_relation = None;
-        let numeric_columns: Vec<bool> = grid.columns.iter().map(|name| self.view == View::Data && self.columns.iter().any(|column| column.name == *name && numeric_column_type(&column.data_type))).collect();
+        let numeric_columns: Vec<bool> = grid
+            .columns
+            .iter()
+            .map(|name| {
+                self.view == View::Data
+                    && self.columns.iter().any(|column| {
+                        column.name == *name && numeric_column_type(&column.data_type)
+                    })
+            })
+            .collect();
         let menu_can_insert = self.can_insert();
         #[cfg(not(target_arch = "wasm32"))]
         let menu_can_import = self.supports_csv_import() && self.pending.is_none();
@@ -5723,13 +6002,18 @@ Right-click to inspect or remove individual changes",
                                 } else { response };
                                 if !editing {
                                     response.context_menu(|ui| {
+                                        ui.set_width(280.0);
                                         if stored && self.tabs[self.tab].result_pages.all_selected {
                                             if ui.button("Copy all rows").clicked() {
                                                 let tab = &mut self.tabs[self.tab]; tab.result_pages.copy_all(&tab.grid, ui.ctx()); ui.close();
                                             }
+                                            ui.separator();
+                                            if let Some(quick) = result_share::menu(ui) { share_request = Some((quick, index)); }
                                             return;
                                         }
                                         if stored && self.tabs[self.tab].result_pages.is_preview(index) {
+                                            if let Some(quick) = result_share::menu(ui) { share_request = Some((quick, index)); }
+                                            ui.separator();
                                             ui.label("Loading full row…");
                                             let tab = &mut self.tabs[self.tab];
                                             tab.result_pages.select(&tab.grid, row_offset + index, column, ui.ctx());
@@ -5772,6 +6056,7 @@ Right-click to inspect or remove individual changes",
                                         if ui.add_enabled(menu_can_insert && !selected_deleted, egui::Button::new("Duplicate Selected Rows")).clicked() { menu_action = Some(("duplicate", column, index)); ui.close(); }
                                         ui.separator();
                                         if ui.button("Copy cell").clicked() { ui.ctx().copy_text(db::clipboard_text(value)); ui.close(); }
+                                        if let Some(quick) = result_share::menu(ui) { share_request = Some((quick, index)); }
                                         for (label, selected_column) in [("Copy Rows", None), ("Copy Selected Cells", Some(column))] {
                                             if ui.button(label).clicked() {
                                                 let result = row_copy::formatted(&grid.columns, self.row_selection.copy_indices(index).into_iter().filter_map(|i| grid.rows.get(i).map(Vec::as_slice)), &self.changes, (!edit_table.is_empty()).then_some(edit_table.as_str()), selected_column, row_copy::Format::Plain, self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
@@ -5904,6 +6189,9 @@ Right-click to inspect or remove individual changes",
             let tab = &mut self.tabs[self.tab];
             tab.result_pages.viewport(&tab.grid, visible_rows, ui.ctx());
         }
+        if let Some((quick, index)) = share_request {
+            self.open_result_share(ui.ctx(), quick, Some(index));
+        }
         // The empty portion of the grid still owns table keyboard shortcuts.
         // Child cells and inputs win hit testing, so this does not steal editing focus.
         if grid_focus.clicked() && self.edit.is_none()
@@ -5971,13 +6259,40 @@ Right-click to inspect or remove individual changes",
                         if multiple { self.start_bulk_edit(column); }
                         else if editable && !edit_columns.as_slice().get(column).is_some_and(|c| c.generated) && !matches!(grid.rows[index][column], Value::Blob(_)) {
                             let original = &grid.rows[index][column];
-                            let value = self.changes.iter().find_map(|change| match change { Change::Cell { table, column: name, original: source, value, original_columns } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && table == edit_table.as_str() && name == &grid.columns[column] && source == &grid.rows[index] => Some(value), _ => None }).unwrap_or(original);
+                            let value = self
+                                .changes
+                                .iter()
+                                .find_map(|change| match change {
+                                    Change::Cell {
+                                        table,
+                                        column: name,
+                                        original: source,
+                                        value,
+                                        original_columns,
+                                    } if original_columns
+                                        .as_ref()
+                                        .is_none_or(|names| names == &grid.columns)
+                                        && table == edit_table.as_str()
+                                        && name == &grid.columns[column]
+                                        && source == &grid.rows[index] =>
+                                    {
+                                        Some(value)
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or(original);
                             if !matches!(value, Value::Text(t) if t.len() > 65536) {
                                 self.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0, table: edit_table.clone(), row: grid.rows[index].clone(), original_value: original.clone(), column: grid.columns[column].clone(), text: if matches!(value, Value::Null) { String::new() } else { db::display(value) }, kind: match value { Value::Null => 0, Value::Integer(_) => 1, Value::Real(_) => 2, _ => 3 }, focus: true, inspector: true });
                             }
                         }
                         if matches!(action, "null" | "empty" | "now") {
-                            let now = (action == "now").then(|| self.edit_columns().get(column).and_then(|c| crate::date_picker::kind(&c.data_type))).flatten()
+                            let now = (action == "now")
+                                .then(|| {
+                                    self.edit_columns()
+                                        .get(column)
+                                        .and_then(|c| crate::date_picker::kind(&c.data_type))
+                                })
+                                .flatten()
                                 .map(crate::date_picker::now_text);
                             if let Some(edit) = &mut self.edit {
                                 edit.text = now.unwrap_or_default();
@@ -6014,10 +6329,17 @@ Right-click to inspect or remove individual changes",
                 // release handler could not restore focus while the editor existed.
                 // Leave focus alone when the user moved into another input.
                 grid_focus.request_focus();
-                ui.memory_mut(|memory| memory.set_focus_lock_filter(grid_focus.id, egui::EventFilter {
-                    horizontal_arrows: true, vertical_arrows: true, tab: true,
-                    ..Default::default()
-                }));
+                ui.memory_mut(|memory| {
+                    memory.set_focus_lock_filter(
+                        grid_focus.id,
+                        egui::EventFilter {
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            tab: true,
+                            ..Default::default()
+                        },
+                    )
+                });
             }
         }
         if edit.is_some() && self.finish_cell_edit() {
@@ -6164,56 +6486,70 @@ Right-click to inspect or remove individual changes",
             // Overlay the scrollbar instead of reserving an empty rail beside short lists.
             ui.spacing_mut().scroll.floating = true;
             ui.spacing_mut().scroll.floating_allocated_width = 0.0;
-            egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
-                TableBuilder::new(ui)
-                    .id_salt(("indexes", self.active_table_tab, &self.browse.table))
-                    .striped(true)
-                    .resizable(true)
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .sense(egui::Sense::click())
-                    .column(TableColumn::initial(240.0).at_least(80.0).clip(true))
-                    .column(TableColumn::initial(260.0).at_least(80.0).clip(true))
-                    .column(TableColumn::initial(76.0).at_least(60.0).clip(true))
-                    .column(TableColumn::initial(120.0).at_least(80.0).clip(true))
-                    .column(TableColumn::remainder().at_least(76.0).clip(true))
-                    .header(25.0, |mut row| {
-                        for title in ["Name", "Columns", "Unique", "Origin", "Partial"] {
-                            row.col(|ui| {
-                                index_cell(ui, RichText::new(title).strong());
-                            });
-                        }
-                    })
-                    .body(|body| {
-                        body.rows(24.0, self.indexes.len(), |mut row| {
-                            let i = row.index();
-                            let index = &self.indexes[i];
-                            row.set_hovered(false);
-                            row.set_selected(self.selected_index == Some(i));
-                            row.col(|ui| {
-                                index_cell(ui, RichText::new(&index.name).monospace());
-                            });
-                            row.col(|ui| {
-                                index_cell(ui, RichText::new(index.columns.join(", ")).monospace());
-                            });
-                            row.col(|ui| {
-                                index_cell(ui, RichText::new(if index.unique { "YES" } else { "NO" }));
-                            });
-                            row.col(|ui| {
-                                index_cell(ui, RichText::new(match index.origin.as_str() {
-                                    "pk" => "Primary key",
-                                    "u" => "Constraint",
-                                    _ => "Index",
-                                }));
-                            });
-                            row.col(|ui| {
-                                index_cell(ui, RichText::new(if index.partial { "YES" } else { "NO" }));
-                            });
-                            if primary_pressed(&row.response()) {
-                                self.selected_index = Some(i);
+            egui::ScrollArea::horizontal()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    TableBuilder::new(ui)
+                        .id_salt(("indexes", self.active_table_tab, &self.browse.table))
+                        .striped(true)
+                        .resizable(true)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .sense(egui::Sense::click())
+                        .column(TableColumn::initial(240.0).at_least(80.0).clip(true))
+                        .column(TableColumn::initial(260.0).at_least(80.0).clip(true))
+                        .column(TableColumn::initial(76.0).at_least(60.0).clip(true))
+                        .column(TableColumn::initial(120.0).at_least(80.0).clip(true))
+                        .column(TableColumn::remainder().at_least(76.0).clip(true))
+                        .header(25.0, |mut row| {
+                            for title in ["Name", "Columns", "Unique", "Origin", "Partial"] {
+                                row.col(|ui| {
+                                    index_cell(ui, RichText::new(title).strong());
+                                });
                             }
+                        })
+                        .body(|body| {
+                            body.rows(24.0, self.indexes.len(), |mut row| {
+                                let i = row.index();
+                                let index = &self.indexes[i];
+                                row.set_hovered(false);
+                                row.set_selected(self.selected_index == Some(i));
+                                row.col(|ui| {
+                                    index_cell(ui, RichText::new(&index.name).monospace());
+                                });
+                                row.col(|ui| {
+                                    index_cell(
+                                        ui,
+                                        RichText::new(index.columns.join(", ")).monospace(),
+                                    );
+                                });
+                                row.col(|ui| {
+                                    index_cell(
+                                        ui,
+                                        RichText::new(if index.unique { "YES" } else { "NO" }),
+                                    );
+                                });
+                                row.col(|ui| {
+                                    index_cell(
+                                        ui,
+                                        RichText::new(match index.origin.as_str() {
+                                            "pk" => "Primary key",
+                                            "u" => "Constraint",
+                                            _ => "Index",
+                                        }),
+                                    );
+                                });
+                                row.col(|ui| {
+                                    index_cell(
+                                        ui,
+                                        RichText::new(if index.partial { "YES" } else { "NO" }),
+                                    );
+                                });
+                                if primary_pressed(&row.response()) {
+                                    self.selected_index = Some(i);
+                                }
+                            });
                         });
-                    });
-            });
+                });
         });
     }
 
@@ -6223,13 +6559,34 @@ Right-click to inspect or remove individual changes",
             return;
         }
         let grid = self.grid();
-        let (Some(values), Some(name)) = (grid.rows.get(row), grid.columns.get(column)) else { return };
+        let (Some(values), Some(name)) = (grid.rows.get(row), grid.columns.get(column)) else {
+            return;
+        };
         let table = self.staged_table().unwrap_or_default().to_owned();
         let original = values[column].clone();
-        let current = self.changes.iter().find_map(|change| match change {
-            Change::Cell { table: t, column: c, original: o, value, original_columns } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && !table.is_empty() && *t == table && c == name && o == values => Some(value.clone()),
-            _ => None,
-        }).unwrap_or_else(|| original.clone());
+        let current = self
+            .changes
+            .iter()
+            .find_map(|change| match change {
+                Change::Cell {
+                    table: t,
+                    column: c,
+                    original: o,
+                    value,
+                    original_columns,
+                } if original_columns
+                    .as_ref()
+                    .is_none_or(|names| names == &grid.columns)
+                    && !table.is_empty()
+                    && *t == table
+                    && c == name
+                    && o == values =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| original.clone());
         let metadata = self.edit_columns().get(column);
         let writable = self.can_edit_rows()
             && !table.is_empty()
@@ -6243,7 +6600,9 @@ Right-click to inspect or remove individual changes",
     }
 
     fn json_window(&mut self, ctx: &egui::Context) {
-        let Some(editor) = self.json_editor.as_mut() else { return };
+        let Some(editor) = self.json_editor.as_mut() else {
+            return;
+        };
         match editor.show(ctx) {
             crate::json_editor::Outcome::Open => {}
             crate::json_editor::Outcome::Close => self.json_editor = None,
@@ -6263,17 +6622,45 @@ Right-click to inspect or remove individual changes",
             return;
         }
         let grid = self.grid();
-        let (Some(values), Some(name)) = (grid.rows.get(row), grid.columns.get(column)) else { return };
-        let Some(metadata) = self.edit_columns().get(column) else { return };
-        let Some(kind) = crate::date_picker::kind(&metadata.data_type) else { return };
+        let (Some(values), Some(name)) = (grid.rows.get(row), grid.columns.get(column)) else {
+            return;
+        };
+        let Some(metadata) = self.edit_columns().get(column) else {
+            return;
+        };
+        let Some(kind) = crate::date_picker::kind(&metadata.data_type) else {
+            return;
+        };
         let (nullable, generated) = (!metadata.not_null, metadata.generated);
-        let Some(table) = self.staged_table().map(str::to_owned) else { return };
+        let Some(table) = self.staged_table().map(str::to_owned) else {
+            return;
+        };
         let original = values[column].clone();
-        let current = self.changes.iter().find_map(|change| match change {
-            Change::Cell { table: t, column: c, original: o, value, original_columns } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && *t == table && c == name && o == values => Some(value.clone()),
-            _ => None,
-        }).unwrap_or_else(|| original.clone());
-        if !self.can_edit_rows() || generated || row_is_deleted(&self.changes, &table, values)
+        let current = self
+            .changes
+            .iter()
+            .find_map(|change| match change {
+                Change::Cell {
+                    table: t,
+                    column: c,
+                    original: o,
+                    value,
+                    original_columns,
+                } if original_columns
+                    .as_ref()
+                    .is_none_or(|names| names == &grid.columns)
+                    && *t == table
+                    && c == name
+                    && o == values =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| original.clone());
+        if !self.can_edit_rows()
+            || generated
+            || row_is_deleted(&self.changes, &table, values)
             || !matches!(current, Value::Text(_) | Value::Null)
         {
             return;
@@ -6283,7 +6670,9 @@ Right-click to inspect or remove individual changes",
     }
 
     fn date_window(&mut self, ctx: &egui::Context) {
-        let Some(picker) = self.date_picker.as_mut() else { return };
+        let Some(picker) = self.date_picker.as_mut() else {
+            return;
+        };
         match picker.show(ctx) {
             crate::date_picker::Outcome::Open => {}
             crate::date_picker::Outcome::Close => self.date_picker = None,
@@ -6306,7 +6695,12 @@ Right-click to inspect or remove individual changes",
             table: target.table, row: target.row, original_value: target.original,
             column: target.column, text: String::new(), kind: 3, focus: false, inspector: false,
         };
-        let names = (self.view == View::Query).then(|| self.edit_columns().iter().map(|column| column.name.clone()).collect());
+        let names = (self.view == View::Query).then(|| {
+            self.edit_columns()
+                .iter()
+                .map(|column| column.name.clone())
+                .collect()
+        });
         stage_cell_value_with_columns(&mut self.changes, edit, value, names);
         self.record_changes();
         self.review = None;
@@ -6316,22 +6710,28 @@ Right-click to inspect or remove individual changes",
     fn ddl_window(&mut self, ctx: &egui::Context) {
         let Some((name, sql)) = self.ddl_preview.as_ref() else { return; };
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("table-ddl"))
-            .show(ctx, |ui| {
-                ui.set_width((ctx.content_rect().width() - 64.0).clamp(240.0, 760.0));
-                ui.horizontal(|ui| {
-                    ui.strong("Table definition");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        close = ui.button("Close").clicked();
-                        if clipboard_button(ui).clicked() { ui.ctx().copy_text(sql.clone()); }
-                    });
+        let modal = egui::Modal::new(egui::Id::new("table-ddl")).show(ctx, |ui| {
+            ui.set_width((ctx.content_rect().width() - 64.0).clamp(240.0, 760.0));
+            ui.horizontal(|ui| {
+                ui.strong("Table definition");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = ui.button("Close").clicked();
+                    if clipboard_button(ui).clicked() {
+                        ui.ctx().copy_text(sql.clone());
+                    }
                 });
-                ui.add(egui::Label::new(RichText::new(name).weak()).truncate());
-                ui.separator();
-                egui::ScrollArea::both().max_height((ctx.content_rect().height() - 160.0).max(100.0))
-                    .show(ui, |ui| { ui.add(egui::Label::new(RichText::new(sql).monospace()).selectable(true)); });
             });
-        if close || modal.should_close() { self.ddl_preview = None; }
+            ui.add(egui::Label::new(RichText::new(name).weak()).truncate());
+            ui.separator();
+            egui::ScrollArea::both()
+                .max_height((ctx.content_rect().height() - 160.0).max(100.0))
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(sql).monospace()).selectable(true));
+                });
+        });
+        if close || modal.should_close() {
+            self.ddl_preview = None;
+        }
     }
 
     fn structure(&mut self, ui: &mut egui::Ui) {
@@ -6360,8 +6760,12 @@ Right-click to inspect or remove individual changes",
         let mut cancel_rename = false;
         let search = self.structure_search.to_lowercase();
         let visible: Vec<usize> = crate::search::Query::new(&search)
-            .ranked(self.columns.iter().enumerate(), |(_, column)| (&column.name, ""))
-            .into_iter().map(|(index, _)| index).collect();
+            .ranked(self.columns.iter().enumerate(), |(_, column)| {
+                (&column.name, "")
+            })
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect();
         egui::ScrollArea::horizontal().show(ui, |ui| {
             TableBuilder::new(ui)
                 .id_salt(("structure-grid", self.active_table_tab, &self.browse.table))
@@ -6654,8 +7058,13 @@ Right-click to inspect or remove individual changes",
                     return true;
                 }
                 let navigation = (edit.advance != 0).then(|| edit.clone());
-                let names = (self.view == View::Query).then(|| self.edit_columns().iter().map(|column| column.name.clone()).collect());
-        stage_cell_value_with_columns(&mut self.changes, edit, value, names);
+                let names = (self.view == View::Query).then(|| {
+                    self.edit_columns()
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect()
+                });
+                stage_cell_value_with_columns(&mut self.changes, edit, value, names);
                 self.record_changes();
                 if let Some(source) = navigation {
                     self.edit = next_cell_edit(
@@ -6740,8 +7149,13 @@ Right-click to inspect or remove individual changes",
             return;
         }
         if let Some(mut plan) = self.review.clone() {
-            plan.refresh_results = self.tabs.iter().any(|tab| tab.edit_target.as_ref().is_some_and(|target|
-                self.changes.iter().any(|change| change.table() == target.table)));
+            plan.refresh_results = self.tabs.iter().any(|tab| {
+                tab.edit_target.as_ref().is_some_and(|target| {
+                    self.changes
+                        .iter()
+                        .any(|change| change.table() == target.table)
+                })
+            });
             self.dispatch(Command::Apply(plan), Pending::Apply);
         } else {
             self.dispatch(Command::Plan(self.changes.clone()), Pending::Plan(bypass));
@@ -7183,7 +7597,12 @@ impl Rustable {
 
     pub(crate) fn render_workspace_frame(&mut self, ctx: &egui::Context) {
         let key = egui::Id::new((ctx.viewport_id(), "table-close-confirmation-open"));
-        ctx.data_mut(|data| data.insert_temp(key, self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some()));
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                key,
+                self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some(),
+            )
+        });
         #[cfg(target_arch = "wasm32")]
         if self.redis_demo_active {
             if self.connections { self.connections_window(ctx); return; }
@@ -7200,8 +7619,26 @@ impl Rustable {
         if let Some(workspace) = &mut self.redis_workspace {
             workspace.set_history_profile(self.active_profile.as_ref().map(|profile| profile.id.0));
             workspace.load_preferences(&self.prefs.redis_browser);
-            if workspace.show(ctx, &self.label, self.active_profile.as_ref().map_or(egui::Color32::from_rgb(40, 83, 65), |profile| egui::Color32::from_rgb(profile.color[0], profile.color[1], profile.color[2])), &mut self.prefs.pane_sizes, &mut self.shared_preferences_dirty) { self.manager_requested = true; }
-            self.shared_preferences_dirty |= workspace.store_preferences(&mut self.prefs.redis_browser);
+            if workspace.show(
+                ctx,
+                &self.label,
+                self.active_profile.as_ref().map_or(
+                    egui::Color32::from_rgb(40, 83, 65),
+                    |profile| {
+                        egui::Color32::from_rgb(
+                            profile.color[0],
+                            profile.color[1],
+                            profile.color[2],
+                        )
+                    },
+                ),
+                &mut self.prefs.pane_sizes,
+                &mut self.shared_preferences_dirty,
+            ) {
+                self.manager_requested = true;
+            }
+            self.shared_preferences_dirty |=
+                workspace.store_preferences(&mut self.prefs.redis_browser);
             return;
         }
         let start = Instant::now();
@@ -7226,6 +7663,7 @@ impl Rustable {
         self.csv_preview_window(ctx);
         self.csv_import_review(ctx);
         self.sidebar_export_window(ctx);
+        self.result_share_window(ctx);
         self.destructive_confirmation(ctx);
         self.table_close_confirmation(ctx);
         self.navigation_confirmation(ctx);
@@ -7356,9 +7794,17 @@ fn apply_formatted_sql(tab: &mut QueryTab, formatted: crate::sql_format::Formatt
     tab.focus_editor = true;
 }
 
-fn toggle_line_comments(tab: &mut QueryTab, dialect: crate::sql::Dialect, state: &mut egui::text_edit::TextEditState) {
-    let cursor = |range: &std::ops::Range<usize>| egui::text::CCursorRange::two(
-        egui::text::CCursor::new(range.start), egui::text::CCursor::new(range.end));
+fn toggle_line_comments(
+    tab: &mut QueryTab,
+    dialect: crate::sql::Dialect,
+    state: &mut egui::text_edit::TextEditState,
+) {
+    let cursor = |range: &std::ops::Range<usize>| {
+        egui::text::CCursorRange::two(
+            egui::text::CCursor::new(range.start),
+            egui::text::CCursor::new(range.end),
+        )
+    };
     let (text, selection) = crate::line_comment::toggle(&tab.sql, tab.cursor.clone(), dialect);
     let mut undoer = state.undoer();
     undoer.add_undo(&(cursor(&tab.cursor), tab.sql.clone()));
@@ -7572,10 +8018,20 @@ fn query_result_control_geometry(width: f32) -> TableControlGeometry {
     let width = width.max(1.0);
     let rect = |x, y, w| egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, 28.0));
     // Keep the count truly centered; wrap it below the actions on narrow panes.
-    if width >= 780.0 {
-        TableControlGeometry { height: 44.0, left: rect(0.0, 0.0, 310.0), center: rect((width - 140.0) * 0.5, 0.0, 140.0), right: rect(width - 164.0, 0.0, 164.0) }
-    } else if width >= 500.0 {
-        TableControlGeometry { height: 78.0, left: rect(0.0, 0.0, width - 170.0), center: rect(0.0, 34.0, width), right: rect(width - 164.0, 0.0, 164.0) }
+    if width >= 820.0 {
+        TableControlGeometry {
+            height: 44.0,
+            left: rect(0.0, 0.0, 310.0),
+            center: rect((width - 140.0) * 0.5, 0.0, 140.0),
+            right: rect(width - 234.0, 0.0, 234.0),
+        }
+    } else if width >= 550.0 {
+        TableControlGeometry {
+            height: 78.0,
+            left: rect(0.0, 0.0, width - 240.0),
+            center: rect(0.0, 34.0, width),
+            right: rect(width - 234.0, 0.0, 234.0),
+        }
     } else {
         TableControlGeometry { height: 112.0, left: rect(0.0, 0.0, width), center: rect(0.0, 68.0, width), right: rect(0.0, 34.0, width) }
     }
@@ -7622,11 +8078,11 @@ fn pagination_button() -> impl egui::Widget {
 }
 
 fn result_pin_button(pinned: bool) -> impl egui::Widget {
-    move |ui: &mut egui::Ui| { crate::icons::button(ui, "pin", egui::vec2(28.0, 28.0), pinned) }
+    move |ui: &mut egui::Ui| crate::icons::button(ui, "pin", egui::vec2(28.0, 28.0), pinned)
 }
 
 fn result_search_button() -> impl egui::Widget {
-    move |ui: &mut egui::Ui| { crate::icons::button(ui, "search", egui::vec2(28.0, 28.0), false) }
+    move |ui: &mut egui::Ui| crate::icons::button(ui, "search", egui::vec2(28.0, 28.0), false)
 }
 
 fn navigation_button(next: bool) -> impl egui::Widget {
@@ -7725,8 +8181,20 @@ fn paint_workspace_tab(
 fn field_value_menu(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 22.0), egui::Sense::click());
     let visuals = ui.style().interact(&response);
-    crate::icons::paint(ui.painter(), rect.center(), "chevron-down", 14.0, visuals.fg_stroke.color);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), "Field value actions"));
+    crate::icons::paint(
+        ui.painter(),
+        rect.center(),
+        "chevron-down",
+        14.0,
+        visuals.fg_stroke.color,
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            "Field value actions",
+        )
+    });
     egui::Popup::menu(&response).show(contents);
     response
 }
@@ -8248,8 +8716,13 @@ fn grid_selection_rects(ui: &egui::Ui, widths: &[f32], columns: Option<(usize, u
     if first > end || first > last { return Vec::new(); }
     let spacing = ui.spacing().item_spacing;
     let origin = ui.cursor().min;
-    let edge = |column: usize| origin.x - spacing.x * 0.5
-        + widths[..column].iter().map(|width| width + spacing.x).sum::<f32>();
+    let edge = |column: usize| {
+        origin.x - spacing.x * 0.5
+            + widths[..column]
+                .iter()
+                .map(|width| width + spacing.x)
+                .sum::<f32>()
+    };
     let left = edge(first + 1);
     let right = edge(end.min(last) + 2);
     let pitch = 22.0 + spacing.y;
@@ -8965,11 +9438,26 @@ mod interaction_tests {
         let mut app = Rustable::with_launcher_preferences(&ctx, Preferences::default());
         app.pending = None;
         app.view = View::Data;
-        app.table = Arc::new(Grid { columns: vec!["value".into()], rows: vec![vec![Value::Text("right-click me".into())]], ..Default::default() });
-        let render = |app: &mut Rustable, events| ctx.run(egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 500.0))),
-            events, ..Default::default()
-        }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+        app.table = Arc::new(Grid {
+            columns: vec!["value".into()],
+            rows: vec![vec![Value::Text("right-click me".into())]],
+            ..Default::default()
+        });
+        let render = |app: &mut Rustable, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 500.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui));
+                },
+            )
+        };
         render(&mut app, vec![]);
         let output = render(&mut app, vec![]);
         let point = text_pos(&output.shapes, "right-click me").unwrap() + egui::vec2(5.0, 5.0);
@@ -9053,7 +9541,13 @@ mod interaction_tests {
             app.view = View::Data;
             app.table = Arc::new(Grid {
                 columns: (0..120).map(|c| format!("column_{c}")).collect(),
-                rows: (0..500).map(|r| (0..120).map(|c| Value::Text(format!("r{r}_c{c}"))).collect()).collect(),
+                rows: (0..500)
+                    .map(|r| {
+                        (0..120)
+                            .map(|c| Value::Text(format!("r{r}_c{c}")))
+                            .collect()
+                    })
+                    .collect(),
                 ..Default::default()
             });
             let mut positions = Vec::new();
@@ -9099,7 +9593,13 @@ mod interaction_tests {
             app.browse.table = "wide_fixture".into();
             app.table = Arc::new(Grid {
                 columns: (0..120).map(|c| format!("column_{c}")).collect(),
-                rows: (0..500).map(|r| (0..120).map(|c| Value::Text(format!("member {r} field {c} sample data"))).collect()).collect(),
+                rows: (0..500)
+                    .map(|r| {
+                        (0..120)
+                            .map(|c| Value::Text(format!("member {r} field {c} sample data")))
+                            .collect()
+                    })
+                    .collect(),
                 ..Default::default()
             });
             let mut samples = Vec::new();
@@ -9636,9 +10136,12 @@ mod interaction_tests {
         // Right-click choices work without cycling through intermediate sorts.
         fn text_center(shape: &egui::Shape, label: &str) -> Option<egui::Pos2> {
             match shape {
-                egui::Shape::Text(text) if text.galley.text() == label =>
-                    Some(text.pos + text.galley.size() * 0.5),
-                egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| text_center(shape, label)),
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().find_map(|shape| text_center(shape, label))
+                }
                 _ => None,
             }
         }
@@ -9725,9 +10228,20 @@ mod interaction_tests {
         app.view = View::Data;
         app.table = Arc::new(Grid {
             columns: (0..120).map(|c| format!("column_{c}")).collect(),
-            rows: ["press_first_row", "press_second_row"].into_iter().map(|name| {
-                (0..120).map(|c| Value::Text(if c == 0 { name.into() } else { format!("value_{c}") })).collect()
-            }).collect(),
+            rows: ["press_first_row", "press_second_row"]
+                .into_iter()
+                .map(|name| {
+                    (0..120)
+                        .map(|c| {
+                            Value::Text(if c == 0 {
+                                name.into()
+                            } else {
+                                format!("value_{c}")
+                            })
+                        })
+                        .collect()
+                })
+                .collect(),
             ..Default::default()
         });
         let frame = |app: &mut Rustable, events| {
@@ -9800,10 +10314,20 @@ mod interaction_tests {
         frame(&mut app, pointer(gutter, false, egui::Modifiers::NONE));
         assert_eq!(app.selected, Some(1));
         let switched = frame(&mut app, pointer(first, true, egui::Modifiers::NONE));
-        let highlighted = |pos| switched.shapes.iter().any(|shape| matches!(&shape.shape,
-            egui::Shape::Rect(rect) if rect.fill == selected_fill && rect.rect.contains(pos)));
-        assert!(highlighted(first), "new row must be highlighted immediately");
-        assert!(!highlighted(second), "old row highlight must clear in the same frame");
+        let highlighted = |pos| {
+            switched.shapes.iter().any(|shape| {
+                matches!(&shape.shape,
+            egui::Shape::Rect(rect) if rect.fill == selected_fill && rect.rect.contains(pos))
+            })
+        };
+        assert!(
+            highlighted(first),
+            "new row must be highlighted immediately"
+        );
+        assert!(
+            !highlighted(second),
+            "old row highlight must clear in the same frame"
+        );
         assert_eq!(switched.platform_output.num_completed_passes, 1);
     }
 
@@ -10171,7 +10695,11 @@ fn saved_query_rows(grid: &Grid, table: &str, saved: &[Change], refreshed: &[db:
         let edited = saved.iter().any(|change| matches!(change,
             Change::Cell { table: t, original, original_columns, .. } if t == table && original == row && original_columns.as_ref().is_none_or(|names| names == &grid.columns)));
         if edited {
-            let refreshed = refreshed.iter().find(|saved| saved.table == table && saved.original == *row && saved.columns == grid.columns)
+            let refreshed = refreshed
+                .iter()
+                .find(|saved| {
+                    saved.table == table && saved.original == *row && saved.columns == grid.columns
+                })
                 .ok_or("A saved row could not be located")?;
             if refreshed.values.len() != grid.columns.len() { return Err("Saved row columns changed".into()); }
             rows.push(refreshed.values.clone());
@@ -10355,8 +10883,21 @@ fn cell_edit_from_slot(
         return None;
     }
     let limit = (grid.rows.len() * width) as isize;
-    let visible = crate::search::Query::new(if source.inspector { field_search } else { "" }).ranked(grid.columns.iter().enumerate(), |(_, name)| (name.as_str(), ""));
-    let mut inspector_position = visible.iter().position(|(index, _)| *index == slot as usize % width).map_or(if source.advance > 0 { -1 } else { visible.len() as isize }, |index| index as isize);
+    let visible = crate::search::Query::new(if source.inspector { field_search } else { "" })
+        .ranked(grid.columns.iter().enumerate(), |(_, name)| {
+            (name.as_str(), "")
+        });
+    let mut inspector_position = visible
+        .iter()
+        .position(|(index, _)| *index == slot as usize % width)
+        .map_or(
+            if source.advance > 0 {
+                -1
+            } else {
+                visible.len() as isize
+            },
+            |index| index as isize,
+        );
     loop {
         if source.inspector {
             inspector_position += isize::from(source.advance.signum());
@@ -10392,8 +10933,17 @@ fn cell_edit_from_slot(
                     table,
                     column,
                     original: r,
-                    value, original_columns,
-                } if original_columns.as_ref().is_none_or(|names| names == &grid.columns) && *table == source.table && column == name && r == row => Some(value),
+                    value,
+                    original_columns,
+                } if original_columns
+                    .as_ref()
+                    .is_none_or(|names| names == &grid.columns)
+                    && *table == source.table
+                    && column == name
+                    && r == row =>
+                {
+                    Some(value)
+                }
                 _ => None,
             })
             .unwrap_or(original);
@@ -10563,12 +11113,25 @@ mod workspace_layout_tests {
         app.tabs[0].sql = original.into();
         app.show_query();
         let frame = |app: &mut Rustable, events| {
-            let _ = ctx.run(egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0))),
-                events, ..Default::default()
-            }, |ctx| app.workspace(ctx));
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1440.0, 920.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.workspace(ctx),
+            );
         };
-        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
         frame(&mut app, vec![]);
         frame(&mut app, vec![]);
         frame(&mut app, vec![key(egui::Key::I, egui::Modifiers::COMMAND)]);
@@ -10599,12 +11162,25 @@ mod workspace_layout_tests {
         app.tabs[0].sql = original.into();
         app.show_query();
         let frame = |app: &mut Rustable, events| {
-            let _ = ctx.run(egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0))),
-                events, ..Default::default()
-            }, |ctx| app.workspace(ctx));
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1440.0, 920.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.workspace(ctx),
+            );
         };
-        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
         frame(&mut app, vec![]);
         frame(&mut app, vec![]);
         let end = original.chars().count();
@@ -10740,8 +11316,13 @@ mod workspace_layout_tests {
                 app.browse.table = "wide_fixture".into();
                 app.table = Arc::new(Grid {
                     columns: (0..column_count).map(|c| format!("field_{c}")).collect(),
-                    rows: (0..500).map(|r| (0..column_count).map(|c|
-                        Value::Text(format!("member {r} field {c} sample data"))).collect()).collect(),
+                    rows: (0..500)
+                        .map(|r| {
+                            (0..column_count)
+                                .map(|c| Value::Text(format!("member {r} field {c} sample data")))
+                                .collect()
+                        })
+                        .collect(),
                     ..Default::default()
                 });
                 app.columns = app.table.columns.iter().enumerate().map(|(c, name)| Column {
@@ -10898,12 +11479,24 @@ mod workspace_layout_tests {
         app.columns = vec![Column { name: "name".into(), data_type: "text".into(), not_null: false, default: String::new(), pk: true, generated: false }];
         app.table = Arc::new(Grid { columns: vec!["name".into()], rows: vec![vec![Value::Text("Alice".into())]], ..Default::default() });
         app.selected = Some(0);
-        let frame = |app: &mut Rustable, events| ctx.run(egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 600.0))), events, ..Default::default()
-        }, |ctx| app.inspector(ctx));
+        let frame = |app: &mut Rustable, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.inspector(ctx),
+            )
+        };
         fn text_pos(shape: &egui::Shape) -> Option<egui::Pos2> {
             match shape {
-                egui::Shape::Text(text) if text.galley.text() == "Alice" => Some(text.pos + egui::vec2(2.0, 6.0)),
+                egui::Shape::Text(text) if text.galley.text() == "Alice" => {
+                    Some(text.pos + egui::vec2(2.0, 6.0))
+                }
                 egui::Shape::Vec(shapes) => shapes.iter().find_map(text_pos),
                 _ => None,
             }
@@ -11029,10 +11622,23 @@ mod workspace_layout_tests {
             let mut app = Rustable::with_preferences(&ctx, Preferences::default());
             app.pending = None;
             app.view = View::Query;
-            app.tabs[0].grid = Arc::new(Grid { columns: vec!["id".into()], elapsed: std::time::Duration::from_micros(400), ..Default::default() });
-            let output = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 300.0))), ..Default::default() }, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| app.query_result_footer(ui));
+            app.tabs[0].grid = Arc::new(Grid {
+                columns: vec!["id".into()],
+                elapsed: std::time::Duration::from_micros(400),
+                ..Default::default()
             });
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 300.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.query_result_footer(ui));
+                },
+            );
             let mut texts = Vec::new();
             for clipped in &output.shapes {
                 text_positions(&clipped.shape, &mut texts);
@@ -11191,11 +11797,30 @@ mod workspace_layout_tests {
                         egui::Shape::Text(text) if text.galley.text() == expected => {
                             status_rect = egui::Rect::from_min_size(text.pos, text.galley.size())
                         }
-                        egui::Shape::Mesh(mesh) if mesh.vertices.iter().all(|v| v.pos.y > 500.0) => {
-                            let rect = egui::Rect::from_points(&mesh.vertices.iter().map(|v| v.pos).collect::<Vec<_>>());
-                            let texture = |name| ctx.try_load_texture(&format!("bytes://lucide/{name}.svg"), egui::TextureOptions::LINEAR, egui::load::SizeHint::Width(18)).ok().and_then(|poll| match poll { egui::load::TexturePoll::Ready { texture } => Some(texture.id), _ => None });
-                            if Some(mesh.texture_id) == texture("search") { filters_rect = rect; }
-                            if Some(mesh.texture_id) == texture("chevron-right") { last_button = rect; }
+                        egui::Shape::Mesh(mesh)
+                            if mesh.vertices.iter().all(|v| v.pos.y > 500.0) =>
+                        {
+                            let rect = egui::Rect::from_points(
+                                &mesh.vertices.iter().map(|v| v.pos).collect::<Vec<_>>(),
+                            );
+                            let texture = |name| {
+                                ctx.try_load_texture(
+                                    &format!("bytes://lucide/{name}.svg"),
+                                    egui::TextureOptions::LINEAR,
+                                    egui::load::SizeHint::Width(18),
+                                )
+                                .ok()
+                                .and_then(|poll| match poll {
+                                    egui::load::TexturePoll::Ready { texture } => Some(texture.id),
+                                    _ => None,
+                                })
+                            };
+                            if Some(mesh.texture_id) == texture("search") {
+                                filters_rect = rect;
+                            }
+                            if Some(mesh.texture_id) == texture("chevron-right") {
+                                last_button = rect;
+                            }
                         }
                         _ => {}
                     }
@@ -11223,69 +11848,79 @@ mod workspace_layout_tests {
 
     #[test]
     fn new_query_uses_available_height_until_it_has_results() {
-        for os in [egui::os::OperatingSystem::Mac, egui::os::OperatingSystem::Windows, egui::os::OperatingSystem::Nix] {
-        let ctx = egui::Context::default();
-        ctx.set_os(os);
-        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
-        app.pending = None;
-        app.view = View::Query;
-        app.tabs[0].sql.clear();
-        app.tabs[0].results.clear();
-        app.prefs.activity_visible = false;
-        let output = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1280.0, 850.0),
-                )),
-                ..Default::default()
-            },
-            |ctx| app.workspace(ctx),
-        );
-        let action_rect = |label: &str| {
-            output
+        for os in [
+            egui::os::OperatingSystem::Mac,
+            egui::os::OperatingSystem::Windows,
+            egui::os::OperatingSystem::Nix,
+        ] {
+            let ctx = egui::Context::default();
+            ctx.set_os(os);
+            let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+            app.pending = None;
+            app.view = View::Query;
+            app.tabs[0].sql.clear();
+            app.tabs[0].results.clear();
+            app.prefs.activity_visible = false;
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 850.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| app.workspace(ctx),
+            );
+            let action_rect = |label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => {
+                            Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("missing action {label}"))
+            };
+            let run = action_rect("Run current");
+            let favorite = action_rect("Save");
+            let file = action_rect("File");
+            let status = action_rect("Line 1, column 1");
+            assert!(
+                (status.center().y - run.center().y).abs() < 2.0,
+                "status and actions share a baseline"
+            );
+            assert!(status.right() < run.left());
+            assert!(favorite.right() < file.left() && file.right() < run.left());
+            let run_button = output
                 .shapes
                 .iter()
                 .find_map(|shape| match &shape.shape {
-                    egui::Shape::Text(text) if text.galley.text() == label => {
-                        Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                    egui::Shape::Rect(rect)
+                        if rect.fill == BLUE && rect.rect.contains(run.center()) =>
+                    {
+                        Some(rect.rect)
                     }
                     _ => None,
                 })
-                .unwrap_or_else(|| panic!("missing action {label}"))
-        };
-        let run = action_rect("Run current");
-        let favorite = action_rect("Save");
-        let file = action_rect("File");
-        let status = action_rect("Line 1, column 1");
-        assert!(
-            (status.center().y - run.center().y).abs() < 2.0,
-            "status and actions share a baseline"
-        );
-        assert!(status.right() < run.left());
-        assert!(
-            favorite.right() < file.left() && file.right() < run.left()
-        );
-        let run_button = output.shapes.iter().find_map(|shape| match &shape.shape {
-            egui::Shape::Rect(rect) if rect.fill == BLUE && rect.rect.contains(run.center()) => Some(rect.rect),
-            _ => None,
-        }).expect("run button background");
-        assert!(
-            run_button.right() > 1230.0,
-            "run action must align with the right edge on {os:?}: {run_button:?}"
-        );
-        let mut positions = Vec::new();
-        for shape in output.shapes {
-            text_positions(&shape.shape, &mut positions);
-        }
-        assert!(!positions.iter().any(|(text, _)| text == "Message"));
-        let run_y = positions
-            .iter()
-            .find(|(text, _)| text == "Run current")
-            .unwrap()
-            .1;
-        assert!(run_y > 650.0, "editor left unused vertical space: {run_y}");
-        assert!(run_y < 850.0, "run controls escaped viewport: {run_y}");
+                .expect("run button background");
+            assert!(
+                run_button.right() > 1230.0,
+                "run action must align with the right edge on {os:?}: {run_button:?}"
+            );
+            let mut positions = Vec::new();
+            for shape in output.shapes {
+                text_positions(&shape.shape, &mut positions);
+            }
+            assert!(!positions.iter().any(|(text, _)| text == "Message"));
+            let run_y = positions
+                .iter()
+                .find(|(text, _)| text == "Run current")
+                .unwrap()
+                .1;
+            assert!(run_y > 650.0, "editor left unused vertical space: {run_y}");
+            assert!(run_y < 850.0, "run controls escaped viewport: {run_y}");
         }
     }
 
@@ -11298,14 +11933,28 @@ mod workspace_layout_tests {
         app.prefs.activity_visible = false;
         app.tabs[0].sql = "SELECT 47 AS anchor_check".into();
         let frame = |app: &mut Rustable| {
-            let output = ctx.run(egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 850.0))),
-                ..Default::default()
-            }, |ctx| app.workspace(ctx));
-            output.shapes.iter().find_map(|shape| match &shape.shape {
-                egui::Shape::Text(text) if text.galley.text() == "SELECT 47 AS anchor_check" => Some(text.pos),
-                _ => None,
-            }).expect("query text")
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 850.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| app.workspace(ctx),
+            );
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text)
+                        if text.galley.text() == "SELECT 47 AS anchor_check" =>
+                    {
+                        Some(text.pos)
+                    }
+                    _ => None,
+                })
+                .expect("query text")
         };
         frame(&mut app);
         let before = frame(&mut app);
@@ -11546,7 +12195,12 @@ mod review_recovery_tests {
                 }, |ctx| app.windows(ctx)));
             }
             let shapes = output.unwrap().shapes;
-            let rect = |text| shapes.iter().find_map(|shape| text_rect(&shape.shape, text)).unwrap();
+            let rect = |text| {
+                shapes
+                    .iter()
+                    .find_map(|shape| text_rect(&shape.shape, text))
+                    .unwrap()
+            };
             let back = rect("Back to editing");
             let save = rect("Save changes");
             assert!((back.center().y - save.center().y).abs() < 1.0);
@@ -12269,15 +12923,29 @@ mod refresh_shortcut_tests {
             let copy = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
             for alt in [false, true] {
                 let modifiers = egui::Modifiers { alt, ..copy };
-                let _ = ctx.run(egui::RawInput {
-                    events: vec![egui::Event::Key { key: egui::Key::C, physical_key: None, pressed: true, repeat: false, modifiers }],
-                    ..Default::default()
-                }, |ctx| {
-                    assert_eq!(ctx.input_mut(|i| i.consume_key(shortcut, egui::Key::C)), alt);
-                    if !alt {
-                        assert!(ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)));
-                    }
-                });
+                let _ = ctx.run(
+                    egui::RawInput {
+                        events: vec![egui::Event::Key {
+                            key: egui::Key::C,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                        }],
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        assert_eq!(
+                            ctx.input_mut(|i| i.consume_key(shortcut, egui::Key::C)),
+                            alt
+                        );
+                        if !alt {
+                            assert!(ctx.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)
+                            }));
+                        }
+                    },
+                );
             }
         }
     }
@@ -13495,8 +14163,21 @@ mod dialog_shortcut_tests {
             match dialog {
                 0 => app.review = Some(ChangePlan::default()),
                 1 => app.history = true,
-                2 => { app.rename = Some(("old".into(), "new".into())); app.rename_inline = false; }
-                _ => app.add_column = Some(ColumnDraft { table: "customers".into(), name: "test".into(), data_type: "TEXT".into(), not_null: false, default_kind: 0, default_text: String::new(), error: None }),
+                2 => {
+                    app.rename = Some(("old".into(), "new".into()));
+                    app.rename_inline = false;
+                }
+                _ => {
+                    app.add_column = Some(ColumnDraft {
+                        table: "customers".into(),
+                        name: "test".into(),
+                        data_type: "TEXT".into(),
+                        not_null: false,
+                        default_kind: 0,
+                        default_text: String::new(),
+                        error: None,
+                    })
+                }
             }
             let count = app.tabs.len();
             for (key_code, modifiers) in [
@@ -13635,7 +14316,11 @@ mod transaction_window_tests {
             app.dispatch(Command::Query { sql: sql.into(), safe }, Pending::Query(0));
             settle(app);
         }
-        let count = || observer.query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0)).unwrap();
+        let count = || {
+            observer
+                .query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
         settle(&mut app);
         run(&mut app, "BEGIN", false);
         run(&mut app, "INSERT INTO t VALUES(1)", false);
@@ -14191,13 +14876,35 @@ mod query_result_editing_tests {
         app.connections = false;
         app.selected = Some(0);
         app.row_selection.click(0, false, false, Some(0));
-        let input = |events| egui::RawInput { events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0))), ..Default::default() };
-        let _ = ctx.run(input(vec![]), |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
-        ctx.memory_mut(|memory| memory.request_focus(app.tabs[0].result_grid_focus.unwrap()));
-        let _ = ctx.run(input(vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]), |ctx| {
+        let input = |events| egui::RawInput {
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input(vec![]), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui));
         });
-        assert!(app.error.as_deref().is_some_and(|message| message.contains("primary-key")));
+        ctx.memory_mut(|memory| memory.request_focus(app.tabs[0].result_grid_focus.unwrap()));
+        let _ = ctx.run(
+            input(vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]),
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui));
+            },
+        );
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|message| message.contains("primary-key"))
+        );
         assert!(app.edit.is_none());
         assert!(app.changes.is_empty());
         app.error = None;
@@ -14395,7 +15102,11 @@ mod query_result_editing_tests {
         app.save_changes(false);
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
-        let name: String = observer.query_row("SELECT name FROM customers WHERE id = 123", [], |r| r.get(0)).unwrap();
+        let name: String = observer
+            .query_row("SELECT name FROM customers WHERE id = 123", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(name, "Ada Lovelace");
         assert_eq!(app.grid().rows[0][1], Value::Text("Ada Lovelace".into()));
         assert!(app.can_edit_rows(), "the patched result remains editable");
@@ -14408,7 +15119,11 @@ mod query_result_editing_tests {
         app.save_changes(false);
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
-        let email: String = observer.query_row("SELECT email FROM customers WHERE id = 123", [], |r| r.get(0)).unwrap();
+        let email: String = observer
+            .query_row("SELECT email FROM customers WHERE id = 123", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(email, "ada@lovelace.dev");
 
         // Concurrent changes are still caught by the full-row precondition.
@@ -14420,7 +15135,11 @@ mod query_result_editing_tests {
         app.save_changes(false);
         settle(&mut app);
         assert_eq!(app.changes.len(), 1, "a stale row must not be overwritten");
-        let name: String = observer.query_row("SELECT name FROM customers WHERE id = 123", [], |r| r.get(0)).unwrap();
+        let name: String = observer
+            .query_row("SELECT name FROM customers WHERE id = 123", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(name, "Ada Lovelace");
         app.discard_changes();
 
@@ -14600,8 +15319,15 @@ mod json_editor_tests {
         app.save_changes(false);
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
-        let (doc, note): (String, Option<String>) = observer.query_row("SELECT doc, note FROM docs WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(doc, r#"{"name":"Ada","tags":["math","computing"],"n":12345678901234567890.5}"#);
+        let (doc, note): (String, Option<String>) = observer
+            .query_row("SELECT doc, note FROM docs WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            doc,
+            r#"{"name":"Ada","tags":["math","computing"],"n":12345678901234567890.5}"#
+        );
         assert_eq!(note, None);
 
         // Read-only results still open a viewer.
@@ -14693,8 +15419,15 @@ mod date_picker_tests {
         app.save_changes(false);
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
-        let (day, at): (String, String) = observer.query_row("SELECT day, at FROM events WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!((day.as_str(), at.as_str()), ("2024-03-01", "2024-03-01 08:15:00"));
+        let (day, at): (String, String) = observer
+            .query_row("SELECT day, at FROM events WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            (day.as_str(), at.as_str()),
+            ("2024-03-01", "2024-03-01 08:15:00")
+        );
 
         // "Set now" on several selected query-result rows uses the result's
         // column metadata (not the Data view's) and stages one value per row.

@@ -427,3 +427,21 @@ float-literal-f32-fallback lint. Tests in `src/sql_highlight.rs` cover owned/sha
 cache equivalence, ownership, fractional widths, font replacement, DPI, theme,
 editor style, text and preview/wrap changes. Release performance and native
 profiling evidence is tracked in `docs/UI-PERFORMANCE.md`.
+
+### Opt-in SQL editor Enter indentation and parentheses
+
+`TextEdit::auto_indent(true)` carries leading tabs/spaces onto a new line.
+`TextEdit::parenthesis_pairing(predicate)` pairs typed `(`, wraps selections,
+overtype-skips an adjacent `)`, and deletes empty `()` together. Enter inside an
+empty pair creates an indented inner line and aligns the closing parenthesis.
+Both features are enabled only for the SQL query editor; ordinary fields retain
+the existing input path. Paste and IME composition are not paired. Pairing uses
+the existing event-loop undo boundaries rather than rewriting input afterward;
+selection wrapping, pair deletion and indented newline edits are atomic.
+
+The predicate receives the SQL prefix only for an actual delimiter edit. Rustable
+uses an allocation-free, dialect-aware lexical scan to exclude strings, quoted
+identifiers, line/block comments, PostgreSQL dollar-quoted bodies and MySQL
+mode-dependent escaping. It does not scan documents during idle frames or normal
+word typing. Tests live in `src/editor_assist_tests.rs`, including Unicode,
+selection, undo/redo, literal typing groups, paste, IME and character limits.
