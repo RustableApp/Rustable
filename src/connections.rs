@@ -778,6 +778,8 @@ impl Rustable {
                         });
                         ui.add_space(8.0);
                         if ui.button("New group").clicked() { action = Some(Action::AddGroup); }
+                        #[cfg(unix)]
+                        { ui.add_space(8.0); self.matrix_connection_button(ui); }
                     });
                     return;
                 }
@@ -791,7 +793,10 @@ impl Rustable {
                     let filtering = !self.connection_manager.search.trim().is_empty();
                     let visible: std::collections::HashSet<_> = self.prefs.saved_connections.matching_profiles(&self.connection_manager.search).into_iter().collect();
                     if filtering { ui.small("Clear search to reorder connections or groups."); }
-                    egui::ScrollArea::vertical().id_salt("saved-connection-list").auto_shrink([false, false]).max_height((ui.available_height() - 44.0).max(0.0)).show(ui, |ui| {
+                    let footer_height = 44.0;
+                    #[cfg(unix)]
+                    let footer_height = footer_height + if self.matrix_connector_available() { crate::controls::BUTTON_HEIGHT + 8.0 } else { 0.0 };
+                    egui::ScrollArea::vertical().id_salt("saved-connection-list").auto_shrink([false, false]).max_height((ui.available_height() - footer_height).max(0.0)).show(ui, |ui| {
                         let groups: Vec<_> = std::iter::once((None, "Ungrouped".to_owned()))
                             .chain(self.prefs.saved_connections.groups.iter().map(|group| (Some(group.id), group.name.clone()))).collect();
                         if visible.is_empty() && filtering { ui.weak("No matching connections."); }
@@ -960,6 +965,8 @@ impl Rustable {
                     });
                     if ui.button("New group").clicked() { action = Some(Action::AddGroup); }
                     });
+                    #[cfg(unix)]
+                    if self.matrix_connector_available() { ui.add_space(4.0); self.matrix_connection_button(ui); }
                     });
                     ui.separator();
                     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ui.available_height()), egui::Layout::top_down(egui::Align::Min), |ui| {

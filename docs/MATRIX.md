@@ -18,9 +18,17 @@ The normal connection manager opens. Open the intended connection, choose your
 usual Safe mode setting, then open the **AI** toolbar menu and choose **Enable AI
 control** in that connection’s window. Nothing is exposed to MCP until you enable
 it. Redis is not supported.
-The launcher prints the MCP client configuration for this running process; add
-that configuration to your AI client. It does not execute a scripted tour on
-real connections.
+Choose **AI → Connect an AI agent… → Copy configuration** to get the live MCP
+configuration, or use **Connect an AI agent…** in the connection manager before
+opening a database. Paste it into your AI client's MCP configuration. **Manual
+setup** also provides separate command and argument copy controls for clients
+with individual fields. The transport is stdio.
+
+Opening or copying these details does not enable database access; explicitly
+choose **Enable AI control** for the intended connection. Keep Rustable open and
+copy the configuration again after restarting, because the socket belongs to the
+current process. The launcher still prints the same configuration in the terminal.
+It does not execute a scripted tour on real connections.
 
 Debug builds use Rustable Development profiles and credentials. Release builds
 use the installed app's profile/credential namespace. Close another instance
@@ -441,3 +449,57 @@ rather than demonstrating zero cost. Raw logs, environment, binary fingerprint,
 source patch and recipe are retained in `target/matrix-toolbar-spacing-performance/`.
 This layout/style correction changes no database exchanges. Native presentation,
 mixed-monitor and 60/120Hz timing checks remain unverified as noted above.
+
+## In-app MCP connection setup
+
+The Matrix listener captures its executable and absolute socket path once at
+startup and shares immutable configuration with the connection manager and SQL
+windows. **Connect an AI agent…** opens a scrollable dialog with live JSON,
+separate manual command/arguments, and temporary in-place copy confirmation.
+Paths containing spaces, quotes and Unicode retain their exact JSON values.
+Opening the dialog does not grant access. Workspace shortcuts and MCP mutations
+respect the open dialog; discovery and cancellation remain available.
+
+Native QA inspected dark and light dialogs, expanded manual setup, the empty
+welcome screen, and the saved-connections sidebar. Long paths wrap within the
+panel and the footer reserves space for the new entry. Captures are retained in
+`target/matrix-connector-review/`. Copy feedback settles without continuous
+repainting. Unit tests cover configuration serialization, clipboard content,
+feedback expiry, manager entry geometry, and access/mutation boundaries.
+
+Database execution, driver sequencing and Safe mode are unchanged: this adds no
+database exchanges. No database latency benchmarks were rerun for this UI-only
+setup feature. Native 60/120 Hz input-to-present, mixed-DPI and display
+reconnection checks remain unverified.
+
+Validation: `cargo test --lib` and the release library test binary each passed
+892 tests (240 ignored); `cargo clippy --all-targets --features qa -- -D warnings`
+passed. Release CPU measurements used the `scripts/ui-performance.py` build,
+measure and comparison helpers against the retained `b22a43d` release binary,
+with unchanged fixtures and the 10% threshold. Apple M4 Max, macOS 27.2.1 arm64,
+Rust 1.99.1; default headless scale, 760/1280 × 760, 20 warmups and 160 samples,
+seven alternating pairs per batch, serial builds/benchmarks. The first batch had
+two inconclusive cases. A second identical batch resolved stream-edit/1280 but
+left the 760px cases inconclusive; this is **not a clean performance pass**.
+Only one of seven inspect/760 pairs and three of seven stream-edit/760 pairs
+exceeded 10% in that repeat, so the slowdown was not repeatable at the runner's
+80% criterion. No thresholds were relaxed. Closed-dialog work adds constant-time
+flag/Option checks; path resolution and JSON serialization happen at startup.
+
+Repeat batch median CPU p95, milliseconds:
+
+| Workload | Base | Candidate | Change | Result |
+| --- | ---: | ---: | ---: | --- |
+| matrix/inspect/1280 | 0.325208 | 0.327958 | +0.85% | pass |
+| matrix/inspect/760 | 0.280083 | 0.310084 | +10.71% | inconclusive |
+| matrix/stream-edit/1280 | 0.238167 | 0.241542 | +1.42% | pass |
+| matrix/stream-edit/760 | 0.229666 | 0.253541 | +10.40% | inconclusive |
+
+New dialog workload (no equivalent base UI): seven candidate-only runs,
+500/760 × 760, including a copy click and first frame after 30 seconds simulated
+idle. Median p50/p95/p99/max across runs were 0.014791/0.016625/0.020209/0.022041 ms
+at 500px and 0.015125/0.016666/0.018375/0.019709 ms at 760px. These are CPU
+layout/tessellation timings, not input-to-display latency. Native screenshots
+used 2× scale. Raw samples, cold/after-idle timings, both comparison batches,
+environment metadata, source patch and the recipe are retained in
+`target/matrix-connector-performance/`; p50/p99/max remain available there.

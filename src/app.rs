@@ -661,7 +661,7 @@ impl Rustable {
     }
     pub(crate) fn manager_shortcut(&mut self, ctx: &egui::Context) {
         #[cfg(unix)]
-        if self.matrix_interaction_locked() { return; }
+        if self.matrix_interaction_locked() || self.matrix_connector_open() { return; }
         if crate::session_windows::close_confirmation_open(ctx) { return; }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
             if self.child_window {
@@ -680,6 +680,8 @@ impl Rustable {
         }
         self.connections = true;
         self.connections_window(ctx);
+        #[cfg(unix)]
+        self.matrix_connector_dialog(ctx);
         false
     }
     pub(crate) fn take_manager_request(&mut self) -> bool {
@@ -2293,7 +2295,7 @@ impl Rustable {
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
         #[cfg(unix)]
-        if self.matrix_interaction_locked() { return true; }
+        if self.matrix_interaction_locked() || self.matrix_connector_open() { return true; }
         self.query_monitor.open || self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
             || self.destructive_confirm.is_some() || self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some()
             || (self.rename.is_some() && !self.rename_inline)
@@ -2303,7 +2305,7 @@ impl Rustable {
 
     fn workspace_shortcuts(&mut self, ctx: &egui::Context) {
         #[cfg(unix)]
-        if self.matrix_interaction_locked() { return; }
+        if self.matrix_interaction_locked() || self.matrix_connector_open() { return; }
         if self.close_table_confirmation.is_some() || crate::session_windows::close_confirmation_open(ctx) { return; }
         // Import windows own the keyboard, including their first visible frame.
         if self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() || self.sidebar_export.is_some() {
@@ -4194,7 +4196,7 @@ Right-click to inspect or remove individual changes",
 
     fn workspace_tab_shortcuts(&mut self, ctx: &egui::Context) {
         #[cfg(unix)]
-        if self.matrix_interaction_locked() { return; }
+        if self.matrix_interaction_locked() || self.matrix_connector_open() { return; }
         if self.connections
             || self.review.is_some()
             || self.history

@@ -4,6 +4,8 @@
 mod app;
 #[cfg(unix)]
 pub mod matrix;
+#[cfg(unix)]
+mod matrix_connector;
 #[cfg(target_arch = "wasm32")]
 mod browser_jobs;
 #[cfg(target_arch = "wasm32")]

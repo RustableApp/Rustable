@@ -5,6 +5,7 @@ use serde_json::json;
 
 impl SessionWindows {
     pub(crate) fn attach_matrix(&mut self, bridge: crate::matrix::Bridge) {
+        self.root.offer_matrix_connection(bridge.connector.as_ref());
         self.matrix = Some(bridge);
         #[cfg(feature = "qa")]
         if let Some(path) = std::env::var_os("RUSTABLE_MATRIX_FIXTURE") {

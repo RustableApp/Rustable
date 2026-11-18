@@ -102,6 +102,71 @@ impl Rustable {
         }
     }
 
+    pub(crate) fn offer_matrix_connection(
+        &mut self,
+        connector: Option<&Arc<crate::matrix_connector::Connector>>,
+    ) {
+        self.offer_matrix();
+        if let Some(bridge) = &mut self.matrix
+            && bridge.connector.is_none()
+        {
+            bridge.connector = connector.cloned();
+        }
+    }
+
+    pub(super) fn matrix_connector_available(&self) -> bool {
+        self.matrix
+            .as_ref()
+            .is_some_and(|bridge| bridge.connector.is_some())
+    }
+
+    #[cfg(feature = "qa")]
+    pub(crate) fn matrix_connector_manager_fixture(&mut self) {
+        if self.prefs.saved_connections.groups.is_empty() {
+            self.prefs
+                .saved_connections
+                .add_group("Local databases".into())
+                .unwrap();
+        }
+    }
+
+    pub(crate) fn matrix_connector_open(&self) -> bool {
+        self.matrix
+            .as_ref()
+            .is_some_and(|bridge| bridge.connector_open)
+    }
+
+    pub(crate) fn open_matrix_connector(&mut self) {
+        if let Some(bridge) = &mut self.matrix
+            && bridge.connector.is_some()
+        {
+            bridge.connector_open = true;
+        }
+    }
+
+    pub(super) fn matrix_connection_button(&mut self, ui: &mut egui::Ui) -> bool {
+        let clicked = self
+            .matrix
+            .as_ref()
+            .is_some_and(|bridge| bridge.connector.is_some())
+            && ui.button("Connect an AI agent…").clicked();
+        if clicked {
+            self.open_matrix_connector();
+        }
+        clicked
+    }
+
+    pub(super) fn matrix_connector_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(bridge) = &mut self.matrix
+            && bridge.connector_open
+            && let Some(connector) = &bridge.connector
+            && connector.show(ctx)
+        {
+            bridge.connector_open = false;
+            ctx.request_repaint();
+        }
+    }
+
     pub(crate) fn matrix_id(&self) -> Option<u64> {
         self.matrix.as_ref().map(|bridge| bridge.id)
     }
@@ -226,6 +291,7 @@ impl Rustable {
         }
         self.matrix = Some(bridge);
         self.matrix_working_input(ctx);
+        self.matrix_connector_dialog(ctx);
     }
 
     /// Also holds the stop-click frame so that input cannot fall through onto
@@ -259,6 +325,7 @@ impl Rustable {
             ui.label(if enabled { "Ready for AI requests" } else { "You have control" });
             ui.weak(if self.safe_mode_active() { "Safe mode on" } else { "Connection allows writes" });
             ui.separator();
+            if self.matrix_connection_button(ui) { ui.close(); }
             if enabled {
                 if ui.button("Pause AI access").clicked() { self.pause_matrix(false); ui.close(); }
             } else if ui.add_enabled(self.supports_safe_mode() && self.pending.is_none()
@@ -503,7 +570,8 @@ impl Rustable {
             );
         }
         // Never navigate away from unfinished human work or interfere with a modal.
-        if self.pending.is_some()
+        if bridge.connector_open
+            || self.pending.is_some()
             || self.has_pending_edits()
             || self.edit.is_some()
             || self.destructive_confirm.is_some()
@@ -633,10 +701,115 @@ mod tests {
                 owned: Default::default(),
                 running_tab: None,
                 frame_locked: false,
+                connector: None,
+                connector_open: false,
                 edit: None,
             },
         )
     }
+    #[test]
+    fn matrix_connector_entry_fits_empty_and_saved_connection_managers() {
+        fn find(shape: &egui::Shape) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == "Connect an AI agent…" => {
+                    Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(find),
+                _ => None,
+            }
+        }
+        for populated in [false, true] {
+            for width in [760.0, 1280.0] {
+                let ctx = egui::Context::default();
+                let (mut app, mut bridge) = fixture();
+                bridge.enabled = false;
+                bridge.connector = Some(Arc::new(
+                    crate::matrix_connector::Connector::new(
+                        std::path::Path::new("/app/rustable"),
+                        std::path::Path::new("/tmp/private/workspace.sock"),
+                    )
+                    .unwrap(),
+                ));
+                app.matrix = Some(bridge);
+                if populated {
+                    app.prefs
+                        .saved_connections
+                        .add_group("Saved databases".into())
+                        .unwrap();
+                }
+                for frame in 0..4 {
+                    let output = ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(width, 560.0),
+                            )),
+                            time: Some(frame as f64),
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            app.render_launcher(ctx);
+                        },
+                    );
+                    if frame == 3 {
+                        let rect = output
+                            .shapes
+                            .iter()
+                            .find_map(|s| find(&s.shape))
+                            .expect("AI connection entry is visible");
+                        assert!(
+                            rect.left() >= 0.0
+                                && rect.right() <= width
+                                && rect.top() >= 0.0
+                                && rect.bottom() <= 560.0,
+                            "entry escaped manager: {rect:?}"
+                        );
+                    }
+                }
+                assert!(!app.matrix.as_ref().unwrap().enabled);
+            }
+        }
+    }
+
+    #[test]
+    fn matrix_connector_does_not_grant_access_and_blocks_mutation_while_open() {
+        let (mut app, mut bridge) = fixture();
+        bridge.enabled = false;
+        bridge.connector = Some(Arc::new(
+            crate::matrix_connector::Connector::new(
+                std::path::Path::new("/Applications/Rustable.app/Contents/MacOS/rustable"),
+                std::path::Path::new("/tmp/private/workspace.sock"),
+            )
+            .unwrap(),
+        ));
+        app.matrix = Some(bridge);
+        app.open_matrix_connector();
+        assert!(app.matrix_connector_open());
+        assert!(!app.matrix.as_ref().unwrap().enabled);
+        assert!(app.dialog_owns_workspace_shortcuts());
+        let mut bridge = app.matrix.take().unwrap();
+        bridge.enabled = true;
+        let count = app.tabs.len();
+        assert!(
+            app.matrix_action(
+                &mut bridge,
+                "open_query",
+                &json!({"title":"Blocked","sql":"SELECT 1"})
+            )
+            .is_err()
+        );
+        assert_eq!(app.tabs.len(), count);
+        bridge.connector_open = false;
+        assert!(
+            app.matrix_action(
+                &mut bridge,
+                "open_query",
+                &json!({"title":"Allowed","sql":"SELECT 1"})
+            )
+            .is_ok()
+        );
+    }
+
     #[test]
     fn matrix_bar_does_not_overlap_toolbar_groups() {
         fn rectangles(shape: &egui::Shape, out: &mut Vec<egui::epaint::RectShape>) {

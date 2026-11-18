@@ -376,7 +376,7 @@ impl eframe::App for SessionWindows {
                     self.root.sync_window_preferences(app);
                     self.root.sync_window_profile(app);
                     #[cfg(unix)]
-                    if self.matrix.is_some() { app.offer_matrix(); }
+                    if let Some(bridge) = &self.matrix { app.offer_matrix_connection(bridge.connector.as_ref()); }
                     app.begin_workspace_frame(child_ctx);
                 }
                 let mut switch = None;

@@ -24,6 +24,8 @@ pub(crate) struct Bridge {
     pub owned: std::collections::HashSet<u64>,
     pub running_tab: Option<u64>,
     pub frame_locked: bool,
+    pub connector: Option<std::sync::Arc<crate::matrix_connector::Connector>>,
+    pub connector_open: bool,
     pub edit: Option<Box<crate::app::matrix_edit::Edit>>,
 }
 
@@ -52,6 +54,8 @@ impl Bridge {
             owned: Default::default(),
             running_tab: None,
             frame_locked: false,
+            connector: None,
+            connector_open: false,
             edit: None,
         }
     }
@@ -155,6 +159,10 @@ pub(crate) fn listen(path: &std::path::Path, ctx: eframe::egui::Context) -> Resu
     if permissions.mode() & 0o077 != 0 {
         return Err("Socket directory must be private (mode 0700); use mktemp -d.".into());
     }
+    let connector = std::sync::Arc::new(crate::matrix_connector::Connector::new(
+        &std::env::current_exe().map_err(|error| error.to_string())?,
+        &std::path::absolute(path).map_err(|error| error.to_string())?,
+    )?);
     let listener =
         UnixListener::bind(path).map_err(|e| format!("Cannot bind {}: {e}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -210,6 +218,8 @@ pub(crate) fn listen(path: &std::path::Path, ctx: eframe::egui::Context) -> Resu
         owned: Default::default(),
         running_tab: None,
         frame_locked: false,
+        connector: Some(connector),
+        connector_open: false,
         edit: None,
     })
 }
@@ -354,7 +364,12 @@ pub(crate) struct Capture {
 #[cfg(feature = "qa")]
 impl eframe::App for Capture {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
-        self.app.update(ctx, frame);
+        let connector_qa = std::env::var_os("RUSTABLE_MATRIX_CONNECTOR_QA").is_some();
+        let manager_qa = std::env::var_os("RUSTABLE_MATRIX_CONNECTOR_MANAGER_QA").is_some();
+        if connector_qa { self.app.open_matrix_connector(); }
+        if manager_qa && std::env::var_os("RUSTABLE_MATRIX_CONNECTOR_GROUP_QA").is_some() { self.app.matrix_connector_manager_fixture(); }
+        if manager_qa { self.app.render_launcher(ctx); } else { self.app.update(ctx, frame); }
+        if (connector_qa || manager_qa) && ctx.cumulative_frame_nr() < 20 { ctx.request_repaint(); }
         if std::env::var_os("RUSTABLE_MATRIX_EDIT_QA").is_some() {
             self.app.matrix_shared_edit_capture(ctx, &self.path);
             return;
@@ -392,7 +407,7 @@ impl eframe::App for Capture {
                 ctx.request_repaint();
             });
         }
-        if !self.requested && self.app.matrix_capture_ready() {
+        if !self.requested && (self.app.matrix_capture_ready() || ((connector_qa || manager_qa) && ctx.cumulative_frame_nr() >= 20)) {
             self.requested = true;
             ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Screenshot(Default::default()));
         }
