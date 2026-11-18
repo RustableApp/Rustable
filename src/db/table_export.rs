@@ -329,9 +329,11 @@ fn write_bundle(
                 if let Some(directory)=directory {
                     driver.export_table(&directory.join(filename(label,index,format)),&Browse {table:name.clone(),..Default::default()},cancel,format).map_err(std::io::Error::other)?;
                 } else {
-                    let temporary=tempfile::NamedTempFile::new_in(path.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")))?;
-                    driver.export_table(temporary.path(),&Browse { table:name.clone(),..Default::default() },cancel,format).map_err(std::io::Error::other)?;
-                    copy_cancel(&mut std::fs::File::open(temporary.path())?,&mut rows,cancel)?;
+                    // Close the placeholder handle before the driver atomically replaces
+                    // its path. Windows denies replacement of an open destination.
+                    let temporary=tempfile::NamedTempFile::new_in(path.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(std::path::Path::new(".")))?.into_temp_path();
+                    driver.export_table(&temporary,&Browse { table:name.clone(),..Default::default() },cancel,format).map_err(std::io::Error::other)?;
+                    copy_cancel(&mut std::fs::File::open(&temporary)?,&mut rows,cancel)?;
                 }
             }
         }
@@ -440,10 +442,11 @@ pub(super) fn export_schema(
         // Stage the streamed INSERTs separately. Only the complete combined SQL
         // is published, so cancellation never replaces an existing destination.
         let data = if combined_sql {
+            // Keep cleanup ownership without holding the destination open during rename.
             let temporary = tempfile::NamedTempFile::new_in(destination.parent().unwrap())
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?.into_temp_path();
             driver.export_table(
-                temporary.path(),
+                &temporary,
                 &Browse {
                     table: name.clone(),
                     ..Default::default()
@@ -461,7 +464,7 @@ pub(super) fn export_schema(
             if !ddl.trim_end().ends_with(';') { writer.write_all(b";")?; }
             writer.write_all(b"\n")?;
             if let Some(data) = &data {
-                let mut input = std::fs::File::open(data.path())?;
+                let mut input = std::fs::File::open(data)?;
                 let mut buffer = [0; 64 * 1024];
                 loop {
                     use std::io::Read;
