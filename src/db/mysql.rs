@@ -1,17 +1,17 @@
 //! MySQL/MariaDB driver using a persistent native connection.
 use super::*;
-use ::mysql::{Conn, OptsBuilder, prelude::Queryable};
 use crate::{connection::MysqlConfig, sql::mysql::Mode};
+use ::mysql::{Conn, OptsBuilder, prelude::Queryable};
 
+#[cfg(test)]
+mod cascade_tests;
 mod editing;
 mod export;
-mod import;
 mod expressions;
+mod import;
 mod safe;
 #[cfg(test)]
 mod transport_tests;
-#[cfg(test)]
-mod cascade_tests;
 
 /// Keep server diagnostics readable without exposing the driver's enum wrapper.
 pub(super) fn error_message(error: &::mysql::Error) -> String {
@@ -133,9 +133,16 @@ fn with_cancel<T>(config: &MysqlConfig, destination: Option<std::net::SocketAddr
                     let mut options = config.clone();
                     options.connect_timeout = Duration::from_secs(1);
                     options.read_timeout = Duration::from_secs(1);
-                    control = Some(Conn::new(OptsBuilder::from(&options).tcp_destination(destination)
-                        .write_timeout(Some(Duration::from_secs(1))))
-                        .map_err(|e| format!("Could not connect to cancel query: {}", error_message(&e)))?);
+                    control = Some(
+                        Conn::new(
+                            OptsBuilder::from(&options)
+                                .tcp_destination(destination)
+                                .write_timeout(Some(Duration::from_secs(1))),
+                        )
+                        .map_err(|e| {
+                            format!("Could not connect to cancel query: {}", error_message(&e))
+                        })?,
+                    );
                 }
                 control.as_mut().unwrap().query_drop(format!("KILL QUERY {id}"))
                     .map_err(|e| format!("Could not cancel query: {}", error_message(&e)))?;
@@ -174,9 +181,18 @@ impl MysqlDriver {
                         name, kind: if kind == "VIEW" { "view" } else { "table" }.into(), columns: vec![], ddl: String::new() });
                 }
                 if let Some(name) = column {
-                    result.last_mut().unwrap().columns.push(Column { name, data_type: ty.unwrap_or_default(),
-                        not_null: nullable.as_deref() == Some("NO"), default: default.unwrap_or_default(),
-                        pk: key.as_deref() == Some("PRI"), generated: extra.is_some_and(|v| v.contains("VIRTUAL GENERATED") || v.contains("STORED GENERATED") || v.contains("PERSISTENT")) });
+                    result.last_mut().unwrap().columns.push(Column {
+                        name,
+                        data_type: ty.unwrap_or_default(),
+                        not_null: nullable.as_deref() == Some("NO"),
+                        default: default.unwrap_or_default(),
+                        pk: key.as_deref() == Some("PRI"),
+                        generated: extra.is_some_and(|v| {
+                            v.contains("VIRTUAL GENERATED")
+                                || v.contains("STORED GENERATED")
+                                || v.contains("PERSISTENT")
+                        }),
+                    });
                 }
             }
             Ok(result)
@@ -217,7 +233,10 @@ impl MysqlDriver {
         let cancel = self.cancel.clone();
         let destination = self.destination;
         let conn = self.conn()?;
-        let (result, cancellation_error) = with_cancel(&config, destination, conn.connection_id(), &cancel, || operation(conn));
+        let (result, cancellation_error) =
+            with_cancel(&config, destination, conn.connection_id(), &cancel, || {
+                operation(conn)
+            });
         match result {
             Ok(value) => Ok((value, cancellation_error)),
             Err(error) => {
@@ -310,30 +329,53 @@ impl MysqlDriver {
                     Ok(rows)
                 })();
                 match read {
-                    Err(::mysql::Error::MySqlError(error)) if matches!(error.code, 1142 | 1227) => Ok(None),
+                    Err(::mysql::Error::MySqlError(error)) if matches!(error.code, 1142 | 1227) => {
+                        Ok(None)
+                    }
                     result => result.map(Some),
                 }
             })?;
             if let Some(rows) = batch {
                 if rows.len() != chunk.len() { return Err("Missing trigger definition results".into()); }
                 for ((name,), row) in chunk.iter().zip(rows) {
-                    definitions.insert(name.clone(), row.get::<String, _>("SQL Original Statement")
-                        .ok_or_else(|| "Trigger definition is unavailable to this account.".to_owned()));
+                    definitions.insert(
+                        name.clone(),
+                        row.get::<String, _>("SQL Original Statement")
+                            .ok_or_else(|| {
+                                "Trigger definition is unavailable to this account.".to_owned()
+                            }),
+                    );
                 }
             }
         }
         let mut triggers = Vec::new();
         for (name,) in names {
-            let definition = if let Some(definition) = definitions.remove(&name) { definition } else { self.with_connection(|conn| {
-                match conn.query_first::<::mysql::Row, _>(format!("SHOW CREATE TRIGGER {}.{}", quote(schema), quote(&name))) {
-                    // MariaDB can expose a trigger name while refusing its DDL.
-                    // Preserve that distinction without hiding cancellation or
-                    // transport failures, which still abort the browse request.
-                    Err(::mysql::Error::MySqlError(error)) if matches!(error.code, 1142 | 1227) => Ok(Err(error.to_string())),
-                    result => result.map(|row| row.and_then(|row| row.get::<String, _>("SQL Original Statement"))
-                        .ok_or_else(|| "Trigger definition is unavailable to this account.".to_owned())),
-                }
-            })? };
+            let definition = if let Some(definition) = definitions.remove(&name) {
+                definition
+            } else {
+                self.with_connection(|conn| {
+                    match conn.query_first::<::mysql::Row, _>(format!(
+                        "SHOW CREATE TRIGGER {}.{}",
+                        quote(schema),
+                        quote(&name)
+                    )) {
+                        // MariaDB can expose a trigger name while refusing its DDL.
+                        // Preserve that distinction without hiding cancellation or
+                        // transport failures, which still abort the browse request.
+                        Err(::mysql::Error::MySqlError(error))
+                            if matches!(error.code, 1142 | 1227) =>
+                        {
+                            Ok(Err(error.to_string()))
+                        }
+                        result => result.map(|row| {
+                            row.and_then(|row| row.get::<String, _>("SQL Original Statement"))
+                                .ok_or_else(|| {
+                                    "Trigger definition is unavailable to this account.".to_owned()
+                                })
+                        }),
+                    }
+                })?
+            };
             let (ddl, metadata_error) = match definition {
                 Ok(ddl) => (ddl, None),
                 Err(error) => (String::new(), Some(error)),
@@ -344,9 +386,16 @@ impl MysqlDriver {
         Ok((indexes.into_values().collect(), triggers))
     }
     fn edit_schema_snapshot(&mut self, schema: &str, table: &str) -> Result<String, String> {
-        let row: Option<::mysql::Row> = self.with_connection(|conn| conn.query_first(
-            format!("SHOW CREATE TABLE {}.{}", quote(schema), quote(table))))?;
-        let definition: String = row.and_then(|row| row.get(1)).ok_or("Missing table definition")?;
+        let row: Option<::mysql::Row> = self.with_connection(|conn| {
+            conn.query_first(format!(
+                "SHOW CREATE TABLE {}.{}",
+                quote(schema),
+                quote(table)
+            ))
+        })?;
+        let definition: String = row
+            .and_then(|row| row.get(1))
+            .ok_or("Missing table definition")?;
         // information_schema describes the persistent table even when a
         // session-local temporary table hides it. Its engine and row metadata
         // cannot authorize writes to that replacement (which may be MyISAM).
@@ -372,8 +421,14 @@ impl MysqlDriver {
         // temporary table can hide a persistent table with a different shape.
         let qualified = format!("{}.{}", quote(&schema), quote(&request.table));
         let (rows, definition) = self.with_connection(|conn| {
-            let mut result = conn.query_iter(format!("SHOW FULL COLUMNS FROM {qualified}; SHOW CREATE TABLE {qualified}"))?;
-            let columns = result.iter().ok_or_else(|| ::mysql::Error::from(std::io::Error::other("Missing column metadata")))?
+            let mut result = conn.query_iter(format!(
+                "SHOW FULL COLUMNS FROM {qualified}; SHOW CREATE TABLE {qualified}"
+            ))?;
+            let columns = result
+                .iter()
+                .ok_or_else(|| {
+                    ::mysql::Error::from(std::io::Error::other("Missing column metadata"))
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
             let definition = match result.iter() {
                 Some(set) => match set.collect::<Result<Vec<_>, _>>() {
@@ -421,13 +476,43 @@ impl MysqlDriver {
         let mut sql = format!("SELECT {projection} FROM {}.{}", quote(&schema), quote(&object.name));
         let mut parameters = Vec::new();
         if !request.filter.is_empty() {
-            let column = request.filter_column.as_ref().ok_or("Choose a filter column")?;
-            if !object.columns.iter().any(|c| &c.name == column) { return Err("Unknown filter column".into()); }
-            sql.push_str(&format!(" WHERE CAST({} AS CHAR) LIKE ? ESCAPE '!'", quote(column)));
-            parameters.push(Value::Text(format!("%{}%", request.filter.replace('!', "!!").replace('%', "!%").replace('_', "!_"))));
+            let column = request
+                .filter_column
+                .as_ref()
+                .ok_or("Choose a filter column")?;
+            if !object.columns.iter().any(|c| &c.name == column) {
+                return Err("Unknown filter column".into());
+            }
+            sql.push_str(&format!(
+                " WHERE CAST({} AS CHAR) LIKE ? ESCAPE '!'",
+                quote(column)
+            ));
+            parameters.push(Value::Text(format!(
+                "%{}%",
+                request
+                    .filter
+                    .replace('!', "!!")
+                    .replace('%', "!%")
+                    .replace('_', "!_")
+            )));
         }
-        let predicate = super::filters::predicate(&request.filters, &object.columns.iter().map(|c| c.name.clone()).collect::<Vec<_>>(), crate::sql::Dialect::Mysql(self.mode))?;
-        if !predicate.is_empty() { sql.push_str(if parameters.is_empty() { " WHERE " } else { " AND " }); sql.push_str(&predicate); }
+        let predicate = super::filters::predicate(
+            &request.filters,
+            &object
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>(),
+            crate::sql::Dialect::Mysql(self.mode),
+        )?;
+        if !predicate.is_empty() {
+            sql.push_str(if parameters.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            });
+            sql.push_str(&predicate);
+        }
         if let Some((column, descending)) = &request.sort {
             if !object.columns.iter().any(|c| &c.name == column) { return Err("Unknown sort column".into()); }
             sql.push_str(&format!(" ORDER BY {} {}", quote(column), if *descending { "DESC" } else { "ASC" }));
@@ -437,13 +522,41 @@ impl MysqlDriver {
     fn require_idle(&mut self) -> Result<(), String> {
         match self.transaction_state() {
             TransactionState::Idle => Ok(()),
-            TransactionState::Disconnected => Err("Database connection is disconnected. Reconnect before continuing.".into()),
+            TransactionState::Disconnected => {
+                Err("Database connection is disconnected. Reconnect before continuing.".into())
+            }
             _ => Err("Finish the SQL transaction before this operation.".into()),
         }
     }
 }
 
 impl Driver for MysqlDriver {
+    fn export_definition(&mut self, name: &str) -> Result<String, String> {
+        let (before, after) = self.export_definition_parts(name)?;
+        Ok(format!("{before}\n{after}"))
+    }
+    fn export_definition_parts(&mut self, name: &str) -> Result<(String, String), String> {
+        let schema = self
+            .schemas
+            .selected
+            .clone()
+            .ok_or("Choose a database first")?;
+        let sql = format!(
+            "SHOW CREATE TABLE {}.{}; SELECT @@SESSION.sql_mode",
+            quote(&schema),
+            quote(name)
+        );
+        self.with_connection(|conn| {
+            let mut results=conn.query_iter(sql)?;
+            let definitions=results.iter().ok_or_else(|| ::mysql::Error::from(std::io::Error::other("Missing definition")))?.collect::<Result<Vec<_>,_>>()?;
+            let modes=results.iter().ok_or_else(|| ::mysql::Error::from(std::io::Error::other("Missing SQL mode")))?.collect::<Result<Vec<_>,_>>()?;
+            let ddl=definitions.first().and_then(|row| row.get::<String,_>(1)).ok_or_else(|| ::mysql::Error::from(std::io::Error::other("No definition returned")))?;
+            let mode=modes.first().and_then(|row| row.get::<String,_>(0)).ok_or_else(|| ::mysql::Error::from(std::io::Error::other("No SQL mode returned")))?;
+            // Server SQL mode names contain only letters, digits, underscores and commas.
+            if !mode.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b',') { return Err(::mysql::Error::from(std::io::Error::other("Unrecognized SQL mode"))); }
+            Ok((format!("SET @rustable_schema_sql_mode = @@SESSION.sql_mode;\nSET SESSION sql_mode = '{mode}';\n{};\n",ddl.trim_end_matches(';')), "SET SESSION sql_mode = @rustable_schema_sql_mode;\n".into()))
+        })
+    }
     fn definition(&mut self, name: &str) -> Result<String, String> {
         let schema = self.schemas.selected.clone().ok_or("Choose a database first")?;
         let sql = format!("SHOW CREATE TABLE {}.{}", quote(&schema), quote(name));
@@ -508,10 +621,15 @@ impl Driver for MysqlDriver {
             let range = offset + range.start..offset + range.end;
             offset += consumed;
             if report.grids.len() >= 128 {
-                report.error = Some("Stopped after 128 result sets; later statements were not executed.".into());
+                report.error = Some(
+                    "Stopped after 128 result sets; later statements were not executed.".into(),
+                );
                 break;
             }
-            if cancel.load(Ordering::Relaxed) { report.error = Some("Cancelled before next statement".into()); break; }
+            if cancel.load(Ordering::Relaxed) {
+                report.error = Some("Cancelled before next statement".into());
+                break;
+            }
             let wrapped = if safe {
                 match safe::validate(&sql[range.clone()], self.mode) {
                     Ok(recovery) => !recovery,
@@ -534,7 +652,7 @@ impl Driver for MysqlDriver {
                     if wrapped {
                         // One COM_QUERY exchange, including setup and successful cleanup.
                         // Newlines prevent a trailing line comment from hiding ROLLBACK.
-                        let batch = safe::batch(&sql[range], self.mode);
+                        let batch = safe::batch(&sql[range.clone()], self.mode);
                         conn.query_iter(batch).map(|results| {
                             super::mysql_results::collect_safe_since(
                                 results,
@@ -544,7 +662,7 @@ impl Driver for MysqlDriver {
                             )
                         })
                     } else {
-                        conn.query_iter(&sql[range]).map(|results| {
+                        conn.query_iter(&sql[range.clone()]).map(|results| {
                             super::mysql_results::collect_budget_since(
                                 results,
                                 &mut remaining,
@@ -609,7 +727,13 @@ impl Driver for MysqlDriver {
                     Err(error) => { report.error = Some(format!("Invalid MySQL session-state update: {error}")); }
                 }
             }
-            report.grids.extend(result.grids);
+            let source = super::QuerySource::statement(&sql[range]);
+            report
+                .grids
+                .extend(result.grids.into_iter().map(|mut grid| {
+                    Arc::make_mut(&mut grid).query_source = Some(source.clone());
+                    grid
+                }));
             if result.error.is_some() || report.error.is_some() {
                 if let Some(error) = result.error {
                     report.error = Some(match report.error.take() {
@@ -649,15 +773,40 @@ impl Driver for MysqlDriver {
         let params = parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>, _>>()?;
         let mut remaining = BYTE_LIMIT;
         let query_started = std::time::Instant::now();
-        let ((report, disconnected), cancellation_error) = self.with_connection_status(|conn| conn.exec_iter(&sql, params).map(|results|
-            super::mysql_results::collect_budget_since(results, &mut remaining, request.page_size() + 1, 1, query_started)))?;
-        if disconnected { self.connection = None; }
-        if let Some(error) = report.error {
-            return Err(match cancellation_error { Some(cancel_error) => format!("{error}\n{cancel_error}"), None => error });
+        let ((report, disconnected), cancellation_error) = self.with_connection_status(|conn| {
+            conn.exec_iter(&sql, params).map(|results| {
+                super::mysql_results::collect_budget_since(
+                    results,
+                    &mut remaining,
+                    request.page_size() + 1,
+                    1,
+                    query_started,
+                )
+            })
+        })?;
+        if disconnected {
+            self.connection = None;
         }
-        if let Some(error) = cancellation_error { return Err(error); }
-        let mut grid = Arc::unwrap_or_clone(report.grids.into_iter().next().ok_or("Missing table result")?);
-        if grid.rows.len() > request.page_size() { grid.rows.truncate(request.page_size()); grid.truncated = true; }
+        if let Some(error) = report.error {
+            return Err(match cancellation_error {
+                Some(cancel_error) => format!("{error}\n{cancel_error}"),
+                None => error,
+            });
+        }
+        if let Some(error) = cancellation_error {
+            return Err(error);
+        }
+        let mut grid = Arc::unwrap_or_clone(
+            report
+                .grids
+                .into_iter()
+                .next()
+                .ok_or("Missing table result")?,
+        );
+        if grid.rows.len() > request.page_size() {
+            grid.rows.truncate(request.page_size());
+            grid.truncated = true;
+        }
         grid.set_browse_total(request.offset, None);
         let (indexes, triggers) = if object.kind == "view" { (Vec::new(), Vec::new()) }
             else { self.table_metadata_with_definition(&schema, &object.name, (!object.ddl.is_empty()).then_some(object.ddl.as_str()))? };
@@ -698,11 +847,29 @@ impl Driver for MysqlDriver {
         let params = query.parameters.iter().map(::mysql::Value::try_from).collect::<Result<Vec<_>, _>>()?;
         let mut remaining = budget;
         let started = std::time::Instant::now();
-        let ((report, disconnected), cancellation_error) = self.with_connection_status(|conn| conn.exec_iter(&query.sql, params).map(|results|
-            super::mysql_results::collect_budget_since(results, &mut remaining, query.originals.len() + 1, 1, started)))?;
-        if disconnected { self.connection = None; }
-        if let Some(error) = report.error.or(cancellation_error) { return Err(error); }
-        report.grids.into_iter().next().map(Arc::unwrap_or_clone).ok_or_else(|| "Missing saved-row result".into())
+        let ((report, disconnected), cancellation_error) = self.with_connection_status(|conn| {
+            conn.exec_iter(&query.sql, params).map(|results| {
+                super::mysql_results::collect_budget_since(
+                    results,
+                    &mut remaining,
+                    query.originals.len() + 1,
+                    1,
+                    started,
+                )
+            })
+        })?;
+        if disconnected {
+            self.connection = None;
+        }
+        if let Some(error) = report.error.or(cancellation_error) {
+            return Err(error);
+        }
+        report
+            .grids
+            .into_iter()
+            .next()
+            .map(Arc::unwrap_or_clone)
+            .ok_or_else(|| "Missing saved-row result".into())
     }
     fn apply(&mut self, plan: &ChangePlan) -> Result<(), String> {
         editing::apply(self, plan)

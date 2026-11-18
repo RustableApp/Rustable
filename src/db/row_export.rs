@@ -11,6 +11,7 @@ pub(super) struct Writer<'a, W> {
     cancel: &'a AtomicBool,
     format: ExportFormat,
     first: bool,
+    sql: Option<super::sql_export::Spec>,
 }
 impl<'a, W: Write> Writer<'a, W> {
     pub(super) fn new(
@@ -25,7 +26,20 @@ impl<'a, W: Write> Writer<'a, W> {
                 columns.iter().map(|name| Ok(csv::Cell::Text(name))),
                 cancel,
             )?,
+            ExportFormat::CsvCustom(options) => {
+                if options.header {
+                    super::csv_options::row(
+                        &mut output,
+                        columns.iter().map(|name| Ok(csv::Cell::Text(name))),
+                        options,
+                        cancel,
+                    )?;
+                }
+            }
             ExportFormat::Json => json::begin(&mut output, columns)?,
+            ExportFormat::Sql => {
+                return Err(io::Error::other("SQL export requires table metadata"));
+            }
         }
         Ok(Self {
             output,
@@ -33,6 +47,29 @@ impl<'a, W: Write> Writer<'a, W> {
             cancel,
             format,
             first: true,
+            sql: None,
+        })
+    }
+    pub(super) fn table(
+        output: W,
+        columns: &'a [String],
+        cancel: &'a AtomicBool,
+        format: ExportFormat,
+        sql: impl FnOnce() -> super::sql_export::Spec,
+    ) -> io::Result<Self> {
+        if format != ExportFormat::Sql {
+            return Self::new(output, columns, cancel, format);
+        }
+        let sql = sql();
+        let mut output = output;
+        sql.begin(&mut output)?;
+        Ok(Self {
+            output,
+            columns,
+            cancel,
+            format,
+            first: true,
+            sql: Some(sql),
         })
     }
     pub(super) fn row<'v>(
@@ -41,6 +78,15 @@ impl<'a, W: Write> Writer<'a, W> {
     ) -> io::Result<()> {
         match self.format {
             ExportFormat::Csv => csv::write_borrowed_row(&mut self.output, values, self.cancel)?,
+            ExportFormat::CsvCustom(options) => {
+                super::csv_options::row(&mut self.output, values, options, self.cancel)?
+            }
+            ExportFormat::Sql => {
+                self.sql
+                    .as_ref()
+                    .unwrap()
+                    .row(&mut self.output, values, self.cancel)?
+            }
             ExportFormat::Json => json::write_row(
                 &mut self.output,
                 self.columns,
@@ -55,6 +101,9 @@ impl<'a, W: Write> Writer<'a, W> {
     pub(super) fn finish(mut self) -> io::Result<()> {
         if matches!(self.format, ExportFormat::Json) {
             self.output.write_all(b"\n]\n")?;
+        }
+        if let Some(sql) = self.sql {
+            sql.finish(&mut self.output)?;
         }
         Ok(())
     }

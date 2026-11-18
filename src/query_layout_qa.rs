@@ -56,10 +56,28 @@ impl Rustable {
         struct Preview {
             app: Rustable,
             frame: usize,
+            assist: bool,
             path: std::path::PathBuf,
             saved: Option<std::sync::mpsc::Receiver<()>>,
         }
         impl eframe::App for Preview {
+            fn raw_input_hook(&mut self, _: &egui::Context, input: &mut egui::RawInput) {
+                if self.assist {
+                    match self.frame {
+                        3 => input.events.push(egui::Event::Text("(".into())),
+                        4 => input.events.push(egui::Event::Key {
+                            key: egui::Key::Enter,
+                            physical_key: None,
+                            pressed: true,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        }),
+                        5 => input.events.push(egui::Event::Text("SELECT 1".into())),
+                        _ => {}
+                    }
+                }
+            }
+
             fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
                 if self.saved.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -90,7 +108,13 @@ impl Rustable {
                 }
                 self.app.toolbar(ctx);
                 self.app.workspace(ctx);
-                if self.frame == 3 {
+                if self.frame == if self.assist { 8 } else { 3 } {
+                    if self.assist {
+                        assert_eq!(
+                            self.app.tabs[0].sql,
+                            "SELECT *\nFROM customers\n\tWHERE EXISTS (\n\t\tSELECT 1\n\t)"
+                        );
+                    }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
                 }
                 self.frame += 1;
@@ -99,6 +123,7 @@ impl Rustable {
         }
         let path = std::path::PathBuf::from(std::env::var_os("RUSTABLE_QUERY_CAPTURE").unwrap());
         let light = std::env::var_os("RUSTABLE_QUERY_LIGHT").is_some();
+        let assist = std::env::var_os("RUSTABLE_EDITOR_ASSIST_CAPTURE").is_some();
         let width = std::env::var("RUSTABLE_QUERY_WIDTH")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
@@ -112,7 +137,15 @@ impl Rustable {
             },
             Box::new(move |cc| {
                 crate::fonts::install(&cc.egui_ctx);
-                let mut app = fixture(&cc.egui_ctx, 8);
+                let result_count = std::env::var("RUSTABLE_QUERY_RESULT_COUNT")
+                    .ok().and_then(|value| value.parse().ok()).unwrap_or(8);
+                let mut app = fixture(&cc.egui_ctx, if assist { 0 } else { result_count });
+                if assist {
+                    app.tabs[0].sql = "SELECT *\nFROM customers\n\tWHERE EXISTS ".into();
+                    let end = app.tabs[0].sql.chars().count();
+                    app.tabs[0].cursor = end..end;
+                    app.tabs[0].focus_editor = true;
+                }
                 app.prefs.appearance = if light {
                     Appearance::Light
                 } else {
@@ -120,10 +153,13 @@ impl Rustable {
                 };
                 apply_theme(&cc.egui_ctx, app.prefs.appearance);
                 let grid = app.tabs[0].grid.clone();
-                app.tabs[0].pins.add(grid, 0).unwrap();
+                if !assist && result_count > 1 {
+                    app.tabs[0].pins.add(grid, 0).unwrap();
+                }
                 Ok(Box::new(Preview {
                     app,
                     frame: 0,
+                    assist,
                     path,
                     saved: None,
                 }))

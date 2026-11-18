@@ -248,8 +248,13 @@ mod line_tests {
                     let gutter = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(40.0, 300.0));
                     let editor = egui::TextEdit::multiline(&mut sql).layouter(&mut editor_layout).show(ui);
                     for row in &editor.galley.rows {
-                        baselines.push(row.glyphs.first().map(|glyph| (
-                            editor.galley_pos.y + row.pos.y + glyph.pos.y, glyph.font_height, glyph.line_height)));
+                        baselines.push(row.glyphs.first().map(|glyph| {
+                            (
+                                editor.galley_pos.y + row.pos.y + glyph.pos.y,
+                                glyph.font_height,
+                                glyph.line_height,
+                            )
+                        }));
                     }
                     paint_line_numbers(ui, gutter, &editor, 1);
                 });
@@ -712,3 +717,120 @@ mod indentation_tests {
         crate::ui_benchmark::report("editor/block-indentation", &samples);
     }
 }
+
+/// Lexical guard for typed delimiter pairing. Scans bytes without allocating tokens.
+/// Only invoked for a delimiter edit, never on idle layout or ordinary typing.
+pub fn parentheses_allowed(sql: &str, dialect: crate::sql::Dialect) -> bool {
+    use crate::sql::Dialect;
+    let b = sql.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'-'
+            && b.get(i + 1) == Some(&b'-')
+            && (!matches!(dialect, Dialect::Mysql(_))
+                || b.get(i + 2).is_none_or(u8::is_ascii_whitespace))
+            || b[i] == b'#' && matches!(dialect, Dialect::Mysql(_))
+        {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            if i == b.len() {
+                return false;
+            }
+        } else if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            i += 2;
+            let mut depth = 1;
+            while i < b.len() && depth > 0 {
+                if b[i] == b'/'
+                    && b.get(i + 1) == Some(&b'*')
+                    && matches!(dialect, Dialect::Postgres)
+                {
+                    depth += 1;
+                    i += 2;
+                } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if depth > 0 {
+                return false;
+            }
+        } else if matches!(b[i], b'\'' | b'"' | b'`')
+            || b[i] == b'[' && matches!(dialect, Dialect::Sqlite)
+        {
+            let quote = b[i];
+            let end = if quote == b'[' { b']' } else { quote };
+            let escapes = match dialect {
+                Dialect::Mysql(mode) => {
+                    !mode.no_backslash_escapes
+                        && quote != b'`'
+                        && !(quote == b'"' && mode.ansi_quotes)
+                }
+                Dialect::Postgres => {
+                    quote == b'\''
+                        && i > 0
+                        && matches!(b[i - 1], b'e' | b'E')
+                        && (i < 2 || !(b[i - 2].is_ascii_alphanumeric() || b[i - 2] == b'_'))
+                }
+                _ => false,
+            };
+            i += 1;
+            let mut closed = false;
+            while i < b.len() {
+                if escapes && b[i] == b'\\' {
+                    i = (i + 2).min(b.len());
+                } else if b[i] == end {
+                    i += 1;
+                    if end != b']' && b.get(i) == Some(&end) {
+                        i += 1;
+                    } else {
+                        closed = true;
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            if !closed {
+                return false;
+            }
+        } else if b[i] == b'$'
+            && matches!(dialect, Dialect::Postgres)
+            && (i == 0
+                || !(b[i - 1].is_ascii_alphanumeric()
+                    || matches!(b[i - 1], b'_' | b'$')
+                    || b[i - 1] >= 128))
+        {
+            let start = i;
+            i += 1;
+            if b.get(i) == Some(&b'$')
+                || b.get(i)
+                    .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_' || *c >= 128)
+            {
+                while b
+                    .get(i)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c >= 128)
+                {
+                    i += 1;
+                }
+                if b.get(i) == Some(&b'$') {
+                    i += 1;
+                    let delimiter = &sql[start..i];
+                    let Some(end) = sql[i..].find(delimiter) else {
+                        return false;
+                    };
+                    i += end + delimiter.len();
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+#[path = "editor_assist_tests.rs"]
+mod assist_tests;

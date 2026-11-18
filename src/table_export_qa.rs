@@ -167,9 +167,15 @@ impl Rustable {
                         let _ = tx.send(());
                     });
                 }
-                if self.frame == 6 && self.mode == "dialog" {
+                if self.frame == 6 && matches!(self.mode.as_str(), "dialog" | "schema") {
                     egui::Popup::close_all(ctx);
                     self.app.begin_sidebar_export();
+                    if self.mode == "schema" {
+                        let dialog = self.app.sidebar_export.as_mut().unwrap();
+                        dialog.contents = Contents::SchemaAndData;
+                        dialog.format = db::ExportFormat::Sql;
+                        dialog.update_files();
+                    }
                 }
                 if self.frame == 6 && self.mode == "truncate" {
                     egui::Popup::close_all(ctx);
@@ -186,7 +192,7 @@ impl Rustable {
                         self.app.sidebar_selection.names.len(),
                         if self.mode == "single" { 1 } else { 3 }
                     );
-                    if self.mode == "dialog" {
+                    if matches!(self.mode.as_str(), "dialog" | "schema") {
                         assert_eq!(self.app.sidebar_export.as_ref().unwrap().count, 3);
                     }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
@@ -359,19 +365,125 @@ mod tests {
     }
 
     #[test]
+    fn export_format_tabs_preserve_selection_and_valid_contents() {
+        let ctx = egui::Context::default();
+        let mut app = fixture(&ctx, 6);
+        app.sidebar_selection.names.insert("customers".into());
+        app.begin_sidebar_export();
+        let selected = app.sidebar_export.as_ref().unwrap().count;
+        let click = |app: &mut Rustable, label: &str| {
+            for _ in 0..8 {
+                frame(app, &ctx, vec![], egui::Modifiers::NONE);
+            }
+            let labels = frame(app, &ctx, vec![], egui::Modifiers::NONE);
+            let position = labels
+                .iter()
+                .filter(|(text, _)| text == label)
+                .max_by(|a, b| a.1.x.total_cmp(&b.1.x))
+                .unwrap()
+                .1
+                + egui::vec2(5.0, 7.0);
+            frame(
+                app,
+                &ctx,
+                pointer(
+                    position,
+                    egui::PointerButton::Primary,
+                    egui::Modifiers::NONE,
+                ),
+                egui::Modifiers::NONE,
+            );
+        };
+        click(&mut app, "SQL");
+        click(&mut app, "Schema only");
+        let dialog = app.sidebar_export.as_ref().unwrap();
+        assert!(dialog.contents == Contents::Schema);
+        assert!(dialog.preview.ends_with(".sql"));
+        click(&mut app, "JSON");
+        let dialog = app.sidebar_export.as_ref().unwrap();
+        assert!(dialog.contents == Contents::Data);
+        assert_eq!(dialog.count, selected);
+        assert!(dialog.preview.ends_with(".json"));
+        click(&mut app, "Include SQL schema");
+        assert!(app.sidebar_export.as_ref().unwrap().contents == Contents::SchemaAndData);
+        click(&mut app, "CSV");
+        click(&mut app, "Field names in the first row");
+        let db::ExportFormat::CsvCustom(options) =
+            app.sidebar_export.as_ref().unwrap().effective_format()
+        else {
+            panic!("CSV settings were not forwarded");
+        };
+        assert!(!options.header);
+        click(&mut app, "All");
+        click(&mut app, "SQL");
+        let dialog = app.sidebar_export.as_ref().unwrap();
+        assert_eq!(dialog.count, 6);
+        assert!(dialog.single_file());
+        assert_eq!(dialog.preview, "tables.sql");
+    }
+
+    #[test]
     #[ignore = "manual new sidebar export interaction CPU workload"]
     fn sidebar_export_frame_benchmark() {
+        export_benchmark(Contents::Data);
+    }
+
+    #[test]
+    #[ignore = "manual schema export interaction CPU workload"]
+    fn sidebar_schema_export_frame_benchmark() {
+        export_benchmark(Contents::SchemaAndData);
+    }
+
+    #[test]
+    #[ignore = "manual SQL export interaction CPU workload"]
+    fn sidebar_sql_export_frame_benchmark() {
+        export_benchmark_format(Contents::SchemaAndData, db::ExportFormat::Sql);
+    }
+
+    fn export_benchmark(contents: Contents) {
+        export_benchmark_format(contents, db::ExportFormat::Csv);
+    }
+
+    #[test]
+    #[ignore = "manual CSV settings interaction CPU workload"]
+    fn sidebar_csv_options_frame_benchmark() {
+        export_benchmark_interaction(Contents::Data, db::ExportFormat::Csv, true);
+    }
+
+    fn export_benchmark_format(contents: Contents, format: db::ExportFormat) {
+        export_benchmark_interaction(contents, format, false);
+    }
+
+    fn export_benchmark_interaction(
+        contents: Contents,
+        format: db::ExportFormat,
+        csv_settings: bool,
+    ) {
         for count in [20, 2000] {
             for editing in [false, true] {
                 let ctx = egui::Context::default();
                 let mut app = fixture(&ctx, count);
                 app.sidebar_selection.names = app.objects.iter().map(|o| o.name.clone()).collect();
                 app.begin_sidebar_export();
+                app.sidebar_export.as_mut().unwrap().contents = contents;
+                app.sidebar_export.as_mut().unwrap().format = format;
+                app.sidebar_export.as_mut().unwrap().update_files();
                 frame(&mut app, &ctx, vec![], egui::Modifiers::NONE);
+                // Allow the centered modal to settle before locating the click target.
+                for _ in 0..8 {
+                    frame(&mut app, &ctx, vec![], egui::Modifiers::NONE);
+                }
                 let labels = frame(&mut app, &ctx, vec![], egui::Modifiers::NONE);
                 let checkbox = labels
                     .iter()
-                    .filter(|(label, _)| label == "customers")
+                    .filter(|(label, _)| {
+                        label
+                            == if csv_settings {
+                                "Field names in the first row"
+                            } else {
+                                "customers"
+                            }
+                    })
                     .max_by(|a, b| a.1.x.total_cmp(&b.1.x))
                     .unwrap()
                     .1
@@ -409,7 +521,13 @@ mod tests {
                     if index >= 20 {
                         samples.push(started.elapsed().as_secs_f64() * 1000.0);
                     }
-                    if editing {
+                    if editing && csv_settings {
+                        assert_eq!(
+                            app.sidebar_export.as_ref().unwrap().csv_options.header,
+                            index % 2 != 0
+                        );
+                        assert_eq!(app.sidebar_export.as_ref().unwrap().count, count);
+                    } else if editing {
                         assert_eq!(
                             app.sidebar_export.as_ref().unwrap().count,
                             if index % 2 == 0 { count - 1 } else { count }
@@ -418,7 +536,16 @@ mod tests {
                 }
                 samples.sort_by(f64::total_cmp);
                 crate::ui_benchmark::report(
-                    &format!("sidebar/export-review/{count}/{editing}"),
+                    &format!(
+                        "sidebar/{}-review/{count}/{editing}",
+                        if csv_settings {
+                            "csv-options"
+                        } else if contents == Contents::Data {
+                            "export"
+                        } else {
+                            "schema"
+                        }
+                    ),
                     &samples,
                 );
             }

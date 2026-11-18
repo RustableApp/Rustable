@@ -100,6 +100,7 @@ pub(super) enum Cell<'a> {
     Integer(i64),
     Real(f64),
     Text(&'a str),
+    Decimal(&'a str),
     Blob(&'a [u8]),
 }
 
@@ -127,7 +128,7 @@ pub(super) fn write_borrowed_row<'a>(
         }
         match value? {
             Cell::Null => {}
-            Cell::Text(text) => quoted(writer, text.as_bytes(), cancel)?,
+            Cell::Text(text) | Cell::Decimal(text) => quoted(writer, text.as_bytes(), cancel)?,
             Cell::Integer(value) => quoted(writer, value.to_string().as_bytes(), cancel)?,
             Cell::Real(value) => quoted(writer, value.to_string().as_bytes(), cancel)?,
             Cell::Blob(bytes) => {

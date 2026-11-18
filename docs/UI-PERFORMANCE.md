@@ -1537,3 +1537,432 @@ there is no claim of improved native presentation latency.
 Final release suite: 873 passed, 234 opt-in tests ignored. Strict all-target QA
 Clippy and `git diff --check` passed. Database latency tests were not repeated
 for this presentation-only follow-up; no execution/driver path changed.
+
+
+### Selected-table schema export follow-up
+
+The export dialog now offers Data, Schema, and Schema + data. Schema-only writes
+SQL definitions; combined export writes separate SQL and CSV/JSON files. Bulk
+exports use a new owned directory, removed on failure/cancellation. SQLite
+includes attached indexes/triggers; PostgreSQL uses existing catalog definition
+SQL; MySQL/MariaDB use SHOW CREATE. This is selected-object DDL, not a complete
+backup: external dependencies, privileges and engine-specific omissions are
+explicit in the dialog/SQL. Combined exports do not promise one snapshot spanning
+DDL and all row files. Existing data-only export is unchanged.
+
+Opening or editing the dialog makes zero database requests. PostgreSQL schema
+export uses bounded parameterized text results and drains through ReadyForQuery:
+one exchange per definition with no describe, custom-type lookup, or statement
+close wait, on cold and warm healthy connections. The 16 MiB per-definition
+retention limit fails explicitly, never silently truncates SQL. An unknown
+transaction status retains the existing synchronization fallback before export;
+active transactions are rejected. MySQL/MariaDB retain their single SHOW CREATE
+exchange and existing cancellation handling; SQLite reads local sqlite_schema.
+Schema + data adds this opt-in definition exchange per object to the unchanged
+row-export path, necessary to obtain current DDL that is not present in row
+results. No additional metadata preview or routine health probe was added.
+Normal editor and browse paths are unchanged.
+
+Native dark 1120×720 and light 820×720 captures at 2× were inspected in
+`target/schema-export-review/`. The CPU workload is 1000×720 at headless 1×,
+20 warmups/160 measured frames, catalogs of 20/2000, idle and checkbox editing,
+including a synthetic 30-second idle. Both baseline and candidate receive eight
+additional settling frames before locating the checkbox: the larger modal
+otherwise moves after the original two-frame setup. No measured workload or
+threshold is weakened. Baseline is `0eadbb8`, rebuilt with that same settling
+change. Five alternating serial release pairs use the checked-in performance
+runner's build/measure/compare functions. Hardware: Apple M4 Max, macOS 27.2.1
+arm64, Rust 1.99.1. Raw samples, logs and executables are retained in
+`target/schema-export-review/`. These CPU measurements do not measure native
+input-to-display latency; 60/120 Hz, mixed-DPI, multiple-monitor/window and
+monitor-disconnect checks were not performed for this modal-only change.
+
+Median per-run p50/p95/p99 and worst observed sample, milliseconds:
+
+| Workload | Before p50 / p95 / p99 / max | After p50 / p95 / p99 / max |
+| --- | --- | --- |
+| sidebar/export-review/20/false | 0.071292 / 0.075084 / 0.079208 / 0.082000 | 0.074166 / 0.078792 / 0.083000 / 0.090250 |
+| sidebar/export-review/20/true | 0.085750 / 0.091375 / 0.093375 / 0.105334 | 0.089500 / 0.094417 / 0.098666 / 0.108167 |
+| sidebar/export-review/2000/false | 0.093750 / 0.096458 / 0.100833 / 0.110708 | 0.097209 / 0.100166 / 0.103542 / 0.136917 |
+| sidebar/export-review/2000/true | 0.360125 / 0.366625 / 0.381417 / 0.404583 | 0.359500 / 0.369791 / 0.383458 / 0.423000 |
+
+All four p95 comparisons passed (0.9–4.9% median increases). Thresholds were unchanged.
+
+The new schema-plus-data workload (candidate only, same fixture) measured:
+
+| Workload | p50 / p95 / p99 / max (ms) |
+| --- | --- |
+| sidebar/schema-review/20/false | 0.080375 / 0.080875 / 0.081500 / 0.083292 |
+| sidebar/schema-review/20/true | 0.106792 / 0.108917 / 0.109291 / 0.109292 |
+| sidebar/schema-review/2000/false | 0.100458 / 0.104625 / 0.106625 / 0.107041 |
+| sidebar/schema-review/2000/true | 0.746042 / 0.751333 / 0.759958 / 0.774042 |
+
+Validation: 874 release tests passed, 235 opt-in tests ignored; strict all-target
+QA Clippy and the separate locked browser WASM check passed (existing WASM
+warnings remain). SQLite restoration validates constraints, a unique index and
+trigger execution, empty restored data, CSV/JSON pairing, cancellation, active
+transactions and failure cleanup. Disposable MySQL and MariaDB tests passed.
+Four unchanged PostgreSQL WAN tests passed in release mode. The bulk/schema WAN
+test passed after correcting its baseline to perform the same atomic disk writes
+(debug build, same machine): at 30 ms simulated RTT, direct schema saves median
+89.866 ms versus orchestrated export 89.534 ms for two objects. The initial
+in-memory baseline incorrectly counted filesystem sync cost as a network wait;
+its failed results are retained, not treated as a pass. No threshold was relaxed.
+The initial preview-query implementation also exposed a real extra status/cleanup
+wait; the final bounded single-exchange export path removes that dependency.
+The final benchmark-only baseline correction does not alter production code or
+the UI timings above. PostgreSQL restoration of exported table constraints was
+also exercised. Native multi-monitor/input-to-present checks remain untested.
+
+
+### SQL INSERT export follow-up
+
+Sidebar export now offers SQL inserts for Data and Schema + data. Choosing
+Schema + data defaults to SQL: one .sql file per selected table containing DDL,
+streamed INSERT statements, then deferred SQLite/PostgreSQL triggers. CSV/JSON
+remain available as separate data files. Single-table combined SQL uses Save File;
+bulk export uses the existing owned directory and cleanup behavior. The combined
+file is atomically published only after its streamed temporary row file completes;
+cancellation/error preserves existing destinations. Empty tables retain their DDL.
+Views are rejected for INSERT export; schema-only view export remains available.
+This remains selected-table export, not a dependency-complete database backup.
+Foreign-key/type/function dependencies and PostgreSQL sequence settings have the
+same disclosed scope as schema-only export; restore referenced tables first.
+
+The shared row sink emits one INSERT per saved row, omits generated columns,
+and quotes identifiers with the owning driver. PostgreSQL uses server text
+representations (including custom types, bytea, exact numeric, arrays, JSON,
+NaN/infinity), explicit identity override, and restore-time identity sequence
+advancement. SQLite handles binary/NUL text with hex literals. MySQL/MariaDB
+encode backslash/NUL text independently of quoting mode, preserve zero auto IDs,
+and capture/restore the source DDL SQL mode. Restored triggers run only after
+saved rows are inserted. These paths retain bounded rows/buffers and run on the
+existing database worker, never the UI thread. Combining DDL and rows does not
+promise a transaction snapshot spanning schema extraction and data reads.
+
+Protocol review: row exports retain the previously documented PostgreSQL 8+B
+exchanges (plus existing conditional synchronization) and MySQL/MariaDB 3 cold /
+2 prepared-cache exchanges. Extra generated/identity flags are read in the same
+metadata response; PostgreSQL SQL results remain built-in text, with no custom
+type lookup exchanges. PostgreSQL schema pre/post sections share one bounded
+text query; MySQL SHOW CREATE and @@SESSION.sql_mode are two result sets in one
+COM_QUERY, one exchange. No routine ping or preview query was introduced.
+Healthy cold/warm schema + SQL adds one definition exchange per table to the
+unchanged data path. Sequence advancement is emitted SQL for restoration, not
+an additional source request. Prepare, portal paging, transaction completion,
+queued statement cleanup and cancellation-worker teardown are unchanged.
+
+At simulated 30 ms RTT, equivalent individual SQL exports of 130 rows plus an
+empty table had median 911.895 ms versus bulk 913.825 ms. JSON comparison was
+902.678 versus 953.737 ms; schema file comparison was 88.087 versus 88.282 ms.
+All three existing thresholds passed without adjustment. The debug editor
+large-result test failed (spooled p95 76.8 ms versus reference 43.9 ms); the
+unchanged editor path is checked separately in release mode below. Original raw
+results are retained, not relabeled as a passing suite.
+
+UI measurements compare the immediately preceding schema-export executable
+(`target/sql-export-review/base-tests`, preserved from the previous review)
+against the candidate using the checked-in runner build/measure/compare functions.
+Five alternating serial release pairs use identical 20/2000-table dialog
+workloads, settled click targets, 20 warmups/160 samples, 1000×720 headless 1×,
+and a synthetic 30-second idle. Hardware/OS/toolchain: Apple M4 Max, macOS 27.2.1
+arm64, Rust 1.99.1. The additional SQL mode workload covers the new combined-file
+interaction. These measure layout/tessellation CPU, not physical presentation
+latency; native multi-monitor, mixed-DPI and 60/120 Hz checks were not performed.
+Artifacts are retained under `target/sql-export-review/`.
+
+Median per-run p50/p95/p99 and worst observed sample, milliseconds:
+
+| Workload | Before p50 / p95 / p99 / max | After p50 / p95 / p99 / max |
+| --- | --- | --- |
+| sidebar/export-review/20/false | 0.075041 / 0.080500 / 0.085292 / 0.089875 | 0.076958 / 0.082250 / 0.085375 / 0.129250 |
+| sidebar/export-review/20/true | 0.090541 / 0.095500 / 0.100750 / 0.123917 | 0.091167 / 0.096292 / 0.098750 / 0.118750 |
+| sidebar/export-review/2000/false | 0.097291 / 0.102625 / 0.107875 / 0.114625 | 0.098000 / 0.101458 / 0.106500 / 0.134959 |
+| sidebar/export-review/2000/true | 0.354584 / 0.363375 / 0.371959 / 0.400500 | 0.364833 / 0.376083 / 0.386084 / 0.397750 |
+
+All four p95 comparisons passed (−1.1% to +3.5% median change), with unchanged thresholds.
+
+Candidate-only combined SQL interaction workload:
+
+| Workload | p50 / p95 / p99 / max (ms) |
+| --- | --- |
+| sidebar/schema-review/20/false | 0.076209 / 0.080209 / 0.088000 / 0.090458 |
+| sidebar/schema-review/20/true | 0.092833 / 0.099792 / 0.104541 / 0.109250 |
+| sidebar/schema-review/2000/false | 0.099208 / 0.103417 / 0.109625 / 0.111500 |
+| sidebar/schema-review/2000/true | 0.509667 / 0.520291 / 0.532958 / 0.556333 |
+
+Final release suite: 875 passed, 238 opt-in tests ignored. Strict all-target QA
+Clippy and the separate locked browser WASM check passed (WASM warnings remain).
+The PostgreSQL export suite and both MySQL/MariaDB export suites, including SQL
+round-trip restoration and existing CSV/JSON/cancellation tests, passed. Both
+MySQL/MariaDB bulk tests passed. SQLite coverage restores quoted identifiers,
+Unicode/quotes/NUL text, binary, NULL, exact real values, generated columns and
+post-data triggers, checks empty and 1200-row bulk exports, and verifies failure
+cleanup/cancellation preserves existing files. PostgreSQL checks custom enum,
+array, JSON, exact numeric, bytea, non-finite float, identity advancement and
+trigger ordering. MySQL/MariaDB checks both quoting modes, unsigned BIGINT,
+DECIMAL, generated columns, binary, NUL text and zero auto-increment IDs.
+
+Native dark 1120×720 and light 820×720 screenshots at 2× were inspected in the
+artifact directory. Buttons, filenames, mode selection and the complete footer
+remain visible in both layouts. No permanent repaint loop was introduced.
+
+All five final release PostgreSQL latency tests passed. The earlier debug-only
+large-result failure did not reproduce: release spooled p95 was 49.0 ms versus
+46.1 ms for the equivalent single-exchange reference. This does not recast the
+debug result as a pass; both logs are retained. No performance thresholds were
+changed and no editor execution code was altered for this follow-up.
+
+
+### Export dialog split-layout follow-up
+
+The supplied TablePlus reference now guides the export dialog: bounded Items
+selection on the left, CSV/JSON/SQL tabs and format-specific controls on the
+right, followed by a filename preview and Cancel/Export actions. SQL exposes
+Data only, Schema only, and Schema + data; CSV/JSON can include a separate SQL
+schema. CSV formatting is now configurable as described below; JSON encoding details
+remain displayed alongside its schema checkbox. Destination naming still uses the native save
+panel. Detailed schema scope is available on hover rather than occupying the
+main dialog. Empty/disabled states and bulk selection remain intact.
+
+The list keeps row virtualization. Its taller viewport intentionally exposes
+more items, and the single-column list replaces the previous filename column.
+The first output filename is cached when selection/format changes, avoiding a
+catalog scan during each render. No database, export encoding, network exchange,
+file publication or cancellation paths changed in this presentation follow-up;
+the preceding database validation remains applicable. No perpetual repaint was
+added. Native dark SQL at 1120×720 and light CSV at 820×720 (2×) were captured
+and inspected in `target/export-layout-review/`.
+
+The comparison uses the preserved SQL-export release executable from the preceding
+review as baseline and the same runner build/measure/compare functions, with five
+alternating serial pairs. Workloads and thresholds are unchanged: 20/2000 tables,
+idle and checkbox editing, 20 warmups/160 measured frames, 1000×720 headless 1×,
+including a synthetic 30-second idle. The SQL interaction workload is also run
+on the candidate. Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile.
+Raw samples and executables are retained in the artifact directory. These are CPU
+layout/tessellation measurements, not input-to-present measurements. Multi-window,
+mixed-DPI, monitor reconnect and 60/120 Hz presentation checks were not performed.
+
+
+### Combined SQL file and configurable CSV follow-up
+
+SQL exports now use a single chosen .sql destination for the entire selection,
+with data-only, schema-only and combined modes. All pre-data DDL precedes all
+INSERTs; PostgreSQL foreign keys and PostgreSQL/SQLite triggers follow the data.
+SQLite uses deferred foreign-key checks inside the generated transaction;
+PostgreSQL validates deferred constraint creation after all selected rows exist.
+MySQL/MariaDB generated scripts temporarily disable foreign-key checks to allow
+child-before-parent DDL, then restore the importing session's prior check flag
+and SQL mode. These statements are emitted into the file, not executed against
+the source database. External dependencies and permissions remain out of scope.
+CSV/JSON plus schema now writes one shared schema.sql beside the individual data
+files. Every bundle is staged and published atomically; failures/cancellation
+remove owned temporary data and preserve existing destinations.
+
+CSV controls match the reference categories: NULL to empty (off emits unquoted
+NULL), CR/LF/CRLF field-break normalization to spaces, header inclusion,
+comma/semicolon/tab/pipe delimiter, quote-if-needed/always quoting, LF/CRLF/CR
+record endings and point/comma decimal separator. Empty strings are quoted;
+literal text NULL is quoted when using the NULL marker. Decimal conversion is
+restricted to numeric values, including exact PostgreSQL NUMERIC and MySQL
+DECIMAL text; it never rewrites dates or arbitrary strings. Quoting accounts for
+the selected delimiter and decimal separator. Field encoding uses fixed buffers,
+checks cancellation in both the quoting scan and write pass, and keeps all row
+and protocol bounds from existing exports. Legacy CSV menu exports retain their
+previous encoder/defaults. Sidebar settings are passed explicitly to the worker.
+
+No source exchanges were added. Generated/identity/base-type metadata already
+arrives in existing responses. PostgreSQL column formatting uses built-in text
+for configurable CSV numeric values, without custom-type lookups. DDL/FK/post-
+trigger sections share the existing single schema query. MySQL SHOW CREATE and
+SQL mode remain one COM_QUERY exchange. Source definitions and row reads retain
+the previous per-table order while file sections are spooled locally, avoiding
+an extra synchronization wait between exports. Healthy cold/warm counts remain
+one schema exchange plus the prior PostgreSQL 8+B row exchanges (and conditional
+cleanup synchronization) or MySQL 3 cold/2 cached row exchanges. Cancellation,
+transaction state, preparation, portal completion and cleanup paths are retained.
+
+At simulated 30 ms RTT, debug comparisons passed unchanged thresholds: separate
+SQL files 981.977 ms versus one file 979.311 ms; individual configurable CSV
+916.983 ms versus bulk 902.260 ms; schema reference 95.919 ms versus file
+95.248 ms. The unchanged large-result editor debug benchmark again failed
+(79.7 ms spooled p95 versus 51.1 ms reference); final release checks are recorded
+below. Raw failures are retained rather than counted as passes.
+
+The final UI comparison uses the pre-layout SQL-export release executable and
+identical existing workloads. It covers both the requested layout and new CSV
+controls. The candidate also runs an actual CSV-header checkbox interaction
+workload with 20 and 2000 selected tables, plus the SQL-mode workload. Measurement
+settings remain those listed above; CSV settings changes do not regenerate all
+filenames. Raw results, screenshots and logs are in target/export-config-review/.
+Native dark CSV and narrow light SQL captures were inspected; every control and
+the single SQL filename remain visible. Strict QA Clippy, browser compilation
+and the format-tab/checkbox/filename interaction check passed. Debug full suite:
+879 passed, 239 opt-in tests ignored. Restoration covers reverse dependency order,
+cyclic PostgreSQL foreign keys, empty tables, SQL-only/schema-only modes,
+cancellation and existing-destination preservation. Driver CSV checks preserve
+high-precision decimals with a comma separator on PostgreSQL, MySQL and MariaDB.
+
+Future spreadsheet formats were investigated but not implemented: a streaming
+XLSX writer is a practical first step. rust_xlsxwriter's constant-memory mode
+flushes rows to temporary files, fitting the existing worker/streaming design
+(https://docs.rs/rust_xlsxwriter/latest/rust_xlsxwriter/performance/index.html).
+Numbers imports XLSX and delimited text, so XLSX provides a supported Numbers
+workflow without a separate native .numbers serializer
+(https://support.apple.com/en-mk/guide/numbers/tan9f3c54bdc/mac).
+Direct Google Sheets export is a separate authenticated, batched network workflow
+with quota, retry, cancellation and explicit destination handling, not simply
+another file extension (https://developers.google.com/workspace/sheets/api/guides/batch
+and https://developers.google.com/workspace/sheets/api/limits). Future XLSX work
+must preserve long IDs/precise decimals as text where necessary, encode strings
+as values rather than formulas, and define sheet/row/column overflow behavior.
+
+Final five-pair UI comparison, median per-run p50/p95/p99 and worst sample (ms):
+
+| Workload | Before p50 / p95 / p99 / max | After p50 / p95 / p99 / max |
+| --- | --- | --- |
+| sidebar/export-review/20/false | 0.069041 / 0.077792 / 0.080792 / 0.101375 | 0.078084 / 0.085459 / 0.087875 / 0.093000 |
+| sidebar/export-review/20/true | 0.087250 / 0.092917 / 0.095833 / 0.106292 | 0.088292 / 0.093500 / 0.097334 / 0.103500 |
+| sidebar/export-review/2000/false | 0.095875 / 0.100083 / 0.103833 / 0.118542 | 0.102416 / 0.108125 / 0.110667 / 0.120542 |
+| sidebar/export-review/2000/true | 0.342333 / 0.358667 / 0.372791 / 0.404750 | 0.344208 / 0.360209 / 0.361833 / 0.380292 |
+
+The first five pairs had three passes and one inconclusive small-catalog idle
+comparison (+11.8%, including a noisy first pair). A fresh serial comparison
+without builds or database workloads passed all four cases: +9.9%, +0.6%, +8.0%
+and +0.4% median p95, respectively. Small-catalog idle is close to the 10%
+threshold; this is not a claim of zero CPU cost. Additional CSV controls and the
+taller list add visible work, while selection editing remains near baseline.
+No threshold or measured fixture was weakened; both sets of raw results remain.
+
+CSV-header checkbox workload (candidate only):
+
+| Case | p50 / p95 / p99 / max (ms) |
+| --- | --- |
+| sidebar/csv-options-review/20/false | 0.082542 / 0.094500 / 0.101458 / 0.102042 |
+| sidebar/csv-options-review/20/true | 0.085542 / 0.091708 / 0.098833 / 0.104083 |
+| sidebar/csv-options-review/2000/false | 0.104917 / 0.105666 / 0.108500 / 0.108625 |
+| sidebar/csv-options-review/2000/true | 0.107875 / 0.108500 / 0.111041 / 0.114375 |
+
+SQL-mode workload (candidate only):
+
+| Case | p50 / p95 / p99 / max (ms) |
+| --- | --- |
+| sidebar/schema-review/20/false | 0.076500 / 0.081083 / 0.089500 / 0.091625 |
+| sidebar/schema-review/20/true | 0.084375 / 0.087500 / 0.087792 / 0.090250 |
+| sidebar/schema-review/2000/false | 0.098958 / 0.102250 / 0.106375 / 0.106708 |
+| sidebar/schema-review/2000/true | 0.506875 / 0.516916 / 0.522166 / 0.522625 |
+
+Final release verification: 879 tests passed, 239 opt-in tests ignored. PostgreSQL
+and MySQL/MariaDB export suites and both MySQL/MariaDB bulk suites passed. All
+five release PostgreSQL latency tests passed, including configurable CSV and
+single-file SQL. Release single-file SQL median was 956.355 ms versus 971.899 ms
+for separate files at simulated 30 ms RTT. The unchanged editor large-result
+release check passed (53.1 ms spooled p95 versus 47.1 ms reference), while its
+debug failure remains recorded above. Native QA Clippy, browser compilation,
+format selection and effective CSV option forwarding checks passed. Disposable
+fixtures were removed. Spreadsheet formats remain researched, not implemented.
+
+### Query/result sharing (2026-11-17)
+
+Compared the current working tree with `0eadbb8e531e979aa3dc6e574861b53acc6ba4f0` using
+`python3 scripts/ui-performance.py --base 0eadbb8e531e979aa3dc6e574861b53acc6ba4f0 --query-editor --output target/share-results-performance`.
+Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile; five alternating
+pairs, identical fixtures and default headless scale (1×). All 23 comparisons
+passed the existing 10% p95 gate. Builds and timings ran serially.
+
+The affected query-result fixtures retain 20 warmup / 160 measured frames per run.
+Values below are median per-run CPU milliseconds (base → candidate), not
+input-to-present timing. Full grid/sidebar/workspace results and raw samples are
+retained in `target/share-results-performance/`.
+
+| Fixture | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| query/editor-results/0/1280 | 0.02079 → 0.02121 | 0.02325 → 0.02263 | 0.02479 → 0.02554 | 0.02488 → 0.02592 |
+| query/editor-results/4/1280 | 0.05262 → 0.05371 | 0.05600 → 0.05679 | 0.05913 → 0.05950 | 0.05996 → 0.06042 |
+| query/editor-results/128/760 | 0.05513 → 0.05621 | 0.05987 → 0.06025 | 0.06246 → 0.06350 | 0.06338 → 0.06608 |
+| query/editor-results/4/500 | 0.05321 → 0.05412 | 0.05667 → 0.05779 | 0.05850 → 0.06137 | 0.06063 → 0.06379 |
+
+The new share dialog has a separate production-rendering workload
+(`share_dialog_frame_benchmark`): 20 warmups and 200 measured frames at
+500×720 and 1120×720, with a simulated 30-second idle gap. These absolute costs
+have no baseline equivalent and are not counted as comparative passes.
+
+| Dialog width | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| share/dialog/500 | 0.02267 | 0.02300 | 0.02333 | 0.02529 |
+| share/dialog/1120 | 0.02221 | 0.02254 | 0.02521 | 0.02592 |
+
+Native dark/wide and light/narrow screenshots are inspected under
+`target/share-design-review/`; the context menu is also inspected natively but
+is not part of the comparative closed-menu timings. Tests separately cover shortcut ownership, early
+copy while preparation is pending, stale-preview rejection, persistence, complete
+stored values, bounded output, bindings and result/statement provenance.
+The new dialog benchmark measures cached rendering, not background formatting,
+clipboard service latency or opening a very large selection. Native 60/120 Hz
+input-to-present timing, missed frames, multiwindow mixed-DPI, monitor reconnect
+and macOS snapping were not measured.
+
+### SQL Enter indentation and parenthesis pairing (2026-11-17)
+
+Compared with `0eadbb8e531e979aa3dc6e574861b53acc6ba4f0` using
+`python3 scripts/ui-performance.py --base 0eadbb8e531e979aa3dc6e574861b53acc6ba4f0 --query-editor --output target/editor-assist-performance`.
+Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release builds, five alternating
+pairs with identical fixtures at default headless scale (1×). All 23 comparisons
+passed the unchanged 10% p95 gate. Builds and benchmark workloads ran serially.
+
+Query result fixtures use 20 warmups / 160 measured frames. Below are median
+per-run CPU milliseconds (base → candidate).
+
+| Fixture | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| query/editor-results/0/1280 | 0.02087 → 0.02096 | 0.02150 → 0.02171 | 0.02367 → 0.02538 | 0.02475 → 0.02592 |
+| query/editor-results/4/1280 | 0.05262 → 0.05342 | 0.05558 → 0.05608 | 0.05583 → 0.05900 | 0.05829 → 0.06100 |
+| query/editor-results/128/760 | 0.05492 → 0.05550 | 0.05983 → 0.05925 | 0.06300 → 0.06288 | 0.06383 → 0.06400 |
+| query/editor-results/4/500 | 0.05225 → 0.05338 | 0.05508 → 0.05613 | 0.05871 → 0.05883 | 0.06171 → 0.06171 |
+| query/editor-history | 0.21633 → 0.21633 | 0.22217 → 0.22092 | 0.22679 → 0.22725 | 0.22921 → 0.22996 |
+
+The new `editor_assist_input_benchmark` exercises the production TextEdit event
+handler: type `(`, Enter, undo the newline, undo the pair, and assert exact text
+restoration. It measures four input/layout passes and tessellation of the two
+insertion passes, with 20 warmup / 100 measured cycles. Fixtures repeat a two-line
+SQL block 10 or 1,000 times (220 / 22,000 ASCII characters). These are absolute
+costs for new behavior, not a comparison against the baseline that lacks it.
+
+| Two-line blocks | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| 10 | 0.04975 | 0.05829 | 0.06100 | 0.06100 |
+| 1000 | 1.15246 | 1.35054 | 1.43229 | 1.43229 |
+
+Raw comparisons are in `target/editor-assist-performance/`; input samples, test
+logs and native captures are in `target/editor-assist-review/`. Focused event tests
+cover tabs/spaces, first Enter after a simulated 30-second idle gap, Unicode
+selection wrapping, closing-character overtyping, empty-pair deletion, literal
+typing groups, undo/redo, paste, IME, limits and dialect-specific lexical guards.
+Native captures inject `(`, Enter and `SELECT 1` into the actual query editor and
+assert the resulting text, including the literal tabs and aligned closer; dark
+1280-wide and light 760-wide views were inspected.
+
+This measures CPU layout/input handling, not end-to-end key-to-present latency,
+native 60/120 Hz frame intervals, mixed-DPI, monitor changes or snapping. The new
+input benchmark uses a plain code TextEdit; complete production workspace typing
+latency and worst-case multi-megabyte scripts were not measured. No database
+execution/protocol paths changed, so network latency suites were not rerun.
+
+### Query toolbar divider spacing (2026-11-17)
+
+Added a 4-point bottom inset to the query editor panel. Native captures at 1280 and 500 logical pixels (2× scale), dark/light, confirm spacing above the results divider; multi-result strips were also inspected. Artifacts: `target/query-toolbar-spacing/`.
+
+Ran `python3 scripts/ui-performance.py --base 0eadbb8e531e979aa3dc6e574861b53acc6ba4f0 --query-editor --output target/query-toolbar-spacing/performance` on Apple M4 Max, macOS 27.2.1, rustc 1.99.1, release profile, five alternating serial baseline/candidate runs. Query layout fixtures use 20 warmups and 160 measured frames per run; unchanged fixtures and viewport/scale metadata are retained in the report. This compares the complete pending changes against the release base.
+
+Median run statistics in ms (base → candidate):
+
+| Query workload | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| query/editor-history | 0.2256 → 0.2246 | 0.2420 → 0.2352 | 0.2809 → 0.2424 | 0.3001 → 0.2474 |
+| query/editor-results/0/1280 | 0.0213 → 0.0215 | 0.0240 → 0.0238 | 0.0249 → 0.0263 | 0.0249 → 0.0290 |
+| query/editor-results/128/760 | 0.0569 → 0.0572 | 0.0633 → 0.0646 | 0.0693 → 0.0747 | 0.0711 → 0.0899 |
+| query/editor-results/4/1280 | 0.0543 → 0.0549 | 0.0638 → 0.0590 | 0.0661 → 0.0632 | 0.0675 → 0.0636 |
+| query/editor-results/4/500 | 0.0540 → 0.0549 | 0.0621 → 0.0610 | 0.0736 → 0.0628 | 0.0962 → 0.0634 |
+
+The overall comparison is **inconclusive**, not a pass: seven noisy scenarios, including the 500-pixel query layout, failed the consistency criterion. Query layout median p95 changes ranged from −7.5% to +2.2%; the narrow layout was −1.7%. Grid precise tessellation (+13.2%) and the 20-item sidebar (+10.9%) were also inconclusive; no repeatable regression was established. Raw paired runs, p50/p95/p99/max and samples are retained in `performance/results.json`. No thresholds were relaxed. These are CPU measurements, not native input-to-present or FPS measurements; mixed-DPI and multi-monitor checks were not performed.

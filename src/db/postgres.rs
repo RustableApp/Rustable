@@ -4,8 +4,8 @@ mod array;
 mod browse;
 mod changes;
 mod export;
-mod interval;
 mod import;
+mod interval;
 use super::*;
 use ::postgres::{
     Client, NoTls, Row, RowIter,
@@ -202,7 +202,45 @@ impl Driver for PostgresDriver {
     }
 
     fn postgres_control(&self) -> Option<PostgresControl> {
-        Some(PostgresControl { process_id: self.client.cancel_token().process_id(), config: self.config.clone(), forwarded_port: self.tunnel.as_ref().map(|t| t.local_port()) })
+        Some(PostgresControl {
+            process_id: self.client.cancel_token().process_id(),
+            config: self.config.clone(),
+            forwarded_port: self.tunnel.as_ref().map(|t| t.local_port()),
+        })
+    }
+
+    fn export_definition(&mut self, name: &str) -> Result<String, String> {
+        let (before, after) = self.export_definition_parts(name)?;
+        Ok(format!("{before}\n{after}"))
+    }
+    fn export_definition_parts(&mut self, name: &str) -> Result<(String, String), String> {
+        self.check_tunnel()?;
+        let _watch = self.watch();
+        let (messages, truncated) = self
+            .client
+            .query_text_bounded(
+                include_str!("postgres/export_definition.sql"),
+                [(&name, Type::TEXT)],
+                1,
+                16 * 1024 * 1024,
+            )
+            .map_err(error)?;
+        if truncated {
+            return Err("Schema definition exceeds the 16 MiB export limit".into());
+        }
+        for message in messages {
+            if let ::postgres::SimpleQueryMessage::Row(row) = message {
+                let before = row.try_get(0).map_err(error)?.ok_or("Schema export is not available for inherited, partitioned, or foreign tables yet")?;
+                return Ok((
+                    before.to_owned(),
+                    row.try_get(1)
+                        .map_err(error)?
+                        .unwrap_or_default()
+                        .to_owned(),
+                ));
+            }
+        }
+        Err("The relation no longer exists".into())
     }
 
     fn definition(&mut self, name: &str) -> Result<String, String> {
@@ -348,11 +386,17 @@ impl Driver for PostgresDriver {
                     .collect();
                 let source = rows.columns().first().and_then(|column| {
                     let oid = column.table_oid()?;
-                    rows.columns().iter().all(|column| column.table_oid() == Some(oid) && column.column_id().is_some())
-                        .then(|| self.result_origins.get(&oid).cloned()).flatten()
+                    rows.columns()
+                        .iter()
+                        .all(|column| {
+                            column.table_oid() == Some(oid) && column.column_id().is_some()
+                        })
+                        .then(|| self.result_origins.get(&oid).cloned())
+                        .flatten()
                 });
                 let mut grid = collect_complete(rows, columns, budget, cancel)?;
                 grid.source = source;
+                grid.query_source = Some(super::QuerySource::statement(statement));
                 grid.elapsed = timer.elapsed();
                 Ok(grid)
             })();
@@ -413,8 +457,16 @@ impl Driver for PostgresDriver {
                     grid.columns = columns.iter().map(|column| column.name().to_owned()).collect();
                 }
                 ::postgres::SimpleQueryMessage::Row(row) => {
-                    let values = row.columns().iter().enumerate().map(|(index, column)|
-                        browse::text::decode(row.try_get(index).map_err(error)?, column.type_oid()))
+                    let values = row
+                        .columns()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, column)| {
+                            browse::text::decode(
+                                row.try_get(index).map_err(error)?,
+                                column.type_oid(),
+                            )
+                        })
                         .collect::<Result<Vec<_>, String>>()?;
                     let size = values.iter().map(value_size).sum::<usize>();
                     if size > remaining { grid.truncated = true; continue; }
@@ -535,7 +587,9 @@ impl CancelWatch {
             while !stopped.load(Ordering::Acquire) {
                 if cancel.load(Ordering::Relaxed) {
                     let result = match &tls {
-                        Some(tls) => token.cancel_query_with_timeout(tls.clone(), CANCEL_REQUEST_TIMEOUT),
+                        Some(tls) => {
+                            token.cancel_query_with_timeout(tls.clone(), CANCEL_REQUEST_TIMEOUT)
+                        }
                         None => token.cancel_query_with_timeout(NoTls, CANCEL_REQUEST_TIMEOUT),
                     };
                     match result {
@@ -1074,10 +1128,15 @@ fn check_statement(sql: &str, safe: bool) -> Result<(), String> {
     let word = first_word(sql).ok_or("Expected an SQL statement")?;
     let recovery = matches!(word.as_str(), "COMMIT" | "END" | "ROLLBACK" | "ABORT")
         && sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
-            .is_ok_and(|statements| matches!(statements.as_slice(),
-                [sqlparser::ast::Statement::Commit { modifier: None, .. }]
-                | [sqlparser::ast::Statement::Rollback { .. }]));
-    if safe && !recovery
+            .is_ok_and(|statements| {
+                matches!(
+                    statements.as_slice(),
+                    [sqlparser::ast::Statement::Commit { modifier: None, .. }]
+                        | [sqlparser::ast::Statement::Rollback { .. }]
+                )
+            });
+    if safe
+        && !recovery
         && !matches!(
             word.as_str(),
             "SELECT" | "WITH" | "VALUES" | "TABLE" | "SHOW" | "EXPLAIN"

@@ -57,6 +57,11 @@ fn retained_bytes(grid: &Grid) -> usize {
     let mut bytes = std::mem::size_of::<Grid>()
         + grid.columns.capacity() * std::mem::size_of::<String>()
         + grid.rows.capacity() * std::mem::size_of::<Vec<Value>>();
+    if let Some(source) = &grid.query_source {
+        bytes = bytes
+            .saturating_add(source.sql.capacity())
+            .saturating_add(crate::db::result_store::row_bytes(&source.parameters));
+    }
     for column in &grid.columns {
         bytes = bytes.saturating_add(column.capacity());
     }

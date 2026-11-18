@@ -43,10 +43,18 @@ impl Rustable {
         ctx.request_repaint();
     }
     pub(super) fn download_table(&mut self, bytes: &[u8], format: db::ExportFormat) {
-        let (name, mime) = match format { db::ExportFormat::Csv => ("table.csv", "text/csv;charset=utf-8"), db::ExportFormat::Json => ("table.json", "application/json") };
+        let (name, mime) = match format {
+            db::ExportFormat::Csv | db::ExportFormat::CsvCustom(_) => {
+                ("table.csv", "text/csv;charset=utf-8")
+            }
+            db::ExportFormat::Json => ("table.json", "application/json"),
+            db::ExportFormat::Sql => ("table.sql", "application/sql"),
+        };
         match download_bytes(name, bytes, mime) {
             Ok(()) => self.status = format!("Download requested: {name}"),
-            Err(error) => self.error = Some(format!("Download failed: {}", crate::browser_error(error))),
+            Err(error) => {
+                self.error = Some(format!("Download failed: {}", crate::browser_error(error)))
+            }
         }
     }
     pub(super) fn script_dialog(&self, ctx: &egui::Context, save: bool) {
@@ -83,14 +91,29 @@ impl Rustable {
         use crate::browser_jobs::{self, Request, Response};
         if self.browser_export.borrow().is_some() { return; }
         let tx = self.files_tx.clone();
-        let (name, mime) = match format { db::ExportFormat::Csv => ("results.csv", "text/csv;charset=utf-8"), db::ExportFormat::Json => ("results.json", "application/json") };
-        match browser_jobs::start(Request::Export { grid: self.grid(), format }, ctx.clone(), move |reply| {
-            let result = reply.and_then(|reply| match reply {
-                Response::Exported(bytes) => download_bytes(name, &bytes, mime).map(|()| name.to_owned()).map_err(|e| format!("Download failed: {}", crate::browser_error(e))),
-                _ => Err("Unexpected export response".into()),
-            });
-            let _ = tx.send(FileAction::BrowserExportDone(result));
-        }) {
+        let (name, mime) = match format {
+            db::ExportFormat::Csv | db::ExportFormat::CsvCustom(_) => {
+                ("results.csv", "text/csv;charset=utf-8")
+            }
+            db::ExportFormat::Json => ("results.json", "application/json"),
+            db::ExportFormat::Sql => ("results.sql", "application/sql"),
+        };
+        match browser_jobs::start(
+            Request::Export {
+                grid: self.grid(),
+                format,
+            },
+            ctx.clone(),
+            move |reply| {
+                let result = reply.and_then(|reply| match reply {
+                    Response::Exported(bytes) => download_bytes(name, &bytes, mime)
+                        .map(|()| name.to_owned())
+                        .map_err(|e| format!("Download failed: {}", crate::browser_error(e))),
+                    _ => Err("Unexpected export response".into()),
+                });
+                let _ = tx.send(FileAction::BrowserExportDone(result));
+            },
+        ) {
             Ok(worker) => *self.browser_export.borrow_mut() = Some(worker),
             Err(error) => { let _ = self.files_tx.send(FileAction::QueryLibraryError(error)); ctx.request_repaint(); }
         }
