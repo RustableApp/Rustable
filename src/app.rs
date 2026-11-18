@@ -1,3 +1,5 @@
+#[cfg(unix)]
+pub(crate) mod matrix_edit;
 #[cfg(all(test, unix))]
 #[path = "app/matrix_connections_tests.rs"]
 mod matrix_connections_tests;
@@ -1906,6 +1908,14 @@ impl Rustable {
     }
 
     fn run_query(&mut self, all: bool) {
+        #[cfg(unix)]
+        if self.matrix.as_ref().and_then(|b|b.edit.as_ref()).is_some_and(|e|e.streaming) {
+            self.error = Some("Finish or stop the AI edit before running SQL.".into());
+            return;
+        }
+        #[cfg(unix)]
+        if let Some(bridge) = &mut self.matrix { bridge.running_tab = None; }
+
         if self.pending.is_some() {
             return;
         }
@@ -4436,6 +4446,8 @@ Right-click to inspect or remove individual changes",
                             let slot = ui.painter().add(egui::Shape::Noop);
                             let editor_id =
                                 ui.make_persistent_id(egui::Id::new(("query-editor", tab.id)));
+                            #[cfg(unix)]
+                            matrix_edit::sync_editor(&mut self.matrix, tab, ui.ctx(), editor_id);
                             if ui.is_enabled() && ui.memory(|m| m.has_focus(editor_id))
                                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::I)) {
                                 tab.formatter.start(ui.ctx(), &tab.sql, tab.cursor.clone(), self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)));
@@ -4539,6 +4551,8 @@ Right-click to inspect or remove individual changes",
                                 tab.cursor.clone(),
                                 self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)),
                             );
+                            #[cfg(unix)]
+                            matrix_edit::paint_edit(&self.matrix, tab, ui, &output);
                             if let Some(range) = &tab.error_highlight {
                                 crate::editor::paint_query_error(ui, &output, range.clone());
                             }
@@ -4631,6 +4645,9 @@ Right-click to inspect or remove individual changes",
         if compact_footer {
             ui.horizontal(|ui| { ui.set_height(28.0); cursor_status(ui, &self.language.status); });
         }
+        let run_enabled = self.pending.is_none();
+        #[cfg(unix)]
+        let run_enabled = run_enabled && !self.matrix.as_ref().and_then(|b|b.edit.as_ref()).is_some_and(|e|e.streaming);
         ui.horizontal(|ui| {
             ui.set_height(28.0);
             if !compact_footer { cursor_status(ui, &self.language.status); }
@@ -4642,14 +4659,14 @@ Right-click to inspect or remove individual changes",
                     let caret = ui.scope(|ui| {
                         ui.spacing_mut().button_padding.x = 3.0;
                         let height = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
-                        ui.add_enabled(self.pending.is_none(), egui::Button::image(
+                        ui.add_enabled(run_enabled, egui::Button::image(
                         egui::Image::new(egui::include_image!("../assets/icons/lucide/chevron-down.svg"))
                             .fit_to_exact_size(egui::vec2(12.0, 12.0)))
                         .fill(BLUE)
                         .min_size(egui::vec2(18.0, height.max(ui.spacing().interact_size.y)))
                         .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 5, se: 5 }))
                     }).inner;
-                    caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && self.pending.is_none(), "Run options"));
+                    caret.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled() && run_enabled, "Run options"));
                     ui.painter().line_segment([
                         caret.rect.left_top() + egui::vec2(0.0, 4.0),
                         caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
@@ -4660,11 +4677,11 @@ Right-click to inspect or remove individual changes",
                         ui.set_width(140.0);
                         ui.spacing_mut().interact_size.y = 20.0;
                         ui.spacing_mut().item_spacing.y = 1.0;
-                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_menu_item("Run current", false, "Enter")).clicked() {
+                        if ui.add_enabled(run_enabled, crate::icons::shortcut_menu_item("Run current", false, "Enter")).clicked() {
                             self.run_query(false);
                             ui.close();
                         }
-                        if ui.add_enabled(self.pending.is_none(), crate::icons::shortcut_menu_item("Run all", true, "Enter")).clicked() {
+                        if ui.add_enabled(run_enabled, crate::icons::shortcut_menu_item("Run all", true, "Enter")).clicked() {
                             self.run_query(true);
                             ui.close();
                         }
@@ -4674,10 +4691,10 @@ Right-click to inspect or remove individual changes",
                     for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active, &mut widgets.noninteractive] {
                         widget.corner_radius = egui::CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 };
                     }
-                    if ui.add_enabled(self.pending.is_none(), crate::icons::query_run_button(
+                    if ui.add_enabled(run_enabled, crate::icons::query_run_button(
                         if self.tabs[self.tab].cursor.is_empty() { "Run current" } else { "Run selection" },
                         self.pending.is_some(), BLUE,
-                    )).clicked() {
+                    )).on_disabled_hover_text("Wait for running work, or finish or stop the AI edit before executing SQL.").clicked() {
                         self.run_query(false);
                     }
                 });

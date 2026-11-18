@@ -22,6 +22,8 @@ pub(crate) struct Bridge {
     pub enabled: bool,
     pub activity: String,
     pub owned: std::collections::HashSet<u64>,
+    pub running_tab: Option<u64>,
+    pub edit: Option<Box<crate::app::matrix_edit::Edit>>,
 }
 
 impl Bridge {
@@ -47,6 +49,8 @@ impl Bridge {
             enabled: false,
             activity: "AI control is off for this connection".into(),
             owned: Default::default(),
+            running_tab: None,
+            edit: None,
         }
     }
     pub(crate) fn revoke(&mut self) {
@@ -64,28 +68,48 @@ pub(crate) fn definitions() -> Value {
         ),
         (
             "workspace",
-            "Inspect the selected live connection, visible query tabs and catalog (up to 200 objects).",
+            "Inspect the live connection, active_tab_id, editor selection, all open SQL tab IDs and catalog (up to 200 objects).",
             json!({}),
         ),
         (
             "open_query",
-            "Open a new AI-owned SQL tab. Leaves existing user tabs intact. SQL is not executed.",
+            "Open a new SQL tab for a separate analysis or alternative. For requests to change the current query, inspect and edit the existing tab instead. SQL is not executed.",
             json!({"title":{"type":"string"},"sql":{"type":"string"}}),
         ),
         (
             "replace_query",
-            "Replace SQL in an AI-owned tab only if expected_sql still matches. Never overwrite user edits.",
+            "Replace SQL in any open tab when the user requested edits to it, only if expected_sql still matches. Preserves its name and file association. Prefer begin_query_edit/append_query_edit/finish_query_edit for visible progressive edits. Never execute merely because you edited.",
             json!({"tab_id":{"type":"integer"},"expected_sql":{"type":"string"},"sql":{"type":"string"}}),
         ),
         (
             "run_query",
-            "Run an AI-owned tab through the visible editor, preserving Safe mode and confirmation dialogs. Requires expected_sql. Returns immediately; inspect_query reports completion. Use LIMIT.",
+            "Run an open SQL tab through the visible editor, preserving Safe mode and confirmation dialogs. Requires expected_sql. Returns immediately; inspect_query reports completion. Use LIMIT.",
             json!({"tab_id":{"type":"integer"},"expected_sql":{"type":"string"}}),
         ),
         (
             "inspect_query",
-            "Inspect an AI-owned tab: SQL, running/error state and a bounded preview of the selected result (20 rows, 30 columns). Does not fetch spilled rows.",
+            "Inspect any open SQL tab (including the user’s): SQL, selection, running/error state and a bounded preview of the selected result (20 rows, 30 columns). Does not fetch spilled rows.",
             json!({"tab_id":{"type":"integer"}}),
+        ),
+        (
+            "begin_query_edit",
+            "Start editing a requested existing tab. Read inspect_query first. expected_sql must match exactly. start/end are zero-based Unicode character offsets (end exclusive); equal offsets insert, 0..SQL length rewrites all. No text changes until append/finish. One live edit per workspace. Returns edit_id and next_sequence.",
+            json!({"tab_id":{"type":"integer"},"expected_sql":{"type":"string"},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":0}}),
+        ),
+        (
+            "append_query_edit",
+            "Stream a replacement chunk into the visible editor. Send complete useful SQL lines/clauses as generated, in order with sequence starting at 0. Each chunk appears immediately; it replaces the selected original range on the first chunk and appends thereafter. Do not send the whole accumulated replacement again. Human edits stop the stream. Never retry an uncertain append blindly: inspect edit state first.",
+            json!({"edit_id":{"type":"integer"},"sequence":{"type":"integer","minimum":0},"text":{"type":"string"}}),
+        ),
+        (
+            "finish_query_edit",
+            "Finish the current streamed replacement without executing SQL. With no chunks, deletes the selected range. Leaves the edited tab visible with Undo AI edit available. Call this before running the query.",
+            json!({"edit_id":{"type":"integer"}}),
+        ),
+        (
+            "revert_query_edit",
+            "Undo the most recent AI edit only when requested and only if its text is still unchanged. Does not undo database operations.",
+            json!({"edit_id":{"type":"integer"}}),
         ),
         (
             "cancel_query",
@@ -182,6 +206,8 @@ pub(crate) fn listen(path: &std::path::Path, ctx: eframe::egui::Context) -> Resu
         enabled: true,
         activity: "Ready for your AI client".into(),
         owned: Default::default(),
+        running_tab: None,
+        edit: None,
     })
 }
 
@@ -225,7 +251,7 @@ pub fn client(path: &std::path::Path) -> i32 {
 
         let result = match request["method"].as_str() {
             Some("initialize") => {
-                json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"rustable-matrix","version":env!("CARGO_PKG_VERSION")},"instructions":"You control explicitly enabled SQL workspaces in Rustable. Start with list_workspaces and use the exact workspace_id on every action. Open named query tabs, then run and inspect them. Query tools return immediately; wait before polling. The user can take over at any time. Never claim a query succeeded until inspect_query confirms it. Never automatically replay a write with an unknown commit outcome. Never choose a different workspace when a target disappears. Credentials stay in Rustable. Safe mode and user confirmations govern writes; inspect the workspace before executing."})
+                json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"rustable-matrix","version":env!("CARGO_PKG_VERSION")},"instructions":"You control explicitly enabled SQL workspaces in Rustable. Start with list_workspaces and use the exact workspace_id on every action. Read workspace to identify the active tab and inspect_query to read the user’s SQL and selection. When asked to fix or change the current query, edit that tab; use a new named tab for separate analyses or alternatives. Never edit merely because you were asked to read or explain. Use begin_query_edit, ordered append_query_edit chunks, then finish_query_edit for progressive visible edits. Reinspect and stop on conflicts; never automatically replace concurrent human changes. Editing is separate from executing SQL. Query tools return immediately; wait before polling. The user can take over at any time. Never claim a query succeeded until inspect_query confirms it. Never automatically replay a write with an unknown commit outcome. Never choose a different workspace when a target disappears. Credentials stay in Rustable. Safe mode and user confirmations govern writes; inspect the workspace before executing."})
             }
             Some("ping") => json!({}),
             Some("tools/list") => json!({"tools":definitions()}),
@@ -326,6 +352,10 @@ pub(crate) struct Capture {
 impl eframe::App for Capture {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
         self.app.update(ctx, frame);
+        if std::env::var_os("RUSTABLE_MATRIX_EDIT_QA").is_some() {
+            self.app.matrix_shared_edit_capture(ctx, &self.path);
+            return;
+        }
         if std::env::var_os("RUSTABLE_MATRIX_FIXTURE").is_some() {
             self.app.matrix_fixture_capture(ctx);
             return;

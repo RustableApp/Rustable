@@ -42,17 +42,25 @@ also revokes the grant. Inactive parked databases are not available through MCP.
 
 - `list_workspaces`: list only enabled, active SQL workspaces, including their
   connection name, database, engine, Safe mode, production flag and busy state.
-- `workspace`: inspect the selected connection, transaction status, tabs, and a
-  bounded preview of the already-loaded catalog.
+- `workspace`: inspect the connection, transaction status, active SQL tab ID, open
+  tab IDs, edit state and a bounded preview of the already-loaded catalog.
 - `open_query`: create an AI-owned tab with a title and SQL, without executing it.
-- `replace_query`: update an AI-owned tab only when `expected_sql` matches.
-- `run_query`: activate and run an AI-owned tab through the existing editor.
+- `replace_query`: update any requested open SQL tab only when `expected_sql` matches.
+- `run_query`: activate and run any requested open SQL tab through the existing editor.
   Requires matching `expected_sql`; returns immediately. Poll `inspect_query`
   for completion without tight loops.
-- `inspect_query`: SQL, error/running/confirmation status and selected result
+- `inspect_query`: read any open SQL tab, including the user’s text and selection,
+  edit state, error/running/confirmation status and selected result
   preview, capped at 20 in-memory rows × 30 columns. Spilled rows are not loaded;
   an empty preview does not prove the result is empty.
-- `cancel_query`: request cancellation of an active AI-owned query.
+- `begin_query_edit`: reserve a character range in an existing tab, with exact
+  `expected_sql` matching; returns an edit ID. It does not erase the original SQL.
+- `append_query_edit`: insert ordered replacement chunks into that range, each
+  appearing immediately in the normal editor. Sequence numbers prevent duplicates.
+- `finish_query_edit`: complete the replacement without executing SQL.
+- `revert_query_edit`: restore the original text if no later human edit conflicts.
+- `cancel_query`: request cancellation of a query started by MCP, including one
+  run in an existing user tab.
 
 All tools except discovery require the exact `workspace_id`. IDs change when
 access is revoked. The client must ask the user to reenable the intended target;
@@ -62,8 +70,7 @@ SQL uses the connection's existing database privileges. A workspace ID routes
 commands; it is not a database ACL or SQL sandbox. Safe mode and production
 protections use the normal Rustable implementation. When Safe mode is off, writes
 are possible; destructive-query dialogs still require the user. The MCP bridge
-cannot change Safe mode, approve dialogs, open saved connections, overwrite
-human-owned tabs, or close tabs. It returns query data to the connected AI client,
+cannot change Safe mode, approve dialogs, open saved connections, or close tabs. It returns query data to the connected AI client,
 which may send that data to its model provider.
 
 Human changes to AI SQL invalidate stale replacements and executions. At most
@@ -72,6 +79,35 @@ dialogs refuse navigation commands. The bridge does not replay failed writes;
 a client must never retry a write whose commit outcome is unknown automatically.
 Credentials stay in Rustable's existing connection system and are not tools output.
 SSH/TLS setup uses the normal connection workflow without a separate connection.
+
+## Working together in an existing query
+
+Enabled workspaces share all open SQL tabs with the AI. “What have I written?”
+reads the active tab and selection without changing anything. “Fix this query”
+should edit that same tab; a separate analysis or alternative can open a new tab.
+These choices are documented in the MCP instructions so the client can follow the
+user’s intent. Tab titles and file associations survive edits; saving remains a
+normal user action. Read access is not limited to AI-created tabs anymore.
+
+Progressive editing replaces a specified Unicode character range. The client sends
+useful chunks as it generates SQL; Rustable shows each immediately, marks the
+changed lines and offers **Stop edit** and **Undo AI edit**. Cmd/Ctrl+Z restores the
+original in one step while preserving earlier editor history. A single workspace
+has one active stream and one latest-edit restoration control. Ordinary editor
+undo retains earlier edits.
+
+Typing in the edited tab, closing it, switching away, or taking over stops the
+stream. Human changes are never silently overwritten or undone. Stopped partial
+SQL remains visible for review; stopping does not restore the original unless
+Undo is requested. Running SQL is blocked during a live edit. Finishing an edit
+never executes it; execution requires a separate action with matching SQL. Results
+already shown in a tab remain results of its previous execution.
+
+This is actual **MCP chunk streaming**, not an animation replay of a completed
+answer. A client that only calls `replace_query` gets an atomic replacement. Direct
+token streaming, inline chat, and a full before/after diff review are future UI work.
+The model/client supplies the editing decisions; the app enforces target identity,
+text conflicts, ordering, bounds and normal database safeguards.
 
 ## Local transport and limits
 
@@ -136,7 +172,7 @@ light theme for captures. Production builds do not include these fixture hooks.
 Child-window screenshot delivery was unavailable on the locked desktop, so these
 captures validate the editor view, not native multiwindow layout.
 
-## Verification (2026-11-17)
+## Real-connection verification (310d581, 2026-11-17)
 
 Real connection tests passed on a temporary SQLite file, PostgreSQL 17.11,
 MySQL 8.4.13 and MariaDB 11.4.13 using disposable local containers. Coverage includes
@@ -193,3 +229,68 @@ remain in `docs/UI-PERFORMANCE.md`. Full samples, metadata and original/repeat
 results are retained in `target/matrix-connections-performance/`; additional
 workload logs and native captures are in `target/matrix-connections-review/`.
 Generated review artifacts are not committed.
+
+## Shared-editor verification
+
+The shared-tab extension passed 886 debug library tests (239 opt-in tests ignored).
+New coverage includes reading a human tab, active-tab discovery, Unicode range
+replacement, ordered chunks, duplicate rejection, the 32 KiB cap, filename and
+saved-text preservation, one-step undo, concurrent typing, tab switching/closure,
+takeover, manual-run blocking and idle settling while waiting for more chunks.
+Existing SQLite execution, Safe mode and multiwindow-routing tests still pass.
+Editing adds no database operations or exchanges; execution continues through the
+unchanged worker/driver path after the edit finishes.
+
+A real stdio MCP tour read and edited an existing, non-AI-owned tab in four chunks,
+kept its title, and verified the complete text without running SQL. Native renderer
+captures were inspected during and after streaming at 1280×820 dark and 760×760
+light, 2× display scale. The tour uses only a disposable SQLite studio:
+
+```sh
+mise exec -- cargo build --features qa
+RUSTABLE_MATRIX_EDIT_QA=1 RUSTABLE_MATRIX_CAPTURE=/absolute/path/shared-edit \
+python3 scripts/matrix-demo.py --edit-tour --exit-after-tour
+```
+
+The QA flag creates a named human-tab fixture; production builds have no fixture
+hook. Add `RUSTABLE_MATRIX_LIGHT=1 RUSTABLE_MATRIX_NARROW=1` for the narrow light
+capture. Files use `-streaming.ppm` and `-complete.ppm` suffixes. This scripted tour
+tests the connector and renderer, not a provider's live token stream. Manual
+native keyboard/input-to-present, mixed-DPI, 60/120Hz and display-management checks
+remain unverified. Existing user database windows were not restarted for testing.
+
+Final release library suite: **886 passed**, 239 opt-in tests ignored. Clippy
+passed with all targets, QA enabled and warnings as errors. The comparison against
+`310d581` passed **all 24 metrics**, with no regressions or inconclusive results:
+
+```sh
+python3 scripts/ui-performance.py --base 310d581 --query-editor \
+  --output target/matrix-shared-edit-performance
+```
+
+Same Apple M4 Max / macOS 27.2.1 arm64 / Rust 1.99.1, release profile, five alternating
+pairs, unchanged fixtures and thresholds. Builds and benchmarks ran serially;
+background OS applications were present. Full environment, p50/p95/p99/max and raw
+samples are retained in the output directory. Median per-run CPU milliseconds:
+
+| Workload | p50, base → candidate | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| Editor history/input after idle | .219791 → .221125 | .229250 → .247167 | .235958 → .253875 | .247792 → .256875 |
+| Four query results, 1280px | .053166 → .052958 | .059041 → .056000 | .064792 → .060041 | .065666 → .064250 |
+| Workspace, 12 columns, inspector | .283459 → .281625 | .302958 → .297041 | .328042 → .314583 | .328042 → .314583 |
+
+The candidate-only `matrix_stream_edit_frame_benchmark` includes chunk admission,
+real editor layout/tessellation, change markers and grouped undo while appending
+180 SQL comment lines to a human tab. It uses 20 warmups and 160 measured frames
+at default headless scale, including a time jump before frame 100:
+
+| Viewport | p50 ms | p95 ms | p99 ms | Max ms | Cold frame ms | First after idle ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| 760×760 | .179709 | .217166 | .223084 | .450792 | 4.243375 | .219917 |
+| 1280×760 | .142333 | .183750 | .186209 | .287583 | .717541 | .153500 |
+
+These are CPU measurements, not sustained FPS or input-to-display latency. The new
+streaming interaction has no equivalent on the base. Deep pre-existing undo
+histories and very large pre-existing SQL drafts were not benchmarked. Raw new
+workload logs, native captures and test results are retained under
+`target/matrix-shared-edit-review/`; generated artifacts are not committed.
