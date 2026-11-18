@@ -147,6 +147,56 @@ fn message(reader: &mut impl BufRead) -> Result<Option<Value>, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Owned by the native event loop so the private session socket is removed on exit.
+pub(crate) struct LaunchSocket {
+    pub path: std::path::PathBuf,
+    _directory: Option<tempfile::TempDir>,
+}
+
+impl LaunchSocket {
+    pub fn new(explicit: Option<std::path::PathBuf>) -> std::io::Result<Self> {
+        if let Some(path) = explicit {
+            return Ok(Self { path, _directory: None });
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::Builder::new().prefix("rustable-mcp-").tempdir()?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        Ok(Self { path: directory.path().join("workspace.sock"), _directory: Some(directory) })
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn ordinary_launch_owns_a_private_unique_socket_directory() {
+        let first = LaunchSocket::new(None).unwrap();
+        let second = LaunchSocket::new(None).unwrap();
+        assert_ne!(first.path, second.path);
+        let parent = first.path.parent().unwrap().to_owned();
+        assert_eq!(std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777, 0o700);
+        let bridge = listen(&first.path, eframe::egui::Context::default()).unwrap();
+        assert!(bridge.connector.is_some());
+        assert_eq!(std::fs::metadata(&first.path).unwrap().permissions().mode() & 0o777, 0o600);
+        drop(bridge);
+        drop(first);
+        assert!(!parent.exists());
+        assert!(second.path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn explicit_socket_directory_remains_caller_owned() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("external.sock");
+        let socket = LaunchSocket::new(Some(path.clone())).unwrap();
+        assert_eq!(socket.path, path);
+        drop(socket);
+        assert!(directory.path().exists());
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn listen(path: &std::path::Path, ctx: eframe::egui::Context) -> Result<Bridge, String> {
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
@@ -271,7 +321,7 @@ pub fn client(path: &std::path::Path) -> i32 {
             Some("tools/call") => {
                 let result = (|| -> Result<Value, String> {
                     let mut stream = UnixStream::connect(path)
-                        .map_err(|e| format!("Open Rustable with Matrix enabled first: {e}"))?;
+                        .map_err(|e| format!("Open Rustable and copy its current AI connection configuration: {e}"))?;
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .map_err(|e| e.to_string())?;
@@ -319,7 +369,12 @@ pub(crate) fn capture_launcher(ctx: &eframe::egui::Context) {
     let Some(prefix) = std::env::var_os("RUSTABLE_MATRIX_CAPTURE") else {
         return;
     };
-    if std::env::var_os("RUSTABLE_MATRIX_FIXTURE").is_none() {
+    let connector = std::env::var_os("RUSTABLE_MATRIX_CONNECTOR_QA").is_some();
+    if std::env::var_os("RUSTABLE_MATRIX_FIXTURE").is_none() && !connector {
+        return;
+    }
+    if connector && ctx.cumulative_frame_nr() < 20 {
+        ctx.request_repaint();
         return;
     }
     let key = eframe::egui::Id::new("matrix-launcher-capture");

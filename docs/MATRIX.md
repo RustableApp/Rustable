@@ -1,6 +1,6 @@
 # Matrix experiment
 
-Branch: `experiment/matrix-mcp`. Matrix lets an external MCP client work in
+Included in normal native builds on macOS and Linux. Matrix lets an external MCP client work in
 Rustable's visible SQL editor using real SQLite, PostgreSQL, MySQL and MariaDB
 connections. Queries and results remain in normal tabs so you can continue the
 work. This is separate from PR #10's headless database server. A built-in chat
@@ -8,11 +8,9 @@ panel and model/provider configuration are still future work.
 
 ## Try it with a real connection
 
-```sh
-./scripts/matrix.sh
-# To use the installed app's saved connections and credential namespace:
-./scripts/matrix.sh --release
-```
+Open Rustable normally (or run `mise exec -- cargo run` during development).
+No special launcher or command-line flag is needed. Windows and the browser build
+do not yet support the local Unix-socket MCP bridge.
 
 The normal connection manager opens. Open the intended connection, choose your
 usual Safe mode setting, then open the **AI** toolbar menu and choose **Enable AI
@@ -27,7 +25,7 @@ with individual fields. The transport is stdio.
 Opening or copying these details does not enable database access; explicitly
 choose **Enable AI control** for the intended connection. Keep Rustable open and
 copy the configuration again after restarting, because the socket belongs to the
-current process. The launcher still prints the same configuration in the terminal.
+current process. The optional `scripts/matrix.sh` development launcher also prints the configuration in the terminal.
 It does not execute a scripted tour on real connections.
 
 Debug builds use Rustable Development profiles and credentials. Release builds
@@ -503,3 +501,23 @@ layout/tessellation timings, not input-to-display latency. Native screenshots
 used 2× scale. Raw samples, cold/after-idle timings, both comparison batches,
 environment metadata, source patch and the recipe are retained in
 `target/matrix-connector-performance/`; p50/p99/max remain available there.
+
+## Ordinary native launch
+
+Normal macOS/Linux startup now creates a unique private session directory (0700)
+and MCP socket (0600), retaining the directory until the native event loop exits.
+The existing AI menu and connection-manager entry are available without the
+experimental launcher. Workspace grants still start disabled and remain explicit.
+The explicit socket CLI remains supported and does not take ownership of its
+caller's directory. Windows/browser MCP transport support is unchanged.
+
+Validation: 920 library tests passed (247 ignored), including private permissions,
+unique session paths, cleanup and explicit-path ownership; strict all-target QA
+Clippy passed. Launched the native QA binary with **no command-line arguments**,
+inspected the setup-dialog screenshot, and exercised both socket discovery and
+the real stdio `mcp` command: both returned no enabled workspaces. Evidence is in
+`target/normal-mcp-review/`. This changes startup/lifetime handling, not the
+existing dialog, toolbar rendering or database protocol paths. No additional
+DB exchanges or per-frame filesystem operations are introduced. Existing CPU
+benchmark limitations above remain; release performance and native display
+latency were not remeasured for this startup change.

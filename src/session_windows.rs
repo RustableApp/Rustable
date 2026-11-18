@@ -313,6 +313,11 @@ impl eframe::App for SessionWindows {
         crate::updates::poll();
         let mut quit_requested = consume_quit(ctx) || crate::native_menu::take_requested();
         set_close_confirmation_open(ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == egui::ViewportId::ROOT));
+        #[cfg(all(unix, feature = "qa"))]
+        if std::env::var_os("RUSTABLE_MATRIX_CONNECTOR_QA").is_some() {
+            self.root.open_matrix_connector();
+            self.crash_prompt = None;
+        }
         quit_requested |= self.root.render_launcher(ctx);
         #[cfg(all(unix, feature = "qa"))]
         if self.matrix.is_some() { crate::matrix::capture_launcher(ctx); }

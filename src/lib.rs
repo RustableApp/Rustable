@@ -207,6 +207,13 @@ fn run_native_mode(#[cfg(unix)] matrix_socket: Option<std::path::PathBuf>) -> ef
             }),
         );
     }
+    // Keep the directory alive for the entire event loop. Normal launches expose
+    // setup details; individual SQL workspaces still require explicit opt-in.
+    #[cfg(unix)]
+    let matrix_socket = matrix::LaunchSocket::new(matrix_socket)
+        .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
+    #[cfg(unix)]
+    let matrix_path = matrix_socket.path.clone();
     eframe::run_native(
         if cfg!(feature = "qa") {
             "Rustable QA"
@@ -228,9 +235,7 @@ fn run_native_mode(#[cfg(unix)] matrix_socket: Option<std::path::PathBuf>) -> ef
             #[allow(unused_mut)]
             let mut windows = session_windows::SessionWindows::new(cc);
             #[cfg(unix)]
-            if let Some(path) = matrix_socket {
-                windows.attach_matrix(matrix::listen(&path, cc.egui_ctx.clone()).map_err(std::io::Error::other)?);
-            }
+            windows.attach_matrix(matrix::listen(&matrix_path, cc.egui_ctx.clone()).map_err(std::io::Error::other)?);
             Ok(Box::new(windows))
         }),
     )
