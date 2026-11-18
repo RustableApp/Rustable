@@ -1966,3 +1966,63 @@ Median run statistics in ms (base → candidate):
 | query/editor-results/4/500 | 0.0540 → 0.0549 | 0.0621 → 0.0610 | 0.0736 → 0.0628 | 0.0962 → 0.0634 |
 
 The overall comparison is **inconclusive**, not a pass: seven noisy scenarios, including the 500-pixel query layout, failed the consistency criterion. Query layout median p95 changes ranged from −7.5% to +2.2%; the narrow layout was −1.7%. Grid precise tessellation (+13.2%) and the 20-item sidebar (+10.9%) were also inconclusive; no repeatable regression was established. Raw paired runs, p50/p95/p99/max and samples are retained in `performance/results.json`. No thresholds were relaxed. These are CPU measurements, not native input-to-present or FPS measurements; mixed-DPI and multi-monitor checks were not performed.
+
+## Aurora connection activity (#12)
+
+The ordinary busy connection pill now uses cyan, blue and violet shaded ribbons
+instead of scrolling square blocks. AI work retains the separate green Matrix
+rain and takeover controls. This is an indeterminate activity animation, never a
+query completion estimate. Connection identity and elapsed time keep their prior
+layout and hover details; the normal connection color returns when work finishes.
+The busy surface uses theme-specific contrast. No input locking or cancellation
+behavior changes accompany this visual update.
+
+The mesh is bounded to three ribbons, 96 segments each (873 vertices maximum),
+with no textures, file I/O, network calls or catalog/result scans. Geometry stays
+inside the pill, including its rounded ends. Animation uses the existing pending
+operation redraw cadence; no new timers or idle polling were added. Database
+protocol/round-trip paths are unchanged, so DB latency tests were not rerun.
+
+Native screenshots at 760×760 and 1280×760, dark and light, were inspected from
+`target/aurora-review/`. QA uses a synthetic pending query with no DB execution.
+60/120 Hz input-to-present timing, mixed-DPI displays, moving/snapping and monitor
+reconnection were not measured. These screenshots validate layout, not FPS.
+
+The repeatable performance command is:
+
+```sh
+python3 scripts/ui-performance.py --base 1c1688f --connection-activity --runs 7 --output target/aurora-performance
+```
+
+The runner copies the same new toolbar workload into the base revision. It
+measures the actual production toolbar, idle and busy, both themes and viewport
+widths, with 20 warmups and 160 measured frames, including first-use and a
+simulated 30-second idle gap. Raw CPU layout/tessellation p50/p95/p99/max and frame
+samples are retained with environment metadata in the output directory.
+
+Measured on Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile,
+default headless scale (native captures at 2×). Builds and benchmarks ran
+serially. After an edge-case geometry adjustment, the candidate was rebuilt;
+measurement resumed using the runner's unchanged helpers and the retained
+baseline binary. The first seven-pair batch passed every busy case but had two
+inconclusive idle light-theme cases. A second seven-pair batch with the same
+binaries passed all eight cases, with the unchanged 10% threshold. Both batches
+are retained; the following table reports the second batch's medians of per-run
+CPU timings, in milliseconds (p50 / p95 / p99 / maximum).
+
+| Width / theme / state | Base | Aurora | p95 change |
+| --- | --- | --- | ---: |
+| 1280 / light / idle | 0.015500 / 0.015958 / 0.018417 / 0.019750 | 0.015459 / 0.015916 / 0.018208 / 0.019542 | -0.3% |
+| 1280 / light / busy | 0.023916 / 0.027416 / 0.030209 / 0.030875 | 0.020417 / 0.022958 / 0.025208 / 0.025792 | -16.3% |
+| 1280 / dark / idle | 0.015333 / 0.016042 / 0.019083 / 0.019750 | 0.015375 / 0.016333 / 0.018291 / 0.019542 | +1.8% |
+| 1280 / dark / busy | 0.023958 / 0.027875 / 0.031250 / 0.034833 | 0.020292 / 0.022583 / 0.025708 / 0.026042 | -19.0% |
+| 760 / light / idle | 0.015292 / 0.015833 / 0.018166 / 0.019334 | 0.015333 / 0.016625 / 0.018791 / 0.019666 | +5.0% |
+| 760 / light / busy | 0.019000 / 0.021125 / 0.022042 / 0.023125 | 0.017333 / 0.019667 / 0.022375 / 0.023292 | -6.9% |
+| 760 / dark / idle | 0.013917 / 0.015708 / 0.017500 / 0.017917 | 0.014917 / 0.015542 / 0.017708 / 0.019000 | -1.1% |
+| 760 / dark / busy | 0.019000 / 0.021541 / 0.023750 / 0.024084 | 0.017250 / 0.020000 / 0.022209 / 0.022916 | -7.2% |
+
+Validation: 921 library tests passed in both debug and release (248 ignored),
+and strict all-target QA Clippy passed. Coverage includes bounded geometry,
+rounded-cap containment, motion, and restoration of the idle bar without ongoing
+redraws. First-use and after-idle measurements are in the raw logs. These CPU
+measurements are not a claim about native presentation latency or sustained FPS.

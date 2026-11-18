@@ -140,6 +140,12 @@ impl Rustable {
                 let result_count = std::env::var("RUSTABLE_QUERY_RESULT_COUNT")
                     .ok().and_then(|value| value.parse().ok()).unwrap_or(8);
                 let mut app = fixture(&cc.egui_ctx, if assist { 0 } else { result_count });
+                if std::env::var_os("RUSTABLE_LOADING_CAPTURE").is_some() {
+                    app.pending = Some(Pending::Query(0));
+                    app.started = Instant::now() - std::time::Duration::from_secs(3);
+                    #[cfg(unix)]
+                    app.offer_matrix();
+                }
                 if assist {
                     app.tabs[0].sql = "SELECT *\nFROM customers\n\tWHERE EXISTS ".into();
                     let end = app.tabs[0].sql.chars().count();

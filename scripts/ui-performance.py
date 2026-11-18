@@ -154,11 +154,16 @@ def main():
     parser.add_argument('--redis-vectors', action='store_true', help='Compare vector result controls and exercise new input workloads')
     parser.add_argument('--redis-tools', action='store_true', help='Include shared Redis diagnostics and topology workloads')
     parser.add_argument('--postgres-connections', action='store_true', help='Compare only the PostgreSQL connection form at two sizes')
+    parser.add_argument('--connection-activity', action='store_true', help='Compare only idle and busy connection toolbar CPU rendering')
     parser.add_argument('--base', required=True, help='Git revision to compare against')
     parser.add_argument('--output', default='target/ui-performance')
     parser.add_argument('--runs', type=int, default=5)
     args = parser.parse_args()
     global BENCHMARKS
+    if args.connection_activity:
+        BENCHMARKS = ('connection_activity_frame_benchmark',)
+        EXPECTED.clear()
+        EXPECTED.update(f'connection/activity/{w}/{d}/{b}' for w in (760, 1280) for d in ('true', 'false') for b in ('true', 'false'))
     if args.postgres_connections:
         BENCHMARKS = ('postgres_connection_profile_frame_benchmark', 'postgres_tls_menu_frame_benchmark')
         EXPECTED.clear()
@@ -238,6 +243,15 @@ def main():
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
+            if args.connection_activity:
+                fixture = root / 'src' / 'connection_activity_benchmark.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                source = base_path / 'src' / 'app.rs'
+                text = source.read_text()
+                if 'include!("connection_activity_benchmark.rs");' not in text:
+                    source.write_text(text.replace('mod interaction_tests {', 'mod interaction_tests {\n    include!("connection_activity_benchmark.rs");', 1))
+                metadata['connection_activity_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.pending_rows:
                 fixture = root / 'src' / 'insert_row_benchmark.rs'
                 shutil.copy2(fixture, base_path / 'src' / fixture.name)

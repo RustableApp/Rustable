@@ -2973,15 +2973,12 @@ impl Rustable {
             return;
         }
         let painter = ui.painter().with_clip_rect(rect);
-        let background = if self.pending.is_some() {
-            Color32::from_rgb(
-                (f32::from(fill.r()) * 0.65) as u8,
-                (f32::from(fill.g()) * 0.65) as u8,
-                (f32::from(fill.b()) * 0.65) as u8,
-            )
-        } else {
-            fill
-        };
+        let active = self.pending.is_some();
+        let dark = ui.visuals().dark_mode;
+        let ink = if active { if dark { Color32::from_rgb(226, 239, 252) } else { Color32::from_rgb(24, 43, 70) } } else { ink };
+        let background = if active {
+            if dark { Color32::from_rgb(14, 27, 46) } else { Color32::from_rgb(226, 237, 249) }
+        } else { fill };
         painter.rect_filled(rect, rect.height() / 2.0, background);
         if self.pending.is_some() {
             // Query totals and network throughput are unknown here. Animate a
@@ -8236,67 +8233,44 @@ fn primary_pressed(response: &egui::Response) -> bool {
             .input(|input| input.pointer.button_pressed(egui::PointerButton::Primary))
 }
 
-// Full-height moving blocks are an indeterminate busy indicator. Clip their
-// geometry to the connection pill itself, not just its rectangular bounds.
-fn paint_connection_activity(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    seconds: f32,
-    ink: Color32,
-) {
-    for points in connection_activity_blocks(rect, seconds) {
-        painter.add(egui::Shape::convex_polygon(
-            points,
-            ink.gamma_multiply(0.12),
-            Stroke::NONE,
-        ));
-    }
+// Bounded, softly shaded ribbons: activity, never a completion percentage.
+fn paint_connection_activity(painter: &egui::Painter, rect: egui::Rect, seconds: f32, ink: Color32) {
+    let dark = ink.intensity() > 0.6;
+    painter.add(egui::Shape::mesh(connection_activity_mesh(rect, seconds, dark)));
 }
 
-fn connection_activity_blocks(rect: egui::Rect, seconds: f32) -> Vec<Vec<egui::Pos2>> {
-    if !rect.is_positive() || !seconds.is_finite() {
-        return Vec::new();
-    }
-    let radius = 13.0_f32.min(rect.height() / 2.0).min(rect.width() / 2.0);
-    let gap = 2.0_f32.min(rect.height() / 8.0);
-    let size = (rect.height() - gap * 3.0) / 4.0;
-    let period = size + gap;
-    let patch = (rect.width() * 0.38).max(period * 4.0).min(rect.width());
-    // A moving patch of small squares indicates activity, not completion. Its
-    // size never grows with elapsed time or guessed query progress.
-    let cycle = rect.width() + patch;
-    let offset = (seconds * 80.0).rem_euclid(cycle);
-    let patch_left = rect.left() + offset - patch;
-    let mut left = rect.left() + (offset % period) - period;
-    let mut blocks = Vec::new();
-    let edge = |x: f32| {
-        let distance = (rect.left() + radius - x)
-            .max(x - (rect.right() - radius))
-            .max(0.0);
-        radius - (radius * radius - distance * distance).max(0.0).sqrt()
+fn connection_activity_mesh(rect: egui::Rect, seconds: f32, dark: bool) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    if rect.width() < 28.0 || rect.height() < 12.0 || !seconds.is_finite() { return mesh; }
+    let segments = ((rect.width() / 12.0).ceil() as usize).clamp(12, 96);
+    let height = rect.height().min(rect.width());
+    let colors = if dark {
+        [Color32::from_rgb(54, 214, 245), Color32::from_rgb(154, 128, 255), Color32::from_rgb(92, 172, 255)]
+    } else {
+        [Color32::from_rgb(0, 120, 160), Color32::from_rgb(111, 68, 190), Color32::from_rgb(24, 103, 190)]
     };
-    while left < rect.right() {
-        let start = left.max(rect.left()).max(patch_left);
-        let end = (left + size).min(rect.right()).min(patch_left + patch);
-        if end > start {
-            // Conservative clipping keeps every corner inside the pill caps.
-            let inset = edge(start).max(edge(end));
-            for row in 0..4 {
-                let top = (rect.top() + row as f32 * period).max(rect.top() + inset);
-                let bottom = (rect.top() + row as f32 * period + size).min(rect.bottom() - inset);
-                if bottom > top {
-                    blocks.push(vec![
-                        egui::pos2(start, top),
-                        egui::pos2(end, top),
-                        egui::pos2(end, bottom),
-                        egui::pos2(start, bottom),
-                    ]);
-                }
+    for (band, color) in colors.into_iter().enumerate() {
+        let start = mesh.vertices.len() as u32;
+        for step in 0..=segments {
+            let u = step as f32 / segments as f32;
+            let phase = u * std::f32::consts::TAU * 1.25 - seconds * 0.85 + band as f32 * 2.1;
+            let envelope = (u * std::f32::consts::PI).sin().max(0.0);
+            let y = rect.center().y + height * (0.22 * phase.sin() + 0.08 * (phase * 1.7 + seconds * 0.4).cos());
+            let x = egui::lerp((rect.left()+13.0)..=(rect.right()-13.0), u);
+            // A traveling light crest within each ribbon, not a growing fill.
+            let crest = ((u * 9.0 - seconds * 1.4 + band as f32).cos() * 0.5 + 0.5).powi(8);
+            let strength = envelope * (0.20 + crest * 0.48);
+            let half = height * 0.14;
+            for (offset, alpha) in [(-half, 0.0), (0.0, strength), (half, 0.0)] {
+                mesh.colored_vertex(egui::pos2(x, y+offset), color.gamma_multiply(alpha));
+            }
+            if step > 0 {
+                let i = start + (step as u32 - 1) * 3;
+                for row in 0..2 { mesh.add_triangle(i+row, i+row+3, i+row+1); mesh.add_triangle(i+row+1, i+row+3, i+row+4); }
             }
         }
-        left += period;
     }
-    blocks
+    mesh
 }
 
 pub(crate) fn clipboard_button(ui: &mut egui::Ui) -> egui::Response {
@@ -9042,6 +9016,7 @@ fn arrow_button(ui: &mut egui::Ui, descending: bool, label: &str) -> egui::Respo
 
 #[cfg(test)]
 mod interaction_tests {
+    include!("connection_activity_benchmark.rs");
     include!("grid_selection_benchmark.rs");
     use super::*;
     fn key(key: egui::Key) -> egui::Event {
@@ -9108,32 +9083,47 @@ mod interaction_tests {
     }
 
     #[test]
-    fn connection_activity_covers_height_and_stays_inside_rounded_bar() {
-        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(700.0, 27.0));
-        let first = connection_activity_blocks(rect, 2.0);
-        let moved = connection_activity_blocks(rect, 2.5);
-        assert_ne!(first, moved);
-        assert!(first.iter().flatten().any(|point| point.y == rect.top()));
-        assert!(first.iter().flatten().any(|point| point.y == rect.bottom()));
-        assert!(
-            first
-                .iter()
-                .all(|points| points[1].x - points[0].x <= 5.251
-                    && points[2].y - points[1].y <= 5.251),
-            "matrix must contain small cells, not full-height stripes"
-        );
-        for points in first.iter().chain(moved.iter()) {
-            for point in points {
-                assert!(rect.contains(*point));
-                let center_x = point.x.clamp(rect.left() + 13.0, rect.right() - 13.0);
-                let center_y = point.y.clamp(rect.top() + 13.0, rect.bottom() - 13.0);
-                assert!(
-                    point.distance(egui::pos2(center_x, center_y)) <= 13.001,
-                    "block escapes rounded capsule: {point:?}"
-                );
+    fn connection_activity_disappears_and_repainting_settles_when_work_finishes() {
+        let ctx = egui::Context::default();
+        let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+        app.pending = Some(Pending::Query(0));
+        for frame in 0..40 {
+            if frame == 10 { app.pending = None; }
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 760.0))),
+                time: Some(frame as f64), ..Default::default()
+            }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.connection_status(ui));
+            });
+            let ribbons = output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Mesh(mesh) if mesh.vertices.len() > 100));
+            if frame == 9 { assert!(ribbons); }
+            if frame == 39 {
+                assert!(!ribbons, "finished work must restore the ordinary connection pill");
+                assert!(output.viewport_output.values().all(|v| v.repaint_delay > std::time::Duration::from_secs(1)), "idle activity must not request redraws");
             }
         }
-        assert!(connection_activity_blocks(rect, f32::NAN).is_empty());
+    }
+
+    #[test]
+    fn connection_activity_is_bounded_animated_and_inside_capsule() {
+        for width in [1.0, 28.0, 140.0, 700.0, 4000.0] {
+            let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(width, 32.0));
+            for dark in [false, true] {
+                let first = connection_activity_mesh(rect, 2.0, dark);
+                let moved = connection_activity_mesh(rect, 2.5, dark);
+                assert!(first.vertices.len() <= 873);
+                assert!(first.is_valid());
+                if width >= 28.0 { assert_ne!(first.vertices, moved.vertices); }
+                for vertex in first.vertices.iter().chain(&moved.vertices) {
+                    assert!(rect.contains(vertex.pos));
+                    let radius = width.min(32.0)/2.0;
+                    let x = vertex.pos.x.clamp(rect.left()+radius, rect.right()-radius);
+                    let y = vertex.pos.y.clamp(rect.top()+radius, rect.bottom()-radius);
+                    assert!(vertex.pos.distance(egui::pos2(x, y)) <= radius+0.001);
+                }
+            }
+        }
+        assert!(connection_activity_mesh(egui::Rect::EVERYTHING, f32::NAN, true).vertices.is_empty());
     }
 
     #[test]
