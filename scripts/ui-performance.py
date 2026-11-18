@@ -143,6 +143,7 @@ def main():
     parser.add_argument('--result-search', action='store_true', help='Compare full scans with cancellation checks and result-search panel navigation')
     parser.add_argument('--change-history', action='store_true', help='Compare staged-edit record, undo and redo CPU with identical large values')
     parser.add_argument('--sql-highlight', action='store_true', help='Compare SQL highlighting, retained job storage and large editor layout')
+    parser.add_argument('--matrix', action='store_true', help='Include Matrix inspection and streamed-edit workloads (Unix; base must support shared-tab edits)')
     parser.add_argument('--query-editor', action='store_true', help='Compare query footer and multiple-result tabs with the same fixture')
     parser.add_argument('--redis', action='store_true', help='Compare the same Redis grid fixture on both revisions')
     parser.add_argument('--redis-connections', action='store_true', help='Include the shared Redis connection profile workload')
@@ -185,6 +186,9 @@ def main():
         BENCHMARKS += ('query_editor_results_frame_benchmark',)
         EXPECTED.add('query/editor-history')
         EXPECTED.update(f'query/editor-results/{count}/{width}' for count, width in ((0,1280),(4,1280),(128,760),(4,500)))
+    if args.matrix:
+        BENCHMARKS += ('matrix_frame_benchmark', 'matrix_stream_edit_frame_benchmark')
+        EXPECTED.update(f'matrix/{case}/{width}' for case in ('inspect', 'stream-edit') for width in (760, 1280))
     if args.redis:
         BENCHMARKS += ('redis_key_grid_frame_benchmark', 'redis_hash_inspector_frame_benchmark', 'redis_string_inspector_frame_benchmark', 'redis_browser_chrome_frame_benchmark')
         EXPECTED.update(('redis/grid', 'redis/hash-inspector', 'redis/string-inspector', 'redis/browser-chrome'))

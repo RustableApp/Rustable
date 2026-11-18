@@ -313,15 +313,6 @@ impl eframe::App for SessionWindows {
         crate::updates::poll();
         let mut quit_requested = consume_quit(ctx) || crate::native_menu::take_requested();
         set_close_confirmation_open(ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == egui::ViewportId::ROOT));
-        #[cfg(unix)]
-        if self.matrix.is_some() && !self.launcher_hidden {
-            egui::TopBottomPanel::top("matrix-launcher").show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.strong("Matrix");
-                    ui.label("Open a SQL connection, then enable AI control in its window.");
-                });
-            });
-        }
         quit_requested |= self.root.render_launcher(ctx);
         #[cfg(all(unix, feature = "qa"))]
         if self.matrix.is_some() { crate::matrix::capture_launcher(ctx); }
@@ -394,6 +385,11 @@ impl eframe::App for SessionWindows {
                     egui::SidePanel::left("database-workspaces").exact_width(92.0).resizable(false)
                         .frame(egui::Frame::new().fill(child_ctx.style().visuals.extreme_bg_color))
                         .show(child_ctx, |ui| {
+                        #[cfg(unix)]
+                        if window.app.as_ref().is_some_and(|app|app.matrix_interaction_locked()) {
+                            ui.visuals_mut().disabled_alpha=0.82;
+                            ui.disable();
+                        }
                         ui.spacing_mut().item_spacing.y = 0.0;
                         for slot in 0..=window.parked.len() {
                             let active = slot == window.active_slot;

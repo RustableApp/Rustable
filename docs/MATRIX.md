@@ -15,8 +15,9 @@ panel and model/provider configuration are still future work.
 ```
 
 The normal connection manager opens. Open the intended connection, choose your
-usual Safe mode setting, then click **Enable AI control** in that connection's
-window. Nothing is exposed to MCP until you enable it. Redis is not supported.
+usual Safe mode setting, then open the **AI** toolbar menu and choose **Enable AI
+control** in that connection’s window. Nothing is exposed to MCP until you enable
+it. Redis is not supported.
 The launcher prints the MCP client configuration for this running process; add
 that configuration to your AI client. It does not execute a scripted tour on
 real connections.
@@ -31,9 +32,12 @@ Example prompt:
 > List the Rustable workspaces I enabled. In the sales connection, explore revenue
 > by product. Open clearly named query tabs and leave a follow-up query I can edit.
 
-Click **Take over** to stop accepting AI commands and request cancellation of an
-active AI query. It does not undo committed writes or automatically roll back a
-transaction. Finish any transaction in the normal editor. You can continue editing
+During an AI edit or query, the connection bar becomes an animated Matrix-style
+**AI is working** indicator. The editor and results remain visible with a muted
+appearance, while background input is disabled. Click **Stop** or press **Esc** to pause AI access
+and request cancellation of an active AI query. The working bar remains until the
+query worker acknowledges cancellation. When idle, use **AI → Pause AI access**.
+It does not undo committed writes or automatically roll back a transaction. Finish any transaction in the normal editor. You can continue editing
 all tabs. Enabling AI again grants a fresh target after takeover; stale requests
 cannot resume automatically. Switching databases, reconnecting, or changing schema
 also revokes the grant. Inactive parked databases are not available through MCP.
@@ -91,13 +95,16 @@ normal user action. Read access is not limited to AI-created tabs anymore.
 
 Progressive editing replaces a specified Unicode character range. The client sends
 useful chunks as it generates SQL; Rustable shows each immediately, marks the
-changed lines and offers **Stop edit** and **Undo AI edit**. Cmd/Ctrl+Z restores the
+changed lines and offers **Stop** in the working bar. **AI → Undo AI edit**
+restores the original after editing stops. Cmd/Ctrl+Z also restores the
 original in one step while preserving earlier editor history. A single workspace
 has one active stream and one latest-edit restoration control. Ordinary editor
 undo retains earlier edits.
 
-Typing in the edited tab, closing it, switching away, or taking over stops the
-stream. Human changes are never silently overwritten or undone. Stopped partial
+While streaming, typing and tab switching are disabled; Stop or Esc returns
+control. Defensive conflict checks also stop the stream if the target text or
+tab changes through another path. Human changes are never silently overwritten
+or undone. Stopped partial
 SQL remains visible for review; stopping does not restore the original unless
 Undo is requested. Running SQL is blocked during a live edit. Finishing an edit
 never executes it; execution requires a separate action with matching SQL. Results
@@ -294,3 +301,101 @@ streaming interaction has no equivalent on the base. Deep pre-existing undo
 histories and very large pre-existing SQL drafts were not benchmarked. Raw new
 workload logs, native captures and test results are retained under
 `target/matrix-shared-edit-review/`; generated artifacts are not committed.
+
+## Matrix activity bar (after `367111d`)
+
+The permanent Matrix control rows are replaced by a compact AI toolbar menu.
+During a streamed edit or an AI-started query, a lightly muted workspace stays
+visible below the existing connection bar, which becomes a green character-rain
+display with readable activity, connection identity, Safe mode and Stop controls.
+Below 1000px, the bar uses the full toolbar width to preserve room for Stop.
+Background typing, shortcuts,
+tab switching and parked-database navigation are disabled. Stop/Esc revokes the
+workspace grant, preserves partial SQL and requests existing worker cancellation;
+a running query keeps the input lock until cancellation completes. The stop-click
+frame stays locked to prevent click-through. Completing work requests one cleanup
+frame. Character rain is bounded to 80 columns with three glyphs each and requests
+frames at 20 Hz only while AI work is active. Eight cached glyph layouts are
+reused, and offscreen characters are skipped. It stops repainting when work ends.
+
+No database driver, SQL execution, metadata or cancellation protocol sequencing
+changed. This adds no database exchanges on cold or warm paths for PostgreSQL,
+MySQL/MariaDB or SQLite. Existing Safe mode and destructive-query confirmation
+paths remain in charge. The PostgreSQL WAN fixture was not rerun for this UI change.
+
+Native QA captures were reviewed at 1280px dark and 760px light, including a live
+MCP streamed edit and the completed, fully interactive editor. Artifacts are in
+`target/matrix-overlay-review/`. These use a disposable SQLite demo, never a user
+database. Native input-to-present timing, 60/120Hz, mixed-DPI and display-management
+checks remain unverified. The currently running user session was left open.
+
+Validation: **887 release library tests passed**, 239 opt-in tests ignored. The
+14 focused Matrix tests and all-targets QA Clippy (`-D warnings`) also pass. Tests
+cover background typing/shortcuts, Stop hit testing, Escape, query cancellation,
+lock release after worker completion, partial-text preservation and repaint
+settling after work ends.
+
+The standard release comparison was started with:
+
+```sh
+python3 scripts/ui-performance.py --base 367111d --query-editor \
+  --output target/matrix-overlay-performance
+```
+
+For the final Matrix design, the exact retained base binary was reused and the
+candidate rebuilt in the same isolated release target. The same script's
+`build`, `measure` and `compare` functions measured seven alternating pairs of
+all 24 standard cases and four Matrix cases, with unchanged fixtures and the
+10% threshold. `--matrix` now includes those four cases for future runs:
+
+```sh
+python3 scripts/ui-performance.py --base 367111d --query-editor --matrix --runs 7
+```
+
+Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile. Matrix workloads
+use 760×760 and 1280×760 headless viewports at default scale, 20 warmups and 160
+measured frames per run, including first use and a time jump before frame 100.
+They include request admission, editor layout and tessellation. Builds and
+benchmarks ran serially with no competing benchmark workloads; normal background
+OS applications remained open. Native captures use 2× scale.
+
+Final median per-run CPU milliseconds (base → candidate):
+
+| Workload | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| Inspect, 760px | .281750 → .278542 | .320166 → .318541 | .350500 → .348084 | .358666 → .363209 |
+| Inspect, 1280px | .326042 → .327417 | .365833 → .368750 | .381666 → .395167 | .403375 → .426125 |
+| Stream edit, 760px | .133958 → .159875 | .186042 → .236417 | .217958 → .245792 | .340708 → .357209 |
+| Stream edit, 1280px | .133292 → .169334 | .187875 → .253583 | .207375 → .279208 | .296667 → .318792 |
+
+The stream-edit p95 increases of **27.1% / 35.0%** are repeatable regressions,
+accepted on this experimental branch for the requested animated ownership display
+and input lock. The cost is **0.050 / 0.066 ms per measured frame**. This is not
+called a pass merely because it fits within a display interval. Investigation
+found unnecessary per-character layout requests and offscreen glyph work; the
+final renderer reuses eight cached layouts and skips invisible glyphs. The
+simpler static indicator avoids the character animation but does not provide the
+chosen design; the earlier floating card obscures toolbar content. The selected
+bar keeps motion within existing chrome and Stop accessible. Animation repaint
+requests stop at completion, so the new effect has no continuing idle animation.
+Read-only inspection passes the existing relative threshold at both sizes.
+
+Median cold stream frames were 1.107 → .704 ms (760px) and .745 → .644 ms
+(1280px); first after simulated idle was .177 → .160 and .141 → .168 ms.
+Worst measured candidate stream-frame stalls across all seven runs were .402 ms
+and .367 ms respectively (cold frames are reported separately).
+
+General UI measurements remain partly **inconclusive**, not a clean performance
+pass. The final repeat using unchanged binaries produced 16 passing cases and
+eight noisy cases: vertical precise scrolling (three metrics), four-result views
+at 1280px and 500px, 200/2000-entry sidebars and the 12-column workspace with
+inspector. Their median p95 changes ranged from −0.8% to +3.3%, but paired spread
+exceeded the unchanged noise limit. No general case met the repeatable-regression
+criterion; this does not establish equivalence for the noisy cases.
+
+Raw results, environment, source patch and execution recipe are retained in
+`target/matrix-bar-performance-final/`, including both general runs. Earlier
+measurements remain in `target/matrix-bar-performance/` and
+`target/matrix-overlay-performance/`. These are CPU checks, not GPU presentation,
+input-to-display latency or sustained FPS. The native checks listed above remain
+unverified; no performance thresholds or fixtures were weakened.

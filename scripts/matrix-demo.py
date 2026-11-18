@@ -130,7 +130,7 @@ try:
         client.stdin.close()
         client.wait(timeout=5)
         client = None
-        print('Tour complete. Click Take over and continue in any query tab. Close the window to finish.', flush=True)
+        print('Tour complete. Continue editing; the AI toolbar menu has access and undo controls. Close the window to finish.', flush=True)
     if args.exit_after_tour:
         app.terminate()
     app.wait()

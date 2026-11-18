@@ -660,6 +660,8 @@ impl Rustable {
         requests
     }
     pub(crate) fn manager_shortcut(&mut self, ctx: &egui::Context) {
+        #[cfg(unix)]
+        if self.matrix_interaction_locked() { return; }
         if crate::session_windows::close_confirmation_open(ctx) { return; }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
             if self.child_window {
@@ -2290,6 +2292,8 @@ impl Rustable {
     }
 
     fn dialog_owns_workspace_shortcuts(&self) -> bool {
+        #[cfg(unix)]
+        if self.matrix_interaction_locked() { return true; }
         self.query_monitor.open || self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
             || self.destructive_confirm.is_some() || self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some()
             || (self.rename.is_some() && !self.rename_inline)
@@ -2298,6 +2302,8 @@ impl Rustable {
     }
 
     fn workspace_shortcuts(&mut self, ctx: &egui::Context) {
+        #[cfg(unix)]
+        if self.matrix_interaction_locked() { return; }
         if self.close_table_confirmation.is_some() || crate::session_windows::close_confirmation_open(ctx) { return; }
         // Import windows own the keyboard, including their first visible frame.
         if self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.csv_preview.is_some() || self.csv_review.is_some() || self.sidebar_export.is_some() {
@@ -2877,6 +2883,11 @@ impl Rustable {
         let width = (ui.available_width() - right_controls - ui.spacing().item_spacing.x).max(1.0);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::click());
+        #[cfg(unix)]
+        if self.matrix_interaction_locked() {
+            self.matrix_working_bar(ui.ctx(), rect);
+            return;
+        }
         let painter = ui.painter().with_clip_rect(rect);
         let background = if self.pending.is_some() {
             Color32::from_rgb(
@@ -3114,13 +3125,25 @@ Right-click to inspect or remove individual changes",
         egui::TopBottomPanel::top(egui::Id::new((ctx.viewport_id(), "toolbar")))
             .exact_height(44.0)
             .show(ctx, |ui| {
-                if self.dialog_owns_workspace_shortcuts() { ui.disable(); }
+                if self.dialog_owns_workspace_shortcuts() {
+                    #[cfg(unix)]
+                    if self.matrix_interaction_locked() { ui.visuals_mut().disabled_alpha=0.82; }
+                    ui.disable();
+                }
                 ui.add_space(4.0);
+                #[cfg(unix)]
+                if self.matrix_interaction_locked() && ctx.content_rect().width() < 1000.0 {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::hover());
+                    self.matrix_working_bar(ctx, rect);
+                    return;
+                }
                 if ctx.content_rect().width() < 720.0 {
                     ui.horizontal(|ui| {
                         if ui.selectable_label(self.compact_panel == 1, "Items").clicked() { self.compact_panel = if self.compact_panel == 1 { 0 } else { 1 }; }
                         if ui.button("SQL").on_hover_text("Open SQL editor").clicked() { self.compact_panel = 0; self.open_sql(); }
                         if ui.selectable_label(self.compact_panel == 2, "Inspector").clicked() { self.compact_panel = if self.compact_panel == 2 { 0 } else { 2 }; }
+                        #[cfg(unix)]
+                        self.matrix_toolbar(ui);
                         ui.menu_button("More", |ui| {
                             if ui.button("Find anything").clicked() { self.open_navigator(false); ui.close(); }
                             if ui.button(if cfg!(target_arch = "wasm32") { "Open SQLite copy…" } else { "Open SQLite…" }).clicked() { self.file_dialog(ctx, false); ui.close(); }
@@ -3166,6 +3189,8 @@ Right-click to inspect or remove individual changes",
                     self.connection_status(ui);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
+                        #[cfg(unix)]
+                        self.matrix_toolbar(ui);
                         let activity_before = self.prefs.activity_visible;
                         pane_toggles::show(
                             ui,
@@ -3218,7 +3243,11 @@ Right-click to inspect or remove individual changes",
             .default_width(if compact { width } else { 220.0 })
             .width_range(if compact { width..=width } else { 160.0..=360.0 })
             .show(ctx, |ui| {
-                if self.dialog_owns_workspace_shortcuts() { ui.disable(); }
+                if self.dialog_owns_workspace_shortcuts() {
+                    #[cfg(unix)]
+                    if self.matrix_interaction_locked() { ui.visuals_mut().disabled_alpha=0.82; }
+                    ui.disable();
+                }
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
@@ -3454,7 +3483,11 @@ Right-click to inspect or remove individual changes",
             .default_width(if compact { width } else { 240.0 })
             .width_range(if compact { width..=width } else { 190.0..=420.0 })
             .show(ctx, |ui| {
-                if self.dialog_owns_workspace_shortcuts() { ui.disable(); }
+                if self.dialog_owns_workspace_shortcuts() {
+                    #[cfg(unix)]
+                    if self.matrix_interaction_locked() { ui.visuals_mut().disabled_alpha=0.82; }
+                    ui.disable();
+                }
                 ui.set_min_width(ui.available_width());
                 ui.add_space(4.0);
                 if self.view == View::Indexes {
@@ -3654,7 +3687,11 @@ Right-click to inspect or remove individual changes",
         let dialog_open = self.dialog_owns_workspace_shortcuts();
         if self.view != View::Data || dialog_open { self.focus_page_grid = false; }
         egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).inner_margin(0)).show(ctx, |ui| {
-            if dialog_open { ui.disable(); }
+            if dialog_open {
+                #[cfg(unix)]
+                if self.matrix_interaction_locked() { ui.visuals_mut().disabled_alpha=0.82; }
+                ui.disable();
+            }
             self.activity_panel(ui);
             let mut close = None;
             let active = (self.view == View::Query, if self.view == View::Query { self.tabs[self.tab].id } else { self.active_table_tab.unwrap_or(0) });
@@ -4152,6 +4189,8 @@ Right-click to inspect or remove individual changes",
     }
 
     fn workspace_tab_shortcuts(&mut self, ctx: &egui::Context) {
+        #[cfg(unix)]
+        if self.matrix_interaction_locked() { return; }
         if self.connections
             || self.review.is_some()
             || self.history

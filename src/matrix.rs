@@ -23,6 +23,7 @@ pub(crate) struct Bridge {
     pub activity: String,
     pub owned: std::collections::HashSet<u64>,
     pub running_tab: Option<u64>,
+    pub frame_locked: bool,
     pub edit: Option<Box<crate::app::matrix_edit::Edit>>,
 }
 
@@ -50,6 +51,7 @@ impl Bridge {
             activity: "AI control is off for this connection".into(),
             owned: Default::default(),
             running_tab: None,
+            frame_locked: false,
             edit: None,
         }
     }
@@ -63,7 +65,7 @@ pub(crate) fn definitions() -> Value {
     let tools = [
         (
             "list_workspaces",
-            "List only active SQL workspaces explicitly enabled by the user. Open a connection in Rustable and click Enable AI control if this is empty. Workspace IDs change after takeover or connection/schema changes; never substitute a different workspace automatically.",
+            "List only active SQL workspaces explicitly enabled by the user. Open a connection in Rustable and choose AI > Enable AI control if this is empty. Workspace IDs change after takeover or connection/schema changes; never substitute a different workspace automatically.",
             json!({}),
         ),
         (
@@ -207,6 +209,7 @@ pub(crate) fn listen(path: &std::path::Path, ctx: eframe::egui::Context) -> Resu
         activity: "Ready for your AI client".into(),
         owned: Default::default(),
         running_tab: None,
+        frame_locked: false,
         edit: None,
     })
 }

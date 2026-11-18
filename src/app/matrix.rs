@@ -216,52 +216,187 @@ impl Rustable {
         {
             edit.streaming = false;
         }
-        let mut take_over = false;
-        let mut undo_edit = None;
-        let mut stop_edit = false;
-        egui::TopBottomPanel::top("matrix-control").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.strong("Matrix");
-                ui.weak(if bridge.demo { "Disposable demo" } else { "This workspace" });
-                ui.label(if self.safe_mode_active() { "Safe mode on" } else { "Writes allowed" });
-                ui.separator();
-                ui.label(if bridge.enabled {
-                    bridge.activity.as_str()
-                } else {
-                    "You have control · AI paused"
-                });
-                if bridge.enabled {
-                    if ui.button("Take over").clicked() {
-                        take_over = true;
-                    }
-                } else if ui.add_enabled(self.supports_safe_mode() && self.pending.is_none()
-                    && !self.worker.transaction_state().blocks_replacement(), egui::Button::new("Enable AI control"))
-                    .on_hover_text("Allow the connected MCP client to read and edit open SQL tabs, read data, and run SQL in this connection. SQL uses this connection’s existing privileges. Safe mode and normal confirmations still apply. Finish active work or transactions first.").clicked() {
-                    bridge.enabled = true;
-                    bridge.activity = "Ready for your AI client".into();
-                }
-            });
-            if let Some(edit) = &bridge.edit {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(if edit.conflict { "Your changes kept · AI edit stopped" }
-                        else if edit.streaming { "AI is editing SQL…" }
-                        else if edit.finished { "AI edit complete" } else { "AI edit stopped" });
-                    ui.weak(format!("{} characters changed", edit.inserted_chars));
-                    if edit.streaming && ui.button("Stop edit").clicked() { stop_edit = true; }
-                    if ui.add_enabled(!edit.conflict && self.pending.is_none(), egui::Button::new("Undo AI edit")).clicked() { undo_edit = Some(edit.id); }
-                });
-            }
-        });
-        if stop_edit && let Some(edit) = &mut bridge.edit {
-            edit.streaming = false;
-        }
-        if let Some(id) = undo_edit {
-            let _ =
-                self.continue_matrix_edit(&mut bridge, "revert_query_edit", &json!({"edit_id":id}));
+        let was_locked = bridge.frame_locked;
+        bridge.frame_locked =
+            self.matrix_running(&bridge) || bridge.edit.as_ref().is_some_and(|edit| edit.streaming);
+        if was_locked && !bridge.frame_locked {
+            ctx.request_repaint();
         }
         self.matrix = Some(bridge);
-        if take_over {
+        self.matrix_working_input(ctx);
+    }
+
+    /// Also holds the stop-click frame so that input cannot fall through onto
+    /// newly re-enabled editor controls under the overlay.
+    pub(crate) fn matrix_interaction_locked(&self) -> bool {
+        self.matrix.as_ref().is_some_and(|bridge| {
+            bridge.frame_locked
+                || self.matrix_running(bridge)
+                || bridge.edit.as_ref().is_some_and(|e| e.streaming)
+        })
+    }
+
+    pub(super) fn matrix_toolbar(&mut self, ui: &mut egui::Ui) {
+        let Some(bridge) = &self.matrix else { return };
+        let enabled = bridge.enabled;
+        let demo = bridge.demo;
+        let response = ui
+            .add(
+                egui::Button::new(egui::RichText::new("AI").strong())
+                    .selected(enabled)
+                    .min_size(egui::vec2(32.0, 28.0)),
+            )
+            .on_hover_text(if enabled {
+                "AI controls · access enabled"
+            } else {
+                "AI controls · access paused"
+            });
+        egui::Popup::menu(&response).show(|ui| {
+            ui.set_min_width(220.0);
+            ui.strong(if demo { "AI workspace · demo" } else { "AI workspace" });
+            ui.label(if enabled { "Ready for AI requests" } else { "You have control" });
+            ui.weak(if self.safe_mode_active() { "Safe mode on" } else { "Connection allows writes" });
+            ui.separator();
+            if enabled {
+                if ui.button("Pause AI access").clicked() { self.pause_matrix(false); ui.close(); }
+            } else if ui.add_enabled(self.supports_safe_mode() && self.pending.is_none()
+                && !self.worker.transaction_state().blocks_replacement(),egui::Button::new("Enable AI control"))
+                .on_hover_text("Allow the connected MCP client to read and edit SQL tabs and run SQL using this connection’s privileges. Safe mode and confirmations still apply.").clicked() {
+                let bridge=self.matrix.as_mut().unwrap();
+                bridge.enabled=true;
+                bridge.activity="Ready for your AI client".into();
+                ui.close();
+            }
+            if let Some(edit)=self.matrix.as_ref().and_then(|b|b.edit.as_ref()) {
+                let id=edit.id;
+                let can_undo=!edit.conflict && self.pending.is_none();
+                ui.separator();
+                ui.weak(if edit.conflict { "Your changes preserved" } else if edit.finished { "Last AI edit complete" } else { "Last AI edit stopped" });
+                if ui.add_enabled(can_undo,egui::Button::new("Undo AI edit")).clicked() {
+                    let mut bridge=self.matrix.take().unwrap();
+                    let _=self.continue_matrix_edit(&mut bridge,"revert_query_edit",&json!({"edit_id":id}));
+                    self.matrix=Some(bridge);
+                    ui.close();
+                }
+            }
+        });
+    }
+
+    fn matrix_working_input(&mut self, ctx: &egui::Context) {
+        if !self.matrix_interaction_locked() {
+            return;
+        }
+        let stopping = !self.matrix.as_ref().unwrap().enabled;
+        let escape =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        // Custom editor/search shortcuts also read raw events outside widget
+        // responses. Keep pointer events for Stop; swallow editing/navigation.
+        ctx.input_mut(|input| {
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                        | egui::Event::Copy
+                        | egui::Event::Cut
+                        | egui::Event::Key { .. }
+                        | egui::Event::MouseWheel { .. }
+                        | egui::Event::Zoom(_)
+                        | egui::Event::Rotate(_)
+                        | egui::Event::Ime(_)
+                        | egui::Event::Touch { .. }
+                )
+            });
+        });
+        if !stopping && escape {
             self.pause_matrix(false);
+            ctx.request_repaint();
+        }
+    }
+
+    /// The ordinary connection pill becomes the only interactive surface while
+    /// AI owns the workspace. Keep it on the modal layer, not in the disabled toolbar.
+    pub(super) fn matrix_working_bar(&mut self, ctx: &egui::Context, rect: egui::Rect) {
+        let bridge = self.matrix.as_ref().unwrap();
+        let stopping = !bridge.enabled;
+        let editing = bridge.edit.as_ref().is_some_and(|edit| edit.streaming);
+        let title = if stopping {
+            "Stopping AI…"
+        } else if editing {
+            "AI is working · Editing SQL"
+        } else {
+            "AI is working · Running query"
+        };
+        let style = self.active_connection_style();
+        let identity = format!(
+            "{} · {} · {} · {}",
+            style.environment.to_uppercase(),
+            if self.safe_mode_active() {
+                "SAFE MODE"
+            } else {
+                "WRITES ALLOWED"
+            },
+            self.engine,
+            self.active_connection_name()
+        );
+        let id = egui::Id::new((ctx.viewport_id(), "matrix-working"));
+        let area = egui::Area::new(id)
+            .kind(egui::UiKind::Modal)
+            .sense(egui::Sense::hover())
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min);
+        let dark = ctx.style().visuals.dark_mode;
+        let mut stop = false;
+        egui::Modal::new(id).area(area).frame(egui::Frame::NONE)
+            .backdrop_color(if dark { Color32::from_black_alpha(18) } else { Color32::from_white_alpha(22) })
+            .show(ctx, |ui| {
+                let (bar, response) = ui.allocate_exact_size(rect.size(), egui::Sense::hover());
+                response.on_hover_text(format!("{title}\n{identity}\nStop or Esc returns control; running queries wait for cancellation."));
+                let painter = ui.painter().with_clip_rect(bar);
+                let background = if dark { Color32::from_rgb(18, 43, 33) } else { Color32::from_rgb(222, 240, 229) };
+                let ink = if dark { Color32::from_rgb(223, 248, 233) } else { Color32::from_rgb(20, 64, 41) };
+                painter.rect_filled(bar, 12.0, background);
+                let heading = painter.layout_no_wrap(title.into(),egui::FontId::monospace(12.0),ink);
+                let detail = painter.layout_no_wrap(identity.clone(),egui::FontId::monospace(11.0),ink.gamma_multiply(0.85));
+                let text_end = bar.left()+heading.size().x.max(detail.size().x)+23.0;
+                let time = ctx.input(|input| input.time) as f32;
+                // Bounded, deterministic glyph rain; no random allocations, SQL,
+                // or network activity. Only animate while AI work is active.
+                // Shape each glyph once; reuse its cached galley for the field.
+                let glyphs = ["0", "1", "{", "}", ";", "<", ">", ":"].map(|glyph|
+                    painter.layout_no_wrap(glyph.into(),egui::FontId::monospace(11.0),Color32::PLACEHOLDER));
+                let columns = ((bar.width() - 16.0) / 15.0).floor().clamp(0.0, 80.0) as usize;
+                let rain = painter.with_clip_rect(egui::Rect::from_min_max(
+                    egui::pos2(text_end,bar.top()+1.0),egui::pos2(bar.right()-72.0,bar.bottom()-1.0)));
+                for col in 0..columns {
+                    let x = bar.left()+10.0+col as f32*15.0;
+                    if x < text_end || x > bar.right()-72.0 { continue; }
+                    let head = (time * (18.0 + (col % 5) as f32 * 3.0) + col as f32 * 19.0)
+                        .rem_euclid(bar.height() + 36.0) - 18.0;
+                    for trail in 0..3 {
+                        let glyph = &glyphs[(col + trail) % glyphs.len()];
+                        let y = bar.top()+head-trail as f32*11.0;
+                        if y+glyph.size().y < bar.top() || y > bar.bottom() { continue; }
+                        rain.galley(egui::pos2(x-glyph.size().x/2.0,y),glyph.clone(),
+                            (if dark { Color32::from_rgb(92, 224, 151) } else { Color32::from_rgb(25, 122, 66) }).gamma_multiply(0.55 - trail as f32*0.15));
+                    }
+                }
+                let button = egui::Rect::from_min_max(
+                    egui::pos2(bar.right()-65.0,bar.top()+2.0),bar.max-egui::vec2(7.0,2.0));
+                let text = egui::Rect::from_min_max(bar.min+egui::vec2(11.0,0.0),egui::pos2(button.left()-8.0,bar.bottom()));
+                let label = painter.with_clip_rect(text);
+                // Keep the animated field separate from the labels and Stop.
+                label.galley(text.left_top()+egui::vec2(0.0,1.0),heading,ink);
+                label.galley(text.left_bottom()-egui::vec2(0.0,detail.size().y+1.0),detail,ink);
+                stop = ui.add_enabled_ui(!stopping, |ui| ui.put(button,egui::Button::new("Stop")))
+                    .inner.on_hover_text("Stop AI work · Esc").clicked();
+            });
+        if stop {
+            self.pause_matrix(false);
+            ctx.request_repaint();
+        }
+        if !stopping {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
 
@@ -481,6 +616,7 @@ mod tests {
                 activity: String::new(),
                 owned: Default::default(),
                 running_tab: None,
+                frame_locked: false,
                 edit: None,
             },
         )
@@ -735,10 +871,10 @@ mod tests {
     }
 
     #[test]
-    fn matrix_takeover_button_cancels_work_and_leaves_query_editable() {
+    fn matrix_stop_overlay_cancels_work_and_leaves_query_editable() {
         fn text_rect(shape: &egui::Shape) -> Option<egui::Rect> {
             match shape {
-                egui::Shape::Text(text) if text.galley.text() == "Take over" => {
+                egui::Shape::Text(text) if text.galley.text() == "Stop" => {
                     Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
                 }
                 egui::Shape::Vec(shapes) => shapes.iter().find_map(text_rect),
@@ -767,7 +903,15 @@ mod tests {
         )
         .unwrap();
         app.matrix = Some(bridge);
-        let output = ctx.run(Default::default(), |ctx| app.matrix_frame(ctx));
+        // Floating areas need their first layout pass before hit testing.
+        let _ = ctx.run(Default::default(), |ctx| {
+            app.matrix_frame(ctx);
+            app.toolbar(ctx);
+        });
+        let output = ctx.run(Default::default(), |ctx| {
+            app.matrix_frame(ctx);
+            app.toolbar(ctx);
+        });
         let pos = output
             .shapes
             .iter()
@@ -793,13 +937,103 @@ mod tests {
                 ],
                 ..Default::default()
             },
-            |ctx| app.matrix_frame(ctx),
+            |ctx| {
+                app.matrix_frame(ctx);
+                app.toolbar(ctx);
+            },
         );
         assert!(!app.matrix.as_ref().unwrap().enabled);
+        assert!(app.matrix_interaction_locked());
         wait(&mut app);
+        let _ = ctx.run(Default::default(), |ctx| {
+            app.matrix_frame(ctx);
+            app.toolbar(ctx);
+        });
+        assert!(!app.matrix_interaction_locked());
         assert!(app.tabs[app.tab].result_error.is_some());
         assert_eq!(app.tabs[app.tab].sql, sql);
         assert!(app.tabs[app.tab].open);
+    }
+
+    #[test]
+    fn matrix_overlay_blocks_background_input_and_escape_stops_cleanly() {
+        let (mut app, mut bridge) = fixture();
+        app.view = View::Query;
+        app.tabs[0].open = true;
+        app.tabs[0].sql = "SELECT 1".into();
+        let tab = app.tabs[0].id;
+        let old_workspace = bridge.id;
+        app.matrix_action(
+            &mut bridge,
+            "begin_query_edit",
+            &json!({"tab_id":tab,"expected_sql":"SELECT 1","start":7,"end":8}),
+        )
+        .unwrap();
+        app.matrix = Some(bridge);
+        let ctx = egui::Context::default();
+        let count = app.tabs.len();
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(760.0, 760.0),
+                )),
+                events: vec![
+                    egui::Event::Text("unwanted".into()),
+                    egui::Event::Paste("pasted".into()),
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::COMMAND,
+                    },
+                    egui::Event::Key {
+                        key: egui::Key::N,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::COMMAND,
+                    },
+                ],
+                ..Default::default()
+            },
+            |ctx| {
+                app.matrix_frame(ctx);
+                app.manager_shortcut(ctx);
+                app.workspace_shortcuts(ctx);
+                app.workspace_tab_shortcuts(ctx);
+                app.toolbar(ctx);
+                app.workspace(ctx);
+            },
+        );
+        assert!(app.matrix_interaction_locked());
+        assert_eq!(app.tabs[0].sql, "SELECT 1");
+        assert_eq!(app.tabs.len(), count);
+        assert!(app.pending.is_none() && !app.manager_requested && !app.connections);
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+                ..Default::default()
+            },
+            |ctx| app.matrix_frame(ctx),
+        );
+        let bridge = app.matrix.as_ref().unwrap();
+        assert!(!bridge.enabled && !bridge.edit.as_ref().unwrap().streaming);
+        assert_ne!(bridge.id, old_workspace);
+        assert!(
+            app.matrix_interaction_locked(),
+            "Stop cannot click through in the same frame"
+        );
+        let _ = ctx.run(Default::default(), |ctx| app.matrix_frame(ctx));
+        assert!(!app.matrix_interaction_locked());
+        assert_eq!(app.tabs[0].sql, "SELECT 1");
     }
 
     #[test]
@@ -813,7 +1047,10 @@ mod tests {
                     time: Some(index as f64),
                     ..Default::default()
                 },
-                |ctx| app.matrix_frame(ctx),
+                |ctx| {
+                    app.matrix_frame(ctx);
+                    app.toolbar(ctx);
+                },
             );
             if index == 19 {
                 assert!(
@@ -850,7 +1087,10 @@ mod tests {
                     time: Some(index as f64),
                     ..Default::default()
                 },
-                |ctx| app.matrix_frame(ctx),
+                |ctx| {
+                    app.matrix_frame(ctx);
+                    app.toolbar(ctx);
+                },
             );
             if index == 19 {
                 assert!(
@@ -870,6 +1110,29 @@ mod tests {
                 .unwrap()
                 .streaming
         );
+        app.pause_matrix(false);
+        for index in 20..40 {
+            let output = ctx.run(
+                egui::RawInput {
+                    time: Some(index as f64),
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.matrix_frame(ctx);
+                    app.toolbar(ctx);
+                },
+            );
+            if index == 39 {
+                assert!(!app.matrix_interaction_locked());
+                assert!(
+                    output
+                        .viewport_output
+                        .values()
+                        .all(|v| v.repaint_delay > std::time::Duration::from_millis(100)),
+                    "Matrix animation must stop with the edit"
+                );
+            }
+        }
     }
 
     #[test]
