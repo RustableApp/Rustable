@@ -3,20 +3,25 @@
 import argparse
 import json
 import pathlib
+import os
 import shutil
 import subprocess
 import tempfile
 import time
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--fixture-tour', action='store_true', help='QA-only tour against RUSTABLE_MATRIX_FIXTURE')
+parser.add_argument('--connections', action='store_true', help='Open the real connection manager; no scripted queries')
 parser.add_argument('--binary', default='target/debug/rustable')
 parser.add_argument('--exit-after-tour', action='store_true', help='Exit after verification (for QA)')
 parser.add_argument('--no-tour', action='store_true', help='Launch the workspace without scripted actions')
 args = parser.parse_args()
+if args.fixture_tour and not (args.connections and os.environ.get('RUSTABLE_MATRIX_FIXTURE') and os.environ.get('RUSTABLE_MATRIX_CAPTURE')):
+    parser.error('--fixture-tour requires --connections and the explicit QA fixture/capture environment')
 binary = str(pathlib.Path(args.binary).resolve())
 directory = tempfile.mkdtemp(prefix='rustable-matrix-')
 socket = str(pathlib.Path(directory) / 'workspace.sock')
-app = subprocess.Popen([binary, 'matrix', '--socket', socket])
+app = subprocess.Popen([binary, 'matrix' if args.connections else 'matrix-demo', '--socket', socket])
 client = None
 try:
     for _ in range(200):
@@ -30,7 +35,7 @@ try:
     print('MCP client configuration for this running window:', flush=True)
     print(json.dumps({'mcpServers': {'rustable-matrix': {'command': binary,
           'args': ['mcp', '--socket', socket]}}}, indent=2), flush=True)
-    if not args.no_tour:
+    if not args.no_tour and (not args.connections or args.fixture_tour):
         client = subprocess.Popen([binary, 'mcp', '--socket', socket], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, text=True, bufsize=1)
         sequence = 0
@@ -46,7 +51,10 @@ try:
                 raise RuntimeError(response['error'])
             return response['result']
 
+        workspace_id = None
         def call(name, arguments):
+            if workspace_id is not None and name != 'list_workspaces':
+                arguments = dict(arguments, workspace_id=workspace_id)
             result = rpc('tools/call', {'name': name, 'arguments': arguments})
             if result.get('isError'):
                 raise RuntimeError(result['content'][0]['text'])
@@ -54,6 +62,14 @@ try:
 
         rpc('initialize', {'protocolVersion': '2024-11-05', 'capabilities': {},
                            'clientInfo': {'name': 'matrix-scripted-tour', 'version': '1'}})
+        for _ in range(100):
+            workspaces = call('list_workspaces', {})['workspaces']
+            if workspaces:
+                workspace_id = workspaces[0]['workspace_id']
+                break
+            time.sleep(0.1)
+        if workspace_id is None:
+            raise TimeoutError('No enabled workspace appeared; enable AI control in the intended window')
         for _ in range(100):
             if not call('workspace', {})['busy']:
                 break

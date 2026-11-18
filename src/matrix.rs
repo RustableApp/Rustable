@@ -1,4 +1,4 @@
-//! Experimental MCP transport into a live, disposable desktop workspace.
+//! Experimental MCP transport into a live desktop workspaces.
 //! All IO runs off the UI thread. Commands expire before admission; execution
 //! returns immediately and clients inspect the same results the user sees.
 use serde_json::{Value, json};
@@ -16,17 +16,55 @@ pub(crate) struct Request {
     pub reply: mpsc::SyncSender<Result<Value, String>>,
 }
 pub(crate) struct Bridge {
-    pub requests: mpsc::Receiver<Request>,
+    pub requests: Option<mpsc::Receiver<Request>>,
+    pub id: u64,
+    pub demo: bool,
     pub enabled: bool,
     pub activity: String,
     pub owned: std::collections::HashSet<u64>,
 }
 
+impl Bridge {
+    pub(crate) fn next_id() -> u64 {
+        use ring::rand::SecureRandom;
+        static NEXT: std::sync::OnceLock<std::sync::atomic::AtomicU64> = std::sync::OnceLock::new();
+        NEXT.get_or_init(|| {
+            let mut bytes = [0u8; 8];
+            ring::rand::SystemRandom::new()
+                .fill(&mut bytes)
+                .expect("workspace ID entropy");
+            // A different process must not reuse stale IDs, and JSON clients
+            // must preserve integers exactly (stay below JavaScript's 2^53).
+            std::sync::atomic::AtomicU64::new(u64::from_le_bytes(bytes) & ((1u64 << 52) - 1))
+        })
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+    pub(crate) fn window() -> Self {
+        Self {
+            requests: None,
+            id: Self::next_id(),
+            demo: false,
+            enabled: false,
+            activity: "AI control is off for this connection".into(),
+            owned: Default::default(),
+        }
+    }
+    pub(crate) fn revoke(&mut self) {
+        self.enabled = false;
+        self.id = Self::next_id();
+    }
+}
+
 pub(crate) fn definitions() -> Value {
     let tools = [
         (
+            "list_workspaces",
+            "List only active SQL workspaces explicitly enabled by the user. Open a connection in Rustable and click Enable AI control if this is empty. Workspace IDs change after takeover or connection/schema changes; never substitute a different workspace automatically.",
+            json!({}),
+        ),
+        (
             "workspace",
-            "Inspect the live demo connection, visible query tabs and catalog (up to 200 objects).",
+            "Inspect the selected live connection, visible query tabs and catalog (up to 200 objects).",
             json!({}),
         ),
         (
@@ -55,7 +93,8 @@ pub(crate) fn definitions() -> Value {
             json!({}),
         ),
     ];
-    Value::Array(tools.into_iter().map(|(name, description, properties)| {
+    Value::Array(tools.into_iter().map(|(name, description, mut properties)| {
+        if name != "list_workspaces" { properties["workspace_id"] = json!({"type":"integer","description":"Exact workspace ID returned by list_workspaces. Never guess or silently switch targets."}); }
         let required: Vec<_> = properties.as_object().unwrap().keys().cloned().collect();
         json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})
     }).collect())
@@ -137,7 +176,9 @@ pub(crate) fn listen(path: &std::path::Path, ctx: eframe::egui::Context) -> Resu
         }
     });
     Ok(Bridge {
-        requests,
+        requests: Some(requests),
+        id: Bridge::next_id(),
+        demo: true,
         enabled: true,
         activity: "Ready for your AI client".into(),
         owned: Default::default(),
@@ -184,14 +225,14 @@ pub fn client(path: &std::path::Path) -> i32 {
 
         let result = match request["method"].as_str() {
             Some("initialize") => {
-                json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"rustable-matrix","version":env!("CARGO_PKG_VERSION")},"instructions":"You control a visible Rustable demo workspace. Start with workspace, open named query tabs, then run and inspect them. Query tools return immediately; wait before polling. The user can take over at any time. Never claim a query succeeded until inspect_query confirms it. Only use this disposable demo."})
+                json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"rustable-matrix","version":env!("CARGO_PKG_VERSION")},"instructions":"You control explicitly enabled SQL workspaces in Rustable. Start with list_workspaces and use the exact workspace_id on every action. Open named query tabs, then run and inspect them. Query tools return immediately; wait before polling. The user can take over at any time. Never claim a query succeeded until inspect_query confirms it. Never automatically replay a write with an unknown commit outcome. Never choose a different workspace when a target disappears. Credentials stay in Rustable. Safe mode and user confirmations govern writes; inspect the workspace before executing."})
             }
             Some("ping") => json!({}),
             Some("tools/list") => json!({"tools":definitions()}),
             Some("tools/call") => {
                 let result = (|| -> Result<Value, String> {
                     let mut stream = UnixStream::connect(path)
-                        .map_err(|e| format!("Open the Matrix demo first: {e}"))?;
+                        .map_err(|e| format!("Open Rustable with Matrix enabled first: {e}"))?;
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .map_err(|e| e.to_string())?;
@@ -233,6 +274,46 @@ pub fn client(path: &std::path::Path) -> i32 {
     }
 }
 
+/// Capture the manager banner once in an explicit fixture run.
+#[cfg(feature = "qa")]
+pub(crate) fn capture_launcher(ctx: &eframe::egui::Context) {
+    let Some(prefix) = std::env::var_os("RUSTABLE_MATRIX_CAPTURE") else {
+        return;
+    };
+    if std::env::var_os("RUSTABLE_MATRIX_FIXTURE").is_none() {
+        return;
+    }
+    let key = eframe::egui::Id::new("matrix-launcher-capture");
+    let stage = ctx.data(|d| d.get_temp::<u8>(key).unwrap_or(0));
+    if stage == 0 {
+        ctx.data_mut(|d| d.insert_temp(key, 1u8));
+        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Screenshot(Default::default()));
+        ctx.request_repaint();
+    } else if stage == 1 {
+        let image = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                eframe::egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            ctx.data_mut(|d| d.insert_temp(key, 2u8));
+            std::thread::spawn(move || {
+                let mut bytes =
+                    format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+                for pixel in &image.pixels {
+                    bytes.extend_from_slice(&pixel.to_array()[..3]);
+                }
+                std::fs::write(
+                    format!("{}-manager.ppm", std::path::PathBuf::from(prefix).display()),
+                    bytes,
+                )
+                .expect("write manager capture");
+            });
+        }
+    }
+}
+
 /// Native rendering QA: capture the completed scripted tour without OS automation.
 #[cfg(feature = "qa")]
 pub(crate) struct Capture {
@@ -245,6 +326,10 @@ pub(crate) struct Capture {
 impl eframe::App for Capture {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
         self.app.update(ctx, frame);
+        if std::env::var_os("RUSTABLE_MATRIX_FIXTURE").is_some() {
+            self.app.matrix_fixture_capture(ctx);
+            return;
+        }
         if self
             .saved
             .as_ref()

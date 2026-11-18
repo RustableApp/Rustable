@@ -1,4 +1,7 @@
 //! Native session windows. Only the root owns saved connection metadata/storage.
+#[cfg(unix)]
+#[path = "matrix_windows.rs"]
+mod matrix_windows;
 use crate::{app::Rustable, connection::PostgresConfig};
 use eframe::egui;
 use std::path::PathBuf;
@@ -120,7 +123,10 @@ impl SessionWindow {
     fn switch_workspace(&mut self, index: usize) {
         let target = self.parked.remove(index);
         let next_slot = index + usize::from(index >= self.active_slot);
-        if let Some(previous) = self.app.replace(target) {
+        #[allow(unused_mut)]
+        if let Some(mut previous) = self.app.replace(target) {
+            #[cfg(unix)]
+            previous.pause_matrix(false);
             let previous_slot = self.active_slot - usize::from(next_slot < self.active_slot);
             self.parked.insert(previous_slot, previous);
         }
@@ -160,6 +166,8 @@ impl SessionWindow {
 }
 
 pub struct SessionWindows {
+    #[cfg(unix)]
+    matrix: Option<crate::matrix::Bridge>,
     #[cfg(not(target_arch = "wasm32"))]
     crash_prompt: Option<crate::crash_log::CrashPrompt>,
     root: Rustable,
@@ -178,6 +186,8 @@ impl SessionWindows {
         crate::scroll_response::install(&cc.egui_ctx);
         crate::updates::initialize(&cc.egui_ctx);
         Self {
+            #[cfg(unix)]
+            matrix: None,
             #[cfg(not(target_arch = "wasm32"))]
             crash_prompt: crate::crash_log::CrashPrompt::load(),
             window_sizes: cc.storage.and_then(|storage| eframe::get_value(storage, "connection-window-sizes")).unwrap_or_default(),
@@ -303,7 +313,18 @@ impl eframe::App for SessionWindows {
         crate::updates::poll();
         let mut quit_requested = consume_quit(ctx) || crate::native_menu::take_requested();
         set_close_confirmation_open(ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == egui::ViewportId::ROOT));
+        #[cfg(unix)]
+        if self.matrix.is_some() && !self.launcher_hidden {
+            egui::TopBottomPanel::top("matrix-launcher").show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong("Matrix");
+                    ui.label("Open a SQL connection, then enable AI control in its window.");
+                });
+            });
+        }
         quit_requested |= self.root.render_launcher(ctx);
+        #[cfg(all(unix, feature = "qa"))]
+        if self.matrix.is_some() { crate::matrix::capture_launcher(ctx); }
         if !self.launcher_hidden { crate::ssh_prompt::show(ctx); }
         #[cfg(not(target_arch = "wasm32"))]
         if self.crash_prompt.as_mut().is_some_and(|prompt| prompt.show(ctx)) {
@@ -311,6 +332,8 @@ impl eframe::App for SessionWindows {
         }
         let mut shared_changed = self.root.publish_shared_preferences();
         let opened_window = self.collect_requests();
+        #[cfg(unix)]
+        self.poll_matrix(ctx);
         let had_windows = !self.windows.is_empty();
         let mut closed_database = false;
         let root_close_requested = ctx.input(|input| input.viewport().close_requested());
@@ -347,7 +370,12 @@ impl eframe::App for SessionWindows {
                         window.switch_workspace(index);
                     } else {
                         let target = Box::new(self.root.new_window(child_ctx, request));
-                        if let Some(previous) = window.app.replace(target) { window.parked.insert(window.active_slot, previous); }
+                        #[allow(unused_mut)]
+                        if let Some(mut previous) = window.app.replace(target) {
+                            #[cfg(unix)]
+                            previous.pause_matrix(false);
+                            window.parked.insert(window.active_slot, previous);
+                        }
                         window.active_slot = window.parked.len();
                     }
                 }
@@ -356,6 +384,8 @@ impl eframe::App for SessionWindows {
                     app.manager_shortcut(child_ctx);
                     self.root.sync_window_preferences(app);
                     self.root.sync_window_profile(app);
+                    #[cfg(unix)]
+                    if self.matrix.is_some() { app.offer_matrix(); }
                     app.begin_workspace_frame(child_ctx);
                 }
                 let mut switch = None;
@@ -416,6 +446,10 @@ impl eframe::App for SessionWindows {
                 if self.root.sync_window_profile(app) { child_ctx.request_repaint(); }
                 set_close_confirmation_open(child_ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == window.id));
                 app.render_workspace_frame(child_ctx);
+                #[cfg(all(unix, feature = "qa"))]
+                if self.matrix.is_some() && window.id == egui::ViewportId::from_hash_of("matrix-fixture") {
+                    app.grant_matrix_fixture(child_ctx);
+                }
                 if self.launcher_hidden { crate::ssh_prompt::show(child_ctx); }
                 if app.has_connection() && window.title != app.active_connection_name() {
                     window.title = app.active_connection_name().to_owned();
@@ -599,9 +633,11 @@ mod launcher_tests {
         }
     }
 
-    fn test_manager(ctx: &egui::Context) -> SessionWindows {
+    pub(super) fn test_manager(ctx: &egui::Context) -> SessionWindows {
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         SessionWindows {
+            #[cfg(unix)]
+            matrix: None,
             #[cfg(not(target_arch = "wasm32"))]
             crash_prompt: None,
             root: Rustable::new(&cc), windows: vec![], next_id: 1,

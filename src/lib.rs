@@ -144,6 +144,11 @@ fn application_icon() -> eframe::egui::IconData {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_native() -> eframe::Result {
+    run_native_mode(#[cfg(unix)] None)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_native_mode(#[cfg(unix)] matrix_socket: Option<std::path::PathBuf>) -> eframe::Result {
     #[cfg(feature = "qa")]
     if std::env::var_os("RUSTABLE_NATIVE_PROFILE").is_some() {
         return session_windows::native_performance::run();
@@ -213,7 +218,15 @@ pub fn run_native() -> eframe::Result {
             vsync: true,
             ..Default::default()
         },
-        Box::new(|cc| Ok(Box::new(session_windows::SessionWindows::new(cc)))),
+        Box::new(move |cc| {
+            #[allow(unused_mut)]
+            let mut windows = session_windows::SessionWindows::new(cc);
+            #[cfg(unix)]
+            if let Some(path) = matrix_socket {
+                windows.attach_matrix(matrix::listen(&path, cc.egui_ctx.clone()).map_err(std::io::Error::other)?);
+            }
+            Ok(Box::new(windows))
+        }),
     )
 }
 
@@ -250,9 +263,15 @@ mod redis_value_editor;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod redis_vector_benchmark;
 
-/// Experimental single-window workspace on a disposable in-memory database.
+/// Open the normal connection manager with opt-in Matrix controls.
 #[cfg(unix)]
 pub fn run_matrix(path: std::path::PathBuf) -> eframe::Result {
+    run_native_mode(Some(path))
+}
+
+/// Standalone disposable workspace used by the scripted tour.
+#[cfg(unix)]
+pub fn run_matrix_demo(path: std::path::PathBuf) -> eframe::Result {
     eframe::run_native(
         "Rustable Matrix Experiment",
         eframe::NativeOptions {
@@ -267,7 +286,16 @@ pub fn run_matrix(path: std::path::PathBuf) -> eframe::Result {
             let bridge =
                 matrix::listen(&path, cc.egui_ctx.clone()).map_err(std::io::Error::other)?;
             let mut app = app::Rustable::new_demo(cc);
+            #[cfg(feature = "qa")]
+            if let Some(fixture) = std::env::var_os("RUSTABLE_MATRIX_FIXTURE") {
+                app = app.new_window(&cc.egui_ctx, session_windows::WindowRequest {
+                    recover_sql: false, identity: None, title: "Matrix SQLite fixture".into(),
+                    connection: session_windows::WindowConnection::Sqlite(fixture.into()),
+                });
+            }
             app.attach_matrix(bridge);
+            #[cfg(feature = "qa")]
+            if std::env::var_os("RUSTABLE_MATRIX_FIXTURE").is_some() { app.prepare_matrix_fixture_capture(); }
             #[cfg(feature = "qa")]
             if let Some(path) = std::env::var_os("RUSTABLE_MATRIX_CAPTURE") {
                 cc.egui_ctx

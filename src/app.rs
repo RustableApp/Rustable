@@ -1,3 +1,6 @@
+#[cfg(all(test, unix))]
+#[path = "app/matrix_connections_tests.rs"]
+mod matrix_connections_tests;
 #[cfg(unix)]
 mod matrix;
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "qa")))]
@@ -1287,6 +1290,8 @@ impl Rustable {
         #[cfg(target_arch = "wasm32")]
         if matches!(command, Command::Open(None)) { self.worker.restart_if_failed(); }
         if command.replaces_connection() || matches!(command, Command::SelectSchema(_)) {
+            #[cfg(unix)]
+            self.pause_matrix(true);
             self.sidebar_selection = Default::default();
             self.sidebar_export = None;
             self.sidebar_export_epoch = self.sidebar_export_epoch.wrapping_add(1);

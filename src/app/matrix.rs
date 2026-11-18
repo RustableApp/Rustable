@@ -12,8 +12,166 @@ impl Rustable {
             && !self.tabs[self.tab].results.is_empty()
     }
 
+    #[cfg(feature = "qa")]
+    pub(crate) fn prepare_matrix_fixture_capture(&mut self) {
+        let bridge = self.matrix.as_mut().unwrap();
+        bridge.demo = false;
+        bridge.enabled = false;
+    }
+
+    #[cfg(feature = "qa")]
+    pub(crate) fn grant_matrix_fixture(&mut self, ctx: &egui::Context) {
+        let key = egui::Id::new((ctx.viewport_id(), "matrix-fixture-granted"));
+        if self.pending.is_none()
+            && self.engine == "SQLite"
+            && !ctx.data(|d| d.get_temp::<bool>(key).unwrap_or(false))
+        {
+            ctx.data_mut(|d| d.insert_temp(key, true));
+            if let Some(bridge) = &mut self.matrix {
+                bridge.enabled = true;
+            }
+        }
+    }
+
+    /// QA-only native capture of a real SQLite connection, including opt-in state.
+    #[cfg(feature = "qa")]
+    pub(crate) fn matrix_fixture_capture(&mut self, ctx: &egui::Context) {
+        let Some(prefix) = std::env::var_os("RUSTABLE_MATRIX_CAPTURE") else {
+            return;
+        };
+        if self.pending.is_some() || self.matrix.is_none() {
+            return;
+        }
+        let key = egui::Id::new((ctx.viewport_id(), "matrix-fixture-capture"));
+        let mut stage = ctx.data(|d| d.get_temp::<u8>(key).unwrap_or(0));
+        let image = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            let suffix = if stage == 1 { "disabled" } else { "active" };
+            let path = format!(
+                "{}-{suffix}.ppm",
+                std::path::PathBuf::from(&prefix).display()
+            );
+            std::thread::spawn(move || {
+                let mut bytes =
+                    format!("P6\n{} {}\n255\n", image.width(), image.height()).into_bytes();
+                for pixel in &image.pixels {
+                    bytes.extend_from_slice(&pixel.to_array()[..3]);
+                }
+                std::fs::write(path, bytes).expect("write Matrix fixture capture");
+            });
+            if stage == 1 {
+                assert_eq!(self.engine, "SQLite");
+                self.safe = true;
+                self.inspector = false;
+                self.matrix.as_mut().unwrap().enabled = true;
+                stage = 2;
+                ctx.request_repaint();
+            } else {
+                stage = 4;
+            }
+        }
+        if stage == 0 || (stage == 2 && self.matrix_capture_ready()) {
+            stage += 1;
+            ctx.request_repaint();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        ctx.data_mut(|d| d.insert_temp(key, stage));
+    }
+
     pub(crate) fn attach_matrix(&mut self, bridge: crate::matrix::Bridge) {
         self.inspector = false;
+        self.matrix = Some(bridge);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn grant_matrix_for_test(&mut self) {
+        assert!(self.supports_safe_mode() && self.pending.is_none());
+        self.matrix.as_mut().unwrap().enabled = true;
+    }
+
+    pub(crate) fn offer_matrix(&mut self) {
+        if self.matrix.is_none() && self.redis_workspace.is_none() {
+            self.matrix = Some(crate::matrix::Bridge::window());
+        }
+    }
+
+    pub(crate) fn matrix_id(&self) -> Option<u64> {
+        self.matrix.as_ref().map(|bridge| bridge.id)
+    }
+
+    pub(crate) fn matrix_summary(&self) -> Option<Json> {
+        let bridge = self.matrix.as_ref().filter(|bridge| bridge.enabled)?;
+        self.supports_safe_mode().then(|| json!({"workspace_id":bridge.id,
+            "connection":self.active_connection_name().chars().take(200).collect::<String>(),
+            "engine":self.engine,"database":self.connected_database,"schema":self.schemas.selected,
+            "safe_mode":self.safe_mode_active(),"production":self.is_production(),"busy":self.pending.is_some()}))
+    }
+
+    pub(crate) fn pause_matrix(&mut self, changed_connection: bool) {
+        if let Some(mut bridge) = self.matrix.take() {
+            if self.matrix_running(&bridge) {
+                self.worker.cancel();
+            }
+            if self
+                .destructive_confirm
+                .as_ref()
+                .is_some_and(|run| bridge.owned.contains(&run.tab_id))
+            {
+                self.destructive_confirm = None;
+            }
+            bridge.revoke();
+            if changed_connection {
+                bridge.owned.clear();
+            }
+            bridge.activity = if changed_connection {
+                "Connection or schema changed · AI control is off"
+            } else {
+                "You have control · AI paused"
+            }
+            .into();
+            self.matrix = Some(bridge);
+        }
+    }
+
+    pub(crate) fn handle_matrix(&mut self, request: crate::matrix::Request) {
+        let Some(mut bridge) = self.matrix.take() else {
+            let _ = request
+                .reply
+                .try_send(Err("AI control is unavailable in this workspace".into()));
+            return;
+        };
+        let result = if request.expires < std::time::Instant::now() {
+            Err("Request expired before execution".into())
+        } else if request.name == "list_workspaces" {
+            if bridge.enabled && self.supports_safe_mode() {
+                Ok(
+                    json!({"workspaces":[{"workspace_id":bridge.id,"connection":self.active_connection_name(),"engine":self.engine,"safe_mode":self.safe_mode_active()}]}),
+                )
+            } else {
+                Ok(json!({"workspaces":[]}))
+            }
+        } else if request.arguments["workspace_id"].as_u64() != Some(bridge.id) {
+            Err("Workspace target expired or changed. Ask the user to enable the intended workspace and list it again; do not switch targets automatically.".into())
+        } else if !bridge.enabled {
+            Err("The user took over. Ask them to enable AI control in this window.".into())
+        } else {
+            self.matrix_action(&mut bridge, &request.name, &request.arguments)
+        };
+        if !matches!(
+            request.name.as_str(),
+            "workspace" | "inspect_query" | "list_workspaces"
+        ) {
+            bridge.activity = match &result {
+                Ok(_) => format!("AI · {}", request.name.replace('_', " ")),
+                Err(error) => format!("Paused · {}", error.chars().take(100).collect::<String>()),
+            };
+        }
+        let _ = request.reply.try_send(result);
         self.matrix = Some(bridge);
     }
 
@@ -30,29 +188,22 @@ impl Rustable {
                 "Query complete · ready for the next step".into()
             };
         }
-        // One bounded request per frame; wakeups come from the transport.
-        if let Ok(request) = bridge.requests.try_recv() {
-            let result = if request.expires < std::time::Instant::now() {
-                Err("Request expired before execution".into())
-            } else if !bridge.enabled {
-                Err("The user took over. Ask them to enable AI control in the window.".into())
-            } else {
-                self.matrix_action(&mut bridge, &request.name, &request.arguments)
-            };
-            if !matches!(request.name.as_str(), "workspace" | "inspect_query") {
-                bridge.activity = match &result {
-                    Ok(_) => format!("AI · {}", request.name.replace('_', " ")),
-                    Err(error) => {
-                        format!("Paused · {}", error.chars().take(100).collect::<String>())
-                    }
-                };
-            }
-            let _ = request.reply.try_send(result);
+        // Demo hosts read directly; real windows receive explicitly routed requests.
+        let request = bridge
+            .requests
+            .as_ref()
+            .and_then(|requests| requests.try_recv().ok());
+        if let Some(request) = request {
+            self.matrix = Some(bridge);
+            self.handle_matrix(request);
+            bridge = self.matrix.take().expect("handler restores controls");
         }
+        let mut take_over = false;
         egui::TopBottomPanel::top("matrix-control").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Matrix");
-                ui.weak("Experimental · disposable demo");
+                ui.weak(if bridge.demo { "Disposable demo" } else { "This workspace" });
+                ui.label(if self.safe_mode_active() { "Safe mode on" } else { "Writes allowed" });
                 ui.separator();
                 ui.label(if bridge.enabled {
                     bridge.activity.as_str()
@@ -61,25 +212,20 @@ impl Rustable {
                 });
                 if bridge.enabled {
                     if ui.button("Take over").clicked() {
-                        bridge.enabled = false;
-                        if self.matrix_running(&bridge) {
-                            self.worker.cancel();
-                        }
-                        if self
-                            .destructive_confirm
-                            .as_ref()
-                            .is_some_and(|run| bridge.owned.contains(&run.tab_id))
-                        {
-                            self.destructive_confirm = None;
-                        }
+                        take_over = true;
                     }
-                } else if ui.button("Enable AI control").clicked() {
+                } else if ui.add_enabled(self.supports_safe_mode() && self.pending.is_none()
+                    && !self.worker.transaction_state().blocks_replacement(), egui::Button::new("Enable AI control"))
+                    .on_hover_text("Allow the connected MCP client to read data and run SQL in this connection. SQL uses this connection’s existing privileges. Safe mode and normal confirmations still apply. Finish active work or transactions first.").clicked() {
                     bridge.enabled = true;
                     bridge.activity = "Ready for your AI client".into();
                 }
             });
         });
         self.matrix = Some(bridge);
+        if take_over {
+            self.pause_matrix(false);
+        }
     }
 
     fn matrix_running(&self, bridge: &crate::matrix::Bridge) -> bool {
@@ -92,12 +238,8 @@ impl Rustable {
         name: &str,
         args: &Json,
     ) -> Result<Json, String> {
-        if self.has_connection()
-            && (self.engine != "SQLite" || self.label != "Studio demo · in memory")
-        {
-            return Err(
-                "Matrix is limited to the disposable studio demo in this experiment.".into(),
-            );
+        if !self.supports_safe_mode() {
+            return Err("Open a SQLite, PostgreSQL, MySQL or MariaDB connection first.".into());
         }
         fn text<'a>(args: &'a Json, key: &str) -> Result<&'a str, String> {
             let value = args[key]
@@ -109,11 +251,29 @@ impl Rustable {
             Ok(value)
         }
         if name == "workspace" {
+            let mut tables = Vec::new();
+            let mut remaining = 48 * 1024;
+            for object in self.objects.iter().take(200) {
+                let table = json!({"name":object.name.chars().take(256).collect::<String>(),
+                    "kind":object.kind,"columns":object.columns.iter().take(50)
+                        .map(|column|column.name.chars().take(128).collect::<String>()).collect::<Vec<_>>(),
+                    "columns_truncated":object.columns.len() > 50});
+                let size = table.to_string().len();
+                if size > remaining {
+                    break;
+                }
+                remaining -= size;
+                tables.push(table);
+            }
             return Ok(
-                json!({"connection": self.active_connection_name(), "engine":self.engine,
+                json!({"workspace_id":bridge.id,"connection":self.active_connection_name().chars().take(200).collect::<String>(),
+                "engine":self.engine,"database":self.connected_database,"schema":self.schemas.selected,
+                "production":self.is_production(),"transaction_state":self.worker.transaction_state(),
                 "busy":self.pending.is_some(), "safe_mode":self.safe_mode_active(),
-                "tabs":self.tabs.iter().filter(|t| t.open).take(50).map(|t|json!({"id":t.id,"title":t.source_name,"ai_owned":bridge.owned.contains(&t.id)})).collect::<Vec<_>>(),
-                "tables":self.objects.iter().take(200).map(|o|json!({"name":o.name,"kind":o.kind,"columns":o.columns.iter().take(50).map(|c| &c.name).collect::<Vec<_>>()})).collect::<Vec<_>>() }),
+                "tabs":self.tabs.iter().filter(|t| t.open).take(50).map(|t|json!({"id":t.id,
+                    "title":t.source_name.as_ref().map(|name|name.chars().take(100).collect::<String>()),
+                    "ai_owned":bridge.owned.contains(&t.id)})).collect::<Vec<_>>(),
+                "catalog_truncated":tables.len() < self.objects.len(),"tables":tables}),
             );
         }
         if name == "cancel_query" {
@@ -163,6 +323,9 @@ impl Rustable {
             || self.add_column.is_some()
             || self.alter_column.is_some()
             || self.index_draft.is_some()
+            || self.date_picker.is_some()
+            || self.sidebar_export.is_some()
+            || self.history
         {
             return Err(
                 "Workspace busy or awaiting user input; retry after the user finishes.".into(),
@@ -233,7 +396,9 @@ mod tests {
         (
             app,
             crate::matrix::Bridge {
-                requests,
+                requests: Some(requests),
+                id: crate::matrix::Bridge::next_id(),
+                demo: true,
                 enabled: true,
                 activity: String::new(),
                 owned: Default::default(),
@@ -280,12 +445,12 @@ mod tests {
         for paused in [false, true] {
             let (mut app, mut bridge) = fixture();
             let (send, requests) = mpsc::sync_channel(1);
-            bridge.requests = requests;
+            bridge.requests = Some(requests);
             bridge.enabled = !paused;
             let (reply, receive) = mpsc::sync_channel(1);
             send.send(crate::matrix::Request {
                 name: "open_query".into(),
-                arguments: json!({"title":"x","sql":"SELECT 1"}),
+                arguments: json!({"title":"x","sql":"SELECT 1","workspace_id":bridge.id}),
                 expires: if paused {
                     std::time::Instant::now() + std::time::Duration::from_secs(5)
                 } else {
@@ -462,14 +627,14 @@ mod tests {
             app.tabs[app.tab].grid = grid.clone();
             app.tabs[app.tab].results = vec![grid];
             let (send, requests) = mpsc::sync_channel(1);
-            bridge.requests = requests;
+            bridge.requests = Some(requests);
             app.matrix = Some(bridge);
             let mut samples = Vec::new();
             for index in 0..180 {
                 let (reply, receive) = mpsc::sync_channel(1);
                 send.try_send(crate::matrix::Request {
                     name: "inspect_query".into(),
-                    arguments: json!({"tab_id":tab}),
+                    arguments: json!({"tab_id":tab,"workspace_id":app.matrix.as_ref().unwrap().id}),
                     expires: std::time::Instant::now() + std::time::Duration::from_secs(5),
                     reply,
                 })

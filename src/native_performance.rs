@@ -154,6 +154,8 @@ pub(crate) fn run() -> eframe::Result {
         });
         let sessions = SessionWindows {
             crash_prompt: None, root: Rustable::new(cc), windows: Vec::new(), next_id: 1,
+            #[cfg(unix)]
+            matrix: None,
             launcher_hidden: false, quitting: false, close_confirmation: None, native_menu_installed: false,
             migrate_launcher_size: false, update_save_error: None, window_sizes: Default::default(),
         };
