@@ -2,6 +2,8 @@
 use super::*;
 use serde_json::{Value as Json, json};
 
+pub(super) const TOOLBAR_BUTTON_WIDTH: f32 = 32.0;
+
 impl Rustable {
     #[cfg(feature = "qa")]
     pub(crate) fn matrix_capture_ready(&self) -> bool {
@@ -244,7 +246,7 @@ impl Rustable {
             .add(
                 egui::Button::new(egui::RichText::new("AI").strong())
                     .selected(enabled)
-                    .min_size(egui::vec2(32.0, 28.0)),
+                    .min_size(egui::vec2(TOOLBAR_BUTTON_WIDTH, 28.0)),
             )
             .on_hover_text(if enabled {
                 "AI controls · access enabled"
@@ -388,8 +390,22 @@ impl Rustable {
                 // Keep the animated field separate from the labels and Stop.
                 label.galley(text.left_top()+egui::vec2(0.0,1.0),heading,ink);
                 label.galley(text.left_bottom()-egui::vec2(0.0,detail.size().y+1.0),detail,ink);
-                stop = ui.add_enabled_ui(!stopping, |ui| ui.put(button,egui::Button::new("Stop")))
-                    .inner.on_hover_text("Stop AI work · Esc").clicked();
+                stop = ui.add_enabled_ui(!stopping, |ui| {
+                    let fill = if dark { Color32::from_rgb(183, 241, 205) } else { Color32::from_rgb(24, 92, 56) };
+                    let hover = if dark { Color32::from_rgb(211, 252, 226) } else { Color32::from_rgb(19, 112, 62) };
+                    let text = if dark { Color32::from_rgb(13, 49, 31) } else { Color32::WHITE };
+                    let widgets = &mut ui.visuals_mut().widgets;
+                    for visual in [&mut widgets.inactive, &mut widgets.noninteractive] {
+                        visual.weak_bg_fill = fill;
+                        visual.fg_stroke.color = text;
+                    }
+                    for visual in [&mut widgets.hovered, &mut widgets.active] {
+                        visual.weak_bg_fill = hover;
+                        visual.fg_stroke.color = text;
+                    }
+                    ui.put(button, egui::Button::new(egui::RichText::new("Stop").strong())
+                        .corner_radius(14).stroke(egui::Stroke::NONE))
+                }).inner.on_hover_text("Stop AI work · Esc").clicked();
             });
         if stop {
             self.pause_matrix(false);
@@ -621,6 +637,106 @@ mod tests {
             },
         )
     }
+    #[test]
+    fn matrix_bar_does_not_overlap_toolbar_groups() {
+        fn rectangles(shape: &egui::Shape, out: &mut Vec<egui::epaint::RectShape>) {
+            match shape {
+                egui::Shape::Rect(rect) => out.push(rect.clone()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        rectangles(shape, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for width in [720.0, 760.0, 1000.0, 1280.0, 1920.0] {
+            for dark in [false, true] {
+                for scale in [1.0, 2.0] {
+                    for working in [false, true] {
+                        let ctx = egui::Context::default();
+                        ctx.set_pixels_per_point(scale);
+                        apply_theme(
+                            &ctx,
+                            if dark {
+                                Appearance::Dark
+                            } else {
+                                Appearance::Light
+                            },
+                        );
+                        let (mut app, mut bridge) = fixture();
+                        if working {
+                            app.view = View::Query;
+                            app.tabs[0].open = true;
+                            app.tabs[0].sql = "SELECT 1".into();
+                            let tab = app.tabs[0].id;
+                            app.matrix_action(
+                                &mut bridge,
+                                "begin_query_edit",
+                                &json!({"tab_id":tab,"expected_sql":"SELECT 1","start":7,"end":8}),
+                            )
+                            .unwrap();
+                        }
+                        app.matrix = Some(bridge);
+                        let color = if working {
+                            if dark {
+                                Color32::from_rgb(18, 43, 33)
+                            } else {
+                                Color32::from_rgb(222, 240, 229)
+                            }
+                        } else {
+                            let color = app.active_connection_style().color;
+                            Color32::from_rgb(color[0], color[1], color[2])
+                        };
+                        for frame in 0..3 {
+                            let output = ctx.run(
+                                egui::RawInput {
+                                    screen_rect: Some(egui::Rect::from_min_size(
+                                        egui::Pos2::ZERO,
+                                        egui::vec2(width, 760.0),
+                                    )),
+                                    time: Some(frame as f64),
+                                    ..Default::default()
+                                },
+                                |ctx| {
+                                    app.matrix_frame(ctx);
+                                    app.toolbar(ctx);
+                                },
+                            );
+                            if frame != 2 {
+                                continue;
+                            }
+                            let mut rects = Vec::new();
+                            for shape in output.shapes {
+                                rectangles(&shape.shape, &mut rects);
+                            }
+                            let bar = rects
+                                .iter()
+                                .find(|r| r.fill == color && (r.rect.height() - 32.0).abs() < 0.1)
+                                .expect("connection bar is painted")
+                                .rect;
+                            assert!(
+                                bar.left() >= 0.0 && bar.right() <= width,
+                                "bar outside viewport"
+                            );
+                            for group in rects.iter().filter(|r| {
+                                (r.rect.height() - 32.0).abs() < 0.1
+                                    && r.rect.width() > 50.0
+                                    && r.rect.right() > bar.right() + 0.1
+                            }) {
+                                assert!(
+                                    group.rect.left() >= bar.right() + 5.0,
+                                    "bar overlaps right toolbar: width={width}, dark={dark}, scale={scale}, working={working}, bar={bar:?}, group={:?}",
+                                    group.rect
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn matrix_edits_requested_human_tabs_and_rejects_stale_sql() {
         let (mut app, mut bridge) = fixture();

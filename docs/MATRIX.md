@@ -399,3 +399,45 @@ measurements remain in `target/matrix-bar-performance/` and
 `target/matrix-overlay-performance/`. These are CPU checks, not GPU presentation,
 input-to-display latency or sustained FPS. The native checks listed above remain
 unverified; no performance thresholds or fixtures were weakened.
+
+## Toolbar spacing and Stop emphasis (after `44a8328`)
+
+The connection pill previously reserved only the two original right-hand control
+groups. Adding the AI menu without reserving its width made those controls overlap
+the pill in both idle and working states. The reservation now includes the shared
+32-point AI button width and its 6-point gap. Stop is a fully rounded, bold,
+high-contrast pill: pale mint on the dark bar, deep green on the light bar, with a
+brighter hover/focus treatment from the button interaction visuals.
+
+A rendering-geometry regression test reproduces the old overlap (26 logical
+points at 720px) and now passes for idle/working states, light/dark themes,
+720/760/1000/1280/1920px widths and 1×/2× scale. It compares painted bar and button
+group bounds, not a second copy of the width calculation. The 15 focused Matrix
+tests and all-targets QA Clippy pass. Updated native wide dark and narrow light
+captures, including the completed idle toolbar, are under
+`target/matrix-overlay-review/toolbar-fixed-*`.
+
+Release library suite: **888 passed**, 239 opt-in tests ignored. The four Matrix
+CPU workloads were compared against the retained `44a8328` release binary using
+the same performance runner helpers, unchanged fixtures and 10% threshold, and
+seven alternating pairs. The first inspection run at 760px was noisy/inconclusive;
+a focused repeat with unchanged binaries passes both inspection widths. Both runs
+are retained. Stream-edit cases pass on the original seven-pair run.
+
+Same Apple M4 Max / macOS 27.2.1 arm64 / Rust 1.99.1 release environment, default
+headless scale, 760×760 and 1280×760, 20 warmups and 160 samples per run, including
+the existing first-use/after-idle workloads. Builds and benchmarks ran serially.
+Median per-run CPU milliseconds, base → candidate:
+
+| Workload | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| matrix/inspect/760 | 0.275500 → 0.277542 | 0.290041 → 0.311541 | 0.298208 → 0.328541 | 0.305083 → 0.351000 |
+| matrix/inspect/1280 | 0.327792 → 0.323917 | 0.337917 → 0.355167 | 0.352292 → 0.398625 | 0.390375 → 0.467542 |
+| matrix/stream-edit/760 | 0.156958 → 0.162917 | 0.226667 → 0.246250 | 0.232083 → 0.283833 | 0.350666 → 0.372458 |
+| matrix/stream-edit/1280 | 0.167709 → 0.173708 | 0.236500 → 0.259042 | 0.242125 → 0.275458 | 0.307375 → 0.336916 |
+
+Final p95 increases range from 5.1% to 9.5%; these meet the existing threshold,
+rather than demonstrating zero cost. Raw logs, environment, binary fingerprint,
+source patch and recipe are retained in `target/matrix-toolbar-spacing-performance/`.
+This layout/style correction changes no database exchanges. Native presentation,
+mixed-monitor and 60/120Hz timing checks remain unverified as noted above.

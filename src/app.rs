@@ -2880,6 +2880,10 @@ impl Rustable {
             Color32::WHITE
         };
         let right_controls = crate::icons::toolbar_group_width(3) + crate::icons::toolbar_group_width(2) + 6.0;
+        // The AI menu is a third item in the right-aligned control strip.
+        // Reserve its width and inter-item gap before giving the pill the rest.
+        #[cfg(unix)]
+        let right_controls = right_controls + if self.matrix.is_some() { matrix::TOOLBAR_BUTTON_WIDTH + 6.0 } else { 0.0 };
         let width = (ui.available_width() - right_controls - ui.spacing().item_spacing.x).max(1.0);
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(width, crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::click());
