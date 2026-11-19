@@ -647,6 +647,7 @@ fn collect_into(
         columns,
         ..Default::default()
     };
+    collector.start_stream(&mut grid);
     let mut failure = None;
     while let Some(row) = rows.next().map_err(error)? {
         if cancel.load(Ordering::Relaxed) {
@@ -690,6 +691,7 @@ fn collect(
         columns,
         ..Grid::default()
     };
+    let mut stream = super::progressive::Stream::new(&mut grid);
     let mut bytes = 0usize;
     while let Some(row) = rows.next().map_err(error)? {
         if cancel.load(Ordering::Relaxed) {
@@ -706,6 +708,7 @@ fn collect(
         bytes += values.iter().map(value_size).sum::<usize>();
         super::progress::decoded_row(&values);
         grid.rows.push(values);
+        stream.update(&grid);
     }
     grid.truncated |= rows.truncated();
     grid.affected = rows.rows_affected().unwrap_or(0) as usize;

@@ -26,6 +26,17 @@ struct TableSnapshot {
     foreign_keys: Vec<db::foreign_keys::ForeignKey>,
 }
 impl Rustable {
+    pub(super) fn invalidate_schema_snapshots(&mut self, removed: &std::collections::HashSet<String>) {
+        self.table_tabs.retain(|tab| !removed.contains(&tab.browse.table));
+        for tab in &mut self.table_tabs { tab.snapshot = None; }
+        if self.active_table_tab.is_some_and(|id| !self.table_tabs.iter().any(|tab| tab.id == id)) {
+            self.active_table_tab = None;
+        }
+        self.table_loaded = false;
+        self.details_loaded = false;
+        self.details_requested = false;
+    }
+
     /// Context DDL can invalidate cached data even when a later statement fails.
     /// Mark only affected snapshots stale; reload on revisit, never during review.
     pub(super) fn invalidate_context_table_snapshots(&mut self, names: &[String]) {

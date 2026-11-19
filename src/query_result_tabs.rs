@@ -8,6 +8,10 @@ const GAP: f32 = 4.0;
 
 impl Rustable {
     pub(super) fn query_result_tabs(&mut self, ui: &mut egui::Ui) {
+        if self.tabs[self.tab].grid.fetching {
+            ui.allocate_space(egui::vec2(ui.available_width(), STRIP_HEIGHT));
+            return;
+        }
         let tab = &mut self.tabs[self.tab];
         let count = tab.pins.items.len() + tab.results.len();
         let selected = tab

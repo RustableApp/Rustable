@@ -44,3 +44,22 @@ impl FallibleIterator for RowIter<'_> {
             .block_on(async { it.next().await.transpose() })
     }
 }
+
+/// Streaming text results; no custom-type resolution or retained page buffer.
+pub struct TextRowIter<'a> {
+    connection: ConnectionRef<'a>,
+    it: Pin<Box<tokio_postgres::SimpleQueryStream>>,
+}
+impl<'a> TextRowIter<'a> {
+    pub(crate) fn new(connection: ConnectionRef<'a>, stream: tokio_postgres::SimpleQueryStream) -> Self {
+        Self { connection, it: Box::pin(stream) }
+    }
+}
+impl FallibleIterator for TextRowIter<'_> {
+    type Item = tokio_postgres::SimpleQueryMessage;
+    type Error = Error;
+    fn next(&mut self) -> Result<Option<Self::Item>, Error> {
+        let it = &mut self.it;
+        self.connection.block_on(async { it.next().await.transpose() })
+    }
+}

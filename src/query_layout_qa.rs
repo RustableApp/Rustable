@@ -112,6 +112,7 @@ impl Rustable {
                 } else {
                     self.app.toolbar(ctx);
                 }
+                if !self.app.prefs.sidebar_hidden { self.app.sidebar(ctx); }
                 self.app.workspace(ctx);
                 if self.frame == if self.assist { 8 } else { 3 } {
                     if self.assist {
@@ -145,6 +146,13 @@ impl Rustable {
                 let result_count = std::env::var("RUSTABLE_QUERY_RESULT_COUNT")
                     .ok().and_then(|value| value.parse().ok()).unwrap_or(8);
                 let mut app = fixture(&cc.egui_ctx, if assist { 0 } else { result_count });
+                if std::env::var_os("RUSTABLE_SCHEMA_CAPTURE").is_some() {
+                    app.prefs.sidebar_hidden = false;
+                    app.objects = ["customers", "orders", "events"].into_iter().map(|name| Object {
+                        name: name.into(), schema: None, display_name: None, metadata_error: None,
+                        columns: Vec::new(), kind: "table".into(), ddl: String::new(),
+                    }).collect();
+                }
                 if std::env::var_os("RUSTABLE_LOADING_CAPTURE").is_some() {
                     app.pending = Some(Pending::Query(0));
                     app.started = Instant::now() - std::time::Duration::from_secs(3);

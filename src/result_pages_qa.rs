@@ -87,7 +87,16 @@ impl Rustable {
                     // Force a cache miss only in this disposable screenshot fixture.
                     self.app.tabs[0].result_pages.offset = 50000;
                 }
+                if std::env::var_os("RUSTABLE_RESULT_INSPECTOR").is_some() {
+                    self.app.inspector = true;
+                    if !self.app.grid().rows.is_empty() { self.app.selected = Some(0); }
+                    if self.frame > 3 {
+                        let snapshot = (*self.app.tabs[0].grid).clone();
+                        self.app.apply_progressive(Arc::new(snapshot));
+                    }
+                }
                 self.app.toolbar(ctx);
+                self.app.inspector(ctx);
                 self.app.workspace(ctx);
                 if self.frame >= 90
                     && self.saved.is_none()
@@ -122,8 +131,24 @@ impl Rustable {
                     Appearance::Dark
                 };
                 apply_theme(&cc.egui_ctx, app.prefs.appearance);
-                let grid = app.tabs[0].grid.clone();
-                app.tabs[0].pins.add(grid, 0).unwrap();
+                if std::env::var_os("RUSTABLE_RESULT_PROGRESSIVE").is_some() {
+                    let mut grid = (*app.tabs[0].grid).clone();
+                    grid.fetching = true;
+                    grid.stream_id = 42;
+                    app.pending = Some(Pending::Query(0));
+                    if std::env::var_os("RUSTABLE_RESULT_TABLE").is_some() {
+                        let (_, rows, _) = grid.stored.as_ref().unwrap().window(0, None, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+                        grid.stored = None;
+                        grid.rows = rows;
+                        app.view = View::Data;
+                        app.browse.table = "customers".into();
+                        app.pending = Some(Pending::Table);
+                        app.table = Arc::new(grid);
+                    } else { app.tabs[0].grid = Arc::new(grid); }
+                } else {
+                    let grid = app.tabs[0].grid.clone();
+                    app.tabs[0].pins.add(grid, 0).unwrap();
+                }
                 Ok(Box::new(Preview {
                     app,
                     frame: 0,
@@ -153,6 +178,213 @@ mod tests {
         );
         let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
     }
+    #[test]
+    fn growing_query_and_table_keep_selection_and_disable_editing() {
+        for view in [View::Query, View::Data] {
+            let ctx = egui::Context::default();
+            let mut app = fixture(&ctx);
+            let stored = app.tabs[0].grid.clone();
+            app.view = view;
+            app.pending = Some(if view == View::Query { Pending::Query(0) } else { Pending::Table });
+            for count in [1, 20, 100, 500] {
+                let grid = Arc::new(Grid {
+                    stream_id: 123, fetching: true,
+                    columns: vec!["id".into(), "name".into()],
+                    rows: (0..count).map(|i| vec![Value::Integer(i), Value::Text(format!("Stream row {i}"))]).collect(),
+                    ..Default::default()
+                });
+                app.apply_progressive(grid);
+                frame(&ctx, &mut app, 760.0, count as f64);
+                assert!(!app.can_edit_rows());
+                assert!(app.pending.is_some());
+                if count == 1 { app.selected = Some(0); }
+                else { assert_eq!(app.selected, Some(0)); }
+                assert_eq!(app.grid().rows.len(), count as usize);
+            }
+            if view == View::Query {
+                app.selected = Some(499);
+                let mut disk = (*stored).clone();
+                disk.stream_id = 123;
+                disk.fetching = true;
+                app.apply_progressive(Arc::new(disk));
+                frame(&ctx, &mut app, 760.0, 501.0);
+                assert_eq!(app.selected, Some(499), "spill must preserve a resident offscreen selection");
+                assert_eq!(app.grid().rows[499][0], Value::Integer(499));
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_inspector_keeps_selected_disk_row_before_workspace_sync() {
+        let ctx = egui::Context::default();
+        let mut app = fixture(&ctx);
+        let mut source = (*app.tabs[0].grid).clone();
+        source.stream_id = 801;
+        source.fetching = true;
+        app.pending = Some(Pending::Query(0));
+        app.apply_progressive(Arc::new(source.clone()));
+        for frame_index in 0..100 {
+            frame(&ctx, &mut app, 1280.0, frame_index as f64);
+            if !app.grid().rows.is_empty() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(!app.grid().rows.is_empty());
+        app.selected = Some(0);
+        app.inspector = true;
+        let selected = app.grid().rows[0].clone();
+        for frame_index in 100..110 {
+            app.apply_progressive(Arc::new(source.clone()));
+            // Production draws the inspector BEFORE workspace synchronizes Pages.
+            assert_eq!(app.grid().rows.first(), Some(&selected));
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 760.0))),
+                time: Some(frame_index as f64), ..Default::default()
+            }, |ctx| { app.inspector(ctx); app.workspace(ctx); });
+            fn empty_label(shape: &egui::Shape) -> bool {
+                match shape {
+                    egui::Shape::Text(text) => text.galley.text() == "No row selected",
+                    egui::Shape::Vec(shapes) => shapes.iter().any(empty_label),
+                    _ => false,
+                }
+            }
+            assert!(!output.shapes.iter().any(|shape| empty_label(&shape.shape)));
+        }
+        source.stream_id = 802;
+        app.apply_progressive(Arc::new(source));
+        assert!(app.selected.is_none(), "a different result must not retain the old selection");
+    }
+
+    #[test]
+    fn progressive_terminal_reply_preserves_selection_and_failure_discards_partial() {
+        let ctx = egui::Context::default();
+        let mut app = fixture(&ctx);
+        let (send, receive) = std::sync::mpsc::channel();
+        app.worker.rx = receive;
+        app.pending = Some(Pending::Query(0));
+        let mut grid = Grid { stream_id: 701, fetching: true,
+            columns: vec!["id".into()], rows: vec![vec![Value::Integer(7)]], ..Default::default() };
+        app.apply_progressive(Arc::new(grid.clone()));
+        frame(&ctx, &mut app, 760.0, 0.0);
+        app.selected = Some(0);
+        grid.fetching = false;
+        send.send(Ok(Payload::Query { dialect: crate::sql::Dialect::Sqlite,
+            report: db::ScriptResult { grids: vec![Arc::new(grid)], ..Default::default() },
+            objects: None, schemas: Default::default() })).unwrap();
+        app.poll();
+        assert!(app.pending.is_none());
+        assert_eq!(app.selected, Some(0));
+        assert!(!app.tabs[0].grid.fetching);
+        app.pending = Some(Pending::Table);
+        app.apply_progressive(Arc::new(Grid { stream_id: 702, fetching: true,
+            columns: vec!["id".into()], rows: vec![vec![Value::Integer(9)]], ..Default::default() }));
+        send.send(Err("Cancelled".into())).unwrap();
+        app.poll();
+        assert!(app.pending.is_none());
+        assert!(app.table.rows.is_empty());
+        assert_eq!(app.error.as_deref(), Some("Cancelled"));
+    }
+
+    #[test]
+    fn completed_stream_updates_selected_snapshot_for_full_export() {
+        let (first, final_grid) = std::thread::spawn(|| {
+            let mailbox = Arc::new(db::progressive::Mailbox::default());
+            let _scope = db::progressive::Scope::enter(mailbox.clone(), Arc::new(|| {}));
+            let mut grid = Grid { columns: vec!["id".into()], ..Default::default() };
+            let mut collector = db::result_store::Collector::new(1);
+            collector.start_stream(&mut grid);
+            collector.push(vec![Value::Integer(0)]).unwrap();
+            let first = mailbox.take().unwrap();
+            for row in 1..1000 { collector.push(vec![Value::Integer(row)]).unwrap(); }
+            collector.finish(&mut grid).unwrap();
+            (first, Arc::new(grid))
+        }).join().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = fixture(&ctx);
+        app.pending = Some(Pending::Query(0));
+        app.apply_progressive(first);
+        wait_page(&ctx, &mut app, 760.0, 0);
+        app.selected = Some(0);
+        frame(&ctx, &mut app, 760.0, 1.0);
+        let (send, receive) = std::sync::mpsc::channel();
+        app.worker.rx = receive;
+        send.send(Ok(Payload::Query { dialect: crate::sql::Dialect::Sqlite,
+            report: db::ScriptResult { grids: vec![final_grid], ..Default::default() },
+            objects: None, schemas: Default::default() })).unwrap();
+        app.poll();
+        frame(&ctx, &mut app, 760.0, 2.0);
+        assert_eq!(app.selected, Some(0));
+        assert!(!app.grid().fetching);
+        assert_eq!(app.grid().row_count(), 1000);
+        let mut rows = 0;
+        app.grid().visit_rows(&std::sync::atomic::AtomicBool::new(false), |_, _| { rows += 1; Ok(true) }).unwrap();
+        assert_eq!(rows, 1000, "export must use the completed store, not the selected partial prefix");
+    }
+
+    #[test]
+    #[ignore = "manual release-mode streaming inspector benchmark"]
+    fn streaming_inspector_frame_benchmark() {
+        for width in [760.0, 1280.0] {
+            let ctx = egui::Context::default();
+            let mut app = fixture(&ctx);
+            let mut source = (*app.tabs[0].grid).clone();
+            source.stream_id = 901;
+            source.fetching = true;
+            app.pending = Some(Pending::Query(0));
+            app.apply_progressive(Arc::new(source.clone()));
+            for index in 0..100 {
+                frame(&ctx, &mut app, width, index as f64 / 120.0);
+                if !app.grid().rows.is_empty() { break; }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(!app.grid().rows.is_empty());
+            app.inspector = true;
+            app.selected = Some(0);
+            let mut samples = Vec::new();
+            for index in 0..180 {
+                let snapshot = Arc::new(source.clone());
+                let started = std::time::Instant::now();
+                app.apply_progressive(snapshot);
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 760.0))),
+                    time: Some(2.0 + index as f64 / 120.0 + if index >= 100 { 30.0 } else { 0.0 }),
+                    ..Default::default()
+                }, |ctx| { app.inspector(ctx); app.workspace(ctx); });
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                if index >= 20 { samples.push(started.elapsed().as_secs_f64() * 1000.0); }
+                assert_eq!(app.grid().rows[0][0], Value::Integer(0));
+            }
+            samples.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("progressive/inspector/{width}"), &samples);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual release-mode progressive UI benchmark"]
+    fn progressive_results_frame_benchmark() {
+        for view in [View::Query, View::Data] {
+            for width in [500.0, 1280.0] {
+                let ctx = egui::Context::default();
+                let mut app = fixture(&ctx);
+                app.view = view;
+                app.pending = Some(if view == View::Query { Pending::Query(0) } else { Pending::Table });
+                let mut samples = Vec::new();
+                for index in 0..180 {
+                    // Snapshot creation is worker work; measure publication + real UI frames.
+                    let grid = Arc::new(Grid { stream_id: 99, fetching: true,
+                        columns: (0..12).map(|i| format!("Column {i}")).collect(),
+                        rows: (0..(index * 3 + 1)).map(|r| (0..12).map(|c| Value::Integer(r+c)).collect()).collect(),
+                        ..Default::default() });
+                    let started = std::time::Instant::now();
+                    app.apply_progressive(grid);
+                    frame(&ctx, &mut app, width, index as f64 / 120.0 + if index >= 100 { 30.0 } else { 0.0 });
+                    if index >= 20 { samples.push(started.elapsed().as_secs_f64() * 1000.0); }
+                }
+                samples.sort_by(f64::total_cmp);
+                crate::ui_benchmark::report(&format!("progressive/{}/{width}", if view == View::Query { "query" } else { "table" }), &samples);
+            }
+        }
+    }
+
     fn wait_page(ctx: &egui::Context, app: &mut Rustable, width: f32, expected: usize) {
         let start = std::time::Instant::now();
         loop {

@@ -75,6 +75,7 @@ fn collect_inner<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &
         remaining -= header_bytes;
         let complete = row_limit == usize::MAX;
         let mut collector = super::result_store::Collector::new(remaining);
+        let mut stream = if complete { collector.start_stream(&mut grid); Default::default() } else { super::progressive::Stream::new(&mut grid) };
         let mut decoding_failed = false;
         for row in set.by_ref() {
             let row = match row {
@@ -110,7 +111,7 @@ fn collect_inner<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &
                             decoding_failed = true;
                         }
                     } else {
-                        remaining -= row_bytes; grid.rows.push(values); }
+                        remaining -= row_bytes; grid.rows.push(values); if grid.rows.len() < row_limit { stream.update(&grid); } }
                 }
                 Err(error) => { report.error = Some(error); decoding_failed = true; }
             }
@@ -144,6 +145,39 @@ fn collect_inner<T: Protocol>(mut results: QueryResult<'_, '_, '_, T>, budget: &
 mod tests {
     use super::*;
     use ::mysql::{Conn, OptsBuilder, prelude::Queryable};
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn progressive_text_and_prepared_results() {
+        use crate::db::progressive::{Mailbox, Scope};
+        use std::sync::Mutex;
+        let port: u16 = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316,43317].contains(&port));
+        let mut conn = Conn::new(OptsBuilder::default().ip_or_hostname(Some("127.0.0.1"))
+            .tcp_port(port).user(Some("rustable")).pass(Some("rustable-test-only"))
+            .db_name(Some("rustable_test")).prefer_socket(false)).unwrap();
+        let sql = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<300) SELECT x, REPEAT('x',4096), SLEEP(0.002) FROM n";
+        for prepared in [false, true] {
+            let mailbox = Arc::new(Mailbox::default());
+            let first = Arc::new(Mutex::new(None));
+            let started = Instant::now();
+            let _scope = Scope::enter(mailbox.clone(), {
+                let mailbox = mailbox.clone(); let first = first.clone();
+                Arc::new(move || { if let Some(grid) = mailbox.take() && grid.row_count() > 0 {
+                    first.lock().unwrap().get_or_insert(started.elapsed());
+                } })
+            });
+            let report = if prepared {
+                collect(conn.exec_iter(sql, ()).unwrap(), BYTE_LIMIT, 500)
+            } else { ScriptResult::from(conn.query_iter(sql).unwrap()) };
+            let elapsed = started.elapsed();
+            assert!(report.error.is_none(), "{:?}", report.error);
+            assert_eq!(report.grids[0].row_count(), 300);
+            let first = first.lock().unwrap().unwrap();
+            assert!(first < elapsed / 2, "first={first:?} complete={elapsed:?}");
+            eprintln!("progressive port={port} prepared={prepared}: first={first:?}, complete={elapsed:?}");
+        }
+    }
 
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]

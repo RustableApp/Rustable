@@ -23,6 +23,8 @@ pub fn row_bytes(row: &[Value]) -> usize {
 
 pub struct Collector {
     rows: Vec<Vec<Value>>,
+    stream: super::progressive::Stream,
+    header: Grid,
     bytes: usize,
     budget: usize,
     #[cfg(test)]
@@ -36,6 +38,8 @@ impl Collector {
     pub fn new(budget: usize) -> Self {
         Self {
             rows: Vec::new(),
+            stream: Default::default(),
+            header: Grid::default(),
             bytes: 0,
             budget,
             #[cfg(test)]
@@ -52,6 +56,23 @@ impl Collector {
             fail_after: Some(rows),
             ..Self::new(0)
         }
+    }
+    pub fn start_stream(&mut self, grid: &mut Grid) {
+        self.stream = super::progressive::Stream::new(grid);
+        self.header = grid.clone();
+    }
+    fn publish(&mut self) -> Result<(), String> {
+        let count = self.rows.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        let count = self.writer.as_ref().map_or(count, |writer| writer.len());
+        if self.stream.due(count) {
+            let mut grid = self.header.clone();
+            grid.rows = self.rows.clone();
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(writer) = &mut self.writer { grid.stored = Some(writer.snapshot()?); }
+            self.stream.publish(grid);
+        }
+        Ok(())
     }
     pub fn push(&mut self, row: Vec<Value>) -> Result<(), String> {
         #[cfg(test)]
@@ -90,14 +111,16 @@ impl Collector {
                 self.writer = Some(writer);
             }
             if let Some(writer) = &mut self.writer {
-                return writer.push(&row);
+                writer.push(&row)?;
+                return self.publish();
             }
         }
         self.bytes = self.bytes.saturating_add(bytes);
         self.rows.push(row);
-        Ok(())
+        self.publish()
     }
     pub fn finish(self, grid: &mut Grid) -> Result<(), String> {
+        grid.stream_id = self.header.stream_id;
         grid.rows = self.rows;
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(writer) = self.writer {
@@ -214,12 +237,16 @@ mod native {
     }
 
     #[derive(Debug)]
-    pub struct StoredRows {
+    struct FileOwner {
         path: Option<TempPath>,
-        count: usize,
         cleanup: mpsc::Sender<TempPath>,
     }
-    impl Drop for StoredRows {
+    #[derive(Clone, Debug)]
+    pub struct StoredRows {
+        file: Arc<FileOwner>,
+        count: usize,
+    }
+    impl Drop for FileOwner {
         fn drop(&mut self) {
             if let Some(path) = self.path.take() {
                 let _ = self.cleanup.send(path);
@@ -229,14 +256,14 @@ mod native {
     impl StoredRows {
         #[cfg(test)]
         pub(super) fn path(&self) -> &std::path::Path {
-            self.path.as_ref().unwrap().as_ref()
+            self.file.path.as_ref().unwrap().as_ref()
         }
         pub fn len(&self) -> usize {
             self.count
         }
         fn open(&self) -> Result<Connection, String> {
             let conn = Connection::open_with_flags(
-                self.path.as_ref().unwrap(),
+                self.file.path.as_ref().unwrap(),
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .map_err(|e| e.to_string())?;
@@ -251,9 +278,9 @@ mod native {
         ) -> Result<(), String> {
             let conn = self.open()?;
             let mut statement = conn
-                .prepare("SELECT id, value FROM result_rows ORDER BY id")
+                .prepare("SELECT id, value FROM result_rows WHERE id < ?1 ORDER BY id")
                 .map_err(|e| e.to_string())?;
-            let mut rows = statement.query([]).map_err(|e| e.to_string())?;
+            let mut rows = statement.query([self.count as i64]).map_err(|e| e.to_string())?;
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Cancelled".into());
@@ -281,14 +308,15 @@ mod native {
         ) -> Result<WindowRows, String> {
             let conn = self.open()?;
             let mut statement = conn
-                .prepare("SELECT r.id, CASE WHEN r.id=?2 THEN r.value ELSE COALESCE(p.value,r.value) END, r.id != ?2 AND p.value IS NOT NULL FROM result_rows r LEFT JOIN result_previews p ON p.id=r.id WHERE r.id >= ?1 ORDER BY r.id LIMIT 256")
+                .prepare("SELECT r.id, CASE WHEN r.id=?2 THEN r.value ELSE COALESCE(p.value,r.value) END, r.id != ?2 AND p.value IS NOT NULL FROM result_rows r LEFT JOIN result_previews p ON p.id=r.id WHERE r.id >= ?1 AND r.id < ?3 ORDER BY r.id LIMIT 256")
                 .map_err(|e| e.to_string())?;
             let mut rows = statement
                 .query(rusqlite::params![
                     i64::try_from(position).map_err(|e| e.to_string())?,
                     full_row
                         .map(|v| i64::try_from(v).unwrap_or(i64::MAX))
-                        .unwrap_or(-1)
+                        .unwrap_or(-1),
+                    self.count as i64
                 ])
                 .map_err(|e| e.to_string())?;
             let mut values = Vec::new();
@@ -404,13 +432,12 @@ mod native {
                 .map_err(|e| e.to_string())?
                 .into_temp_path();
             let conn = Connection::open(&path).map_err(|e| e.to_string())?;
-            conn.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048; PRAGMA mmap_size=0; CREATE TABLE result_rows(id INTEGER PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE result_previews(id INTEGER PRIMARY KEY, value BLOB NOT NULL); BEGIN;").map_err(|e| e.to_string())?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF; PRAGMA cache_size=-2048; PRAGMA mmap_size=0; CREATE TABLE result_rows(id INTEGER PRIMARY KEY, value BLOB NOT NULL); CREATE TABLE result_previews(id INTEGER PRIMARY KEY, value BLOB NOT NULL); BEGIN;").map_err(|e| e.to_string())?;
             Ok(Self {
                 conn,
                 store: StoredRows {
-                    path: Some(path),
+                    file: Arc::new(FileOwner { path: Some(path), cleanup }),
                     count: 0,
-                    cleanup,
                 },
                 encoded: Vec::new(),
             })
@@ -444,6 +471,11 @@ mod native {
                 self.encoded = Vec::new();
             }
             Ok(())
+        }
+        pub fn len(&self) -> usize { self.store.count }
+        pub fn snapshot(&mut self) -> Result<Arc<StoredRows>, String> {
+            self.conn.execute_batch("COMMIT; BEGIN;").map_err(|e| e.to_string())?;
+            Ok(Arc::new(self.store.clone()))
         }
         pub fn finish(self) -> Result<Arc<StoredRows>, String> {
             self.conn

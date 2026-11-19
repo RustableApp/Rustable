@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) enum NavigationAction {
     Refresh,
+    RefreshSchema,
     View(View),
     Table(String),
     TableTab(u64),
@@ -82,7 +83,7 @@ impl Rustable {
     pub(super) fn navigation_confirmation(&mut self, ctx: &egui::Context) {
         let Some(confirmation) = &self.navigation_confirmation else { return; };
         let verb = match confirmation.action {
-            NavigationAction::Refresh => "refresh",
+            NavigationAction::Refresh | NavigationAction::RefreshSchema => "refresh",
             NavigationAction::Connection(..) => "switch connections",
             _ => "change views",
         };
@@ -114,6 +115,7 @@ impl Rustable {
         self.error = None;
         match confirmation.action {
             NavigationAction::Refresh => self.refresh_current_view(),
+            NavigationAction::RefreshSchema => self.refresh_schema(),
             NavigationAction::View(view) => self.change_table_view(view),
             NavigationAction::Table(name) => self.open_table(name),
             NavigationAction::TableTab(id) => self.activate_table_tab_id(id),
@@ -200,6 +202,34 @@ mod tests {
             assert_eq!(app.edit.as_ref().unwrap().text, "changed");
             assert_eq!(app.changes, other);
             app.refresh_current_view();
+            app.resolve_navigation(true);
+            assert!(app.edit.is_none());
+            assert_eq!(app.changes, other);
+            settle(&mut app);
+            let text: String = rusqlite::Connection::open(file.path()).unwrap()
+                .query_row("SELECT name FROM t", [], |row| row.get(0)).unwrap();
+            assert_eq!(text, "original", "discard never writes to the database");
+        }
+    }
+
+    #[test]
+    fn schema_refresh_cancel_preserves_draft_and_discard_preserves_other_tables() {
+        for inspector in [false, true] {
+            let (_ctx, file, mut app) = fixture();
+            app.edit = Some(draft(&app, "changed", inspector));
+            app.changes.push(Change::Cell { original_columns: None, table: "elsewhere".into(),
+                column: "name".into(), original: vec![Value::Integer(1)], value: Value::Text("keep".into()) });
+            app.record_changes();
+            let other = app.changes.clone();
+            app.refresh_schema();
+            assert!(app.pending.is_none());
+            assert!(app.error.is_none());
+            assert!(app.navigation_confirmation.is_some());
+            assert!(!app.finish_cell_edit(), "opening the dialog must not stage a blur");
+            app.resolve_navigation(false);
+            assert_eq!(app.edit.as_ref().unwrap().text, "changed");
+            assert_eq!(app.changes, other);
+            app.refresh_schema();
             app.resolve_navigation(true);
             assert!(app.edit.is_none());
             assert_eq!(app.changes, other);

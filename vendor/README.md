@@ -445,3 +445,14 @@ identifiers, line/block comments, PostgreSQL dollar-quoted bodies and MySQL
 mode-dependent escaping. It does not scan documents during idle frames or normal
 word typing. Tests live in `src/editor_assist_tests.rs`, including Unicode,
 selection, undo/redo, literal typing groups, paste, IME and character limits.
+
+### Progressive table results
+
+`postgres::Client::query_text_stream_with_metadata` and `TextRowIter` expose the
+existing pipelined text response without buffering the complete page. Both
+requests are submitted together; the metadata result (built-in types only) is
+returned before the caller consumes/exposes data rows. The application validates
+fresh catalog shape and RowDescription before decoding rows and bounds its page
+collector while draining the remainder. Text results never resolve custom types.
+The older bounded buffering API remains available. This adds no Sync boundary,
+preparation, metadata lookup or cleanup request.
