@@ -23,7 +23,11 @@ setup** also provides separate command and argument copy controls for clients
 with individual fields. The transport is stdio.
 
 Opening or copying these details does not enable database access; explicitly
-choose **Enable AI control** for the intended connection. Keep Rustable open and
+choose **Enable AI** in the connector dialog to enable the current SQL workspace
+and close the dialog, or **Enable AI control** in the AI menu. **Cancel** closes
+the dialog without changing access. Enabling is unavailable in the connection
+manager, during a pending operation, or while a transaction needs to finish.
+Keep Rustable open and
 copy the configuration again after restarting, because the socket belongs to the
 current process. The optional `scripts/matrix.sh` development launcher also prints the configuration in the terminal.
 It does not execute a scripted tour on real connections.
@@ -521,3 +525,35 @@ existing dialog, toolbar rendering or database protocol paths. No additional
 DB exchanges or per-frame filesystem operations are introduced. Existing CPU
 benchmark limitations above remain; release performance and native display
 latency were not remeasured for this startup change.
+
+### Connector footer refinement (2026-11-18)
+
+The connector has a compact content-height footer with Cancel and primary-colored
+Enable AI actions. Both use the shared rounded-action style, equal 88-point widths
+and `controls::BUTTON_HEIGHT`; a bounded horizontal row avoids stretching the modal
+to the viewport height. JSON/manual details scroll independently when necessary.
+The old header Close action is removed. Enable uses the menu's shared eligibility
+check and rechecks before granting access; Cancel preserves existing access.
+
+Validation: 923 library tests passed (248 ignored), including footer clicks and
+workspace enable/cancel guards. Native QA captures reviewed in dark mode, narrow
+light mode with Manual setup expanded, and the disabled connection-manager state
+are in `target/matrix-enable-review/`. The change adds no database exchanges.
+Native 60/120 Hz presentation timing, mixed-DPI and monitor hot-plug checks were
+not measured; no event-loop or renderer changes are included.
+
+Release CPU comparison against `b70bf2c` used seven paired runs on Apple M4 Max,
+macOS 27.2.1, rustc 1.99.1, at 500×760 and 760×760 points with default headless
+scale, 20 warmups and 160 measured frames per run. Identical copy-feedback and
+30-second simulated-idle workloads were used on both revisions. Median per-run
+p50/p95/p99/max in milliseconds:
+
+| Width | Base | Updated |
+| --- | --- | --- |
+| 500 | .014917 / .016042 / .020916 / .023459 | .015792 / .017167 / .022042 / .022583 |
+| 760 | .015291 / .016292 / .017916 / .019042 | .016042 / .017500 / .018792 / .020042 |
+
+Both p95 comparisons pass the unchanged 10% threshold (+7.0% and +7.4%).
+Raw samples, first-use/after-idle logs and environment metadata are retained in
+`target/matrix-enable-performance/`. These measure CPU layout and tessellation,
+not input-to-display latency or sustained FPS.

@@ -9,6 +9,9 @@ pub(crate) struct Connector {
     pub configuration: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Action { Cancel, Enable }
+
 impl Connector {
     pub fn new(command: &Path, socket: &Path) -> Result<Self, String> {
         let command = command
@@ -29,21 +32,16 @@ impl Connector {
         })
     }
 
-    pub fn show(&self, ctx: &egui::Context) -> bool {
-        let mut close = false;
+    pub fn show(&self, ctx: &egui::Context, enable_blocker: Option<&str>) -> Option<Action> {
+        let mut action = None;
         let modal = egui::Modal::new(egui::Id::new((ctx.viewport_id(), "matrix-connector")))
             .frame(egui::Frame::popup(&ctx.style()).inner_margin(16).corner_radius(14))
             .show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width()-64.0).clamp(240.0, 620.0));
                 ui.set_max_height((ctx.content_rect().height()-96.0).max(180.0));
-                ui.horizontal(|ui| {
-                    ui.strong("Connect an AI agent");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        close = ui.button("Close").clicked();
-                    });
-                });
+                ui.strong("Connect an AI agent");
                 ui.add_space(8.0);
-                egui::ScrollArea::vertical().max_height((ctx.content_rect().height()-150.0).max(120.0))
+                egui::ScrollArea::vertical().max_height((ctx.content_rect().height()-220.0).max(120.0))
                     .show(ui, |ui| {
                         ui.label("Add Rustable as a local MCP server in your AI agent.");
                         ui.weak("Transport: stdio · Server name: rustable-matrix");
@@ -74,13 +72,26 @@ impl Connector {
                             code(ui, &self.arguments);
                         });
                         ui.separator();
-                        ui.label("Then open the intended database and choose AI → Enable AI control.");
+                        ui.label(enable_blocker.unwrap_or("Enable AI to let your agent work in this SQL workspace."));
                         ui.weak("Your agent can read and edit enabled SQL tabs and run queries using that connection’s permissions and Safe mode.");
                         ui.add_space(8.0);
                         ui.weak("Keep Rustable open. This configuration belongs to the current session; copy it again after restarting Rustable.");
                     });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                  ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    crate::controls::rounded_action_buttons(ui);
+                    let button_size = egui::vec2(88.0, crate::controls::BUTTON_HEIGHT);
+                    let enable = ui.add_enabled(enable_blocker.is_none(),
+                        egui::Button::new(egui::RichText::new("Enable AI").color(egui::Color32::WHITE))
+                            .fill(crate::app::BLUE).min_size(button_size));
+                    if enable.clicked() { action = Some(Action::Enable); }
+                    if let Some(reason) = enable_blocker { enable.on_disabled_hover_text(reason); }
+                    if ui.add(egui::Button::new("Cancel").min_size(button_size)).clicked() { action = Some(Action::Cancel); }
+                  });
+                });
             });
-        close || modal.should_close()
+        action.or_else(|| modal.should_close().then_some(Action::Cancel))
     }
 }
 
@@ -132,6 +143,40 @@ mod tests {
     }
 
     #[test]
+    fn connector_footer_actions_are_visible_and_respect_disabled_state() {
+        for (label, blocker, expected) in [
+            ("Enable AI", None, Some(Action::Enable)),
+            ("Cancel", None, Some(Action::Cancel)),
+            ("Enable AI", Some("Open a SQL connection to enable AI."), None),
+            ("Cancel", Some("Open a SQL connection to enable AI."), Some(Action::Cancel)),
+        ] {
+            let ctx = egui::Context::default();
+            let connector = Connector::new(Path::new("/app/rustable"), Path::new("/tmp/session/workspace.sock")).unwrap();
+            let mut button = egui::Rect::NOTHING;
+            let mut action = None;
+            for frame in 0..6 {
+                let events = if frame == 4 || frame == 5 { vec![
+                    egui::Event::PointerMoved(button.center()),
+                    egui::Event::PointerButton { pos: button.center(), button: egui::PointerButton::Primary, pressed: frame == 4, modifiers: Default::default() },
+                ] } else { vec![] };
+                let output = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(500.0,560.0))), time: Some(frame as f64/10.0), events, ..Default::default() }, |ctx| { action = connector.show(ctx, blocker); });
+                if frame == 3 {
+                    let mut labels = vec![];
+                    for shape in &output.shapes { texts(&shape.shape, &mut labels); }
+                    assert!(!labels.iter().any(|(text,_)| text == "Close"));
+                    let enable = labels.iter().find(|(text,_)|text == "Enable AI").unwrap().1;
+                    let cancel = labels.iter().find(|(text,_)|text == "Cancel").unwrap().1;
+                    assert!(cancel.right() < enable.left());
+                    assert!(enable.bottom() < 560.0 && enable.right() < 500.0);
+                    assert!((enable.center().y-cancel.center().y).abs() < 1.0);
+                    button = labels.iter().find(|(text,_)|text == label).unwrap().1;
+                }
+            }
+            assert_eq!(action, expected, "{label}: {blocker:?}");
+        }
+    }
+
+    #[test]
     fn connector_copy_uses_exact_live_configuration_and_feedback_settles() {
         let ctx = egui::Context::default();
         let connector = Connector::new(
@@ -167,7 +212,7 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    assert!(!connector.show(ctx));
+                    assert!(connector.show(ctx, None).is_none());
                 },
             );
             let mut labels = vec![];
@@ -238,7 +283,7 @@ mod tests {
                         ..Default::default()
                     },
                     |ctx| {
-                        connector.show(ctx);
+                        connector.show(ctx, None);
                     },
                 );
                 if frame == 2 {

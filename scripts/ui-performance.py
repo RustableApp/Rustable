@@ -100,9 +100,22 @@ def build(source, target, logs, label):
     env = dict(os.environ, CARGO_TARGET_DIR=str(target))
     log = logs / f'{label}-build.log'
     with log.open('w') as output:
-        completed = run(['mise', 'exec', '--', 'cargo', 'test', '--locked', '--release', '--lib',
-                         '--no-run', '--message-format=json'], source, env=env,
-                        stdout=subprocess.PIPE, stderr=output)
+        try:
+            completed = run(['mise', 'exec', '--', 'cargo', 'test', '--locked', '--release', '--lib',
+                             '--no-run', '--message-format=json'], source, env=env,
+                            stdout=subprocess.PIPE, stderr=output)
+        except subprocess.CalledProcessError as error:
+            # Cargo puts compiler diagnostics on stdout in JSON mode. Preserve
+            # them on failure too, so baseline failures can be investigated.
+            for line in (error.stdout or '').splitlines():
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rendered = message.get('message', {}).get('rendered')
+                if rendered:
+                    output.write(rendered)
+            raise
     executable = None
     for line in completed.stdout.splitlines():
         try:
@@ -155,15 +168,21 @@ def main():
     parser.add_argument('--redis-tools', action='store_true', help='Include shared Redis diagnostics and topology workloads')
     parser.add_argument('--postgres-connections', action='store_true', help='Compare only the PostgreSQL connection form at two sizes')
     parser.add_argument('--connection-activity', action='store_true', help='Compare only idle and busy connection toolbar CPU rendering')
+    parser.add_argument('--matrix-connector', action='store_true', help='Compare the MCP setup dialog including copy feedback and idle resume')
     parser.add_argument('--base', required=True, help='Git revision to compare against')
     parser.add_argument('--output', default='target/ui-performance')
     parser.add_argument('--runs', type=int, default=5)
     args = parser.parse_args()
     global BENCHMARKS
+    if args.matrix_connector:
+        BENCHMARKS = ('matrix_connector_frame_benchmark',)
+        EXPECTED.clear()
+        EXPECTED.update(f'matrix/connector/{w}' for w in (500, 760))
     if args.connection_activity:
-        BENCHMARKS = ('connection_activity_frame_benchmark',)
+        BENCHMARKS = ('connection_activity_frame_benchmark', 'transaction_toolbar_frame_benchmark')
         EXPECTED.clear()
         EXPECTED.update(f'connection/activity/{w}/{d}/{b}' for w in (760, 1280) for d in ('true', 'false') for b in ('true', 'false'))
+        EXPECTED.update(f'connection/transaction/{w}/{d}/{b}' for w in (500, 760, 1280) for d in ('true', 'false') for b in ('true', 'false'))
     if args.postgres_connections:
         BENCHMARKS = ('postgres_connection_profile_frame_benchmark', 'postgres_tls_menu_frame_benchmark')
         EXPECTED.clear()

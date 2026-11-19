@@ -57,6 +57,7 @@ impl Rustable {
             app: Rustable,
             frame: usize,
             assist: bool,
+            transaction: Option<db::TransactionState>,
             path: std::path::PathBuf,
             saved: Option<std::sync::mpsc::Receiver<()>>,
         }
@@ -106,7 +107,11 @@ impl Rustable {
                         let _ = tx.send(());
                     });
                 }
-                self.app.toolbar(ctx);
+                if let Some(transaction) = self.transaction {
+                    self.app.toolbar_with_transaction(ctx, transaction);
+                } else {
+                    self.app.toolbar(ctx);
+                }
                 self.app.workspace(ctx);
                 if self.frame == if self.assist { 8 } else { 3 } {
                     if self.assist {
@@ -166,6 +171,8 @@ impl Rustable {
                     app,
                     frame: 0,
                     assist,
+                    transaction: std::env::var("RUSTABLE_TRANSACTION_CAPTURE").ok().map(|state|
+                        if state == "failed" { db::TransactionState::Failed } else { db::TransactionState::Active }),
                     path,
                     saved: None,
                 }))

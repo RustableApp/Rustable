@@ -16,6 +16,8 @@ mod bulk_rows;
 mod change_history;
 #[path = "navigation_confirmation.rs"]
 mod navigation_confirmation;
+#[path = "transaction_indicator.rs"]
+mod transaction_indicator;
 #[path = "navigator.rs"]
 pub(crate) mod navigator;
 #[path = "query_history.rs"]
@@ -94,7 +96,7 @@ fn error_toast(ctx: &egui::Context, error: &str, actions: impl FnOnce(&mut egui:
     dismissed
 }
 
-const BLUE: Color32 = Color32::from_rgb(50, 104, 224);
+pub(crate) const BLUE: Color32 = Color32::from_rgb(50, 104, 224);
 const MUTED: Color32 = Color32::from_rgb(125, 137, 156);
 const GREEN: Color32 = Color32::from_rgb(40, 145, 110);
 
@@ -2951,7 +2953,12 @@ impl Rustable {
             });
     }
 
+    #[cfg(test)]
     fn connection_status(&mut self, ui: &mut egui::Ui) {
+        self.connection_status_with_transaction(ui, self.worker.transaction_state());
+    }
+
+    fn connection_status_with_transaction(&mut self, ui: &mut egui::Ui, transaction: db::TransactionState) {
         let style = self.active_connection_style();
         let fill = Color32::from_rgb(style.color[0], style.color[1], style.color[2]);
         let ink = if fill.intensity() > 0.6 {
@@ -2969,7 +2976,7 @@ impl Rustable {
             ui.allocate_exact_size(egui::vec2(width, crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::click());
         #[cfg(unix)]
         if self.matrix_interaction_locked() {
-            self.matrix_working_bar(ui.ctx(), rect);
+            self.matrix_working_bar(ui.ctx(), rect, transaction);
             return;
         }
         let painter = ui.painter().with_clip_rect(rect);
@@ -2979,8 +2986,10 @@ impl Rustable {
         let background = if active {
             if dark { Color32::from_rgb(14, 27, 46) } else { Color32::from_rgb(226, 237, 249) }
         } else { fill };
-        painter.rect_filled(rect, rect.height() / 2.0, background);
-        if self.pending.is_some() {
+        if !transaction.blocks_replacement() {
+            painter.rect_filled(rect, rect.height() / 2.0, background);
+        }
+        if self.pending.is_some() && !transaction.blocks_replacement() {
             // Query totals and network throughput are unknown here. Animate a
             // repeating activity pattern, never an invented completion fraction.
             paint_connection_activity(&painter, rect, self.started.elapsed().as_secs_f32(), ink);
@@ -3013,7 +3022,10 @@ impl Rustable {
             "{}{}{}  |  {}  ·  {}{}  ·  {}",
             style.environment.to_uppercase(),
             if self.safe_mode_active() { " · SAFE MODE" } else { "" },
-            self.worker.transaction_state().label(),
+            match self.worker.transaction_state() {
+                db::TransactionState::Disconnected => db::TransactionState::Disconnected.label(),
+                _ => "", // Open/failed transactions take over this connection pill.
+            },
             self.engine,
             database,
             name,
@@ -3026,6 +3038,9 @@ impl Rustable {
                 rect.bottom(),
             ),
         );
+        if transaction.blocks_replacement() {
+            transaction_indicator::paint(ui, rect, transaction, &label, &timing);
+        } else {
         painter.with_clip_rect(text_rect).text(
             text_rect.left_center(),
             egui::Align2::LEFT_CENTER,
@@ -3040,11 +3055,13 @@ impl Rustable {
             egui::FontId::monospace(11.0),
             ink,
         );
+        }
         if response
             .on_hover_text(format!(
-                "{}\n{}{}\nClick to edit connection appearance",
+                "{}\n{}{}{}\nClick to edit connection appearance",
                 self.label,
                 self.status,
+                transaction_indicator::guidance(transaction),
                 if self.pending.is_some() && progress.active && progress.rows > 0 {
                     format!(
                         "\n{} rows decoded · {:.1} KiB decoded (not network bytes)",
@@ -3236,6 +3253,10 @@ Right-click to inspect or remove individual changes",
     }
 
     fn toolbar(&mut self, ctx: &egui::Context) {
+        self.toolbar_with_transaction(ctx, self.worker.transaction_state());
+    }
+
+    fn toolbar_with_transaction(&mut self, ctx: &egui::Context, transaction: db::TransactionState) {
         egui::TopBottomPanel::top(egui::Id::new((ctx.viewport_id(), "toolbar")))
             .exact_height(44.0)
             .show(ctx, |ui| {
@@ -3248,7 +3269,7 @@ Right-click to inspect or remove individual changes",
                 #[cfg(unix)]
                 if self.matrix_interaction_locked() && ctx.content_rect().width() < 1000.0 {
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::hover());
-                    self.matrix_working_bar(ctx, rect);
+                    self.matrix_working_bar(ctx, rect, transaction);
                     return;
                 }
                 if ctx.content_rect().width() < 720.0 {
@@ -3271,6 +3292,11 @@ Right-click to inspect or remove individual changes",
                             }
                         });
                         if self.pending.is_some() && ui.add(crate::icons::shortcut_button("Cancel", false, ".", None)).on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() { self.request_query_cancel(ctx); }
+                        if transaction.blocks_replacement() {
+                            let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(1.0), crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::hover());
+                            transaction_indicator::paint(ui, rect, transaction, "", "");
+                            response.on_hover_text(transaction_indicator::guidance(transaction));
+                        }
                     });
                     return;
                 }
@@ -3300,7 +3326,7 @@ Right-click to inspect or remove individual changes",
                         self.open_sql();
                     }
                     });
-                    self.connection_status(ui);
+                    self.connection_status_with_transaction(ui, transaction);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         #[cfg(unix)]

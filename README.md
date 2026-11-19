@@ -4,7 +4,7 @@
 
 A native database client for **PostgreSQL, MySQL, MariaDB, SQLite, and Redis**. Browse your data, write queries, and review changes before saving—all in a fast, focused workspace.
 
-[Try the live demo](https://rustable.app/#demo-title) · [Website](https://rustable.app) · [Latest release](https://github.com/RustableApp/Rustable/releases/latest)
+[Try the live demo](https://rustable.app/#demo-title) · [Website](https://rustable.app) · [AI & MCP integration](https://rustable.app/ai/) · [Latest release](https://github.com/RustableApp/Rustable/releases/latest)
 
 ## Download
 
@@ -13,6 +13,22 @@ A native database client for **PostgreSQL, MySQL, MariaDB, SQLite, and Redis**. 
 - [Linux · x64](https://github.com/RustableApp/Rustable/releases/latest/download/Rustable-linux-x86_64.tar.gz)
 
 macOS builds are signed and notarized, with automatic updates. Windows and Linux use portable packages and manual updates. Linux requires Ubuntu 24.04 or a compatible newer system.
+
+## Your AI works in your workspace
+
+Connect your AI agent through **MCP** and work together in the same Rustable SQL tabs. Ask it to explore your data, explain your current query, or edit the SQL you already have open. Watch the changes, run queries, and pick up exactly where it leaves off: the SQL and results stay in your workspace, ready to inspect, modify, rerun, or save.
+
+[![AI-created SQL tabs and customer query results in Rustable, using disposable SQLite sample data](assets/ai-workspace.png)](https://rustable.app/ai/)
+
+- **Work on the actual query.** Agents can read existing tabs and selections, edit the same SQL, and stream changes visibly when the client uses progressive edits.
+- **Take over when you need to.** Stop or Esc pauses AI access and requests cancellation of an active AI query. Continue editing yourself; Undo AI edit can restore unchanged AI edits.
+- **Keep your connection controls.** Access is explicitly enabled per active SQL workspace. Database permissions, Safe mode, and human confirmations still apply. Credentials stay in Rustable; query text and result previews are shared with your AI client and may reach its model provider.
+
+To connect, open **AI → Connect an AI agent… → Copy configuration**, add it to a client that supports local stdio MCP servers, then choose **AI → Enable AI control** in the intended connection’s window. Keep Rustable open; copy the configuration again after restarting.
+
+MCP is available on **macOS and Linux** for **PostgreSQL, SQLite, MySQL, and MariaDB**. Bring your own AI client and model. Windows, browser MCP, Redis agent control, and built-in AI chat are not supported yet. Editing does not automatically execute SQL; stopping does not undo committed database changes.
+
+[See the workflow and screenshots](https://rustable.app/ai/) · [Setup, tools, and boundaries](docs/MATRIX.md)
 
 ## A workspace for your databases
 

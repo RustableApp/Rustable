@@ -2026,3 +2026,123 @@ and strict all-target QA Clippy passed. Coverage includes bounded geometry,
 rounded-cap containment, motion, and restoration of the idle bar without ongoing
 redraws. First-use and after-idle measurements are in the raw logs. These CPU
 measurements are not a claim about native presentation latency or sustained FPS.
+
+### Saved connection deletion confirmation (2026-11-18)
+
+The connection context menu now opens a modal before removing a saved profile or
+queuing credential deletion. Cancel/Escape preserve the saved profile and draft;
+the dialog uses the profile ID captured when removal was requested. No database
+execution, driver or network sequencing changed. The closed-dialog path checks
+one optional ID; there are no new timers or redraw loops.
+
+Native dark/wide and light/compact screenshots were inspected under
+`target/delete-connection-review/`. The preview uses the existing Sentinel form;
+its background debug widget-ID warnings remain outside this change. Native
+input-to-present latency, multi-monitor and mixed-DPI checks were not measured.
+
+Attempted the required comparison with
+`python3 scripts/ui-performance.py --base b70bf2c49456aff17591ed522e42cb4c5878c835 --postgres-connections --output target/delete-connection-review/performance`.
+The baseline library-test build failed before timings, so this is **unverified**,
+not a performance pass. The runner retained environment/build logs but discarded
+Cargo's JSON diagnostics; the two underlying compile errors were not diagnosed.
+No thresholds were changed. Environment: Apple M4 Max, macOS 27.2.1 arm64,
+Rust 1.99.1, release profile.
+
+The new `connection_delete_dialog_frame_benchmark` measures the production modal
+with a long connection name at 500×760 and 1100×760, default headless scale, 20
+warmups and 160 measured frames including a simulated 30-second idle gap. This
+is an absolute CPU layout/tessellation workload for new behavior, not a baseline
+comparison or input-to-display measurement.
+
+The release connection suite passed 43 tests (7 manual benchmarks ignored).
+The new dialog benchmark also passed, run directly from the same release test
+executable after builds stopped. At 500 px, p50/p95/p99/max were
+0.007208/0.007334/0.007458/0.007458 ms; at 1100 px they were
+0.008000/0.008125/0.008208/0.008250 ms. Raw samples are retained in
+`target/delete-connection-review/dialog-benchmark.log`.
+
+### Transaction status in the connection capsule (2026-11-18)
+
+The existing connection-details capsule now turns amber for an open transaction
+and red for a failed transaction. Its two lines prioritize transaction status,
+then connection identity or recovery guidance. Timing remains on wide capsules;
+narrow capsules use abbreviated labels and full hover guidance. The toolbar stays
+44 points high; no extra banner or row is added. Compact navigation includes a
+small status capsule in the same row. AI takeover retains its Stop control and
+uses transaction status as its heading with an amber/red outline.
+
+This replaces the initially reviewed separate transaction band. Its screenshots
+and measurements under `target/transaction-review/` are historical and do not
+represent the final design. Current captures are under
+`target/transaction-capsule-review/`.
+
+State comes from the existing worker atomic, published after command completion.
+PostgreSQL derives it from ReadyForQuery, MySQL/MariaDB from server status,
+and SQLite from autocommit. No driver, status-check, SQL or network sequencing
+changed; there are zero added exchanges on cold and warm paths. Database latency
+suites were not rerun. During a transaction, the steady amber/red capsule takes
+priority over the ordinary query ribbons; running-query elapsed time and existing
+cancellation controls remain available. No new timers or redraw loops were added.
+
+Tests exercise real disposable SQLite transactions across queries, errors, tab
+changes, COMMIT/ROLLBACK and SAVEPOINT/RELEASE, plus failed state, busy work, AI
+takeover, connection loss, idle settling and unchanged toolbar height. Native
+screenshots cover dark/open at 1280, light/failed at 760 and light/open at 500
+logical pixels, 2× scale. These QA captures inject a presentation state; they do
+not claim to reproduce a PostgreSQL failure. Native input-to-present, 60/120 Hz,
+mixed-DPI and monitor reconnect checks were not measured.
+
+The standard `scripts/ui-performance.py` comparison is rerun via
+`target/transaction-capsule-review/run-performance.py --base b70bf2c49456aff17591ed522e42cb4c5878c835 --connection-activity --output target/transaction-capsule-review/performance`.
+The wrapper reuses the previously built baseline after checking its commit and
+identical fixture, records its SHA-256/provenance, and rebuilds the candidate with
+the standard runner. Five alternating pairs run serially, without competing
+builds/benchmarks. Fixtures retain 20 warmups and 160 samples, with first-use and
+after-idle samples recorded separately. Both versions open the same disposable
+SQLite transaction before timing. Workloads cover 500/760/1280 widths, light/dark
+and idle/busy states at default headless scale. This measures CPU layout and
+tessellation, not FPS or native presentation latency.
+
+Measured on Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release. The four
+transaction presentation tests, existing AI overlay/Stop/Escape test and existing
+connection-activity idle-settling test all passed in the final release binary.
+
+The first five-pair batch had one threshold regression (compact/light/idle,
++0.0015 ms) and seven inconclusive cases. A second five-pair run with the same
+binaries passed all eight ordinary toolbar cases; seven transaction comparisons
+remained noisy/inconclusive. This is **not an overall performance pass**. Both
+batches and raw first-use/after-idle samples are retained; thresholds were unchanged.
+
+Repeat medians of per-run CPU milliseconds (p50 / p95 / p99 / max):
+
+| Transaction width / dark / busy | Base | Candidate | p95 result |
+| --- | --- | --- | --- |
+| 1280/false/false | 0.015417 / 0.015708 / 0.018375 / 0.019625 | 0.016625 / 0.017666 / 0.018250 / 0.020750 | +12.5% · inconclusive |
+| 1280/false/true | 0.020417 / 0.022750 / 0.025500 / 0.027375 | 0.017167 / 0.020459 / 0.022375 / 0.023958 | -10.1% · pass |
+| 1280/true/false | 0.015458 / 0.016584 / 0.018542 / 0.019459 | 0.016709 / 0.017500 / 0.017750 / 0.021208 | +5.5% · inconclusive |
+| 1280/true/true | 0.020334 / 0.022584 / 0.025584 / 0.027500 | 0.017625 / 0.020292 / 0.021917 / 0.023167 | -10.1% · pass |
+| 500/false/false | 0.005209 / 0.005959 / 0.006625 / 0.006791 | 0.007083 / 0.008125 / 0.008709 / 0.008709 | +36.3% · inconclusive |
+| 500/false/true | 0.007167 / 0.007667 / 0.009084 / 0.009416 | 0.008834 / 0.009833 / 0.010792 / 0.011167 | +28.3% · inconclusive |
+| 500/true/false | 0.004750 / 0.006000 / 0.006625 / 0.006833 | 0.006250 / 0.007917 / 0.008083 / 0.008500 | +32.0% · inconclusive |
+| 500/true/true | 0.006542 / 0.008167 / 0.009000 / 0.009250 | 0.008750 / 0.009542 / 0.009917 / 0.010375 | +16.8% · inconclusive |
+| 760/false/false | 0.015458 / 0.017792 / 0.019584 / 0.019666 | 0.016167 / 0.018375 / 0.018834 / 0.020041 | +3.3% · pass |
+| 760/false/true | 0.017625 / 0.020834 / 0.023084 / 0.024833 | 0.016833 / 0.017958 / 0.018500 / 0.021250 | -13.8% · pass |
+| 760/true/false | 0.015583 / 0.017542 / 0.018833 / 0.019709 | 0.016292 / 0.018625 / 0.019791 / 0.020375 | +6.2% · pass |
+| 760/true/true | 0.017500 / 0.020958 / 0.022917 / 0.024083 | 0.016625 / 0.019125 / 0.020667 / 0.020875 | -8.7% · pass |
+
+The compact transaction capsule adds roughly 0.0014–0.0022 ms at p95 in the repeat;
+this extra bounded drawing is retained because compact navigation previously had
+no visible transaction status. Wide idle transaction costs range from +0.0006 to
++0.0020 ms; several comparisons remain inconclusive, so no precise regression-free
+claim is made. Keeping the old small suffix would preserve its clipping/visibility
+problem. A separate band would consume another row and was explicitly rejected.
+The chosen design prioritizes transaction state within the existing capsule.
+Busy transaction cases perform less geometry because the static transaction state
+replaces the query ribbons; that is an intentional visual priority, not a claim of
+an equivalent-animation optimization. Cancellation and elapsed-time updates remain.
+
+Current raw comparisons are in `target/transaction-capsule-review/performance/`
+and `performance-repeat/`, with wrapper/repeat scripts retained alongside them.
+The compact busy capture confirms the status and top-toolbar Cancel remain visible;
+the pre-existing lower SQL-editor action row still clips at 500 points while busy,
+outside the changed connection-status control.

@@ -156,13 +156,36 @@ impl Rustable {
         clicked
     }
 
+    fn matrix_enable_blocker(&self) -> Option<&'static str> {
+        if self.connections || !self.supports_safe_mode() {
+            Some("Open a SQL connection to enable AI.")
+        } else if self.pending.is_some() {
+            Some("Wait for the current operation to finish before enabling AI.")
+        } else if self.worker.transaction_state().blocks_replacement() {
+            Some("Finish the current transaction before enabling AI.")
+        } else { None }
+    }
+
+    fn enable_matrix(&mut self) -> bool {
+        if self.matrix_enable_blocker().is_some() { return false; }
+        let Some(bridge) = &mut self.matrix else { return false; };
+        bridge.enabled = true;
+        bridge.activity = "Ready for your AI client".into();
+        true
+    }
+
+    fn matrix_connector_action(&mut self, action: crate::matrix_connector::Action) {
+        if action == crate::matrix_connector::Action::Enable && !self.enable_matrix() { return; }
+        if let Some(bridge) = &mut self.matrix { bridge.connector_open = false; }
+    }
+
     pub(super) fn matrix_connector_dialog(&mut self, ctx: &egui::Context) {
-        if let Some(bridge) = &mut self.matrix
+        if let Some(bridge) = &self.matrix
             && bridge.connector_open
             && let Some(connector) = &bridge.connector
-            && connector.show(ctx)
+            && let Some(action) = connector.show(ctx, self.matrix_enable_blocker())
         {
-            bridge.connector_open = false;
+            self.matrix_connector_action(action);
             ctx.request_repaint();
         }
     }
@@ -328,12 +351,9 @@ impl Rustable {
             if self.matrix_connection_button(ui) { ui.close(); }
             if enabled {
                 if ui.button("Pause AI access").clicked() { self.pause_matrix(false); ui.close(); }
-            } else if ui.add_enabled(self.supports_safe_mode() && self.pending.is_none()
-                && !self.worker.transaction_state().blocks_replacement(),egui::Button::new("Enable AI control"))
+            } else if ui.add_enabled(self.matrix_enable_blocker().is_none(),egui::Button::new("Enable AI control"))
                 .on_hover_text("Allow the connected MCP client to read and edit SQL tabs and run SQL using this connection’s privileges. Safe mode and confirmations still apply.").clicked() {
-                let bridge=self.matrix.as_mut().unwrap();
-                bridge.enabled=true;
-                bridge.activity="Ready for your AI client".into();
+                self.enable_matrix();
                 ui.close();
             }
             if let Some(edit)=self.matrix.as_ref().and_then(|b|b.edit.as_ref()) {
@@ -385,7 +405,7 @@ impl Rustable {
 
     /// The ordinary connection pill becomes the only interactive surface while
     /// AI owns the workspace. Keep it on the modal layer, not in the disabled toolbar.
-    pub(super) fn matrix_working_bar(&mut self, ctx: &egui::Context, rect: egui::Rect) {
+    pub(super) fn matrix_working_bar(&mut self, ctx: &egui::Context, rect: egui::Rect, transaction: db::TransactionState) {
         let bridge = self.matrix.as_ref().unwrap();
         let stopping = !bridge.enabled;
         let editing = bridge.edit.as_ref().is_some_and(|edit| edit.streaming);
@@ -396,6 +416,8 @@ impl Rustable {
         } else {
             "AI is working · Running query"
         };
+        let activity_title = title;
+        let title = if transaction.blocks_replacement() { transaction_indicator::title(transaction, rect.width() < 300.0) } else { title };
         let style = self.active_connection_style();
         let identity = format!(
             "{} · {} · {} · {}",
@@ -408,6 +430,7 @@ impl Rustable {
             self.engine,
             self.active_connection_name()
         );
+        let identity = if transaction.blocks_replacement() { format!("{activity_title} · {identity}") } else { identity };
         let id = egui::Id::new((ctx.viewport_id(), "matrix-working"));
         let area = egui::Area::new(id)
             .kind(egui::UiKind::Modal)
@@ -420,11 +443,15 @@ impl Rustable {
             .backdrop_color(if dark { Color32::from_black_alpha(18) } else { Color32::from_white_alpha(22) })
             .show(ctx, |ui| {
                 let (bar, response) = ui.allocate_exact_size(rect.size(), egui::Sense::hover());
-                response.on_hover_text(format!("{title}\n{identity}\nStop or Esc returns control; running queries wait for cancellation."));
+                response.on_hover_text(format!("{title}\n{identity}{}\nStop or Esc returns control; running queries wait for cancellation.", transaction_indicator::guidance(transaction)));
                 let painter = ui.painter().with_clip_rect(bar);
                 let background = if dark { Color32::from_rgb(18, 43, 33) } else { Color32::from_rgb(222, 240, 229) };
                 let ink = if dark { Color32::from_rgb(223, 248, 233) } else { Color32::from_rgb(20, 64, 41) };
                 painter.rect_filled(bar, 12.0, background);
+                if transaction.blocks_replacement() {
+                    let accent = if transaction == db::TransactionState::Failed { ui.visuals().error_fg_color } else { ui.visuals().warn_fg_color };
+                    painter.rect_stroke(bar, 12.0, Stroke::new(1.0_f32, accent), egui::StrokeKind::Inside);
+                }
                 let heading = painter.layout_no_wrap(title.into(),egui::FontId::monospace(12.0),ink);
                 let detail = painter.layout_no_wrap(identity.clone(),egui::FontId::monospace(11.0),ink.gamma_multiply(0.85));
                 let text_end = bar.left()+heading.size().x.max(detail.size().x)+23.0;
@@ -708,6 +735,38 @@ mod tests {
             },
         )
     }
+    #[test]
+    fn connector_enable_grants_current_workspace_and_closes_only_when_allowed() {
+        use crate::matrix_connector::Action;
+        let (mut app, mut bridge) = fixture();
+        bridge.enabled = false;
+        bridge.connector_open = true;
+        app.matrix = Some(bridge);
+        app.matrix_connector_action(Action::Cancel);
+        assert!(!app.matrix.as_ref().unwrap().enabled);
+        assert!(!app.matrix_connector_open());
+        app.matrix.as_mut().unwrap().connector_open = true;
+        app.connections = true;
+        app.matrix_connector_action(Action::Enable);
+        assert!(!app.matrix.as_ref().unwrap().enabled);
+        assert!(app.matrix_connector_open());
+        app.connections = false;
+        app.pending = Some(Pending::Query(0));
+        app.matrix_connector_action(Action::Enable);
+        assert!(!app.matrix.as_ref().unwrap().enabled);
+        assert!(app.matrix_connector_open());
+        app.pending = None;
+        let id = app.matrix_id();
+        app.matrix_connector_action(Action::Enable);
+        assert!(app.matrix.as_ref().unwrap().enabled);
+        assert!(!app.matrix_connector_open());
+        assert_eq!(app.matrix_id(), id);
+        assert!(app.matrix_summary().is_some());
+        app.matrix.as_mut().unwrap().connector_open = true;
+        app.matrix_connector_action(Action::Cancel);
+        assert!(app.matrix.as_ref().unwrap().enabled, "cancel must preserve existing access");
+    }
+
     #[test]
     fn matrix_connector_entry_fits_empty_and_saved_connection_managers() {
         fn find(shape: &egui::Shape) -> Option<egui::Rect> {

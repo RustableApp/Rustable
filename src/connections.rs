@@ -18,6 +18,7 @@ enum ListSelection {
 #[derive(Default)]
 pub(super) struct Manager {
     selection: Option<ListSelection>,
+    pending_delete: Option<ProfileId>,
     #[cfg(not(target_arch = "wasm32"))]
     tableplus_import: Option<crate::tableplus_import::Dialog>,
     import_notice: Option<String>,
@@ -286,6 +287,7 @@ enum Action {
     Save(bool),
     OpenWindow,
     Discard,
+    RequestDelete(ProfileId),
     Delete(ProfileId),
     Duplicate(ProfileId),
     Move(ProfileId, Option<GroupId>, usize),
@@ -702,6 +704,7 @@ impl Rustable {
                         keyboard_selection = Some(id);
                     }
                     if keyboard_selection.is_none()
+                        && self.connection_manager.pending_delete.is_none()
                         && ctx.memory(|m| m.has_focus(egui::Id::new("connection-search")))
                         && !egui::Popup::is_any_open(ctx)
                         && ctx.input_mut(|input| input.modifiers.is_none()
@@ -936,7 +939,7 @@ impl Rustable {
                                     });
                                     ui.separator();
                                     if connection_menu_action(ui, true, "Duplicate").clicked() { action = Some(Action::Duplicate(profile.id)); ui.close(); }
-                                    if ui.button("Remove saved connection").clicked() { action = Some(Action::Delete(profile.id)); ui.close(); }
+                                    if ui.button("Remove saved connection").clicked() { action = Some(Action::RequestDelete(profile.id)); ui.close(); }
                                 });
                             }
                             });
@@ -1265,6 +1268,7 @@ impl Rustable {
                 self.connection_manager.error = Some(error);
             }
         }
+        self.connection_delete_confirmation(ctx);
         if let Some(error) = self.connection_manager.error.as_ref().or(self.error.as_ref())
             && super::error_toast(ctx, error, |_| {}) {
             if self.connection_manager.error.is_some() { self.connection_manager.error = None; }
@@ -1272,8 +1276,48 @@ impl Rustable {
         }
     }
 
+    fn connection_delete_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.connection_manager.pending_delete else { return; };
+        let Some(profile) = self.prefs.saved_connections.profile(id) else {
+            self.connection_manager.pending_delete = None;
+            return;
+        };
+        let mut answer = None;
+        let frame = egui::Frame::popup(&ctx.style()).inner_margin(16).corner_radius(16);
+        let modal = egui::Modal::new(egui::Id::new("delete-saved-connection"))
+            .frame(frame).show(ctx, |ui| {
+                ui.push_id("delete-connection-content", |ui| {
+                    ui.set_width(320.0);
+                    ui.label(RichText::new("Delete saved connection?").strong());
+                    ui.add_space(8.0);
+                    ui.add(egui::Label::new(&profile.name).truncate()).on_hover_text(&profile.name);
+                    ui.label("This removes the saved connection and its saved passwords. Your database and its data are unaffected.");
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let size = egui::vec2(118.0, crate::controls::BUTTON_HEIGHT);
+                        if ui.add_sized(size, egui::Button::new("Cancel").corner_radius(14)).clicked() {
+                            answer = Some(false);
+                        }
+                        if ui.add_sized(size, egui::Button::new("Delete").corner_radius(14)).clicked() {
+                            answer = Some(true);
+                        }
+                    });
+                });
+            });
+        if modal.should_close() { answer = Some(false); }
+        if let Some(delete) = answer { self.resolve_connection_delete(delete); }
+    }
+
+    fn resolve_connection_delete(&mut self, delete: bool) {
+        let Some(id) = self.connection_manager.pending_delete.take() else { return; };
+        if delete && let Err(error) = self.connection_action(Action::Delete(id)) {
+            self.connection_manager.error = Some(error);
+        }
+    }
+
     fn connection_search_navigation(&self, ctx: &egui::Context) -> Option<ProfileId> {
-        if !ctx.memory(|m| m.has_focus(egui::Id::new("connection-search")))
+        if self.connection_manager.pending_delete.is_some()
+            || !ctx.memory(|m| m.has_focus(egui::Id::new("connection-search")))
             || egui::Popup::is_any_open(ctx) { return None; }
         let forward = ctx.input_mut(|input| {
             if !input.modifiers.is_none() { return None; }
@@ -1464,6 +1508,10 @@ impl Rustable {
                     .clone();
                 self.connection_manager.select(copy);
                 self.profiles_changed();
+            }
+            Action::RequestDelete(id) => {
+                self.prefs.saved_connections.profile(id).ok_or("Connection no longer exists.")?;
+                self.connection_manager.pending_delete = Some(id);
             }
             Action::Delete(id) => {
                 let removed = self.prefs.saved_connections.remove_profile(id)?;
@@ -1825,6 +1873,11 @@ impl Rustable {
                 settings.sentinel = Some(crate::redis_settings::Sentinel { service: "primary-cache".into(), seeds: vec![crate::redis_settings::SentinelSeed { host: "sentinel-1.example.test".into(), port: 26379 }], ..Default::default() });
                 }
             }
+            if std::env::var_os("RUSTABLE_DELETE_CONNECTION_PREVIEW").is_some() {
+                app.connection_action(Action::Save(false)).unwrap();
+                let id = app.connection_manager.draft.as_ref().unwrap().id;
+                app.connection_action(Action::RequestDelete(id)).unwrap();
+            }
             Ok(Box::new(Preview { app, frames: 0, requested: false }))
         }))
     }
@@ -1952,6 +2005,66 @@ mod tests {
         assert!(app.pending.is_none());
         app
     }
+    #[test]
+    #[ignore = "manual delete confirmation CPU measurements"]
+    fn connection_delete_dialog_frame_benchmark() {
+        for width in [500.0, 1100.0] {
+            let ctx = egui::Context::default();
+            let mut app = app();
+            app.connection_action(Action::NewRedis).unwrap();
+            app.connection_manager.draft.as_mut().unwrap().name = "Production cache".repeat(20);
+            app.connection_action(Action::Save(false)).unwrap();
+            let id = app.connection_manager.draft.as_ref().unwrap().id;
+            app.connection_action(Action::RequestDelete(id)).unwrap();
+            let mut samples = Vec::new();
+            for frame in 0..180 {
+                let start = std::time::Instant::now();
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 760.0))),
+                    time: Some(frame as f64 / 120.0 + if frame >= 100 { 30.0 } else { 0.0 }),
+                    ..Default::default()
+                }, |ctx| app.connection_delete_confirmation(ctx));
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                if frame >= 20 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+            }
+            assert!(app.prefs.saved_connections.profile(id).is_some());
+            samples.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("connection/delete-dialog/{width}"), &samples);
+        }
+    }
+
+    #[test]
+    fn deleting_saved_connection_requires_confirmation_and_cancel_preserves_draft() {
+        let mut app = app();
+        app.connection_action(Action::NewRedis).unwrap();
+        app.connection_manager.draft.as_mut().unwrap().name = "Production cache".into();
+        app.connection_action(Action::Save(false)).unwrap();
+        let id = app.connection_manager.draft.as_ref().unwrap().id;
+        app.connection_manager.draft.as_mut().unwrap().name = "Unsaved name".into();
+        app.connection_action(Action::RequestDelete(id)).unwrap();
+        assert!(app.prefs.saved_connections.profile(id).is_some());
+        assert!(!app.connection_manager.credential_pending.iter().any(|pending| matches!(pending.kind, CredentialKind::Delete)));
+        let ctx = egui::Context::default();
+        for frame in 0..3 {
+            let _ = ctx.run(egui::RawInput {
+                events: if frame == 2 { vec![egui::Event::Key {
+                    key: egui::Key::Escape, physical_key: None, pressed: true,
+                    repeat: false, modifiers: egui::Modifiers::NONE,
+                }] } else { vec![] },
+                ..Default::default()
+            }, |ctx| app.connection_delete_confirmation(ctx));
+        }
+        assert!(app.connection_manager.pending_delete.is_none());
+        assert!(app.prefs.saved_connections.profile(id).is_some());
+        assert_eq!(app.connection_manager.draft.as_ref().unwrap().name, "Unsaved name");
+        app.resolve_connection_delete(true);
+        assert!(app.prefs.saved_connections.profile(id).is_some());
+        app.connection_action(Action::RequestDelete(id)).unwrap();
+        app.resolve_connection_delete(true);
+        assert!(app.prefs.saved_connections.profile(id).is_none());
+        assert!(app.connection_manager.draft.is_none());
+    }
+
     #[test]
     fn probe_fill_stays_inside_input_without_changing_layout() {
         for width in [300.0, 700.0] {
