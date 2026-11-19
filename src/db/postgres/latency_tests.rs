@@ -1,5 +1,12 @@
 use super::*;
 
+fn with_progressive<T>(run: impl FnOnce() -> T) -> T {
+    let _scope = crate::db::progressive::Scope::enter(
+        Arc::new(crate::db::progressive::Mailbox::default()), Arc::new(|| {}));
+    run()
+}
+
+
 #[test]
 #[ignore = "manual latency measurement against opted-in disposable PostgreSQL QA"]
 fn query_completion_latency() {
@@ -149,7 +156,7 @@ fn editor_wan_latency_comparison() {
         assert_eq!(previous.rows, grid.rows);
         let describe_ms = timer.elapsed().as_secs_f64() * 1000.0;
         let timer = Instant::now();
-        let result = driver.execute(sql, true, &cancel);
+        let result = with_progressive(|| driver.execute(sql, true, &cancel));
         assert!(result.error.is_none(), "{:?}", result.error);
         assert_eq!(result.grids[0].rows, grid.rows);
         let new_ms = timer.elapsed().as_secs_f64() * 1000.0;
@@ -216,7 +223,7 @@ fn editor_wan_latency_comparison() {
                 1024,
             )
             .unwrap();
-        let grid = collect_complete(rows, vec!["id".into()], 1024, &cancel).unwrap();
+        let grid = with_progressive(|| collect_complete(rows, vec!["id".into()], 1024, &cancel)).unwrap();
         let elapsed = start.elapsed().as_secs_f64() * 1000.0;
         assert!(grid.is_stored());
         assert_eq!(grid.row_count(), 6000);
@@ -347,24 +354,24 @@ fn browse_wan_latency_comparison() {
         driver.browse_catalog.clear();
         driver.browse_hints.clear();
         let timer = Instant::now();
-        let first = driver.browse(&request).unwrap();
+        let first = with_progressive(|| driver.browse(&request)).unwrap();
         let first_ms = timer.elapsed().as_secs_f64() * 1000.0;
         // Sidebar column hints exist before a normal first open; clear the
         // browse catalog to prove that this does not depend on a previous page.
         driver.browse_catalog.clear();
         let timer = Instant::now();
-        let cold_page = driver.browse(&request).unwrap();
+        let cold_page = with_progressive(|| driver.browse(&request)).unwrap();
         let cold_ms = timer.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(cold_page.grid.rows, first.grid.rows);
         let timer = Instant::now();
         driver.client.simple_query("SELECT * FROM latency_address ORDER BY id LIMIT 501 OFFSET 0").unwrap();
         let baseline_ms = timer.elapsed().as_secs_f64() * 1000.0;
         let timer = Instant::now();
-        let new = driver.browse(&request).unwrap();
+        let new = with_progressive(|| driver.browse(&request)).unwrap();
         let new_ms = timer.elapsed().as_secs_f64() * 1000.0;
         driver.browse(&Browse { table: "latency_other".into(), ..Default::default() }).unwrap();
         let timer = Instant::now();
-        let revisit = driver.browse(&request).unwrap();
+        let revisit = with_progressive(|| driver.browse(&request)).unwrap();
         let revisit_ms = timer.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(revisit.grid.rows, new.grid.rows);
         assert_eq!(first.grid.rows, new.grid.rows);
@@ -433,6 +440,35 @@ fn browse_wan_latency_comparison() {
         assert!(browse_samples[1] < reference_samples[1] * 1.5,
             "idle browse should remain near the reference without adding exchanges");
     }
+    // Explicit schema refresh does more work than data refresh: discover the
+    // catalog, then reload the selected table without reconnecting or replaying SQL.
+    driver.client.batch_execute("CREATE SCHEMA rustable_schema_refresh_latency; CREATE TABLE rustable_schema_refresh_latency.item(id integer PRIMARY KEY); INSERT INTO rustable_schema_refresh_latency.item VALUES(1)").unwrap();
+    driver.schemas.selected = Some("rustable_schema_refresh_latency".into());
+    driver.objects().unwrap();
+    driver.client.batch_execute("ALTER TABLE rustable_schema_refresh_latency.item ADD COLUMN added text; CREATE TABLE rustable_schema_refresh_latency.new_table(id integer)").unwrap();
+    let refreshed_request = Browse { table: "\"rustable_schema_refresh_latency\".\"item\"".into(), ..Default::default() };
+    let mut catalog_only = Vec::new();
+    let mut catalog_and_table = Vec::new();
+    for sample in 0..9 {
+        let timer = Instant::now();
+        let objects = driver.objects().unwrap();
+        let catalog_ms = timer.elapsed().as_secs_f64() * 1000.0;
+        assert!(objects.iter().any(|object| object.display_name() == "new_table"));
+        assert!(objects.iter().find(|object| object.display_name() == "item").unwrap().columns.iter().any(|column| column.name == "added"));
+        driver.browse_catalog.clear(); // First open and cached revisit use the same catalog hints.
+        let timer = Instant::now();
+        driver.objects().unwrap();
+        let page = with_progressive(|| driver.browse(&refreshed_request)).unwrap();
+        let complete_ms = timer.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(page.grid.columns, ["id", "added"]);
+        assert_eq!(page.grid.rows, [vec![Value::Integer(1), Value::Null]]);
+        if sample >= 2 { catalog_only.push(catalog_ms); catalog_and_table.push(complete_ms); }
+    }
+    catalog_only.sort_by(f64::total_cmp);
+    catalog_and_table.sort_by(f64::total_cmp);
+    eprintln!("explicit schema refresh,30ms RTT,7samples: catalog-only p50={:.1}ms p95={:.1}ms; catalog+current-table p50={:.1}ms p95={:.1}ms", catalog_only[3], catalog_only[6], catalog_and_table[3], catalog_and_table[6]);
+    assert!(catalog_and_table[3] < catalog_only[3] + baseline[3] * 1.5, "explicit refresh adds only the existing one-exchange table load");
+    driver.client.batch_execute("DROP SCHEMA rustable_schema_refresh_latency CASCADE").unwrap();
     drop(driver);
     proxy.join().unwrap();
 }
@@ -1001,4 +1037,54 @@ fn bulk_export_wan_latency_comparison() {
     );
     drop(driver);
     proxy.join().unwrap();
+}
+
+#[test]
+#[ignore = "opted-in disposable PostgreSQL progressive result measurement"]
+fn progressive_query_and_browse_first_rows() {
+    use crate::db::progressive::{Mailbox, Scope};
+    use std::sync::Mutex;
+    assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut driver = PostgresDriver::open(&crate::connection::PostgresConfig {
+        host: "127.0.0.1".into(), port: 54329, database: "rustable_qa".into(),
+        user: "postgres".into(), password: "rustable_qa_only".into(),
+        tls: crate::connection::PostgresTlsMode::Disable, ssh: None,
+    }, cancel.clone()).unwrap();
+    driver.client.batch_execute("CREATE TEMP VIEW progressive_rows AS SELECT i, repeat('x',4096) AS payload FROM generate_series(1,300) i WHERE pg_sleep(0.002) IS NOT NULL").unwrap();
+    let table = "progressive_rows".to_owned();
+    driver.browse(&Browse { table: table.clone(), ..Default::default() }).unwrap();
+    driver.browse_catalog.clear();
+    for browse in [false, true] {
+        for repetition in 0..2 {
+            let mailbox = Arc::new(Mailbox::default());
+            let first = Arc::new(Mutex::new(None));
+            let started = Instant::now();
+            let _scope = Scope::enter(mailbox.clone(), {
+                let mailbox = mailbox.clone();
+                let first = first.clone();
+                Arc::new(move || {
+                    if let Some(grid) = mailbox.take() && grid.row_count() > 0 {
+                            first.lock().unwrap().get_or_insert((started.elapsed(), grid.row_count()));
+                            assert!(grid.fetching);
+                    }
+                })
+            });
+            let grid = if browse {
+                driver.browse(&Browse { table: table.clone(), ..Default::default() }).unwrap().grid
+            } else {
+                let report = driver.execute("SELECT * FROM progressive_rows", true, &cancel);
+                assert!(report.error.is_none(), "{:?}", report.error);
+                Arc::unwrap_or_clone(report.grids[0].clone())
+            };
+            let elapsed = started.elapsed();
+            let (first, rows) = first.lock().unwrap().expect("no partial rows published");
+            assert_eq!(grid.row_count(), 300);
+            assert!(!grid.fetching);
+            assert!(rows < 300);
+            assert!(first < elapsed / 2, "first={first:?}, complete={elapsed:?}");
+            assert_eq!(driver.client.transaction_status(), Some(b'I'));
+            eprintln!("progressive browse={browse} repetition={repetition}: first={first:?}, complete={elapsed:?}, initial_rows={rows}");
+        }
+    }
 }

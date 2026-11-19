@@ -10,6 +10,7 @@ use std::sync::{
 #[derive(Default)]
 pub struct Pages {
     source: Weak<Grid>,
+    stream_id: u64,
     page: Option<Arc<Grid>>,
     pub offset: usize,
     worker: Option<Worker>,
@@ -103,7 +104,25 @@ impl Drop for Worker {
     }
 }
 impl Pages {
+    /// Keep the resident viewport alive through the one-time switch to disk.
+    /// Otherwise an offscreen selection would disappear before its first disk window arrives.
+    pub fn promote(&mut self, previous: &mut Arc<Grid>, source: &Arc<Grid>) {
+        if !previous.is_stored() && source.is_stored() && previous.stream_id != 0 && previous.stream_id == source.stream_id {
+            let page = Arc::make_mut(previous);
+            page.fetching = source.fetching;
+            #[cfg(not(target_arch = "wasm32"))]
+            { page.stored = source.stored.clone(); }
+            self.page = Some(previous.clone());
+            self.source = Arc::downgrade(source);
+            self.stream_id = source.stream_id;
+            self.offset = 0;
+        }
+    }
     pub fn copy_all(&mut self, source: &Arc<Grid>, ctx: &egui::Context) {
+        if source.fetching {
+            self.copy_error = Some("Wait for fetching to finish before copying all rows.".into());
+            return;
+        }
         if self.copy.is_some() {
             return;
         }
@@ -143,7 +162,11 @@ impl Pages {
         }
     }
     pub fn grid(&self, source: &Arc<Grid>) -> Arc<Grid> {
-        if self.source.ptr_eq(&Arc::downgrade(source)) {
+        // The inspector renders before show() synchronizes a new snapshot.
+        // Immutable prefixes from the same stream share the cached row window.
+        if self.source.ptr_eq(&Arc::downgrade(source))
+            || (source.stream_id != 0 && self.stream_id == source.stream_id)
+        {
             if !self.rendering
                 && let Some(selection) = &self.selection
             {
@@ -334,9 +357,35 @@ impl Pages {
     ) -> (Option<(usize, usize)>, bool) {
         let mut changed = false;
         let mut selected = None;
+        if !self.source.ptr_eq(&Arc::downgrade(source)) && source.stream_id != 0 && self.stream_id == source.stream_id {
+            self.source = Arc::downgrade(source);
+            let shared_selection = self.page.as_ref().zip(self.selection.as_ref())
+                .is_some_and(|(page, selection)| Arc::ptr_eq(page, selection));
+            if let Some(page) = &mut self.page {
+                if page.fetching != source.fetching {
+                    let page = Arc::make_mut(page);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    { page.stored = source.stored.clone(); }
+                    page.fetching = source.fetching;
+                }
+            } else if source.is_stored() && self.worker.is_none() {
+                self.request(source, self.offset, None, ui.ctx());
+            }
+            if !source.fetching {
+                if shared_selection {
+                    self.selection = self.page.clone();
+                } else if let Some(selection) = &mut self.selection {
+                    let selection = Arc::make_mut(selection);
+                    selection.fetching = false;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    { selection.stored = source.stored.clone(); }
+                }
+            }
+        }
         if !self.source.ptr_eq(&Arc::downgrade(source)) {
             *self = Self {
                 source: Arc::downgrade(source),
+                stream_id: source.stream_id,
                 ..Default::default()
             };
             if source.is_stored() {
@@ -400,7 +449,13 @@ impl Pages {
                 self.request(&source, position, full_row, ui.ctx());
             } else {
                 match result {
-                    Ok((offset, page, previews)) => {
+                    Ok((offset, mut page, previews)) => {
+                        if source.stream_id != 0 && source.stream_id == page.stream_id {
+                            let page = Arc::make_mut(&mut page);
+                            page.fetching = source.fetching;
+                            #[cfg(not(target_arch = "wasm32"))]
+                            { page.stored = source.stored.clone(); }
+                        }
                         self.offset = offset;
                         self.page = Some(page);
                         self.previews = previews;

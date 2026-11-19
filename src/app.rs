@@ -35,6 +35,8 @@ mod query_result_tabs;
 mod table_export;
 #[path = "table_tabs.rs"]
 mod table_tabs;
+#[path = "schema_refresh.rs"]
+mod schema_refresh;
 use navigation_confirmation::{NavigationAction, NavigationConfirmation};
 #[cfg(target_arch = "wasm32")]
 #[path = "browser_files.rs"]
@@ -360,6 +362,7 @@ enum Pending {
         identity: ProfileIdentity,
     },
     Table,
+    Schema,
     Query(usize),
     Export,
     ImportMetadata,
@@ -1051,6 +1054,7 @@ impl Rustable {
 
     /// Staged changes shown over the visible grid, when it is an edit target.
     pub(super) fn staged_table(&self) -> Option<&str> {
+        if (self.view == View::Query && self.tabs[self.tab].grid.fetching) || (self.view == View::Data && self.table.fetching) { return None; }
         Some(self.edit_table()).filter(|table| {
             !table.is_empty() && (self.view == View::Data || self.query_edit_target().is_some())
         })
@@ -1360,6 +1364,41 @@ impl Rustable {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_progressive(&mut self, grid: Arc<Grid>) {
+        match self.pending {
+            Some(Pending::Query(index)) => {
+                let tab = &mut self.tabs[index];
+                if tab.grid.stream_id != grid.stream_id {
+                    tab.result_search.cancel();
+                    tab.result_pages = Default::default();
+                    tab.selected_pin = None;
+                    tab.edit_target = None;
+                    tab.result_error = None;
+                    tab.results.clear();
+                    tab.result_index = 0;
+                    tab.result_view = ResultView::Data;
+                    if self.view == View::Query && self.tab == index {
+                        self.selected = None;
+                        self.row_selection.clear();
+                    }
+                }
+                tab.result_pages.promote(&mut tab.grid, &grid);
+                tab.grid = grid;
+            }
+            Some(Pending::Table) => {
+                if self.table.stream_id != grid.stream_id {
+                    self.columns.clear();
+                    self.foreign_keys.clear();
+                    self.selected = None;
+                    self.row_selection.clear();
+                }
+                self.table = grid;
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn poll(&mut self) {
         self.poll_query_groups();
         #[cfg(target_arch = "wasm32")]
@@ -1371,6 +1410,10 @@ impl Rustable {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(error) = self.worker.take_notice() { self.error = Some(error); }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(grid) = self.worker.take_progressive() {
+            self.apply_progressive(grid);
+        }
         loop {
             let result = match self.worker.rx.try_recv() {
                 Ok(result) => result,
@@ -1414,6 +1457,11 @@ impl Rustable {
                     if matches!(pending, Some(Pending::Table)) {
                         self.saved_selection = None;
                     }
+                    if let Some(Pending::Query(index)) = pending && self.tabs[index].grid.fetching {
+                        self.tabs[index].grid = Arc::default();
+                        self.tabs[index].result_pages = Default::default();
+                    }
+                    if self.table.fetching { self.table = Arc::default(); }
                     self.status = "Operation failed".into();
                     self.error = Some(e);
                 }
@@ -1557,6 +1605,7 @@ impl Rustable {
                         grid.rows.len(),
                         grid.elapsed.as_secs_f64() * 1000.0
                     );
+                    let streamed = self.table.stream_id != 0 && self.table.stream_id == grid.stream_id;
                     self.table = Arc::new(grid);
                     self.table_loaded = true;
                     self.columns = columns;
@@ -1565,13 +1614,14 @@ impl Rustable {
                     self.indexes = indexes;
                     self.triggers = triggers;
                     self.foreign_keys = foreign_keys;
-                    self.row_selection.clear();
+                    if !streamed { self.row_selection.clear(); }
+                    let streamed_selection = streamed.then_some(self.selected).flatten();
                     self.selected = self.saved_selection.take().and_then(|(table, keys)| {
                         if table != self.browse.table {
                             return None;
                         }
                         find_saved_row(&self.table, &keys)
-                    });
+                    }).or(streamed_selection);
                     if !self.columns.iter().any(|c| c.name == self.filter_column) {
                         self.filter_column = self
                             .columns
@@ -1587,6 +1637,7 @@ impl Rustable {
                     objects,
                     schemas,
                 }) => {
+                    let streamed_query = matches!(pending, Some(Pending::Query(index)) if self.tabs[index].grid.fetching && report.grids.iter().any(|grid| grid.stream_id == self.tabs[index].grid.stream_id));
                     self.session_dialect = Some(dialect);
                     self.schemas = schemas;
                     self.status = format!(
@@ -1598,20 +1649,21 @@ impl Rustable {
                         self.tabs[index].result_view = if report.error.is_some() { ResultView::Message } else { ResultView::Data };
                         let tab = &mut self.tabs[index];
                         tab.result_search.cancel();
-                        tab.result_pages = Default::default();
+                        let streamed_id = tab.grid.stream_id;
+                        if streamed_id == 0 { tab.result_pages = Default::default(); }
                         tab.error_highlight = tab.execution_source.take().and_then(|(source, base)| {
                             (source == tab.sql && report.error.is_some()).then_some(())?;
                             crate::editor::error_token_range(&source, base.checked_add(report.error_offset?)?)
                         });
                         self.tabs[index].result_error = report.error.clone();
+                        let streamed_index = report.grids.iter().position(|grid| streamed_id != 0 && grid.stream_id == streamed_id).unwrap_or(0);
                         self.tabs[index].results = report.grids;
-                        self.tabs[index].result_index = 0;
+                        self.tabs[index].result_index = streamed_index;
                         self.tabs[index].selected_pin = None;
-                        self.tabs[index].grid = self.tabs[index]
-                            .results
-                            .first()
-                            .cloned()
-                            .unwrap_or_default();
+                        let grid = self.tabs[index].results.get(streamed_index).cloned().unwrap_or_default();
+                        let tab = &mut self.tabs[index];
+                        tab.result_pages.promote(&mut tab.grid, &grid);
+                        tab.grid = grid;
                     }
                     self.error = report.error;
                     match objects {
@@ -1634,8 +1686,10 @@ impl Rustable {
                     if let Some(Pending::Query(index)) = pending {
                         self.update_query_edit_target(index);
                     }
-                    self.row_selection.clear();
-                    self.selected = None;
+                    if !streamed_query {
+                        self.row_selection.clear();
+                        self.selected = None;
+                    }
                 }
                 Ok(Payload::Imported(count)) => {
                     self.csv_preview = None;
@@ -1716,12 +1770,7 @@ impl Rustable {
                     self.ddl_preview = Some((name, sql));
                 }
                 Ok(Payload::Schema { objects, schemas }) => {
-                    self.navigator.loaded = false;
-                    if matches!(self.engine.as_str(), "MySQL" | "MariaDB") { self.connected_database = schemas.selected.clone(); }
-                    self.schemas = schemas;
-                    self.objects = objects;
-                    self.language.invalidate();
-                    self.status = "Schema refreshed".into();
+                    self.install_schema_catalog(objects, schemas, matches!(pending, Some(Pending::Schema)));
                 }
                 #[cfg(target_arch = "wasm32")]
                 Ok(Payload::Download { bytes, format }) => self.download_table(&bytes, format),
@@ -2339,7 +2388,7 @@ impl Rustable {
         }
         if self.defer_navigation(NavigationAction::Refresh) { return; }
         if self.view == View::Query || self.browse.table.is_empty() {
-            self.dispatch(Command::RefreshSchema, Pending::Export);
+            self.refresh_schema();
         } else {
             self.refresh();
         }
@@ -2448,7 +2497,9 @@ impl Rustable {
         }
         self.workspace_tab_shortcuts(ctx);
         self.staged_history_shortcuts(ctx);
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::R)) {
+            self.refresh_schema();
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
             self.refresh_current_view();
         }
         if ctx.input_mut(|i| {
@@ -2553,10 +2604,12 @@ impl Rustable {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
                 self.tabs[self.tab].focus_editor = false;
                 if results_focused {
+                    if !self.tabs[self.tab].grid.fetching {
                     let tab = &mut self.tabs[self.tab];
                     tab.result_view = ResultView::Data;
                     tab.result_search.open = true;
                     tab.result_search.focus = true;
+                    }
                 } else {
                     let search = &mut self.tabs[self.tab].search;
                     search.open = true;
@@ -3465,7 +3518,17 @@ Right-click to inspect or remove individual changes",
                     }
                     ui.add_space(4.0);
                 }
-                sidebar_search(ui, &mut self.search, "Search for item…");
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let response = ui.add_enabled(self.pending.is_none() && self.review.is_none(), crate::icons::widget("refresh-cw"));
+                        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, response.enabled(), "Refresh schema"));
+                        if response.on_hover_text(format!("Refresh schema · {}\nReload tables, columns and definitions changed outside Rustable.", crate::icons::shortcut(ui.ctx(), true, "R")))
+                            .clicked() { self.refresh_schema(); }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            sidebar_search(ui, &mut self.search, "Search for item…");
+                        });
+                    });
+                });
                 ui.add_space(4.0);
                 let filter = crate::search::Query::new(&self.search);
                 let changed_tables: std::collections::HashSet<&str> =
@@ -3948,7 +4011,7 @@ Right-click to inspect or remove individual changes",
             if self.view != View::Query {
                 let grid = self.grid();
                 let selected_count = self.row_selection.rows.len().max(usize::from(self.selected.is_some()));
-                let page_range = if self.view == View::Data && self.selected.is_some_and(|index| index >= grid.rows.len()) {
+                let page_range = if grid.fetching { format!("{} rows received · fetching…", grid.row_count()) } else if self.view == View::Data && self.selected.is_some_and(|index| index >= grid.rows.len()) {
                     "New row · pending save".to_owned()
                 } else {
                     table_status_label(self.browse.offset, &grid, selected_count)
@@ -4049,7 +4112,7 @@ Right-click to inspect or remove individual changes",
                                             ui.close();
                                         }
                                         ui.separator();
-                                        if ui.button("Loaded rows as CSV…").clicked() {
+                                        if ui.add_enabled(self.pending.is_none(), egui::Button::new("Loaded rows as CSV…")).clicked() {
                                             self.file_dialog(ctx, true);
                                             ui.close();
                                         }
@@ -4179,7 +4242,7 @@ Right-click to inspect or remove individual changes",
             if self.view == View::Query {
                 let grid = self.tabs[self.tab].grid.clone();
                 let was_open = self.tabs[self.tab].result_search.open;
-                if ui.is_enabled() && let Some((row, column)) = self.tabs[self.tab].result_search.show(ui, &grid)
+                if ui.is_enabled() && !grid.fetching && let Some((row, column)) = self.tabs[self.tab].result_search.show(ui, &grid)
                     && let Some((row, column)) = self.tabs[self.tab].result_pages.select(&grid, row, column, ui.ctx()) {
                     self.selected = self.row_selection.click(row, false, false, None);
                     self.row_selection.cell_column = column;
@@ -4257,7 +4320,7 @@ Right-click to inspect or remove individual changes",
                             ui.label(RichText::new(format!("{count} · editable")).color(ui.visuals().weak_text_color()))
                                 .on_hover_text(hint);
                         } else {
-                            ui.label(RichText::new(if pending { String::new() } else { count }).color(ui.visuals().weak_text_color()))
+                            ui.label(RichText::new(if grid.fetching { format!("{} rows received · fetching…", grid.row_count()) } else if pending { String::new() } else { count }).color(ui.visuals().weak_text_color()))
                                 .on_hover_text(if grid.truncated { "Browser preview limit reached (5,000 rows or 16 MiB); use the desktop app for complete disk-backed results." } else { "Rows in the selected result" });
                         }
                     });
@@ -4270,11 +4333,11 @@ Right-click to inspect or remove individual changes",
                                 if ui.button(if grid.truncated { "Loaded rows as JSON…" } else { "All result rows as JSON…" }).on_hover_text(if grid.truncated { "JSON objects; binary values are byte arrays. Exports loaded rows only." } else { "JSON objects; binary values are byte arrays. Exports every result row." }).clicked() { self.json_export_dialog(ui.ctx()); ui.close(); }
                             });
                         });
-                        if ui.add_enabled(!grid.columns.is_empty(), egui::Button::new("Share…"))
+                        if ui.add_enabled(!pending && !grid.columns.is_empty(), egui::Button::new("Share…"))
                             .on_hover_text(format!("Share query and results · {}", crate::icons::shortcut(ui.ctx(), true, "J"))).clicked() {
                             self.open_result_share(ui.ctx(), false, None);
                         }
-                        if ui.add_enabled(!grid.columns.is_empty(), result_search_button())
+                        if ui.add_enabled(!pending && !grid.columns.is_empty(), result_search_button())
                             .on_hover_text(format!("Find in all result rows · {} when results are focused", crate::icons::shortcut(ui.ctx(), false, "F"))).clicked() {
                             let tab = &mut self.tabs[self.tab];
                             tab.result_view = ResultView::Data;
@@ -4296,6 +4359,7 @@ Right-click to inspect or remove individual changes",
     }
 
     fn toggle_result_pin(&mut self) {
+        if self.tabs[self.tab].grid.fetching { return; }
         let tab = &mut self.tabs[self.tab];
         if let Some(index) = tab.pins.find(&tab.grid) {
             tab.remove_pin(index);
@@ -5422,7 +5486,7 @@ Right-click to inspect or remove individual changes",
     fn data_grid_body(&mut self, ui: &mut egui::Ui) {
         let mut share_request = None;
         let grid = self.grid();
-        if self.pending.is_some() {
+        if self.pending.is_some() && !grid.fetching {
             let names;
             let columns = if grid.columns.is_empty() && self.view == View::Data {
                 names = self
@@ -5490,7 +5554,7 @@ Right-click to inspect or remove individual changes",
             0
         };
         let logical_rows = if stored {
-            grid.row_count()
+            self.tabs[self.tab].grid.row_count()
         } else {
             grid.rows.len()
         };
@@ -5567,11 +5631,12 @@ Right-click to inspect or remove individual changes",
         let defaults = ui
             .ctx()
             .data(|data| data.get_temp::<(std::sync::Weak<Grid>, Arc<Vec<f32>>)>(defaults_id))
-            .filter(|(source, _)| std::ptr::eq(source.as_ptr(), Arc::as_ptr(&grid)))
+            .filter(|(source, _)| std::ptr::eq(source.as_ptr(), Arc::as_ptr(&grid)) || (grid.stream_id != 0 && ui.ctx().data(|data| data.get_temp::<u64>(defaults_id.with("stream"))) == Some(grid.stream_id)))
             .map(|(_, widths)| widths)
             .unwrap_or_else(|| {
                 let widths = Arc::new(content_column_widths(ui, &grid));
                 ui.ctx().data_mut(|data| {
+                    data.insert_temp(defaults_id.with("stream"), grid.stream_id);
                     data.insert_temp(defaults_id, (Arc::downgrade(&grid), widths.clone()))
                 });
                 widths
@@ -12978,7 +13043,7 @@ mod refresh_shortcut_tests {
         app.view = View::Data;
         app.browse.table.clear();
         app.refresh_current_view();
-        assert!(matches!(app.pending, Some(Pending::Export)));
+        assert!(matches!(app.pending, Some(Pending::Schema)));
         assert!(app.browse.table.is_empty());
     }
 

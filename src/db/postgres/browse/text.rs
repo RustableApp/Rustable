@@ -25,12 +25,11 @@ pub(super) fn browse(
     };
     let (metadata, data) = driver
         .client
-        .query_text_with_metadata(
+        .query_text_stream_with_metadata(
             CATALOG,
             &[(&request.table, Type::TEXT)],
             &sql,
             bind_values(&parameters),
-            request.page_size() + 1,
             BYTE_LIMIT,
         )
         .map_err(error)?;
@@ -66,6 +65,7 @@ pub(super) fn browse(
             .zip(&hint.columns)
             .all(|(a, b)| a.name == b.name && a.data_type == b.data_type && a.pk == b.pk);
     if !same {
+        drop(data);
         driver.browse_hints.retain(|o| o.name != request.table);
         driver
             .browse_catalog
@@ -74,14 +74,14 @@ pub(super) fn browse(
         result.grid.elapsed = started.elapsed();
         return Ok(result);
     }
-    let (messages, truncated) = data.map_err(error)?;
-    let mut grid = Grid {
-        truncated,
-        ..Grid::default()
-    };
+    let mut messages = data.map_err(error)?;
+    let mut grid = Grid::default();
+    let mut stream = crate::db::progressive::Stream::default();
     let mut bytes = 0usize;
+    let mut wire_bytes = 0usize;
     let mut decoded_truncated = false;
-    for message in messages {
+    while let Some(message) = messages.next().map_err(error)? {
+        if driver.cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
         match message {
             SimpleQueryMessage::RowDescription(fields) => {
                 if fields.len() != raw.len()
@@ -95,12 +95,22 @@ pub(super) fn browse(
                     );
                 }
                 grid.columns = fields.iter().map(|f| f.name().to_owned()).collect();
+                stream = crate::db::progressive::Stream::new(&mut grid);
             }
             SimpleQueryMessage::Row(row) => {
                 if decoded_truncated || grid.rows.len() >= request.page_size() {
                     grid.truncated = true;
                     continue;
                 }
+                // Reject wide wire rows before allocating decoded strings/blobs.
+                // The former buffered API enforced this bound inside the driver.
+                let size = row.storage_size();
+                if size > BYTE_LIMIT.saturating_sub(wire_bytes) {
+                    decoded_truncated = true;
+                    grid.truncated = true;
+                    continue;
+                }
+                wire_bytes += size;
                 let mut values = Vec::with_capacity(raw.len());
                 let mut row_bytes = 0usize;
                 for (index, column) in raw.iter().enumerate() {
@@ -116,11 +126,13 @@ pub(super) fn browse(
                 bytes += row_bytes;
                 crate::db::progress::decoded_row(&values);
                 grid.rows.push(values);
+                stream.update(&grid);
             }
             SimpleQueryMessage::CommandComplete(n) => grid.affected = n as usize,
             _ => {}
         }
     }
+    drop(messages);
     finish(
         driver, request, row, grid, columns, sql, parameters, started,
     )

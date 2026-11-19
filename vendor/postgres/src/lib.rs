@@ -87,7 +87,7 @@ pub use crate::generic_client::GenericClient;
 pub use crate::notifications::Notifications;
 #[doc(no_inline)]
 pub use crate::row::{Row, SimpleQueryRow};
-pub use crate::row_iter::RowIter;
+pub use crate::row_iter::{RowIter, TextRowIter};
 #[doc(no_inline)]
 pub use crate::tls::NoTls;
 pub use crate::transaction::*;

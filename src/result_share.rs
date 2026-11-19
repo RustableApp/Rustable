@@ -533,6 +533,10 @@ impl Rustable {
             return;
         }
         let displayed = self.grid();
+        if displayed.fetching {
+            self.error = Some("Wait for fetching to finish before sharing the result.".into());
+            return;
+        }
         if displayed.columns.is_empty() {
             return;
         }

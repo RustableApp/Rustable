@@ -243,3 +243,120 @@ Raw timings, environment, binary hashes and comparison results are in
 latency or sustained FPS. The previously listed native frame-timing, mixed-DPI,
 multiple-window and monitor-transition limitations remain untested. No database
 execution or driver sequencing changed in this preloading follow-up.
+
+## Progressive desktop display
+
+SQL results and forward table pages now publish headers and their first decoded
+row before the operation finishes. Subsequent snapshots are coalesced at most
+every 50 ms while rows arrive. A single-slot mailbox replaces obsolete snapshots;
+the UI never drains an unbounded queue of result batches. The footer distinguishes
+rows received from a completed result. Editing, whole-result sharing, pinning,
+and full-result search wait for completion. Cancel/error replies remain terminal
+and partial table data is discarded; receiving RETURNING rows never implies commit.
+
+Large results keep the same 5,000-row / 16 MiB spill thresholds. The temporary
+SQLite store uses WAL and publishes committed prefixes for background readers.
+Each snapshot has a fixed row count; window/search/export readers cannot read
+past that prefix even if the writer has appended more rows. Readers are bounded
+and do no work on the UI thread. Snapshot identity keeps scrolling and selection
+stable across updates and the transition to disk. This still fetches the entire
+original SQL result, without rewriting it or requesting additional server pages.
+
+PostgreSQL table browsing uses a synchronous text iterator over the existing
+pipelined metadata and data responses. Fresh metadata is validated before any
+rows are exposed. Built-in/cached editor types and ordinary sidebar table loads
+retain their one-exchange budgets, cold and warm. Uncached editor custom types
+still drain before type resolution; their first display must wait for that safe
+fallback. Unknown relations, schema recovery, explicit transactions, safeguards,
+transaction status handling and cancellation teardown retain their existing
+protocol paths. MySQL/MariaDB use the same text/prepared streams, setup and metadata
+requests as before; SQLite steps the same statement. No new database request,
+health check, description pass or cleanup exchange is introduced.
+
+SQLite reverse keyset pages are buffered until their rows can be reversed into
+the requested order, preserving the existing fast seek and stable row positions.
+The browser demo still uses its existing bounded, completed-result transport.
+A server-side sort, aggregate, lock or delayed first packet can still postpone
+the first visible row. Progressive display reduces the client-side wait, not the
+server's work or the total bytes transferred.
+
+Established healthy connection exchange audit (before → after):
+
+| Path | Cold / warm exchanges |
+| --- | --- |
+| PostgreSQL editor, built-in/cached result types | 1 → 1 / 1 → 1 |
+| PostgreSQL sidebar table, valid catalog hint | 1 pipelined → 1 pipelined / same |
+| PostgreSQL unknown table or explicit-transaction metadata-first browse | 2 → 2 / same fallback |
+| MySQL/MariaDB ordinary editor SELECT, including safe START/read/ROLLBACK batch | 1 → 1 / 1 → 1 |
+| MySQL/MariaDB ordinary base-table browse, no triggers | 6 → 6 / 4 → 4 |
+| SQLite | 0 → 0 |
+
+The MySQL browse count includes one SHOW columns/definition batch, prepared data
+execution (prepare + execute cold, execute warm), one index/trigger-name batch,
+and the prepared foreign-key query (prepare + execute cold, execute warm).
+Trigger-definition batches, view-permission fallbacks, session refresh after
+session-changing SQL, errors, cancellation and reconnection retain their existing
+additional work. Healthy completion reads protocol transaction status; cancellation
+watchers wake on completion and do not open a control connection unless cancelled.
+Cold PostgreSQL custom types retain their existing type-dependent catalog lookups
+after draining; no lookup is added by progressive display.
+
+### Progressive verification (2026-11-18)
+
+Raw results and native captures: `target/progressive-results-qa/`. Final release
+library suite: **933 passed, 253 opt-in checks ignored**. Explicit disposable
+checks passed for PostgreSQL streaming query/table first rows, cold custom types,
+no write replay, empty results and schema changes, plus MySQL and MariaDB text
+and prepared collection, bounded storage and connection reuse. Unit/UI regressions
+cover cancellation after the first publication, readable committed prefixes while
+writing, snapshot isolation, selection across growth/spill/completion, failure
+cleanup, and full export after selecting an earlier partial prefix.
+
+On the deliberately slow 300-row fixture, PostgreSQL first publication took
+8–16 ms versus 920–952 ms completion; MySQL/MariaDB took 12–18 ms versus
+922–969 ms completion. These measure worker publication, not input-to-display
+latency. No synthetic delay was added to the UI.
+
+Serial release latency comparison against `b0d16ae54c9e57c808539b9aafca7936826f79aa`,
+with 30 ms simulated network RTT, seven measured samples after two warmups:
+
+| Complete operation | Base p50 / p95 ms | Progressive p50 / p95 ms |
+| --- | --- | --- |
+| Editor indexed lookup | 38.2 / 45.2 | 44.2 / 46.1 |
+| Complete 6,000-row disk-backed result | 48.7 / 53.4 | 50.6 / 58.0 |
+| Table refresh | 39.3 / 46.9 | 40.0 / 48.3 |
+| First sidebar table load | 45.8 / 47.7 | 43.7 / 46.4 |
+| Table revisit | 43.1 / 48.4 | 41.7 / 44.0 |
+
+Both revisions passed the existing latency thresholds, including after 0/1/3-second
+idle periods. Candidate ordinary editor/browse measurements enable publication;
+reference queries retain their original execution path. Small sample sets and
+transport jitter limit conclusions about small CPU differences. Neither thresholds
+nor result workloads were weakened.
+
+Final strict `cargo clippy --all-targets --features qa -- -D warnings` passed.
+The locked `wasm32-unknown-unknown` library check passed (87 warnings; browser
+transport remains non-progressive). Disposable PostgreSQL, MySQL and MariaDB
+containers were removed after validation. UI comparison and unmeasured native
+presentation cases are recorded in `UI-PERFORMANCE.md`.
+
+### Streaming inspector stability (2026-11-19)
+
+The inspector draws before the workspace synchronizes a new result snapshot.
+A strict Arc-identity check therefore briefly returned the empty disk-backed
+source on each publication, flashing “No row selected” between valid frames.
+`Pages::grid` now accepts a matching nonzero stream identity when returning the
+cached window/selection. Distinct streams still reset selection. This adds no
+row copy, database exchange, disk read or persistent repaint request.
+
+The regression test reproduced the empty-row failure before the fix and now
+checks the production inspector-before-workspace order over repeated snapshots,
+including a switch to a different stream. The full debug library suite passed
+(938 passed; 253 ignored at that run), and strict all-target QA Clippy passed.
+A separate opt-in streaming-inspector benchmark was subsequently added. Native
+captures in both themes are in `target/streaming-inspector-qa`; see
+`UI-PERFORMANCE.md` for CPU measurements and presentation limitations.
+
+Final release library run after adding the inspector workload: **938 passed,
+254 ignored**. Fresh release UI comparison passed all 24 gates; the dedicated
+streaming-inspector workload passed at both widths.

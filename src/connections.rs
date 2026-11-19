@@ -3648,7 +3648,7 @@ mod tests {
         app.tabs[app.tab].sql = "DROP TABLE customers;".into();
         let original = app.tabs[app.tab].grid.clone();
         app.refresh_current_view();
-        assert!(matches!(app.pending, Some(Pending::Export)));
+        assert!(matches!(app.pending, Some(Pending::Schema)));
         let deadline = Instant::now() + std::time::Duration::from_secs(5);
         while app.pending.is_some() && Instant::now() < deadline {
             app.poll();

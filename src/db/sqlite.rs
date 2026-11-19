@@ -253,7 +253,7 @@ impl Driver for SqliteDriver {
         let mut statement = self.connection.prepare(&query.sql).map_err(|e| e.to_string())?;
         let columns = statement.column_names().into_iter().map(str::to_owned).collect();
         let mut rows = statement.query(params_from_iter(&query.parameters)).map_err(|e| e.to_string())?;
-        collect_with_budget(&mut rows, columns, query.originals.len() + 1, budget).map_err(|e| e.to_string())
+        collect_with_budget(&mut rows, columns, query.originals.len() + 1, budget, false).map_err(|e| e.to_string())
     }
     fn apply(&mut self, plan: &ChangePlan) -> Result<(), String> {
         self.cursor = None;
@@ -489,6 +489,7 @@ fn query_into(
         columns: names,
         ..Default::default()
     };
+    collector.start_stream(&mut grid);
     let mut failure = None;
     while let Some(row) = rows.next()? {
         if failure.is_some() {
@@ -541,12 +542,13 @@ fn query_into(
     Ok(grid)
 }
 
+#[cfg(test)]
 fn collect(
     rows: &mut rusqlite::Rows<'_>,
     columns: Vec<String>,
     limit: usize,
 ) -> rusqlite::Result<Grid> {
-    collect_with_budget(rows, columns, limit, BYTE_LIMIT)
+    collect_with_budget(rows, columns, limit, BYTE_LIMIT, false)
 }
 
 fn collect_with_budget(
@@ -554,11 +556,13 @@ fn collect_with_budget(
     columns: Vec<String>,
     limit: usize,
     budget: usize,
+    progressive: bool,
 ) -> rusqlite::Result<Grid> {
     let mut grid = Grid {
         columns,
         ..Default::default()
     };
+    let mut stream = if progressive { super::progressive::Stream::new(&mut grid) } else { Default::default() };
     let mut bytes = 0;
     while let Some(row) = rows.next()? {
         if grid.rows.len() == limit {
@@ -585,6 +589,7 @@ fn collect_with_budget(
         bytes += row_bytes;
         super::progress::decoded_row(&values);
         grid.rows.push(values);
+        stream.update(&grid);
     }
     Ok(grid)
 }
@@ -785,7 +790,7 @@ fn browse_table_after(
     let mut stmt = conn.prepare(&sql)?;
     let names = stmt.column_names().into_iter().map(String::from).collect();
     let mut rows = stmt.query(params_from_iter(params.iter()))?;
-    let mut grid = collect(&mut rows, names, browse.page_size())?;
+    let mut grid = collect_with_budget(&mut rows, names, browse.page_size(), BYTE_LIMIT, !backward)?;
     if backward {
         if grid.rows.len() != browse.page_size() {
             // A byte-limited reverse result would contain the end of the page,

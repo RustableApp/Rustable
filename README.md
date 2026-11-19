@@ -47,6 +47,8 @@ The [browser demo](https://rustable.app/#demo-title) includes disposable SQLite 
 
 ## Good to know
 
+After changing a SQL database’s schema in another tool, click **Refresh schema** beside the sidebar search, or press **Cmd/Ctrl+Shift+R**. This reloads the catalog and current table without reconnecting. **Cmd/Ctrl+R** refreshes table data; in the SQL editor it refreshes the schema without rerunning your SQL.
+
 Rustable is actively developed and still has rough edges. Support varies by database; see the [driver capabilities](docs/DRIVER_CAPABILITIES.md), [MySQL/MariaDB notes](docs/MYSQL-MARIADB-RELEASE.md), and [Redis guide](docs/REDIS.md).
 
 Exports include loaded results, not automatically the entire database. On Windows, SSH connections require an external tunnel.

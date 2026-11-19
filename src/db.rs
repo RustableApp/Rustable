@@ -34,6 +34,7 @@ pub mod csv_preview;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod postgres;
 pub mod progress;
+pub mod progressive;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use postgres::async_client_config as probe_client_config;
 #[cfg(target_arch = "wasm32")]
@@ -196,6 +197,11 @@ pub struct Column {
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Grid {
+    /// Operation-local identity preserves viewport/selection across growing snapshots.
+    #[serde(skip)]
+    pub stream_id: u64,
+    #[serde(skip)]
+    pub fetching: bool,
     /// Exact executed statement and bindings; retained with pages and pinned results.
     #[serde(default)]
     pub query_source: Option<Arc<QuerySource>>,
@@ -476,6 +482,7 @@ pub struct Worker {
     pub rx: Receiver<Result<Payload, String>>,
     cancel: Arc<AtomicBool>,
     progress: Arc<progress::Progress>,
+    progressive: Arc<progressive::Mailbox>,
     transaction: Arc<AtomicU8>,
     control: Arc<std::sync::Mutex<Option<PostgresControl>>>,
 }
@@ -490,6 +497,8 @@ impl Worker {
         let stop = cancel.clone();
         let progress = Arc::new(progress::Progress::default());
         let telemetry = progress.clone();
+        let progressive = Arc::new(progressive::Mailbox::default());
+        let snapshots = progressive.clone();
         let transaction = Arc::new(AtomicU8::new(TransactionState::Idle as u8));
         let transaction_status = transaction.clone();
         let control = Arc::new(std::sync::Mutex::new(None));
@@ -500,7 +509,13 @@ impl Worker {
                 let mut connection = None;
                 while let Ok(command) = commands.recv() {
                     let operation = telemetry.begin();
+                    let stream_scope = matches!(command, Command::Query { .. } | Command::Browse(_)).then(|| {
+                        let ctx = ctx.clone();
+                        progressive::Scope::enter(snapshots.clone(), Arc::new(move || ctx.request_repaint_of(viewport_id)))
+                    });
                     let result = handle(&mut connection, command, &stop);
+                    drop(stream_scope);
+                    snapshots.take();
                     *control_status.lock().unwrap() = connection.as_ref().and_then(|driver| driver.postgres_control());
                     transaction_status.store(connection.as_mut().map_or(TransactionState::Idle,
                         |driver| driver.transaction_state()) as u8, Ordering::Release);
@@ -517,10 +532,13 @@ impl Worker {
             rx,
             cancel,
             progress,
+            progressive,
             transaction,
             control,
         }
     }
+
+    pub(crate) fn take_progressive(&self) -> Option<Arc<Grid>> { self.progressive.take() }
 
     pub(crate) fn postgres_control(&self) -> Option<PostgresControl> { self.control.lock().unwrap().clone() }
     pub(crate) fn take_notice(&self) -> Option<String> { self.progress.take_notice() }
@@ -535,6 +553,7 @@ impl Worker {
     }
 
     pub fn send(&self, command: Command) -> Result<(), String> {
+        self.progressive.take();
         self.cancel.store(false, Ordering::Relaxed);
         self.tx.try_send(command).map_err(|e| e.to_string())
     }

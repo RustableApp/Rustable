@@ -438,6 +438,29 @@ impl Client {
         })
     }
 
+    /// Pipelines built-in metadata with a text stream. Metadata must use only
+    /// built-in types; the caller validates it before consuming/exposing rows.
+    pub fn query_text_stream_with_metadata<P, I>(
+        &mut self, metadata: &str, metadata_params: &[(&(dyn ToSql + Sync), Type)],
+        query: &str, params: I, max_bytes: usize,
+    ) -> Result<(Vec<Row>, Result<crate::TextRowIter<'_>, Error>), Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        let (metadata, data) = self.connection.block_on(async {
+            use futures_util::TryStreamExt;
+            let (metadata, data) = futures_util::future::join(
+                async {
+                    self.client.query_typed_raw_bounded_with_prefix(metadata,
+                        metadata_params.iter().map(|(v,t)| (*v,t.clone())), &[], 1, max_bytes)
+                        .await?.try_collect::<Vec<Row>>().await
+                },
+                self.client.query_text_raw(query, params),
+            ).await;
+            Ok((metadata?, data))
+        })?;
+        Ok((metadata, data.map(|stream| crate::TextRowIter::new(self.connection.as_ref(), stream))))
+    }
+
     /// Pipelines built-in-type metadata with bounded text results. Drains both
     /// responses concurrently; unknown data types never trigger catalog queries.
     pub fn query_text_with_metadata<P, I>(

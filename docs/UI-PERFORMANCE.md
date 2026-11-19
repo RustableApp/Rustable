@@ -2146,3 +2146,161 @@ and `performance-repeat/`, with wrapper/repeat scripts retained alongside them.
 The compact busy capture confirms the status and top-toolbar Cancel remain visible;
 the pre-existing lower SQL-editor action row still clips at 500 points while busy,
 outside the changed connection-status control.
+
+## Progressive SQL and table results (2026-11-18)
+
+Compared with `b0d16ae54c9e57c808539b9aafca7936826f79aa` using
+`python3 scripts/ui-performance.py --base b0d16ae54c9e57c808539b9aafca7936826f79aa --query-editor --output target/progressive-results-qa/ui-comparison`.
+Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, isolated release binaries, five
+alternating paired runs without competing benchmarks/builds. All **24 p95 gates
+passed**, median changes −2.5% to +4.5%. Existing identical grid/sidebar/workspace
+fixtures and query-editor fixtures were retained, including synthetic idle jumps.
+Headless scale was 1×. Raw samples and full environment remain in that directory.
+
+Representative median per-run CPU times (ms; base → candidate):
+
+| Fixture | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| Query, 4 results, 1280×760 | .05867 → .05829 | .06629 → .06775 | .06837 → .07858 | .07154 → .08954 |
+| Workspace, 120 columns, inspector, 1440×900 | .45025 → .45521 | .47775 → .48450 | .50138 → .51025 | .50138 → .51025 |
+| Vertical precise grid layout, 1200×800 | .25942 → .25779 | .28817 → .28942 | .32729 → .34304 | .40475 → .37733 |
+
+The new `progressive_results_frame_benchmark` measures snapshot consumption plus
+production layout/tessellation as 12-column query/table results grow from 1 to
+538 rows. It publishes every measured frame (more frequently than production's
+50 ms coalescing), uses 20 warmups/160 samples, 500×760 and 1280×760 viewports, and
+includes an idle time jump. Worker-side snapshot construction is outside its CPU
+measurement. This is new-workload absolute evidence, not a before/after pass:
+
+| New fixture | p50 ms | p95 ms | p99 ms | Maximum ms |
+| --- | --- | --- | --- | --- |
+| Query / 500 | .1077 | .1271 | .1274 | .1275 |
+| Query / 1280 | .1730 | .1806 | .1859 | .1921 |
+| Table / 500 | .1301 | .1360 | .1408 | .1455 |
+| Table / 1280 | .2494 | .2712 | .2917 | .2921 |
+
+The separate continuous disk-result workload also passed: 3-column p95 .091–.098 ms;
+120-column p95 .296 ms, p99 .727 ms, maximum .736 ms. Raw candidate-only results are
+in `target/progressive-results-qa/progressive-ui.log` and `stored-ui.log`.
+
+Native 2× query captures were inspected in dark 1280×760 and light 500×760;
+table captures in dark 1280×760 and light 760×760. They verify populated partial
+results, fetching status and disabled completion-dependent controls. No event-loop
+or renderer changes were made; publication requests redraw only when new snapshots
+are produced. Actual input-to-present timing, frame intervals/missed frames,
+60/120 Hz, multiple windows, mixed DPI, monitor reconnect and macOS snapping/tiling
+were **not measured**. CPU results and screenshots do not establish those claims.
+See `COMPLETE-QUERY-RESULTS.md` for network budgets, database checks and remaining
+buffered fallback paths.
+
+## External schema refresh (2026-11-18)
+
+The Items sidebar has an explicit Refresh schema control beside search;
+Cmd/Ctrl+Shift+R invokes it from the workspace. Cmd/Ctrl+R retains table-only
+refresh in table views and catalog refresh in the editor. Successful explicit
+schema refresh invalidates table snapshots, reloads the current table, removes
+known dropped tabs, invalidates completion/navigation metadata, and disables
+editing of query results whose source definition changed. It never replays editor
+SQL. Unchanged query targets remain editable; pending edits use the existing
+navigation confirmation.
+
+No driver/protocol implementation changed for this fix. Ordinary PostgreSQL
+browse/refresh remains one pipelined exchange on the established known-relation
+path, including cold custom result types. Explicit catalog refresh still uses the
+existing two exchanges (schema list, then selected-schema objects); when a table
+is selected, it now follows those with the existing browse operation so the view
+is refreshed too. That reload is limited to the explicit schema action, with the
+existing schema-change/transaction fallback preserved. MySQL/MariaDB reuse their
+existing prepared catalog enumeration and browse paths; SQLite checks its schema
+version before using cached metadata. No health check or polling was added.
+
+A two-connection disposable SQLite fixture covers external CREATE, ALTER, index
+creation, DROP, cached-tab revisit, unchanged query editing, stale-result editing
+invalidation, and preserving editor SQL/results. Navigation tests cover cancel
+and discard with both inline and inspector drafts, preserving other-table edits.
+The full unit suite passed (937 passed, 253 ignored), strict all-target Clippy with
+QA passed, and the WASM library check passed with 87 warnings.
+
+Native screenshots were inspected at 1280×760 dark and 760×760 light, 2× scale,
+including the full sidebar and query workspace. Artifacts are in
+`target/schema-refresh-qa/{dark,light}.png`. The new control stays aligned with
+search at both widths. No event-loop/renderer changes were made. Input-to-present,
+60/120 Hz, mixed-DPI/multiple-window, monitor-reconnect and snapping checks were
+not repeated; screenshots do not establish those performance claims.
+
+Release CPU comparison against `b0d16ae54c9e57c808539b9aafca7936826f79aa`
+(including the uncommitted progressive-results changes) passed all 19 p95 gates:
+−5.1% to +1.6%. Five alternating paired runs, Apple M4 Max, macOS 27.2.1 arm64,
+Rust 1.99.1, no competing builds/benchmarks. Identical sidebar/grid/workspace
+fixtures; sidebar viewport 1440×900 at 1×, 20 warmups and 100 samples per run.
+The sidebar fixture renders the new control on every measured frame. Raw samples,
+environment, p50/p95/p99/max and the summary are retained in
+`target/schema-refresh-qa/ui-comparison`.
+
+Median per-run sidebar CPU times (ms, base → candidate):
+
+| Objects | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| 20 | .02417 → .02492 | .02921 → .02771 | .03087 → .03008 | .03087 → .03008 |
+| 200 | .03488 → .03537 | .03871 → .03883 | .04063 → .04479 | .04063 → .04479 |
+| 2,000 | .04825 → .04846 | .05146 → .05229 | .05379 → .05513 | .05379 → .05513 |
+
+These measure rendering cost, not network duration or input-to-present latency.
+
+The extended disposable PostgreSQL browse WAN test passed with 30 ms simulated
+RTT (debug test build, two warmups/seven samples, serial with no competing
+benchmarks). Catalog-only refresh measured p50/p95 **117.3/127.0 ms**;
+catalog plus current-table reload **163.7/178.8 ms**, a median addition of
+**46.4 ms** for fresh visible rows/columns. It checks newly created tables and
+added columns and clears the browse cache to cover the first-load path. Cached
+metadata cannot discover external new tables, and refreshing the catalog alone
+leaves the displayed rows/headers stale. The added browse wait uses the existing
+validated pipeline; it is confined to explicit schema refresh, never paging or
+normal data refresh. Schema discovery remains the existing metadata-first path;
+no speculative query construction or replay was added.
+
+Ordinary browse/refresh measured p50/p95 **45.3/49.8 ms**, initial sidebar load
+**44.7/50.6 ms**, revisit **47.3/48.8 ms**, against a genuine single-exchange
+reference median **40.8 ms**. All existing ratio gates, including after-idle checks,
+passed. These timings are this run’s debug fixture results, not a release UI
+comparison. Raw output: `target/schema-refresh-qa/postgres-browse.log`. The fixture
+was removed after testing. MySQL/MariaDB protocol paths were inspected but their
+live fixtures were not rerun for this UI-only schema-refresh fix.
+
+## Streaming inspector follow-up (2026-11-19)
+
+`Pages::grid` accepts cached rows from the same stream before the workspace's
+snapshot synchronization. This fixes the inspector alternating between its row
+and “No row selected” on each publication. It adds no allocations or I/O to the
+lookup. The regression reproduced the failure before the fix. Native 2× dark
+1280×760 and light 760×760 captures were inspected with repeated publications;
+artifacts are in `target/streaming-inspector-qa`.
+
+Fresh release comparison against `b0d16ae54c9e57c808539b9aafca7936826f79aa`:
+all 24 p95 gates passed, −5.9% to +6.7%. Apple M4 Max, macOS 27.2.1 arm64,
+Rust 1.99.1, five alternating paired runs, identical grid/sidebar/workspace and
+query-editor fixtures at 1×; no competing builds/benchmarks. Raw samples,
+environment and all tails remain in `target/streaming-inspector-qa/ui-comparison`.
+
+Median per-run CPU milliseconds, base → candidate:
+
+| Fixture | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| workspace/120/true | 0.42321 → 0.42967 | 0.44988 → 0.45800 | 0.46525 → 0.48171 | 0.46525 → 0.48171 |
+| query/editor-results/4/1280 | 0.05621 → 0.05513 | 0.06492 → 0.06492 | 0.06729 → 0.06688 | 0.06771 → 0.06771 |
+| sidebar/20 | 0.02433 → 0.02596 | 0.02908 → 0.03104 | 0.03108 → 0.03250 | 0.03108 → 0.03250 |
+
+The new inspector workload measures publication plus production
+inspector-before-workspace rendering/tessellation, with a selected disk-backed
+row and a fresh snapshot every frame. It uses 20 warmups/160 samples and an idle
+time jump. Absolute new-workload evidence (not a before/after comparison):
+
+| Viewport | p50 ms | p95 ms | p99 ms | Maximum ms |
+| --- | --- | --- | --- | --- |
+| progressive/inspector/760 | 0.09575 | 0.12567 | 0.13225 | 0.13283 |
+| progressive/inspector/1280 | 0.10662 | 0.11346 | 0.11721 | 0.11838 |
+
+Raw new-workload output is `target/streaming-inspector-qa/inspector-benchmark.log`.
+These CPU measurements and screenshots do not measure input-to-present, frame
+intervals, 60/120 Hz, mixed DPI/multiple windows, monitor reconnect or macOS
+snapping/tiling. No event-loop/renderer changes or periodic repaint were added.
