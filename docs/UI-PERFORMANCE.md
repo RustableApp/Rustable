@@ -2304,3 +2304,60 @@ Raw new-workload output is `target/streaming-inspector-qa/inspector-benchmark.lo
 These CPU measurements and screenshots do not measure input-to-present, frame
 intervals, 60/120 Hz, mixed DPI/multiple windows, monitor reconnect or macOS
 snapping/tiling. No event-loop/renderer changes or periodic repaint were added.
+
+### Solarized themes (2026-11-22)
+
+Compared with `75b9067e107430b9b41258b306009079561105a0` on Apple M4 Max,
+macOS 27.2.1 arm64, mise-selected Rust 1.99.1, release profile. Ran
+`mise exec -- python scripts/ui-performance.py --base 75b9067e107430b9b41258b306009079561105a0 --sql-highlight --output target/solarized-performance`.
+All 27 metrics passed across five alternating paired runs; the largest median
+p95 increase was 4.0%. Fixtures, warmups, samples, viewport and headless scale
+were unchanged: the SQL fixture uses 20 warmups and 160 measured frames at
+1200×800, including editing, resizing and a synthetic 30-second idle jump.
+
+The same release binaries also ran `query_editor_results_frame_benchmark`
+serially in five alternating pairs. Its 4-result/1280-width case was initially
+inconclusive (+13.9% median p95, only three pairs exceeding 10%). An unchanged
+five-pair repeat passed all five query metrics; the largest median p95 change
+was +1.95%. Both runs are retained, with no threshold or fixture changes.
+
+Median per-run milliseconds (base → candidate); maximum is the median of
+per-run maxima:
+
+| Scenario | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| SQL tokenization | 0.08575 → 0.08467 | 0.08704 → 0.08825 | 0.09154 → 0.09167 | 0.09279 → 0.09292 |
+| SQL editing/layout | 0.35558 → 0.35658 | 0.36817 → 0.36638 | 0.38387 → 0.37338 | 0.39333 → 0.38804 |
+| SQL resize/layout | 0.28021 → 0.27854 | 0.28546 → 0.28558 | 0.28896 → 0.29588 | 0.29562 → 0.29929 |
+| Query 4 results / 1280 (repeat) | 0.05271 → 0.05129 | 0.05346 → 0.05450 | 0.05783 → 0.05579 | 0.06100 → 0.06358 |
+| Query 128 results / 760 (repeat) | 0.05442 → 0.05346 | 0.05708 → 0.05721 | 0.06192 → 0.06158 | 0.06300 → 0.06354 |
+
+Raw logs, environment, samples and comparisons are in
+`target/solarized-performance/`, including `query-results.json` and
+`query-repeat-results.json`. These compare existing standard-theme workloads to
+protect shared rendering paths; they are not native Solarized input-to-present
+measurements. Native Solarized captures at 1280×760 and 600×760 logical points,
+2× scale, are in `target/solarized-review/`: editor, populated/empty results,
+sidebar and appearance menus. Native frame intervals, missed frames, 60/120 Hz,
+multi-window and mixed-DPI/monitor reconnection checks were not measured.
+
+Final v0.4.35 connection-button follow-up: the comparison with
+`--postgres-connections --sql-highlight --query-editor` passed all 17 metrics
+(five alternating pairs, same machine/toolchain/profile as above). Raw results
+are in `target/solarized-release-performance-final/`. The initial attempt in
+`target/solarized-release-performance/` failed before measurement because the
+runner duplicated an already included PostgreSQL fixture; the runner now checks
+for that include, preserving the fixture and thresholds. Its eight offline tests
+pass. Final palette-only selected foreground/background adjustments are protected
+by contrast tests and native screenshots; the comparison workloads use standard
+themes. No production render-loop algorithm changed after the measured build.
+
+| Final scenario | p50 | p95 | p99 | Maximum |
+| --- | --- | --- | --- | --- |
+| postgres/connection-profile/1100x760 | 0.04292 → 0.04312 | 0.04358 → 0.04404 | 0.04858 → 0.04417 | 0.05088 → 0.04587 |
+| query/editor-results/4/1280 | 0.05358 → 0.05350 | 0.05437 → 0.05404 | 0.05725 → 0.05658 | 0.06162 → 0.06146 |
+| sql/layout/query/true | 0.35671 → 0.36029 | 0.36254 → 0.36654 | 0.36888 → 0.36942 | 0.37546 → 0.38038 |
+
+Selected table rows, Data tabs and Connect buttons were visually verified in both
+Solarized modes in `target/solarized-review/*-table-selection.png` and
+`*-connection-buttons.png`. Native presentation limitations above still apply.

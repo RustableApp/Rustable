@@ -227,20 +227,27 @@ enum Appearance {
     System,
     Light,
     Dark,
+    SolarizedLight,
+    SolarizedDark,
 }
 impl Appearance {
+    const ALL: [Self; 5] = [Self::System, Self::Light, Self::Dark, Self::SolarizedLight, Self::SolarizedDark];
+
+    fn solarized(self) -> bool { matches!(self, Self::SolarizedLight | Self::SolarizedDark) }
     fn label(self) -> &'static str {
         match self {
             Self::System => "System",
             Self::Light => "Light",
             Self::Dark => "Dark",
+            Self::SolarizedLight => "Solarized Light",
+            Self::SolarizedDark => "Solarized Dark",
         }
     }
     fn preference(self) -> egui::ThemePreference {
         match self {
             Self::System => egui::ThemePreference::System,
-            Self::Light => egui::ThemePreference::Light,
-            Self::Dark => egui::ThemePreference::Dark,
+            Self::Light | Self::SolarizedLight => egui::ThemePreference::Light,
+            Self::Dark | Self::SolarizedDark => egui::ThemePreference::Dark,
         }
     }
 }
@@ -3338,9 +3345,9 @@ Right-click to inspect or remove individual changes",
                             if ui.button("SQL activity").clicked() { self.prefs.activity_visible = !self.prefs.activity_visible; self.shared_preferences_dirty = true; ui.close(); }
                             self.edit_toolbar(ui);
                             self.safe_mode_toggle(ui, None);
-                            for choice in [Appearance::System, Appearance::Light, Appearance::Dark] {
+                            for choice in Appearance::ALL {
                                 if ui.selectable_value(&mut self.prefs.appearance, choice, choice.label()).clicked() {
-                                    self.shared_preferences_dirty = true; ctx.set_theme(choice.preference()); ui.close();
+                                    self.shared_preferences_dirty = true; apply_theme(ctx, choice); ui.close();
                                 }
                             }
                         });
@@ -3418,9 +3425,7 @@ Right-click to inspect or remove individual changes",
                             let settings = toolbar_action(ui, 5, false).on_hover_text("Appearance");
                             egui::Popup::menu(&settings).show(|ui| {
                                 ui.label("Appearance");
-                                for choice in
-                                    [Appearance::System, Appearance::Light, Appearance::Dark]
-                                {
+                                for choice in Appearance::ALL {
                                     if ui
                                         .selectable_value(
                                             &mut self.prefs.appearance,
@@ -3435,7 +3440,7 @@ Right-click to inspect or remove individual changes",
                             });
                             if before != self.prefs.appearance {
                                 self.shared_preferences_dirty = true;
-                                ctx.set_theme(self.prefs.appearance.preference());
+                                apply_theme(ctx, self.prefs.appearance);
                             }
                         });
                     });
@@ -3926,7 +3931,7 @@ Right-click to inspect or remove individual changes",
                 data.insert_temp(id, active);
                 previous != Some(active)
             });
-            let tab_fill = if ui.visuals().dark_mode { Color32::from_rgb(48, 48, 48) } else { Color32::from_rgb(226, 228, 231) };
+            let tab_fill = if crate::solarized::is_active(ui.visuals()) { ui.visuals().faint_bg_color } else if ui.visuals().dark_mode { Color32::from_rgb(48, 48, 48) } else { Color32::from_rgb(226, 228, 231) };
             egui::Frame::new().fill(tab_fill).inner_margin(egui::Margin::symmetric(4, 4)).show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             let tab_count = self.tabs.iter().filter(|tab| tab.open).count() + self.table_tabs.len();
@@ -4738,7 +4743,9 @@ Right-click to inspect or remove individual changes",
         let gutter_width = digits as f32 * 8.0 + 16.0;
         let mut active_caret = self.tabs[self.tab].cursor.start;
         let mut text_left = ui.cursor().left();
-        let editor_background = if ui.visuals().dark_mode {
+        let editor_background = if crate::solarized::is_active(ui.visuals()) {
+            ui.visuals().extreme_bg_color
+        } else if ui.visuals().dark_mode {
             Color32::from_gray(30)
         } else {
             Color32::from_gray(250)
@@ -7832,6 +7839,7 @@ fn apply_theme(ctx: &egui::Context, appearance: Appearance) {
             visuals.widgets.noninteractive.bg_stroke =
                 Stroke::new(1.0_f32, Color32::from_rgb(225, 231, 240));
         }
+        if appearance.solarized() { crate::solarized::apply(&mut visuals); }
         let mut style = (*ctx.style_of(theme)).clone();
         style.visuals = visuals;
         {
@@ -8244,8 +8252,12 @@ fn paint_workspace_tab(
         (false, false, true) => (240, 192),
         (false, false, false) => (210, 210),
     };
-    ui.painter().rect(rect, 10.0, Color32::from_gray(fill),
-        if selected { Stroke::new(1.0_f32, Color32::from_gray(outline)) } else { Stroke::NONE }, egui::StrokeKind::Inside);
+    let (fill, outline) = if crate::solarized::is_active(ui.visuals()) {
+        (if selected || response.hovered() { ui.visuals().panel_fill } else { ui.visuals().faint_bg_color },
+         ui.visuals().widgets.noninteractive.bg_stroke.color)
+    } else { (Color32::from_gray(fill), Color32::from_gray(outline)) };
+    ui.painter().rect(rect, 10.0, fill,
+        if selected { Stroke::new(1.0_f32, outline) } else { Stroke::NONE }, egui::StrokeKind::Inside);
     let text_rect = egui::Rect::from_min_max(
         rect.min + egui::vec2(text_inset, 0.0),
         rect.max - egui::vec2(text_inset, 0.0),
@@ -8463,6 +8475,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn solarized_preferences_restore_and_switch_back_to_standard() {
+        let ctx = egui::Context::default();
+        for choice in Appearance::ALL {
+            let saved = serde_json::to_string(&choice).unwrap();
+            let restored: Appearance = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored, choice);
+            apply_theme(&ctx, restored);
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+            assert_eq!(crate::solarized::is_active(&ctx.style().visuals), choice.solarized());
+            if choice.solarized() {
+                assert_eq!(ctx.style().visuals.dark_mode, choice == Appearance::SolarizedDark);
+            }
+        }
+        apply_theme(&ctx, Appearance::System);
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            assert!(!crate::solarized::is_active(&ctx.style_of(theme).visuals));
+        }
+    }
 
     #[test]
     fn system_theme_tracks_os_and_override_stays_fixed() {

@@ -89,7 +89,9 @@ impl Rustable {
             Box::new(move |cc| {
                 crate::fonts::install(&cc.egui_ctx);
                 let mut app = fixture(&cc.egui_ctx);
-                app.prefs.appearance = if light {
+                app.prefs.appearance = if std::env::var_os("RUSTABLE_QUERY_SOLARIZED").is_some() {
+                    if light { Appearance::SolarizedLight } else { Appearance::SolarizedDark }
+                } else if light {
                     Appearance::Light
                 } else {
                     Appearance::Dark

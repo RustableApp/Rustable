@@ -6,6 +6,12 @@ pub(crate) fn base_spacing(spacing: &mut egui::Spacing) {
     spacing.button_padding = egui::vec2(8.0, 4.0);
     spacing.interact_size.y = BUTTON_HEIGHT;
 }
+/// Primary actions use the selection background and its matching foreground.
+pub(crate) fn primary_button(ui: &egui::Ui, label: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(label.into()).color(ui.visuals().selection.stroke.color))
+        .fill(ui.visuals().selection.bg_fill)
+}
+
 /// Match the custom pagination controls across every interaction state.
 pub(crate) fn rounded_action_buttons(ui: &mut egui::Ui) {
     let widgets = &mut ui.visuals_mut().widgets;

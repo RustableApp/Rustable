@@ -57,12 +57,22 @@ impl Rustable {
             app: Rustable,
             frame: usize,
             assist: bool,
+            menu_capture: Option<egui::Pos2>,
             transaction: Option<db::TransactionState>,
             path: std::path::PathBuf,
             saved: Option<std::sync::mpsc::Receiver<()>>,
         }
         impl eframe::App for Preview {
             fn raw_input_hook(&mut self, _: &egui::Context, input: &mut egui::RawInput) {
+                // Keep popup animation deterministic even when native QA frames run unpaced.
+                if self.menu_capture.is_some() { input.time = Some(self.frame as f64 / 60.0); }
+                if let Some(pos) = self.menu_capture.filter(|_| matches!(self.frame, 1 | 2)) {
+                    input.events.push(egui::Event::PointerMoved(pos));
+                    input.events.push(egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed: self.frame == 1,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
                 if self.assist {
                     match self.frame {
                         3 => input.events.push(egui::Event::Text("(".into())),
@@ -114,7 +124,7 @@ impl Rustable {
                 }
                 if !self.app.prefs.sidebar_hidden { self.app.sidebar(ctx); }
                 self.app.workspace(ctx);
-                if self.frame == if self.assist { 8 } else { 3 } {
+                if self.saved.is_none() && !ctx.will_discard() && self.frame >= if self.menu_capture.is_some() { 20 } else if self.assist { 8 } else { 3 } {
                     if self.assist {
                         assert_eq!(
                             self.app.tabs[0].sql,
@@ -165,12 +175,21 @@ impl Rustable {
                     app.tabs[0].cursor = end..end;
                     app.tabs[0].focus_editor = true;
                 }
-                app.prefs.appearance = if light {
+                app.prefs.appearance = if std::env::var_os("RUSTABLE_QUERY_SOLARIZED").is_some() {
+                    if light { Appearance::SolarizedLight } else { Appearance::SolarizedDark }
+                } else if light {
                     Appearance::Light
                 } else {
                     Appearance::Dark
                 };
                 apply_theme(&cc.egui_ctx, app.prefs.appearance);
+                if std::env::var_os("RUSTABLE_TABLE_SELECTION_CAPTURE").is_some() {
+                    app.view = View::Data;
+                    app.table = app.tabs[0].grid.clone();
+                    app.browse.table = "customers".into();
+                    app.selected = app.row_selection.click(2, false, false, None);
+                    app.tabs[0].open = false;
+                }
                 let grid = app.tabs[0].grid.clone();
                 if !assist && result_count > 1 {
                     app.tabs[0].pins.add(grid, 0).unwrap();
@@ -179,6 +198,9 @@ impl Rustable {
                     app,
                     frame: 0,
                     assist,
+                    menu_capture: std::env::var_os("RUSTABLE_QUERY_MENU_CAPTURE").map(|_| {
+                        if width < 720.0 { egui::pos2(215.0, 20.0) } else { egui::pos2(width - 110.0, 20.0) }
+                    }),
                     transaction: std::env::var("RUSTABLE_TRANSACTION_CAPTURE").ok().map(|state|
                         if state == "failed" { db::TransactionState::Failed } else { db::TransactionState::Active }),
                     path,

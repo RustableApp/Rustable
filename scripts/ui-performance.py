@@ -320,7 +320,9 @@ def main():
                 fixture = root / 'src' / 'postgres_connection_benchmark.rs'
                 shutil.copy2(fixture, base_path / 'src' / fixture.name)
                 source = base_path / 'src' / 'connections.rs'
-                source.write_text(source.read_text().replace('include!("redis_connection_benchmark.rs");', 'include!("redis_connection_benchmark.rs");\n    include!("postgres_connection_benchmark.rs");'))
+                text = source.read_text()
+                if 'include!("postgres_connection_benchmark.rs");' not in text:
+                    source.write_text(text.replace('include!("redis_connection_benchmark.rs");', 'include!("redis_connection_benchmark.rs");\n    include!("postgres_connection_benchmark.rs");'))
                 metadata['postgres_fixture'] = fixture.read_text()
                 (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.change_history:

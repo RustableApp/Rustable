@@ -7,9 +7,9 @@ pub const EDITOR_LINE_HEIGHT: f32 = 18.0;
 
 #[derive(Default)]
 struct Highlighter;
-impl egui::cache::ComputerMut<(&str, bool, bool), Arc<LayoutJob>> for Highlighter {
-    fn compute(&mut self, (code, dark, editor): (&str, bool, bool)) -> Arc<LayoutJob> {
-        let mut job = highlight(code, dark);
+impl egui::cache::ComputerMut<(&str, bool, bool, bool), Arc<LayoutJob>> for Highlighter {
+    fn compute(&mut self, (code, dark, editor, solarized): (&str, bool, bool, bool)) -> Arc<LayoutJob> {
+        let mut job = highlight_palette(code, dark, solarized);
         if editor {
             for section in &mut job.sections {
                 section.format.font_id = FontId::monospace(EDITOR_FONT_SIZE);
@@ -24,6 +24,7 @@ impl egui::cache::ComputerMut<(&str, bool, bool), Arc<LayoutJob>> for Highlighte
 struct LayoutKey<'a> {
     text: &'a str,
     dark: bool,
+    solarized: bool,
     editor: bool,
     width: u32,
     max_rows: usize,
@@ -33,7 +34,7 @@ impl std::hash::Hash for LayoutKey<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Highlighting is a pure function of text/theme/editor. Hash those inputs,
         // not every format record in the supplied immutable intermediate job.
-        (self.text, self.dark, self.editor, self.width, self.max_rows).hash(state);
+        (self.text, self.dark, self.solarized, self.editor, self.width, self.max_rows).hash(state);
     }
 }
 #[derive(Default)]
@@ -58,6 +59,10 @@ pub fn layout(
 /// Keep token colors readable over a neutral editor-only selection background.
 pub fn selection_style(visuals: &mut egui::Visuals) {
     visuals.selection.preserve_text_color = true;
+    if crate::solarized::is_active(visuals) {
+        visuals.selection.bg_fill = visuals.faint_bg_color;
+        return;
+    }
     visuals.selection.bg_fill = if visuals.dark_mode {
         Color32::from_gray(65)
     } else {
@@ -80,19 +85,25 @@ fn layout_rows(ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32, max_rows:
     type LayoutCache = egui::cache::FrameCache<Arc<LayoutJob>, LayoutComputer>;
     let width = width.max(1.0).round().to_bits();
     let dark = ui.visuals().dark_mode;
+    let solarized = crate::solarized::is_active(ui.visuals());
     let job = ui.ctx().memory_mut(|memory| {
         // Keep syntax alive across frames so resizing only prepares a new wrap,
         // without re-tokenizing an unchanged document.
         let highlighted = memory.caches.cache::<SyntaxCache>()
-            .get((text.as_str(), dark, editor));
+            .get((text.as_str(), dark, editor, solarized));
         memory.caches.cache::<LayoutCache>().get(LayoutKey {
-            text: text.as_str(), dark, editor, width, max_rows, highlighted: &highlighted,
+            text: text.as_str(), dark, solarized, editor, width, max_rows, highlighted: &highlighted,
         })
     });
     ui.fonts_mut(|fonts| fonts.layout_job_shared(job))
 }
 
+#[cfg(test)]
 fn highlight(code: &str, dark: bool) -> LayoutJob {
+    highlight_palette(code, dark, false)
+}
+
+fn highlight_palette(code: &str, dark: bool, solarized: bool) -> LayoutJob {
     let plain = if dark {
         Color32::from_rgb(218, 224, 235)
     } else {
@@ -123,6 +134,10 @@ fn highlight(code: &str, dark: bool) -> LayoutJob {
     } else {
         Color32::from_rgb(36, 113, 48)
     };
+    let (plain, keyword, string, identifier, number, comment) = if solarized {
+        use crate::solarized::*;
+        (if dark { BASE0 } else { BASE00 }, GREEN, CYAN, BLUE, MAGENTA, if dark { BASE01 } else { BASE1 })
+    } else { (plain, keyword, string, identifier, number, comment) };
     let mut job = LayoutJob::default();
     if code.is_empty() {
         // Empty LayoutJobs have a zero-height galley row. Retain the editor
@@ -365,6 +380,26 @@ mod tests {
                 });
             });
         }
+    }
+
+    #[test]
+    fn solarized_switch_invalidates_cached_syntax_and_layout() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let original = editor_layout(ui, &"SELECT 42", 300.0);
+                let visuals = ui.visuals().clone();
+                crate::solarized::apply(ui.visuals_mut());
+                let solarized = editor_layout(ui, &"SELECT 42", 300.0);
+                assert_eq!(solarized.job.sections[0].format.color, crate::solarized::GREEN);
+                assert!(!Arc::ptr_eq(&original.job, &solarized.job));
+                let repeated = editor_layout(ui, &"SELECT 42", 300.0);
+                assert!(Arc::ptr_eq(&solarized.job, &repeated.job));
+                *ui.visuals_mut() = visuals;
+                let restored = editor_layout(ui, &"SELECT 42", 300.0);
+                assert_eq!(restored.job.sections, original.job.sections);
+            });
+        });
     }
 
     #[test]

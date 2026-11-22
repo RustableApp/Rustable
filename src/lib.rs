@@ -106,6 +106,7 @@ mod tablepro_import;
 #[cfg(target_arch = "wasm32")]
 use redis_demo as redis_session;
 mod session_windows;
+mod solarized;
 mod sql;
 mod sql_format;
 mod sql_language_server;

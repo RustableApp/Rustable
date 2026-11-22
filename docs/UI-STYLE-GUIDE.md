@@ -95,3 +95,20 @@ Keep the padded PNG fallback for unbundled development runs only. Do not resize
 the artwork to compensate for a runtime override. Compare visible icon bounds
 with native apps at the same size, and inspect both the Dock and app switcher
 after launching the rebuilt bundle before claiming visual verification.
+
+## Solarized appearance
+
+The Appearance menu (or More in a narrow window) includes Solarized Light and
+Solarized Dark alongside System, Light and Dark. The choice is saved with the
+existing shared preferences. Solarized uses Ethan Schoonover's
+[canonical sRGB palette](https://ethanschoonover.com/solarized/#the-values):
+base3/base2 surfaces with base00 text in light mode, and base03/base02 surfaces
+with base0 text in dark mode. SQL uses green keywords, cyan strings, blue quoted
+identifiers, magenta numbers and subdued base-tone comments. Connection identity
+colors retain their user-selected meaning. Selected rows and segments use base1
+with base03 text in light mode, and base01 with base3 text in dark mode. Primary
+actions pair the selection fill with its foreground; never set only their fill.
+
+Native disposable query previews accept `RUSTABLE_QUERY_SOLARIZED=1`, together
+with `RUSTABLE_QUERY_LIGHT=1` for light mode. These previews never connect to a
+database or save preferences.

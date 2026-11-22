@@ -716,15 +716,14 @@ impl Dialog {
                     if !self.candidates.is_empty() && self.pending.is_none() {
                         let count = self.candidates.iter().filter(|c| c.selected && c.profile.is_some()
                             && (self.duplicates != Duplicates::Skip || !is_duplicate(store, c))).count();
-                        if ui.add_enabled(count > 0, egui::Button::new(format!("Import {count} {}", if count == 1 { "connection" } else { "connections" }))
-                            .fill(ui.visuals().selection.bg_fill)).clicked() {
+                        if ui.add_enabled(count > 0, crate::controls::primary_button(ui, format!("Import {count} {}", if count == 1 { "connection" } else { "connections" }))).clicked() {
                             decision = Some(Decision::Import);
                         }
                     }
                     if self.pending.is_none() {
                         let initial = self.candidates.is_empty() && self.locked.is_none();
                         let button = egui::Button::new(if initial { "Choose export file…" } else { "Choose another file…" });
-                        let button = if initial { button.fill(ui.visuals().selection.bg_fill) } else { button };
+                        let button = if initial { crate::controls::primary_button(ui, "Choose export file…") } else { button };
                         if ui.add(button).clicked() { self.choose_file(ctx.clone()); }
                     }
                 });

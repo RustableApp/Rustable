@@ -1167,7 +1167,7 @@ impl Rustable {
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let can_connect = valid && !password_loading && self.pending.is_none();
-                        if ui.add_enabled(can_connect, egui::Button::new("Connect").fill(ui.visuals().selection.bg_fill))
+                        if ui.add_enabled(can_connect, crate::controls::primary_button(ui, "Connect"))
                             .on_hover_text("Save and open connection · Enter from connection search").clicked()
                             || (can_connect && keyboard_connect) { action = Some(Action::Save(true)); }
                         if self.connection_manager.probe.is_some() {
