@@ -115,6 +115,12 @@ pub fn query_run_button(label: &'static str, running: bool, fill: egui::Color32)
     shortcut_widget(label, false, "Enter", Some(fill), false, Some(running))
 }
 
+/// The running query action occupies the Run button's position.
+pub fn query_cancel_button(cancelling: bool) -> impl egui::Widget {
+    shortcut_widget(if cancelling { "Cancelling…" } else { "Cancel query" }, false, ".",
+        Some(egui::Color32::from_rgb(180, 55, 48)), false, Some(false))
+}
+
 fn shortcut_widget(label: &'static str, shift: bool, key: &'static str, fill: Option<egui::Color32>, menu: bool, running: Option<bool>) -> impl egui::Widget {
     move |ui: &mut egui::Ui| {
         egui_extras::install_image_loaders(ui.ctx());
@@ -151,6 +157,8 @@ fn shortcut_widget(label: &'static str, shift: bool, key: &'static str, fill: Op
                 if running {
                     egui::Spinner::new().color(egui::Color32::WHITE).paint_at(ui,
                         egui::Rect::from_center_size(center, egui::vec2(14.0, 14.0)));
+                } else if key == "." {
+                    ui.painter().rect_filled(egui::Rect::from_center_size(center, egui::vec2(8.0, 8.0)), 1.0, egui::Color32::WHITE);
                 } else {
                     ui.painter().add(egui::Shape::convex_polygon(vec![
                         center + egui::vec2(-4.0, -5.0), center + egui::vec2(5.0, 0.0),

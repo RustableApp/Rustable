@@ -166,6 +166,7 @@ impl Rustable {
                 if std::env::var_os("RUSTABLE_LOADING_CAPTURE").is_some() {
                     app.pending = Some(Pending::Query(0));
                     app.started = Instant::now() - std::time::Duration::from_secs(3);
+                    if std::env::var_os("RUSTABLE_CANCELLING_CAPTURE").is_some() { app.worker.cancel(); }
                     #[cfg(unix)]
                     app.offer_matrix();
                 }
@@ -358,6 +359,10 @@ mod tests {
             let mut app = fixture(&ctx, count);
             let mut samples = Vec::new();
             for index in 0..180 {
+                // Exercise Run -> Cancel -> Cancelling -> Run, including after idle.
+                // This same fixture is copied to the baseline by ui-performance.py.
+                app.pending = if (20..140).contains(&index) { Some(Pending::Query(0)) } else { None };
+                if index == 80 { app.worker.cancel(); }
                 if count > 0 {
                     app.tabs[0].result_index = index % count;
                 }

@@ -3013,6 +3013,10 @@ impl Rustable {
             });
     }
 
+    fn query_action_visible(&self, ctx: &egui::Context) -> bool {
+        self.view == View::Query && (ctx.content_rect().width() >= 720.0 || self.compact_panel == 0)
+    }
+
     #[cfg(test)]
     fn connection_status(&mut self, ui: &mut egui::Ui) {
         self.connection_status_with_transaction(ui, self.worker.transaction_state());
@@ -3139,7 +3143,7 @@ impl Rustable {
             }
             self.connections = true;
         }
-        if self.pending.is_some()
+        if self.pending.is_some() && !self.query_action_visible(ui.ctx())
             && ui
                 .add(crate::icons::widget("x"))
                 .on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, ".")))
@@ -3351,7 +3355,7 @@ Right-click to inspect or remove individual changes",
                                 }
                             }
                         });
-                        if self.pending.is_some() && ui.add(crate::icons::shortcut_button("Cancel", false, ".", None)).on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() { self.request_query_cancel(ctx); }
+                        if self.pending.is_some() && !self.query_action_visible(ctx) && ui.add(crate::icons::shortcut_button("Cancel", false, ".", None)).on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() { self.request_query_cancel(ctx); }
                         if transaction.blocks_replacement() {
                             let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(1.0), crate::icons::TOOLBAR_GROUP_HEIGHT), egui::Sense::hover());
                             transaction_indicator::paint(ui, rect, transaction, "", "");
@@ -5022,90 +5026,99 @@ Right-click to inspect or remove individual changes",
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 rounded_action_buttons(ui);
                 ui.add_space(8.0);
-                ui.scope(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    let caret = ui
-                        .scope(|ui| {
-                            ui.spacing_mut().button_padding.x = 3.0;
-                            let height = ui.text_style_height(&egui::TextStyle::Button)
-                                + 2.0 * ui.spacing().button_padding.y;
-                            ui.add_enabled(
-                                run_enabled,
-                                egui::Button::image(
-                                    egui::Image::new(egui::include_image!(
-                                        "../assets/icons/lucide/chevron-down.svg"
+                if self.pending.is_some() {
+                    let cancelling = self.worker.cancellation_requested();
+                    if ui.add_enabled(!cancelling, crate::icons::query_cancel_button(cancelling))
+                        .on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, ".")))
+                        .clicked() {
+                        self.request_query_cancel(ui.ctx());
+                    }
+                } else {
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        let caret = ui
+                            .scope(|ui| {
+                                ui.spacing_mut().button_padding.x = 3.0;
+                                let height = ui.text_style_height(&egui::TextStyle::Button)
+                                    + 2.0 * ui.spacing().button_padding.y;
+                                ui.add_enabled(
+                                    run_enabled,
+                                    egui::Button::image(
+                                        egui::Image::new(egui::include_image!(
+                                            "../assets/icons/lucide/chevron-down.svg"
+                                        ))
+                                        .fit_to_exact_size(egui::vec2(12.0, 12.0)),
+                                    )
+                                    .fill(BLUE)
+                                    .min_size(egui::vec2(
+                                        18.0,
+                                        height.max(ui.spacing().interact_size.y),
                                     ))
-                                    .fit_to_exact_size(egui::vec2(12.0, 12.0)),
+                                    .corner_radius(
+                                        egui::CornerRadius {
+                                            nw: 0,
+                                            sw: 0,
+                                            ne: 5,
+                                            se: 5,
+                                        },
+                                    ),
                                 )
-                                .fill(BLUE)
-                                .min_size(egui::vec2(
-                                    18.0,
-                                    height.max(ui.spacing().interact_size.y),
-                                ))
-                                .corner_radius(
-                                    egui::CornerRadius {
-                                        nw: 0,
-                                        sw: 0,
-                                        ne: 5,
-                                        se: 5,
-                                    },
-                                ),
+                            })
+                            .inner;
+                        caret.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                ui.is_enabled() && run_enabled,
+                                "Run options",
                             )
-                        })
-                        .inner;
-                    caret.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            ui.is_enabled() && run_enabled,
-                            "Run options",
-                        )
-                    });
-                    ui.painter().line_segment(
-                        [
-                            caret.rect.left_top() + egui::vec2(0.0, 4.0),
-                            caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
-                        ],
-                        Stroke::new(1.0_f32, Color32::from_white_alpha(70)),
-                    );
-                    egui::Popup::menu(&caret)
-                        .frame(egui::Frame::popup(ui.style()).inner_margin(4.0))
-                        .show(|ui| {
-                            ui.set_width(140.0);
-                            ui.spacing_mut().interact_size.y = 20.0;
-                            ui.spacing_mut().item_spacing.y = 1.0;
-                            if ui
-                                .add_enabled(
-                                    run_enabled,
-                                    crate::icons::shortcut_menu_item("Run current", false, "Enter"),
-                                )
-                                .clicked()
-                            {
-                                self.run_query(false);
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(
-                                    run_enabled,
-                                    crate::icons::shortcut_menu_item("Run all", true, "Enter"),
-                                )
-                                .clicked()
-                            {
-                                self.run_query(true);
-                                ui.close();
-                            }
                         });
-                    caret.on_hover_text("Run options");
-                    let widgets = &mut ui.visuals_mut().widgets;
-                    for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active, &mut widgets.noninteractive] {
-                        widget.corner_radius = egui::CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 };
-                    }
-                    if ui.add_enabled(run_enabled, crate::icons::query_run_button(
-                        if self.tabs[self.tab].cursor.is_empty() { "Run current" } else { "Run selection" },
-                        self.pending.is_some(), BLUE,
-                    )).on_disabled_hover_text("Wait for running work, or finish or stop the AI edit before executing SQL.").clicked() {
-                        self.run_query(false);
-                    }
-                });
+                        ui.painter().line_segment(
+                            [
+                                caret.rect.left_top() + egui::vec2(0.0, 4.0),
+                                caret.rect.left_bottom() - egui::vec2(0.0, 4.0),
+                            ],
+                            Stroke::new(1.0_f32, Color32::from_white_alpha(70)),
+                        );
+                        egui::Popup::menu(&caret)
+                            .frame(egui::Frame::popup(ui.style()).inner_margin(4.0))
+                            .show(|ui| {
+                                ui.set_width(140.0);
+                                ui.spacing_mut().interact_size.y = 20.0;
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                if ui
+                                    .add_enabled(
+                                        run_enabled,
+                                        crate::icons::shortcut_menu_item("Run current", false, "Enter"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.run_query(false);
+                                    ui.close();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        run_enabled,
+                                        crate::icons::shortcut_menu_item("Run all", true, "Enter"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.run_query(true);
+                                    ui.close();
+                                }
+                            });
+                        caret.on_hover_text("Run options");
+                        let widgets = &mut ui.visuals_mut().widgets;
+                        for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active, &mut widgets.noninteractive] {
+                            widget.corner_radius = egui::CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 };
+                        }
+                        if ui.add_enabled(run_enabled, crate::icons::query_run_button(
+                            if self.tabs[self.tab].cursor.is_empty() { "Run current" } else { "Run selection" },
+                            self.pending.is_some(), BLUE,
+                        )).on_disabled_hover_text("Wait for running work, or finish or stop the AI edit before executing SQL.").clicked() {
+                            self.run_query(false);
+                        }
+                    });
+                }
                 ui.menu_button("File", |ui| {
                     if ui
                         .add_enabled(self.pending.is_none(), egui::Button::new("Save SQL"))
@@ -5142,9 +5155,6 @@ Right-click to inspect or remove individual changes",
                 }
                 if ui.add(crate::icons::shortcut_button("Save", false, "S", None)).on_hover_text(format!("Save named SQL query · {}", crate::icons::shortcut(ui.ctx(), false, "S"))).clicked() {
                     self.save_query_file(ui.ctx(), false);
-                }
-                if self.pending.is_some() && ui.add(crate::icons::shortcut_button("Cancel", false, ".", None)).on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() {
-                    self.request_query_cancel(ui.ctx());
                 }
             });
         });
@@ -11673,9 +11683,39 @@ mod workspace_layout_tests {
     }
 
     #[test]
+    fn query_run_action_is_replaced_by_one_cancel_action() {
+        for width in [500.0, 1280.0] {
+            let ctx = egui::Context::default();
+            let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+            app.view = View::Query;
+            app.tabs[0].sql = "SELECT 1".into();
+            for state in 0..4 {
+                app.pending = if state == 1 || state == 2 { Some(Pending::Query(0)) } else { None };
+                if state == 2 { app.request_query_cancel(&ctx); }
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 760.0))),
+                    ..Default::default()
+                }, |ctx| { app.toolbar(ctx); app.workspace(ctx); });
+                let mut positions = Vec::new();
+                for clipped in output.shapes { text_positions(&clipped.shape, &mut positions); }
+                let count = |label: &str| positions.iter().filter(|(text, _)| text == label).count();
+                assert_eq!(count("Cancel"), 0);
+                assert_eq!(count("Cancel query"), usize::from(state == 1));
+                assert_eq!(count("Cancelling…"), usize::from(state == 2));
+                assert_eq!(count("Run current"), usize::from(state == 0 || state == 3));
+            }
+            app.compact_panel = 1;
+            assert_eq!(app.query_action_visible(&ctx), width >= 720.0);
+            app.view = View::Data;
+            assert!(!app.query_action_visible(&ctx));
+        }
+    }
+
+    #[test]
     fn table_log_is_separate_from_editor_and_query_editor_precedes_results() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
         app.tabs[0].sql = "SELECT '日本';\n\nSELECT 42;\n".into();
         app.tabs[0].results.push(Arc::new(Grid::default()));
         app.prefs.activity_visible = true;
@@ -12098,6 +12138,7 @@ mod workspace_layout_tests {
     fn results_do_not_grow_editor_on_successive_frames() {
         let ctx = egui::Context::default();
         let mut app = Rustable::with_preferences(&ctx, Preferences::default());
+        app.pending = None;
         app.view = View::Query;
         app.prefs.activity_visible = true;
         app.tabs[0].results.push(Arc::new(Grid::default()));
