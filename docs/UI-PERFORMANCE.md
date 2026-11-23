@@ -2361,3 +2361,40 @@ themes. No production render-loop algorithm changed after the measured build.
 Selected table rows, Data tabs and Connect buttons were visually verified in both
 Solarized modes in `target/solarized-review/*-table-selection.png` and
 `*-connection-buttons.png`. Native presentation limitations above still apply.
+
+
+## Query cancellation action (2026-11-23)
+
+The query footer replaces the Run split button with one red Cancel query action
+while a database operation is pending. It reads the existing cancellation flag
+for Cancelling… feedback; completion restores Run. The connection toolbar only
+retains its cancellation control when the query footer is not visible. Keyboard
+cancellation and the PostgreSQL query monitor flow are unchanged. No driver
+request sequence or database round-trip count changes.
+
+Validation: 942 library tests passed (254 opt-in tests ignored), strict native
+Clippy passed, and the browser target check passed with 87 warnings. Native
+screenshots in `target/cancel-action-qa/` cover dark, light at 500 logical points,
+Solarized Dark/Light, and cancellation-requested feedback at 2× scale. These
+were visually inspected. Native input-to-present timings, mixed-DPI, multiple
+windows, and 60/120 Hz checks were not measured; event-loop and renderer code
+are unchanged.
+
+The release comparison against `5445cac` uses `--query-editor` with the same
+revised fixture copied to both revisions. It includes pending work, a cancellation
+request, return to idle, and a simulated idle gap, in addition to the existing
+result-tab and editor-history workloads. Raw samples and environment metadata
+are retained in `target/cancel-action-performance/`.
+
+All 24 comparison gates passed on Apple M4 Max, macOS 27.2.1, Rust 1.99.1,
+release profile, five alternating pairs. Query fixtures use 20 warmup frames and
+160 measured frames per run at 1280×760, 760×760 and 500×760 logical points
+(headless egui scale 1). Median per-run CPU timings in milliseconds:
+
+| Query workload | p50 base → head | p95 base → head | p99 base → head | max base → head |
+| --- | ---: | ---: | ---: | ---: |
+| query/editor-results/0/1280 | 0.03592 → 0.03258 | 0.03896 → 0.03608 | 0.04754 → 0.06308 | 0.16171 → 0.15933 |
+| query/editor-results/4/1280 | 0.04213 → 0.03875 | 0.05392 → 0.05433 | 0.06150 → 0.06338 | 0.06233 → 0.09717 |
+| query/editor-results/128/760 | 0.04458 → 0.04108 | 0.05671 → 0.05683 | 0.06271 → 0.06429 | 0.06383 → 0.09346 |
+| query/editor-results/4/500 | 0.04250 → 0.03892 | 0.05517 → 0.05604 | 0.06008 → 0.06187 | 0.06288 → 0.09079 |
+| query/editor-history | 0.21954 → 0.21971 | 0.23100 → 0.23321 | 0.23542 → 0.24825 | 0.24042 → 0.25517 |

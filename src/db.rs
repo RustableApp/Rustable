@@ -562,6 +562,10 @@ impl Worker {
         self.progress.snapshot()
     }
 
+    pub fn cancellation_requested(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }

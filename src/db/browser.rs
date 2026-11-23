@@ -155,6 +155,9 @@ impl Worker {
         match self.transaction.load(Ordering::Acquire) { 1 => TransactionState::Active, 2 => TransactionState::Failed, 3 => TransactionState::Disconnected, _ => TransactionState::Idle }
     }
     pub fn progress(&self) -> progress::Snapshot { progress::Snapshot::default() }
+    pub fn cancellation_requested(&self) -> bool {
+        self.cancellation.as_ref().is_some_and(|flag| js_sys::Atomics::load(flag, 0).unwrap_or(0) != 0)
+    }
     pub fn cancel(&self) {
         if let Some(flag) = &self.cancellation { let _ = js_sys::Atomics::store(flag, 0, 1); }
     }
