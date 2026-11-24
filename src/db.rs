@@ -1645,6 +1645,9 @@ impl Change {
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChangePlan {
+    /// PostgreSQL can run generated guards server-side when PL/pgSQL is available.
+    #[serde(default)]
+    pub postgres_server_checks: bool,
     #[serde(default)]
     pub refresh_results: bool,
     #[serde(default)]

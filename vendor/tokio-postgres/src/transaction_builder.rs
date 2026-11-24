@@ -63,6 +63,13 @@ impl<'a> TransactionBuilder<'a> {
     ///
     /// The transaction will roll back by default - use the `commit` method to commit it.
     pub async fn start(self) -> Result<Transaction<'a>, Error> {
+        self.start_with_batch("").await
+    }
+
+    /// Begins a transaction and runs a trusted initialization batch in the same exchange.
+    /// The batch must not contain transaction control. Errors roll back; success
+    /// returns the usual rollback-on-drop transaction, never an automatic commit.
+    pub async fn start_with_batch(self, batch: &str) -> Result<Transaction<'a>, Error> {
         let mut query = "START TRANSACTION".to_string();
         let mut first = true;
 
@@ -106,6 +113,11 @@ impl<'a> TransactionBuilder<'a> {
             query.push_str(s);
         }
 
+        if !batch.is_empty() {
+            query.push_str("; ");
+            query.push_str(batch);
+        }
+
         struct RollbackIfNotDone<'me> {
             client: &'me Client,
             done: bool,
@@ -131,7 +143,12 @@ impl<'a> TransactionBuilder<'a> {
                 client: self.client,
                 done: false,
             };
-            self.client.batch_execute(&query).await?;
+            if let Err(error) = self.client.batch_execute(&query).await {
+                // Drain rollback before returning an initialization error.
+                let _ = self.client.batch_execute("ROLLBACK").await;
+                cleaner.done = true;
+                return Err(error);
+            }
             cleaner.done = true;
         }
 

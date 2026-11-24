@@ -126,6 +126,16 @@ and retry through the fresh sequential path. This fast path is disabled inside
 explicit transactions and while transaction status is unknown. It does not open
 a second session or cache displayed metadata across refreshes.
 
+The synchronous `postgres::Transaction::query_typed_raw_bounded_with_prefix`
+forwards the existing async client API on the transaction connection. Generated
+edit saves use it for LOCK followed by fresh metadata in one Sync group, and for
+single-exchange original-row checks. Prefix failure skips the following query;
+the transaction guard still rolls back on errors. Metadata and checks return only
+built-in types and are drained before the next operation. Writes use the existing
+`execute_typed`; commit remains separate until all affected-row counts and the
+cancellation flag have been checked. See `docs/EDIT-TRANSACTION-PERFORMANCE.md`
+for protocol counts and concurrency/cancellation tests.
+
 ## eframe checked persistence
 
 ### macOS resize presentation
@@ -492,3 +502,15 @@ mappings on MOVED and reconnect. The Sentinel script verifies independent trust
 policies for discovery and primary connections, including MONITOR/SUBSCRIBE.
 Set `RUSTABLE_TLS_IMAGE=valkey/valkey:8-alpine`, `RUSTABLE_TLS_SERVER=valkey-server`
 and `RUSTABLE_TLS_CLI=valkey-cli` to run the mTLS and Cluster scripts with Valkey.
+
+### PostgreSQL generated-edit initialization
+
+The synchronous and asynchronous transaction builders expose `start_with_batch`.
+It sends START TRANSACTION plus a trusted initialization batch in one Query
+message. Callers must not put transaction control in that batch. Success returns
+the normal rollback-on-drop transaction; failure drains ROLLBACK before returning
+(the cancellation/drop guard remains active while awaiting the response). No
+automatic commit or replay is added. Rustable uses this only for generated edit
+guards/writes, then checks cancellation and explicitly commits in a separate
+exchange. See `docs/EDIT-SERVER-CHECKS-PERFORMANCE.md` for ordering, fallback,
+protocol-count tests and failure injection.

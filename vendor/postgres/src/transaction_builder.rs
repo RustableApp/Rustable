@@ -47,4 +47,11 @@ impl<'a> TransactionBuilder<'a> {
         let transaction = self.connection.block_on(self.builder.start())?;
         Ok(Transaction::new(self.connection, transaction))
     }
+    /// Begins and initializes a transaction in one exchange. The trusted batch
+    /// must not contain transaction control. Errors roll back before returning.
+    pub fn start_with_batch(mut self, batch: &str) -> Result<Transaction<'a>, Error> {
+        let transaction = self.connection.block_on(self.builder.start_with_batch(batch))?;
+        Ok(Transaction::new(self.connection, transaction))
+    }
+
 }

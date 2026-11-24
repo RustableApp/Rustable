@@ -1192,3 +1192,159 @@ fn delete_wan_latency_comparison() {
     drop(driver);
     proxy.join().unwrap();
 }
+
+#[test]
+#[ignore = "opted-in disposable PostgreSQL edit planning latency comparison"]
+fn edit_planning_wan_latency_comparison() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let groups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let proxy_groups = groups.clone();
+    let proxy = std::thread::spawn(move || {
+        let (downstream, _) = listener.accept().unwrap();
+        let upstream = TcpStream::connect("127.0.0.1:54329").unwrap();
+        upstream.set_nodelay(true).unwrap();
+        downstream.set_nodelay(true).unwrap();
+        fn forward(mut source: TcpStream, mut target: TcpStream, groups: Option<Arc<std::sync::atomic::AtomicUsize>>) {
+            // Delay arrival, not every sequential read: packets already in
+            // flight must overlap just as they do on a real network link.
+            let shutdown = source.try_clone().unwrap();
+            let (send, receive) = std::sync::mpsc::sync_channel(64);
+            let reader = std::thread::spawn(move || {
+                let mut bytes = [0u8; 65536];
+                let mut wire = Vec::new();
+                let mut startup = true;
+                while let Ok(length) = source.read(&mut bytes) {
+                    if length == 0 {
+                        break;
+                    }
+                    if let Some(groups) = &groups {
+                        wire.extend_from_slice(&bytes[..length]);
+                        loop {
+                            let offset = usize::from(!startup);
+                            if wire.len() < offset + 4 { break; }
+                            let size = u32::from_be_bytes(wire[offset..offset+4].try_into().unwrap()) as usize;
+                            assert!((4..=1024*1024).contains(&size), "invalid fixture protocol message");
+                            if wire.len() < offset + size { break; }
+                            if !startup && matches!(wire[0], b'S' | b'Q') { groups.fetch_add(1, Ordering::SeqCst); }
+                            wire.drain(..offset+size);
+                            startup = false;
+                        }
+                    }
+                    let deadline = Instant::now() + Duration::from_millis(15);
+                    if send.send((deadline, bytes[..length].to_vec())).is_err() {
+                        break;
+                    }
+                }
+            });
+            while let Ok((deadline, bytes)) = receive.recv() {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                if target.write_all(&bytes).is_err() {
+                    break;
+                }
+            }
+            drop(receive);
+            let _ = shutdown.shutdown(std::net::Shutdown::Both);
+            let _ = target.shutdown(std::net::Shutdown::Both);
+            reader.join().unwrap();
+        }
+
+        let reverse_source = upstream.try_clone().unwrap();
+        let reverse_target = downstream.try_clone().unwrap();
+        let reverse = std::thread::spawn(move || forward(reverse_source, reverse_target, None));
+        forward(downstream, upstream, Some(proxy_groups));
+        reverse.join().unwrap();
+    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut driver = PostgresDriver::open(
+        &crate::connection::PostgresConfig {
+            host: "127.0.0.1".into(),
+            port,
+            database: "rustable_qa".into(),
+            user: "postgres".into(),
+            password: "rustable_qa_only".into(),
+            tls: crate::connection::PostgresTlsMode::Disable,
+            ssh: None,
+        },
+        cancel.clone(),
+    )
+    .unwrap();
+
+
+    driver.client.batch_execute("CREATE TEMP TABLE planning_latency(id int PRIMARY KEY, n int); INSERT INTO planning_latency VALUES(1,0)").unwrap();
+    let changes = vec![Change::Cell { table: "planning_latency".into(), original_columns: None, original: vec![Value::Integer(1),Value::Integer(0)], column: "n".into(), value: Value::Integer(1) }];
+    let mut planning = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut saving = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for sample in 0..6 {
+        let mut plans = Vec::new();
+        for index in if sample % 2 == 0 { [3,2,1,0] } else { [0,1,2,3] } {
+            driver.client.batch_execute("UPDATE planning_latency SET n=0").unwrap();
+            groups.store(0, Ordering::SeqCst);
+            let start = Instant::now();
+            let plan = if index == 0 { changes::plan_legacy(&mut driver, &changes) } else { driver.plan(&changes) }.unwrap();
+            let preview_ms = start.elapsed().as_secs_f64()*1000.0;
+            if index == 0 { changes::apply_legacy(&mut driver, &plan) } else if index == 1 { changes::apply_previous(&mut driver, &plan) } else if index == 2 { changes::apply_six_exchanges(&mut driver, &plan) } else { driver.apply(&plan) }.unwrap();
+            let save_ms = start.elapsed().as_secs_f64()*1000.0;
+            if index == 2 { assert_eq!(groups.load(Ordering::SeqCst), 6); }
+            if index == 3 { assert_eq!(groups.load(Ordering::SeqCst), 3, "one planning group + BEGIN/server guards and writes + COMMIT"); }
+            eprintln!("planning sample={sample} path={index} preview_ms={preview_ms:.2} plan_and_apply_ms={save_ms:.2}");
+            if sample > 0 { planning[index].push(preview_ms); saving[index].push(save_ms); }
+            plans.push(serde_json::to_value(plan).unwrap());
+            assert_eq!(driver.client.query_one("SELECT n FROM planning_latency", &[]).unwrap().get::<_,i32>(0),1);
+        }
+        assert_eq!(plans[0],plans[3]);
+        assert_eq!(plans[0],plans[2]);
+        assert_eq!(plans[0],plans[1], "optimization must generate the exact same plan and guards");
+    }
+    for samples in planning.iter_mut().chain(saving.iter_mut()) { samples.sort_by(f64::total_cmp); }
+    eprintln!("30ms RTT: preview old={:.2}ms new={:.2}ms; plan+apply old={:.2}ms new={:.2}ms", planning[0][2], planning[1][2], saving[0][2], saving[1][2]);
+    assert!(planning[1][2] < planning[0][2]*0.35, "preview must remove at least 65% of WAN delay");
+    assert!(saving[1][2] < saving[0][2]*0.60, "full save must retain the metadata improvement");
+    eprintln!("30ms RTT: metadata-only plan+apply={:.2}ms; transaction-optimized={:.2}ms", saving[1][2],saving[2][2]);
+    assert!(saving[2][2] < saving[1][2]*0.75, "transaction path must remove at least 25% of the remaining delay");
+    eprintln!("30ms RTT: six-exchange plan+apply={:.2}ms; server-checks={:.2}ms", saving[2][2],saving[3][2]);
+    assert!(saving[3][2] < saving[2][2]*0.75, "server checks must remove at least 25% of the remaining delay");
+    for sample in 0..3 {
+        driver.client.batch_execute("TRUNCATE planning_latency; INSERT INTO planning_latency SELECT id,0 FROM generate_series(1,128) AS id").unwrap();
+        let changes = (1..=128).map(|id| Change::Cell { table: "planning_latency".into(), original_columns: None, original: vec![Value::Integer(id),Value::Integer(0)], column: "n".into(), value: Value::Integer(1) }).collect::<Vec<_>>();
+        groups.store(0, Ordering::SeqCst);
+        let start = Instant::now();
+        let plan = driver.plan(&changes).unwrap();
+        driver.apply(&plan).unwrap();
+        eprintln!("128 independent edits sample={sample} plan+apply_ms={:.2}", start.elapsed().as_secs_f64()*1000.0);
+        assert_eq!(groups.load(Ordering::SeqCst), 3, "row count must not add network waits");
+        assert_eq!(driver.client.query_one("SELECT count(*) FROM planning_latency WHERE n=1", &[]).unwrap().get::<_,i64>(0),128);
+    }
+    driver.client.batch_execute("CREATE TEMP TABLE planning_other(id int PRIMARY KEY,n int); INSERT INTO planning_other VALUES(1,0)").unwrap();
+    let edits = [
+        Change::Cell { table: "planning_latency".into(), original_columns:None, original:vec![Value::Integer(1),Value::Integer(1)], column:"n".into(), value:Value::Integer(2) },
+        Change::Cell { table: "planning_other".into(), original_columns:None, original:vec![Value::Integer(1),Value::Integer(0)], column:"n".into(), value:Value::Integer(2) },
+    ];
+    groups.store(0, Ordering::SeqCst);
+    let start = Instant::now();
+    let plan = driver.plan(&edits).unwrap();
+    driver.apply(&plan).unwrap();
+    eprintln!("two-table plan+apply_ms={:.2}",start.elapsed().as_secs_f64()*1000.0);
+    assert_eq!(groups.load(Ordering::SeqCst),3,"multiple tables must not add network waits");
+    assert_eq!(driver.client.query_one("SELECT n FROM planning_other",&[]).unwrap().get::<_,i32>(0),2);
+    let table = plan.schemas[0].0.clone();
+    driver.client.batch_execute("SELECT 1").unwrap(); // Drain baseline statement cleanup outside timing.
+    for sample in 0..6 {
+        let edits = [Change::Cell { table:table.clone(), original_columns:None,
+            original:vec![Value::Integer(1),Value::Integer(2+sample)], column:"n".into(), value:Value::Integer(3+sample) }];
+        groups.store(0, Ordering::SeqCst);
+        let start = Instant::now();
+        let plan = driver.plan(&edits).unwrap();
+        let preview_ms = start.elapsed().as_secs_f64()*1000.0;
+        assert_eq!(groups.load(Ordering::SeqCst),0,"cached preparation must be local");
+        driver.apply(&plan).unwrap();
+        eprintln!("cached sample={sample} preview_ms={preview_ms:.3} plan+apply_ms={:.2}",start.elapsed().as_secs_f64()*1000.0);
+        assert_eq!(groups.load(Ordering::SeqCst),2,"warm save needs only guarded execution and commit");
+        assert_eq!(driver.client.query_typed(&format!("SELECT n FROM {table} WHERE id=1"),&[]).unwrap()[0].get::<_,i32>(0),3+sample as i32);
+    }
+    drop(driver);
+    proxy.join().unwrap();
+}

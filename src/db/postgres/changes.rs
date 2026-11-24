@@ -1,11 +1,12 @@
 //! PostgreSQL generated writes use server-native casts from bound text, avoiding
 //! lossy numeric conversion or pretending opaque binary values are text.
 mod structure;
+mod server_checks;
 use super::*;
 use ::postgres::GenericClient;
 use std::collections::BTreeMap;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct EditColumn {
     name: String,
     cast: String,
@@ -13,12 +14,13 @@ struct EditColumn {
     pk: bool,
     generated: bool,
 }
-#[derive(Clone)]
-struct Table {
+#[derive(Clone, Debug)]
+pub(super) struct Table {
     name: String,
     columns: Vec<EditColumn>,
     fingerprint: String,
     batch_deletes: bool,
+    server_checks: bool,
 }
 
 fn native_equality(oid: u32) -> bool {
@@ -44,7 +46,105 @@ fn native_equality(oid: u32) -> bool {
             | 3802
     )
 }
+// Every field comes from one fresh catalog snapshot. No schema cache is trusted.
+fn metadata_sql(max_bytes: usize) -> String {
+    let types = type_catalog_sql(
+        "SELECT atttypid FROM pg_catalog.pg_attribute WHERE attrelid=(SELECT oid FROM target) AND attnum>0 AND NOT attisdropped",
+    );
+    format!(r#"WITH target AS (SELECT c.oid,n.nspname,c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=pg_catalog.to_regclass($1) AND c.relkind IN ('r','p')),
+        columns AS (SELECT COALESCE(jsonb_agg(jsonb_build_array(a.attname,a.atttypid::bigint,a.atttypmod,a.attnotnull,COALESCE(pg_catalog.pg_get_expr(d.adbin,d.adrelid),''), EXISTS(SELECT 1 FROM pg_catalog.pg_index i WHERE i.indrelid=a.attrelid AND i.indisprimary AND a.attnum=ANY(i.indkey)),(a.attgenerated<>'' OR a.attidentity<>''),tn.nspname,t.typname,t.typtype::text,a.attcollation::bigint,(WITH RECURSIVE domain_base AS (SELECT t.oid,t.typbasetype UNION ALL SELECT bt.oid,bt.typbasetype FROM pg_catalog.pg_type bt JOIN domain_base d ON bt.oid=d.typbasetype) SELECT oid::bigint FROM domain_base WHERE typbasetype=0 LIMIT 1)) ORDER BY a.attnum),'[]'::jsonb) AS value FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_type t ON t.oid=a.atttypid JOIN pg_catalog.pg_namespace tn ON tn.oid=t.typnamespace LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum WHERE a.attrelid=(SELECT oid FROM target) AND a.attnum>0 AND NOT a.attisdropped),
+        details(constraints, trigger_definitions, trigger_functions, indexes, cascade_triggers) AS (SELECT ARRAY(SELECT pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE conrelid=(SELECT oid FROM target) ORDER BY oid), ARRAY(SELECT pg_catalog.pg_get_triggerdef(t.oid) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=(SELECT oid FROM target) AND NOT t.tgisinternal ORDER BY t.oid), ARRAY(SELECT pg_catalog.pg_get_functiondef(t.tgfoid) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=(SELECT oid FROM target) AND NOT t.tgisinternal ORDER BY t.oid), ARRAY(SELECT pg_catalog.pg_get_indexdef(indexrelid) FROM pg_catalog.pg_index WHERE indrelid=(SELECT oid FROM target) ORDER BY indexrelid), EXISTS(WITH RECURSIVE affected(oid) AS (SELECT (SELECT oid FROM target)::oid UNION SELECT c.conrelid FROM pg_catalog.pg_constraint c JOIN affected a ON c.confrelid=a.oid WHERE c.contype='f' AND c.confdeltype IN ('c','n','d')) SELECT 1 FROM pg_catalog.pg_trigger t JOIN affected a ON t.tgrelid=a.oid WHERE NOT t.tgisinternal)),
+        types AS ({types}),
+        payload AS (SELECT jsonb_build_object(
+            'server_checks',EXISTS(SELECT 1 FROM pg_catalog.pg_language WHERE lanname='plpgsql' AND pg_catalog.has_language_privilege(oid,'USAGE')),'oid',target.oid::bigint,'schema',target.nspname,'relation',target.relname,
+            'columns',columns.value,'constraints',details.constraints,
+            'trigger_definitions',details.trigger_definitions,'trigger_functions',details.trigger_functions,
+            'indexes',details.indexes,'cascade_triggers',details.cascade_triggers,
+            'types',COALESCE((SELECT jsonb_agg(jsonb_build_array(type_oid::bigint,signature) ORDER BY type_oid) FROM types),'[]'::jsonb)
+        )::text AS value FROM target CROSS JOIN columns CROSS JOIN details)
+        SELECT CASE WHEN octet_length(value) <= {max_bytes} THEN value ELSE NULL END FROM payload"#)
+}
+
+type CatalogColumn = (String, u32, i32, bool, String, bool, bool, String, String, String, u32, u32);
+#[derive(serde::Deserialize)]
+struct EditCatalog {
+    server_checks: bool,
+    oid: u32,
+    schema: String,
+    relation: String,
+    columns: Vec<CatalogColumn>,
+    constraints: Vec<String>,
+    trigger_definitions: Vec<String>,
+    trigger_functions: Vec<String>,
+    indexes: Vec<String>,
+    cascade_triggers: bool,
+    types: Vec<(u32, String)>,
+}
+
+fn decode_metadata(row: Option<Row>, data: bool) -> Result<Table, String> {
+    let row = row.ok_or("Only existing PostgreSQL tables can be edited")?;
+    let payload: Option<&str> = row.get(0);
+    let catalog: EditCatalog = serde_json::from_str(payload.ok_or("Editing metadata exceeds the memory limit; nothing was saved")?)
+        .map_err(|e| format!("Invalid editing metadata: {e}"))?;
+    let mut columns = Vec::new();
+    let mut signatures = Vec::new();
+    for (column, type_oid, modifier, not_null, default, pk, generated, namespace, name, kind, collation, base_oid) in catalog.columns {
+        if data && matches!(kind.as_str(), "p" | "c") {
+            return Err(format!("PostgreSQL visual editing does not yet support composite/pseudo column {column}. Use SQL for this table."));
+        }
+        let cast = format!("{}.{}", quote(&namespace), quote(&name));
+        signatures.push((column.clone(), type_oid, modifier, not_null, default, pk, generated, cast.clone(), collation));
+        columns.push(EditColumn { name: column, cast, native_oid: base_oid, pk, generated });
+    }
+    if data && !columns.iter().any(|column| column.pk) {
+        return Err("PostgreSQL visual editing requires a primary key".into());
+    }
+    let triggers = catalog.trigger_definitions.into_iter().zip(catalog.trigger_functions).collect::<Vec<_>>();
+    let fingerprint = serde_json::to_string(&(catalog.oid, signatures, catalog.constraints, triggers, catalog.types, catalog.indexes, catalog.cascade_triggers)).map_err(|e| e.to_string())?;
+    Ok(Table { name: format!("{}.{}", quote(&catalog.schema), quote(&catalog.relation)), columns, fingerprint, batch_deletes: !catalog.cascade_triggers, server_checks: catalog.server_checks })
+}
+
+// The transaction path retains its lock-before-revalidation ordering. The
+// existing generic client prepares and executes this one query (two exchanges).
 fn metadata(client: &mut impl GenericClient, input: &str, data: bool) -> Result<Table, String> {
+    decode_metadata(client.query_opt(&metadata_sql(BYTE_LIMIT), &[&input]).map_err(error)?, data)
+}
+
+// Planning uses the already-audited single-exchange API. Its sole output type is
+// built-in TEXT, so custom table types never trigger client-side type lookups.
+fn metadata_fast(client: &mut Client, input: &str, data: bool) -> Result<Table, String> {
+    let mut rows = client.query_typed_raw_bounded_with_prefix(
+        &metadata_sql(BYTE_LIMIT), [(&input as &(dyn ToSql + Sync), Type::TEXT)], &[], 1, BYTE_LIMIT,
+    ).map_err(error)?;
+    let row = rows.next().map_err(error)?;
+    // Read ReadyForQuery before returning, including for invalid/oversized data.
+    if rows.next().map_err(error)?.is_some() || rows.truncated() {
+        return Err("Invalid or oversized editing metadata".into());
+    }
+    decode_metadata(row, data)
+}
+
+fn metadata_tables(client: &mut Client, changes: &[Change], data: bool) -> Result<BTreeMap<String, Table>, String> {
+    let names = changes.iter().map(Change::table).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    if names.is_empty() { return Ok(BTreeMap::new()); }
+    if names.len() == 1 {
+        return Ok(BTreeMap::from([(names[0].to_owned(), metadata_fast(client,names[0],data)?)]));
+    }
+    let catalog = metadata_sql(BYTE_LIMIT).replace("$1", "inputs.name");
+    let sql = format!("SELECT metadata.value,metadata.present FROM pg_catalog.unnest($1::pg_catalog.text[]) WITH ORDINALITY AS inputs(name,ordinal) LEFT JOIN LATERAL (SELECT catalog.value,true AS present FROM ({catalog}) AS catalog(value)) AS metadata ON true ORDER BY inputs.ordinal");
+    let mut rows = client.query_typed_raw_bounded_with_prefix(&sql, [(&names as &(dyn ToSql + Sync),Type::TEXT_ARRAY)], &[], names.len(), BYTE_LIMIT).map_err(error)?;
+    let mut collected = Vec::new();
+    while let Some(row) = rows.next().map_err(error)? { collected.push(row); }
+    if rows.truncated() || collected.len()!=names.len() { return Err("Invalid or oversized editing metadata".into()); }
+    // Decode only after draining the bounded response, even on invalid tables.
+    names.into_iter().zip(collected).map(|(name,row)| {
+        let present = row.get::<_,Option<bool>>(1).is_some();
+        Ok((name.to_owned(), decode_metadata(present.then_some(row),data)?))
+    }).collect()
+}
+
+#[cfg(test)]
+fn metadata_legacy(client: &mut impl GenericClient, input: &str, data: bool) -> Result<Table, String> {
     let row=client.query_opt("SELECT c.oid,n.nspname,c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=pg_catalog.to_regclass($1) AND c.relkind IN ('r','p')",&[&input]).map_err(error)?.ok_or("Only existing PostgreSQL tables can be edited")?;
     let oid: u32 = row.get(0);
     let schema: String = row.get(1);
@@ -107,8 +207,10 @@ fn metadata(client: &mut impl GenericClient, input: &str, data: bool) -> Result<
         columns,
         fingerprint,
         batch_deletes: !details.get::<_, bool>(4),
+        server_checks: true, // Legacy reader is a test-only baseline.
     })
 }
+#[cfg(test)]
 fn type_fingerprints(
     client: &mut impl GenericClient,
     relation: u32,
@@ -242,6 +344,50 @@ fn same_row(left: &[Value], right: &[Value]) -> bool {
         })
 }
 pub(super) fn plan(driver: &mut PostgresDriver, changes: &[Change]) -> Result<ChangePlan, String> {
+    let cached = driver.edit_catalog.take();
+    let data = changes.iter().all(|c| matches!(c, Change::Cell { .. } | Change::InsertRow { .. } | Change::DeleteRow { .. }));
+    if data && driver.client.transaction_status() == Some(b'I')
+        && let Some(cached) = cached
+        && changes.iter().all(|change| cached.contains_key(change.table()))
+    {
+        // Only canonical, fully qualified keys are cached. Search-path changes
+        // cannot redirect a cached plan to a different relation. Apply still
+        // revalidates every fingerprint under lock before any write.
+        let result = plan_with_metadata(driver, changes, |_, changes, _| {
+            Ok(changes.iter().map(Change::table).collect::<std::collections::BTreeSet<_>>().into_iter().map(|name| (name.to_owned(),cached[name].clone())).collect())
+        });
+        if result.is_ok() {
+            driver.edit_catalog = Some(cached);
+            return result;
+        }
+        // A local planning error may reflect new columns/types. Retrying only
+        // this read-only preparation is safe; execution is never replayed.
+    }
+    let mut fresh = None;
+    let result = plan_with_metadata(driver, changes, |client, changes, data| {
+        let tables = metadata_tables(client,changes,data)?;
+        let size = tables.values().map(|table| table.name.len()+table.fingerprint.len()+table.columns.iter().map(|c| c.name.len()+c.cast.len()+std::mem::size_of::<EditColumn>()).sum::<usize>()).sum::<usize>();
+        if data && size <= BYTE_LIMIT {
+            fresh = Some(tables.values().map(|table| (table.name.clone(),table.clone())).collect());
+        }
+        Ok(tables)
+    });
+    if result.is_ok() && driver.client.transaction_status() == Some(b'I') { driver.edit_catalog = fresh; }
+    result
+}
+#[cfg(test)]
+pub(super) fn plan_legacy(driver: &mut PostgresDriver, changes: &[Change]) -> Result<ChangePlan, String> {
+    plan_with_metadata(driver, changes, |client,changes,data| {
+        let mut tables = BTreeMap::new();
+        for change in changes {
+            if !tables.contains_key(change.table()) {
+                tables.insert(change.table().to_owned(),metadata_legacy(client,change.table(),data)?);
+            }
+        }
+        Ok(tables)
+    })
+}
+fn plan_with_metadata(driver: &mut PostgresDriver, changes: &[Change], mut read_metadata: impl FnMut(&mut Client, &[Change], bool) -> Result<BTreeMap<String,Table>, String>) -> Result<ChangePlan, String> {
     driver.check_tunnel()?;
     let _watch = driver.watch();
     let data_count = changes
@@ -259,16 +405,9 @@ pub(super) fn plan(driver: &mut PostgresDriver, changes: &[Change]) -> Result<Ch
         }
         return structure::plan(driver, changes);
     }
-    let mut tables = BTreeMap::new();
-    for change in changes {
-        if !tables.contains_key(change.table()) {
-            tables.insert(
-                change.table().to_owned(),
-                metadata(&mut driver.client, change.table(), true)?,
-            );
-        }
-    }
+    let tables = read_metadata(&mut driver.client, changes, true)?;
     let mut plan = ChangePlan {
+        postgres_server_checks: tables.values().all(|t| t.server_checks),
         schemas: tables
             .values()
             .map(|t| (t.name.clone(), t.fingerprint.clone()))
@@ -414,6 +553,24 @@ pub(super) fn bindings(parameters: &[Value]) -> Result<Vec<Option<String>>, Stri
         .collect()
 }
 pub(super) fn apply(driver: &mut PostgresDriver, plan: &ChangePlan) -> Result<(), String> {
+    let result = if plan.postgres_server_checks { server_checks::apply(driver, plan) }
+        else { apply_with_metadata(driver, plan, true, |client, input, data| metadata(client, input, data)) };
+    if result.is_err() || plan.statements.iter().any(|s| s.expected_rows.is_none()) { driver.edit_catalog = None; }
+    result
+}
+#[cfg(test)]
+pub(super) fn apply_legacy(driver: &mut PostgresDriver, plan: &ChangePlan) -> Result<(), String> {
+    apply_with_metadata(driver, plan, false, |client, input, data| metadata_legacy(client, input, data))
+}
+#[cfg(test)]
+pub(super) fn apply_six_exchanges(driver: &mut PostgresDriver, plan: &ChangePlan) -> Result<(), String> {
+    apply_with_metadata(driver, plan, true, |client, input, data| metadata(client, input, data))
+}
+#[cfg(test)]
+pub(super) fn apply_previous(driver: &mut PostgresDriver, plan: &ChangePlan) -> Result<(), String> {
+    apply_with_metadata(driver, plan, false, |client, input, data| metadata(client, input, data))
+}
+fn apply_with_metadata(driver: &mut PostgresDriver, plan: &ChangePlan, single_exchange: bool, read_metadata: impl Fn(&mut ::postgres::Transaction<'_>, &str, bool) -> Result<Table, String>) -> Result<(), String> {
     driver.require_idle_transaction()?;
     driver.check_tunnel()?;
     let _watch = driver.watch();
@@ -435,17 +592,23 @@ pub(super) fn apply(driver: &mut PostgresDriver, plan: &ChangePlan) -> Result<()
     for (table, expected) in schemas {
         // Plan keys already contain fully qualified, quoted table names.
         // Lock first, then read the fingerprint once under that lock.
-        tx.batch_execute(&format!(
-            "LOCK TABLE {} IN {} MODE",
-            table,
-            if schema_plan {
-                "ACCESS EXCLUSIVE"
-            } else {
-                "ROW EXCLUSIVE"
+        let lock = format!("LOCK TABLE {} IN {} MODE", table,
+            if schema_plan { "ACCESS EXCLUSIVE" } else { "ROW EXCLUSIVE" });
+        let fresh = if single_exchange {
+            let mut rows = tx.query_typed_raw_bounded_with_prefix(
+                &metadata_sql(BYTE_LIMIT), [(table as &(dyn ToSql + Sync), Type::TEXT)],
+                &[&lock], 1, BYTE_LIMIT,
+            ).map_err(error)?;
+            let row = rows.next().map_err(error)?;
+            if rows.next().map_err(error)?.is_some() || rows.truncated() {
+                return Err("Invalid or oversized editing metadata".into());
             }
-        ))
-        .map_err(error)?;
-        if metadata(&mut tx, table, !schema_plan)?.fingerprint != *expected {
+            decode_metadata(row, !schema_plan)?
+        } else {
+            tx.batch_execute(&lock).map_err(error)?;
+            read_metadata(&mut tx, table, !schema_plan)?
+        };
+        if fresh.fingerprint != *expected {
             return Err("Table structure changed since review. Nothing was saved; refresh and review again.".into());
         }
     }
@@ -463,7 +626,16 @@ pub(super) fn apply(driver: &mut PostgresDriver, plan: &ChangePlan) -> Result<()
                 .iter()
                 .map(|v| v as &(dyn ToSql + Sync))
                 .collect::<Vec<_>>();
-            let count: i64 = tx.query_one(&check.sql, &parameters).map_err(error)?.get(0);
+            let count: i64 = if single_exchange {
+                let mut rows = tx.query_typed_raw_bounded_with_prefix(
+                    &check.sql, parameters.iter().map(|p| (*p, Type::TEXT)), &[], 1, BYTE_LIMIT,
+                ).map_err(error)?;
+                let row = rows.next().map_err(error)?.ok_or("Missing concurrency check result")?;
+                if rows.next().map_err(error)?.is_some() || rows.truncated() {
+                    return Err("Invalid concurrency check result".into());
+                }
+                row.get(0)
+            } else { tx.query_one(&check.sql, &parameters).map_err(error)?.get(0) };
             if count != 1 {
                 return Err(if schema_plan {"A type definition changed since review. Nothing was saved; review the structure changes again."} else {"A row changed since it was loaded. Nothing was saved; pending changes are retained."}.into());
             }
@@ -473,7 +645,13 @@ pub(super) fn apply(driver: &mut PostgresDriver, plan: &ChangePlan) -> Result<()
             .iter()
             .map(|v| v as &(dyn ToSql + Sync))
             .collect::<Vec<_>>();
-        let count = tx.execute(&statement.sql, &parameters).map_err(error)?;
+        let count = if single_exchange {
+            // Every generated parameter is bound text with an explicit SQL cast.
+            // execute_typed uses unnamed Parse/Bind/Describe/Execute/Sync, drains
+            // ReadyForQuery and does not resolve returned custom-type metadata.
+            let typed = parameters.iter().map(|p| (*p, Type::TEXT)).collect::<Vec<_>>();
+            tx.execute_typed(&statement.sql, &typed).map_err(error)?
+        } else { tx.execute(&statement.sql, &parameters).map_err(error)? };
         if statement
             .expected_rows
             .is_some_and(|expected| count != expected as u64)
@@ -513,7 +691,7 @@ mod tests {
         };
         assert!(encoded(&Value::Blob(vec![0, 255]), &text).is_err());
     }
-    fn fixture() -> PostgresDriver {
+    pub(super) fn fixture() -> PostgresDriver {
         assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
         PostgresDriver::open(
             &crate::connection::PostgresConfig {
@@ -529,6 +707,92 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    #[ignore = "requires disposable PostgreSQL QA"]
+    fn fresh_metadata_matches_legacy_and_rejects_invalid_payloads() {
+        let mut driver = fixture();
+        driver.client.batch_execute("CREATE TYPE pg_temp.plan_state AS ENUM('new','done'); CREATE DOMAIN pg_temp.plan_domain AS text CHECK (length(VALUE)<100); CREATE TEMP TABLE plan_catalog(id int PRIMARY KEY, state pg_temp.plan_state, label pg_temp.plan_domain DEFAULT 'x', n int GENERATED ALWAYS AS (id+1) STORED, UNIQUE(label)); CREATE INDEX plan_state_idx ON plan_catalog(state); CREATE FUNCTION pg_temp.plan_trigger() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; CREATE TRIGGER plan_touch BEFORE UPDATE ON plan_catalog FOR EACH ROW EXECUTE FUNCTION pg_temp.plan_trigger(); CREATE TEMP TABLE plan_empty();").unwrap();
+        for (table, data) in [("plan_catalog", true), ("plan_empty", false)] {
+            let old = metadata_legacy(&mut driver.client, table, data).unwrap();
+            // First and repeated use must work with uncached custom types.
+            for _ in 0..2 {
+                let fresh = metadata_fast(&mut driver.client, table, data).unwrap();
+                assert_eq!(fresh.fingerprint, old.fingerprint);
+                assert_eq!(fresh.name, old.name);
+                assert_eq!(fresh.batch_deletes, old.batch_deletes);
+                assert_eq!(fresh.columns.iter().map(|c| (&c.name,&c.cast,c.native_oid,c.pk,c.generated)).collect::<Vec<_>>(), old.columns.iter().map(|c| (&c.name,&c.cast,c.native_oid,c.pk,c.generated)).collect::<Vec<_>>());
+            }
+        }
+        assert!(metadata_fast(&mut driver.client, "plan_missing", true).is_err());
+        assert!(metadata_fast(&mut driver.client, "plan_empty", true).unwrap_err().contains("primary key"));
+        let row = driver.client.query_opt(&metadata_sql(1), &[&"plan_catalog"]).unwrap();
+        assert!(decode_metadata(row, true).unwrap_err().contains("memory limit"));
+        driver.client.batch_execute("BEGIN").unwrap();
+        assert!(metadata_fast(&mut driver.client, "plan_catalog", true).is_ok());
+        driver.client.batch_execute("SELECT 1/0").unwrap_err();
+        assert!(metadata_fast(&mut driver.client, "plan_catalog", true).is_err());
+        driver.client.batch_execute("ROLLBACK").unwrap();
+        assert!(metadata_fast(&mut driver.client, "plan_catalog", true).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires disposable PostgreSQL QA"]
+    fn transaction_prefix_failure_skips_query_and_restores_connection() {
+        let mut driver = fixture();
+        driver.client.batch_execute("CREATE TEMP SEQUENCE prefix_probe").unwrap();
+        {
+            let mut tx = driver.client.transaction().unwrap();
+            let result = tx.query_typed_raw_bounded_with_prefix(
+                "SELECT nextval('prefix_probe')", std::iter::empty::<(&(dyn ToSql + Sync), Type)>(),
+                &["LOCK TABLE missing_prefix_target IN ROW EXCLUSIVE MODE"], 1, BYTE_LIMIT,
+            );
+            assert!(result.is_err());
+        }
+        // nextval cannot be undone by rollback, so this proves query suppression.
+        assert!(!driver.client.query_one("SELECT is_called FROM prefix_probe", &[]).unwrap().get::<_,bool>(0));
+        assert!(driver.require_idle_transaction().is_ok());
+        driver.client.batch_execute("CREATE TEMP TABLE prefix_save(id int PRIMARY KEY, n int); INSERT INTO prefix_save VALUES(1,0)").unwrap();
+        let edits = vec![Change::Cell { table: "prefix_save".into(), column: "n".into(), original: vec![Value::Integer(1),Value::Integer(0)], original_columns: None, value: Value::Integer(1) }];
+        let reviewed = plan(&mut driver, &edits).unwrap();
+        driver.client.batch_execute("DROP TABLE prefix_save").unwrap();
+        assert!(apply(&mut driver, &reviewed).is_err());
+        assert!(driver.require_idle_transaction().is_ok());
+        driver.client.batch_execute("CREATE TEMP TABLE prefix_save(id int PRIMARY KEY,n int); INSERT INTO prefix_save VALUES(1,0)").unwrap();
+        let fresh = plan(&mut driver,&edits).unwrap();
+        apply(&mut driver,&fresh).unwrap();
+        assert_eq!(driver.client.query_one("SELECT n FROM prefix_save", &[]).unwrap().get::<_,i32>(0),1);
+    }
+
+    #[test]
+    #[ignore = "requires disposable PostgreSQL QA"]
+    fn prefixed_metadata_observes_ddl_committed_while_waiting_for_lock() {
+        let mut driver = fixture();
+        driver.client.batch_execute("DROP SCHEMA IF EXISTS rustable_lock_snapshot CASCADE; CREATE SCHEMA rustable_lock_snapshot; CREATE TABLE rustable_lock_snapshot.t(id int PRIMARY KEY,n int); INSERT INTO rustable_lock_snapshot.t VALUES(1,0)").unwrap();
+        let edits = vec![Change::Cell { table: "rustable_lock_snapshot.t".into(), column: "n".into(), original: vec![Value::Integer(1),Value::Integer(0)], original_columns: None, value: Value::Integer(1) }];
+        let reviewed = plan(&mut driver,&edits).unwrap();
+        let pid: i32 = driver.client.query_one("SELECT pg_backend_pid()", &[]).unwrap().get(0);
+        let mut other = fixture();
+        other.client.batch_execute("BEGIN; ALTER TABLE rustable_lock_snapshot.t ADD COLUMN added int").unwrap();
+        let blocker = std::thread::spawn(move || {
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                // Clear the observer's statistics snapshot between polls.
+                other.client.batch_execute("SELECT pg_stat_clear_snapshot()").unwrap();
+                let waiting: bool = other.client.query_one("SELECT COALESCE((SELECT wait_event_type='Lock' FROM pg_stat_activity WHERE pid=$1),false)", &[&pid]).unwrap().get(0);
+                if waiting { break; }
+                assert!(Instant::now()<deadline,"save never waited for the DDL lock");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            other.client.batch_execute("COMMIT").unwrap();
+        });
+        let result = apply(&mut driver,&reviewed);
+        blocker.join().unwrap();
+        assert!(result.unwrap_err().contains("structure changed"));
+        assert!(driver.require_idle_transaction().is_ok());
+        assert_eq!(driver.client.query_one("SELECT n FROM rustable_lock_snapshot.t", &[]).unwrap().get::<_,i32>(0),0);
+        driver.client.batch_execute("DROP SCHEMA rustable_lock_snapshot CASCADE").unwrap();
+    }
+
     #[test]
     #[ignore = "requires disposable PostgreSQL QA"]
     fn grouped_delete_preserves_cascade_trigger_checks_and_review_invalidation() {

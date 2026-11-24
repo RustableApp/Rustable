@@ -24,6 +24,7 @@ pub(super) struct PostgresDriver {
     tunnel: Option<crate::ssh_tunnel::Tunnel>,
     schemas: SchemaCatalog,
     browse_catalog: Vec<(String, Row)>,
+    edit_catalog: Option<std::collections::BTreeMap<String, changes::Table>>,
     browse_hints: Vec<Object>,
     result_origins: std::collections::HashMap<u32, (String, String)>,
 }
@@ -65,12 +66,14 @@ impl PostgresDriver {
             tunnel,
             schemas: SchemaCatalog::default(),
             browse_catalog: Vec::new(),
+            edit_catalog: None,
             browse_hints: Vec::new(),
             result_origins: Default::default(),
         })
     }
 
     fn refresh_schemas(&mut self) -> Result<(), String> {
+        self.edit_catalog = None;
         let rows = self.client.query_typed(
             "SELECT nspname, pg_catalog.current_schema()::text FROM pg_catalog.pg_namespace WHERE pg_catalog.has_schema_privilege(oid,'USAGE') AND nspname NOT LIKE 'pg_toast%' AND nspname NOT LIKE 'pg_temp_%' ORDER BY nspname",
             &[],
@@ -314,6 +317,7 @@ impl Driver for PostgresDriver {
     }
 
     fn execute(&mut self, sql: &str, safe: bool, cancel: &AtomicBool) -> ScriptResult {
+        self.edit_catalog = None;
         let started = Instant::now();
         let _watch = self.watch();
         let mut report = ScriptResult::default();

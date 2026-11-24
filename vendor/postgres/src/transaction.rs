@@ -129,6 +129,21 @@ impl<'a> Transaction<'a> {
         Ok(RowIter::new(self.connection.as_ref(), stream))
     }
 
+    /// Like `Client::query_typed_raw_bounded_with_prefix`, on this transaction.
+    /// Prefixes and query share one Sync; a failed prefix skips the query.
+    /// Exhaust the iterator before inspecting rows_affected or issuing more work.
+    pub fn query_typed_raw_bounded_with_prefix<P, I>(
+        &mut self, query: &str, params: I, prefix: &[&str], max_rows: usize, max_bytes: usize,
+    ) -> Result<RowIter<'_>, Error>
+    where P: BorrowToSql, I: IntoIterator<Item = (P, Type)>,
+    {
+        let stream = self.connection.block_on(
+            self.transaction.as_ref().unwrap().client()
+                .query_typed_raw_bounded_with_prefix(query, params, prefix, max_rows, max_bytes)
+        )?;
+        Ok(RowIter::new(self.connection.as_ref(), stream))
+    }
+
     /// Like `Client::query_typed`.
     pub fn query_typed(
         &mut self,

@@ -110,16 +110,9 @@ fn guard(plan: &mut ChangePlan, ty: &TypeSpec) {
     });
 }
 pub(super) fn plan(driver: &mut PostgresDriver, changes: &[Change]) -> Result<ChangePlan, String> {
-    let mut tables = BTreeMap::new();
-    for change in changes {
-        if !tables.contains_key(change.table()) {
-            tables.insert(
-                change.table().to_owned(),
-                metadata(&mut driver.client, change.table(), false)?,
-            );
-        }
-    }
+    let mut tables = metadata_tables(&mut driver.client, changes, false)?;
     let mut plan = ChangePlan {
+        postgres_server_checks: tables.values().all(|t| t.server_checks),
         schemas: tables
             .values()
             .map(|table| (table.name.clone(), table.fingerprint.clone()))

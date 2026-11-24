@@ -72,6 +72,8 @@ managed-write paths.
 
 ## Protocol investigation
 
+These counts describe v0.4.38. The subsequent [fresh edit-planning optimization](EDIT-PLANNING-PERFORMANCE.md) reduces planning metadata from eight exchanges to one. The [transaction follow-up](EDIT-TRANSACTION-PERFORMANCE.md) also combines locking and metadata revalidation in one exchange, and makes checks/writes single-exchange operations.
+
 Established healthy PostgreSQL connection, built-in/cached metadata types, one
 table, N deleted rows and B batches:
 
@@ -184,3 +186,5 @@ Large-preview p95 improved from 0.290375 to 0.277292 ms; settings was unchanged
 within threshold, and the untouched menu was noisy/inconclusive. These are CPU
 measurements, not input-to-present measurements; native frame timing and actual
 Touch ID hardware authentication were not measured in this follow-up.
+
+The [server-side guard follow-up](EDIT-SERVER-CHECKS-PERFORMANCE.md) reaches three exchanges on first use and two for warm PostgreSQL data saves, with local cached previews and full locked revalidation before writing. The explicit client cancellation boundary before COMMIT remains.
