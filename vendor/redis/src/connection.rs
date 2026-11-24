@@ -83,19 +83,18 @@ pub(crate) fn create_native_tls_connector_builder(
 ) -> native_tls::TlsConnectorBuilder {
     let mut builder = native_tls::TlsConnector::builder();
 
+    // Verification policy is independent of SNI routing and client authentication.
     if insecure {
         builder
             .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .use_sni(false);
-        return builder;
+            .danger_accept_invalid_hostnames(true);
     }
 
     let Some(tls_params) = tls_params else {
         return builder;
     };
 
-    builder.danger_accept_invalid_hostnames(tls_params.danger_accept_invalid_hostnames);
+    builder.danger_accept_invalid_hostnames(insecure || tls_params.danger_accept_invalid_hostnames);
 
     let Some(NativeTlsParams {
         identity,

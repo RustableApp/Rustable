@@ -65,6 +65,8 @@ pub(crate) fn with_primary<T>(
                 username: sentinel.username.clone(),
                 ssh: settings.ssh.clone(),
                 tls: sentinel.tls,
+                verify_tls: sentinel.verify_tls,
+                port_forwards: settings.port_forwards.clone(),
                 root_certificate: sentinel.root_certificate.clone(),
                 client_certificate: sentinel.client_certificate.clone(),
                 client_key: sentinel.client_key.clone(),
@@ -529,7 +531,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        for fault in 0..7 {
+        for fault in 0..11 {
             let mut candidate = settings.clone();
             match fault {
                 1 => candidate.root_certificate = Some(sentinel_ca.clone()),
@@ -538,14 +540,25 @@ mod tests {
                 4 => candidate.root_certificate = None,
                 5 => { candidate.client_certificate = None; candidate.client_key = None; }
                 6 => { let discovery = candidate.sentinel.as_mut().unwrap(); discovery.client_certificate = None; discovery.client_key = None; }
+                7 => { candidate.verify_tls = false; candidate.root_certificate = None; }
+                8 => { let discovery = candidate.sentinel.as_mut().unwrap(); discovery.verify_tls = false; discovery.root_certificate = None; }
+                9 => { candidate.verify_tls = false; candidate.sentinel.as_mut().unwrap().root_certificate = Some(data_ca.clone()); }
+                10 => {
+                    let discovery = candidate.sentinel.as_mut().unwrap();
+                    discovery.seeds[0].host = "sentinel.fixture.test".into();
+                    discovery.verify_tls = false;
+                    discovery.root_certificate = None;
+                    candidate.port_forwards = vec![crate::redis_settings::PortForward { host: "sentinel.fixture.test".into(), port: 26420, local_port: 26420 }];
+                }
                 _ => {}
             }
+            let succeeds = matches!(fault, 0 | 7 | 8 | 10);
             let session = connect(
                 &candidate,
                 "rustable-data-test-only",
                 "rustable-sentinel-test-only",
             );
-            assert_eq!(session.is_ok(), fault == 0, "session trust case {fault}");
+            assert_eq!(session.is_ok(), succeeds, "session trust case {fault}");
             if let Ok(mut session) = session {
                 assert_eq!(session.execute("PING", true).unwrap(), vec![redis::Value::SimpleString("PONG".into())]);
             }
@@ -561,7 +574,7 @@ mod tests {
                     "rustable-sentinel-test-only",
                     &command,
                 );
-                assert_eq!(stream.is_ok(), fault == 0, "stream trust case {fault}");
+                assert_eq!(stream.is_ok(), succeeds, "stream trust case {fault}");
                 if let Ok(mut stream) = stream {
                     let reply = redis::Parser::new().parse_value(&mut stream).unwrap();
                     match command.args_iter().next().unwrap() {

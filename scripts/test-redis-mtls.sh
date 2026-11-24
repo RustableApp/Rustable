@@ -4,7 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 fixture="rustable-mtls-$$"
 certs="$(mktemp -d)"
-cleanup() { docker rm -f "$fixture" >/dev/null 2>&1 || true; rm -rf "$certs"; }
+sni_pid=""
+cleanup() { if [ -n "$sni_pid" ]; then kill "$sni_pid" 2>/dev/null || true; wait "$sni_pid" 2>/dev/null || true; fi; docker rm -f "$fixture" >/dev/null 2>&1 || true; rm -rf "$certs"; }
 trap cleanup EXIT
 for authority in ca other-ca; do
  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=Rustable $authority QA" -keyout "$certs/$authority.key" -out "$certs/$authority.crt" >/dev/null 2>&1
@@ -15,17 +16,25 @@ for identity in server client untrusted; do
  if [ "$identity" = untrusted ]; then authority=other-ca; fi
  printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\n' > "$certs/extensions.cnf"
  if [ "$identity" = server ]; then
-  printf 'subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' >> "$certs/extensions.cnf"
+  printf 'subjectAltName=IP:127.0.0.1,DNS:redis.fixture.test\nextendedKeyUsage=serverAuth\n' >> "$certs/extensions.cnf"
  else
   printf 'extendedKeyUsage=clientAuth\n' >> "$certs/extensions.cnf"
  fi
  openssl x509 -req -days 2 -in "$certs/$identity.csr" -CA "$certs/$authority.crt" -CAkey "$certs/$authority.key" -CAcreateserial -extfile "$certs/extensions.cnf" -out "$certs/$identity.crt" >/dev/null 2>&1
 done
-docker run -d --name "$fixture" -p 127.0.0.1::6379 -v "$certs:/certs:ro" redis:7.4-alpine redis-server --save '' --appendonly no --port 0 --tls-port 6379 --tls-auth-clients yes --tls-cert-file /certs/server.crt --tls-key-file /certs/server.key --tls-ca-cert-file /certs/ca.crt --requirepass rustable-mtls-test-only >/dev/null
+mise exec -- python tools/database-fixtures/tls-sni.py "$certs" &
+sni_pid=$!
+for attempt in {1..50}; do
+ if [ -f "$certs/sni-port" ]; then break; fi
+ sleep 0.1
+done
+test -f "$certs/sni-port"
+export RUSTABLE_REDIS_SNI_PORT="$(cat "$certs/sni-port")"
+docker run -d --name "$fixture" -p 127.0.0.1::6379 -v "$certs:/certs:ro" "${RUSTABLE_TLS_IMAGE:-redis:7.4-alpine}" "${RUSTABLE_TLS_SERVER:-redis-server}" --save '' --appendonly no --port 0 --tls-port 6379 --tls-auth-clients yes --tls-cert-file /certs/server.crt --tls-key-file /certs/server.key --tls-ca-cert-file /certs/ca.crt --requirepass rustable-mtls-test-only >/dev/null
 port="$(docker port "$fixture" 6379/tcp | sed 's/.*://')"
 ready=false
 for attempt in {1..50}; do
- if docker exec -e REDISCLI_AUTH=rustable-mtls-test-only "$fixture" redis-cli --tls --cacert /certs/ca.crt --cert /certs/client.crt --key /certs/client.key -h 127.0.0.1 PING 2>/dev/null | rg -q '^PONG'; then ready=true; break; fi
+ if docker exec -e REDISCLI_AUTH=rustable-mtls-test-only "$fixture" "${RUSTABLE_TLS_CLI:-redis-cli}" --tls --cacert /certs/ca.crt --cert /certs/client.crt --key /certs/client.key -h 127.0.0.1 PING 2>/dev/null | rg -q '^PONG'; then ready=true; break; fi
  sleep 0.2
 done
 if [ "$ready" != true ]; then echo 'Mutual TLS fixture did not become ready' >&2; exit 1; fi

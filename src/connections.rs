@@ -167,7 +167,12 @@ impl Manager {
                             self.probe_message = Some(format!("Connection test succeeded · TLS mode: {}", profile.tls.label()));
                             None
                         },
-                        ConnectionKind::Redis(profile) => Some(profile.tls),
+                        ConnectionKind::Redis(profile) => {
+                            self.probe_message = Some(if let Some(sentinel) = &profile.sentinel {
+                                format!("Connection test succeeded · Primary TLS: {} · Sentinel TLS: {}", profile.tls_mode().label(), crate::redis_settings::TlsMode::from_flags(sentinel.tls, sentinel.verify_tls).label())
+                            } else { format!("Connection test succeeded · TLS mode: {}", profile.tls_mode().label()) });
+                            None
+                        },
                         ConnectionKind::SQLite { .. } => None,
                     });
                     self.probe_message.get_or_insert_with(|| match transport {
@@ -482,10 +487,62 @@ fn sentinel_form(ui: &mut egui::Ui, config: &mut crate::redis_settings::Sentinel
     ui.ctx().data_mut(|data| data.insert_temp(row_id, (row_ids, next_id)));
     form_text(ui, "User", &mut config.username, false, None);
     if form_text(ui, "Password", password, true, None) { *revision = revision.wrapping_add(1); }
-    form_row(ui, "TLS", |ui| { form_checkbox(ui, &mut config.tls, "Verify certificate and hostname"); });
+    form_row(ui, "TLS", |ui| { redis_tls_picker(ui, &mut config.tls, &mut config.verify_tls); });
     let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
     if form_text(ui, "CA file", &mut ca, false, None) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
     redis_identity_form(ui, &mut config.client_certificate, &mut config.client_key);
+    valid
+}
+
+fn redis_tls_picker(ui: &mut egui::Ui, tls: &mut bool, verify: &mut bool) {
+    use crate::redis_settings::TlsMode;
+    let mut mode = TlsMode::from_flags(*tls, *verify);
+    ui.vertical(|ui| {
+        #[cfg(feature = "qa")]
+        if ui.ctx().data_mut(|data| data.remove_temp::<bool>(egui::Id::new("tls-preview-open")).unwrap_or(false)) {
+            egui::Popup::open_id(ui.ctx(), ui.make_persistent_id(egui::Id::new("redis-tls-mode")).with("popup"));
+        }
+        egui::ComboBox::from_id_salt("redis-tls-mode").selected_text(mode.label()).show_ui(ui, |ui| {
+            for value in [TlsMode::VerifyFull, TlsMode::Require, TlsMode::Disable] {
+                ui.selectable_value(&mut mode, value, value.label());
+            }
+        });
+        *tls = mode != TlsMode::Disable;
+        *verify = mode != TlsMode::Require;
+        if mode == TlsMode::Require {
+            ui.label(egui::RichText::new("Encrypted; server identity is not verified.").small().color(ui.visuals().warn_fg_color));
+        }
+    });
+}
+
+fn redis_port_forwards_form(ui: &mut egui::Ui, forwards: &mut Vec<crate::redis_settings::PortForward>, generation: u64) -> bool {
+    let mut valid = true;
+    egui::CollapsingHeader::new("Local port forwards (optional)").default_open(!forwards.is_empty()).show(ui, |ui| {
+        ui.weak("Use the database hostname in Host. Map it to an existing forward on 127.0.0.1 below; TLS still uses the database hostname. Add mappings for discovered Cluster or Sentinel nodes as needed.");
+        let row_id = ui.make_persistent_id(("forward-ids", generation));
+        let (mut ids, mut next) = ui.ctx().data_mut(|data| data.get_temp::<(Vec<u64>, u64)>(row_id)).unwrap_or_default();
+        ids.truncate(forwards.len());
+        while ids.len() < forwards.len() { ids.push(next); next += 1; }
+        let mut remove = None;
+        for (index, forward) in forwards.iter_mut().enumerate() {
+            ui.push_id(ids[index], |ui| {
+                form_section(ui, &format!("Forward {}", index + 1));
+                form_text(ui, "Database host", &mut forward.host, false, None);
+                valid &= form_port(ui, &mut forward.port, ProbeField::Port, generation);
+                ui.push_id("local", |ui| {
+                    valid &= form_port_label(ui, "Local port", &mut forward.local_port, ProbeField::Port, generation);
+                });
+                form_row(ui, "", |ui| { if ui.button("Remove forward").clicked() { remove = Some(index); } });
+            });
+        }
+        if let Some(index) = remove { forwards.remove(index); ids.remove(index); }
+        form_row(ui, "", |ui| {
+            if ui.add_enabled(forwards.len() < 16, egui::Button::new("Add port forward")).clicked() {
+                forwards.push(crate::redis_settings::PortForward { host: String::new(), port: 6379, local_port: 6379 });
+            }
+        });
+        ui.ctx().data_mut(|data| data.insert_temp(row_id, (ids, next)));
+    });
     valid
 }
 
@@ -509,6 +566,9 @@ struct PortEdit {
     committed: u16,
 }
 fn form_port(ui: &mut egui::Ui, port: &mut u16, field: ProbeField, generation: u64) -> bool {
+    form_port_label(ui, "Port", port, field, generation)
+}
+fn form_port_label(ui: &mut egui::Ui, label: &str, port: &mut u16, field: ProbeField, generation: u64) -> bool {
     let id = ui.make_persistent_id(("connection-port-text", format!("{field:?}"), generation));
     let mut edit = ui
         .ctx()
@@ -523,7 +583,7 @@ fn form_port(ui: &mut egui::Ui, port: &mut u16, field: ProbeField, generation: u
     }
     ui.scope(|ui| {
         ui.set_max_width(244.0);
-        form_text(ui, "Port", &mut edit.text, false, Some(field));
+        form_text(ui, label, &mut edit.text, false, Some(field));
     });
     let value = edit.text.parse::<u16>().ok().filter(|value| *value != 0);
     if let Some(value) = value {
@@ -1040,7 +1100,7 @@ impl Rustable {
                                 config.cluster = deployment == 1;
                                 if deployment == 2 {
                                     let sentinel = config.sentinel.get_or_insert_with(Default::default);
-                                    ports_valid &= sentinel_form(ui, sentinel, &mut self.connection_manager.sentinel_password, &mut self.connection_manager.sentinel_password_revision, self.connection_manager.generation);
+                                    ports_valid &= ui.push_id("sentinel-discovery", |ui| sentinel_form(ui, sentinel, &mut self.connection_manager.sentinel_password, &mut self.connection_manager.sentinel_password_revision, self.connection_manager.generation)).inner;
                                     form_section(ui, "Primary database");
                                     ui.weak("Connects to the primary discovered by Sentinel.");
                                 } else {
@@ -1053,10 +1113,11 @@ impl Rustable {
                                 status_row(ui, "Database", Some(ProbeField::Database), |ui| { ui.add_enabled_ui(!config.cluster, |ui| {ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut config.database).range(0..=u32::MAX));}); });
                                 form_text(ui, "User", &mut config.username, false, Some(ProbeField::User));
                                 if form_text(ui, "Password", &mut self.connection_manager.password, true, Some(ProbeField::Password)) { self.connection_manager.password_revision = self.connection_manager.password_revision.wrapping_add(1); }
-                                status_row(ui, "TLS", Some(ProbeField::Tls), |ui| { form_checkbox(ui, &mut config.tls, "Verify certificate and hostname"); });
+                                status_row(ui, "TLS", Some(ProbeField::Tls), |ui| { redis_tls_picker(ui, &mut config.tls, &mut config.verify_tls); });
                                 let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
                                 if form_text(ui, "CA file", &mut ca, false, Some(ProbeField::Tls)) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
                                 redis_identity_form(ui, &mut config.client_certificate, &mut config.client_key);
+                                ports_valid &= redis_port_forwards_form(ui, &mut config.port_forwards, self.connection_manager.generation);
                                 ports_valid &= ssh_form(ui, &mut config.ssh, self.connection_manager.generation, &mut pick);
                                 form_row(ui, "Connect timeout", |ui| { let mut seconds = config.connect_timeout.as_secs_f64(); if ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut seconds).range(0.1..=300.0).speed(0.1).suffix(" s")).changed() { config.connect_timeout = std::time::Duration::from_secs_f64(seconds); } });
                                 form_row(ui, "Read timeout", |ui| { let mut seconds = config.read_timeout.as_secs_f64(); if ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut seconds).range(0.1..=300.0).speed(0.1).suffix(" s")).changed() { config.read_timeout = std::time::Duration::from_secs_f64(seconds); } });
@@ -1915,6 +1976,54 @@ mod tests {
         app.connection_manager.draft.as_mut().unwrap().name = "Unsaved change".into();
         assert!(app.connection_manager.dirty(&app.prefs.saved_connections));
         assert_ne!(app.connection_manager.saved_feedback.as_ref().map(|(saved, _)| saved), app.connection_manager.draft.as_ref());
+    }
+
+    #[test]
+    fn redis_tls_picker_keeps_encryption_when_verification_is_disabled() {
+        use crate::redis_settings::TlsMode;
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.connections = true;
+        app.connection_action(Action::NewRedis).unwrap();
+        for _ in 0..3 { manager_frame(&ctx, &mut app, vec![]); }
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        manager_click(&ctx, &mut app, painted_text(&output, "Verify full").unwrap(), egui::PointerButton::Primary);
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        manager_click(&ctx, &mut app, painted_text(&output, TlsMode::Require.label()).unwrap(), egui::PointerButton::Primary);
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        assert!(painted_text(&output, "Encrypted; server identity is not verified.").is_some());
+        let ConnectionKind::Redis(profile) = &app.connection_manager.draft.as_ref().unwrap().connection else { panic!() };
+        assert!(profile.tls);
+        assert!(!profile.verify_tls);
+        for (tls, verify) in [(true, true), (true, false), (false, true)] {
+            let ConnectionKind::Redis(profile) = &mut app.connection_manager.draft.as_mut().unwrap().connection else { panic!() };
+            profile.tls = tls;
+            profile.verify_tls = verify;
+            app.connection_manager.probe_message = None;
+            app.connection_manager.apply_probe_event(ProbeEvent::Finished);
+            assert_eq!(app.connection_manager.probe_message.as_deref(), Some(format!("Connection test succeeded · TLS mode: {}", TlsMode::from_flags(tls, verify).label()).as_str()));
+        }
+    }
+
+    #[test]
+    fn sentinel_tls_picker_and_summary_keep_policies_independent() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.connections = true;
+        app.connection_action(Action::NewRedis).unwrap();
+        let ConnectionKind::Redis(profile) = &mut app.connection_manager.draft.as_mut().unwrap().connection else { panic!() };
+        profile.sentinel = Some(Default::default());
+        for _ in 0..3 { manager_frame(&ctx, &mut app, vec![]); }
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        manager_click(&ctx, &mut app, painted_text(&output, "Verify full").unwrap(), egui::PointerButton::Primary);
+        let output = manager_frame(&ctx, &mut app, vec![]);
+        manager_click(&ctx, &mut app, painted_text(&output, "Require TLS (unverified)").unwrap(), egui::PointerButton::Primary);
+        let ConnectionKind::Redis(profile) = &app.connection_manager.draft.as_ref().unwrap().connection else { panic!() };
+        assert!(profile.verify_tls);
+        assert!(profile.sentinel.as_ref().unwrap().tls);
+        assert!(!profile.sentinel.as_ref().unwrap().verify_tls);
+        app.connection_manager.apply_probe_event(ProbeEvent::Finished);
+        assert_eq!(app.connection_manager.probe_message.as_deref(), Some("Connection test succeeded · Primary TLS: Verify full · Sentinel TLS: Require TLS (unverified)"));
     }
 
     #[test]

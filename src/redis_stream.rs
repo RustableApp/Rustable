@@ -172,9 +172,9 @@ impl Control {
         let tunnel = crate::redis_settings::start_tunnel(settings, &self.cancelled)?;
         let endpoint = tunnel.as_ref().map(|tunnel| ("127.0.0.1", tunnel.local_port()))
             .unwrap_or((settings.host.as_str(), settings.port));
-        let addresses = endpoint
-            .to_socket_addrs()
-            .map_err(|e| e.to_string())?;
+        let addresses = if let Some(forward) = settings.forwarded_endpoint() {
+            vec![forward]
+        } else { endpoint.to_socket_addrs().map_err(|e| e.to_string())?.collect() };
         let deadline = Instant::now() + settings.connect_timeout;
         let mut connected = None;
         let mut last_error = "No Redis addresses resolved".to_string();
@@ -210,6 +210,8 @@ impl Control {
         }
         let stream: Box<dyn Transport> = if settings.tls {
             let mut builder = native_tls::TlsConnector::builder();
+            builder.danger_accept_invalid_certs(!settings.verify_tls)
+                .danger_accept_invalid_hostnames(!settings.verify_tls);
             if let Some(path) = &settings.root_certificate {
                 let pem = crate::redis_settings::read_pem(path, "CA certificate")?;
                 builder.add_root_certificate(

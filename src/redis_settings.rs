@@ -2,6 +2,30 @@
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, time::Duration};
 
+/// A logical database endpoint mapped to an existing local TCP forward.
+/// Keep the logical hostname for TLS SNI, verification and Cluster routing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PortForward {
+    pub host: String,
+    pub port: u16,
+    pub local_port: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TlsMode { VerifyFull, Require, Disable }
+impl TlsMode {
+    pub fn from_flags(tls: bool, verify: bool) -> Self {
+        if !tls { Self::Disable } else if verify { Self::VerifyFull } else { Self::Require }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::VerifyFull => "Verify full",
+            Self::Require => "Require TLS (unverified)",
+            Self::Disable => "Disabled (unencrypted)",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SentinelSeed {
     pub host: String,
@@ -14,6 +38,8 @@ pub(crate) struct Sentinel {
     pub seeds: Vec<SentinelSeed>,
     pub username: String,
     pub tls: bool,
+    /// Independent from encryption; absent in legacy profiles means verified TLS.
+    pub verify_tls: bool,
     pub root_certificate: Option<PathBuf>,
     pub client_certificate: Option<PathBuf>,
     pub client_key: Option<PathBuf>,
@@ -29,6 +55,7 @@ impl Default for Sentinel {
             }],
             username: String::new(),
             tls: true,
+            verify_tls: true,
             root_certificate: None,
             client_certificate: None,
             client_key: None,
@@ -74,9 +101,12 @@ pub(crate) struct Settings {
     pub cluster: bool,
     pub ssh: Option<crate::connection_profiles::SshOptions>,
     pub cluster_seeds: Vec<SentinelSeed>,
+    pub port_forwards: Vec<PortForward>,
     pub sentinel: Option<Sentinel>,
     pub username: String,
     pub tls: bool,
+    /// Independent from encryption; absent in legacy profiles means verified TLS.
+    pub verify_tls: bool,
     pub root_certificate: Option<PathBuf>,
     pub client_certificate: Option<PathBuf>,
     pub client_key: Option<PathBuf>,
@@ -92,9 +122,11 @@ impl Default for Settings {
             cluster: false,
             ssh: None,
             cluster_seeds: Vec::new(),
+            port_forwards: Vec::new(),
             sentinel: None,
             username: String::new(),
             tls: true,
+            verify_tls: true,
             root_certificate: None,
             client_certificate: None,
             client_key: None,
@@ -104,7 +136,26 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    pub fn tls_mode(&self) -> TlsMode { TlsMode::from_flags(self.tls, self.verify_tls) }
+    #[cfg(any(test, not(target_arch = "wasm32")))]
+    pub fn forwarded_endpoint(&self) -> Option<std::net::SocketAddr> {
+        self.port_forwards.iter().find(|forward| forward.host == self.host && forward.port == self.port)
+            .map(|forward| std::net::SocketAddr::from(([127, 0, 0, 1], forward.local_port)))
+    }
     pub fn validate(&self) -> Result<(), String> {
+        if self.port_forwards.len() > 16 { return Err("Configure at most 16 port forwards.".into()); }
+        if self.ssh.is_some() && !self.port_forwards.is_empty() {
+            return Err("Choose built-in SSH or existing local port forwards, not both.".into());
+        }
+        let mut forwards = std::collections::HashSet::new();
+        for forward in &self.port_forwards {
+            if forward.host.trim().is_empty() || forward.host.len() > 253
+                || forward.host.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '/' | '\\' | '@' | '#' | '?'))
+                || forward.port == 0 || forward.local_port == 0 {
+                return Err("Each port forward needs a database host, database port and local port.".into());
+            }
+            if !forwards.insert((&forward.host, forward.port)) { return Err("Remove duplicate port forwards for the same database endpoint.".into()); }
+        }
         if let Some(ssh) = &self.ssh
             && ssh.host.trim().is_empty() {
             return Err("Enter an SSH gateway host.".into());
@@ -308,5 +359,41 @@ mod tests {
         let restored: Settings =
             serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!(restored, settings);
+    }
+}
+
+#[cfg(test)]
+mod tls_policy_tests {
+    use super::*;
+    #[test]
+    fn legacy_profiles_preserve_encryption_and_verification() {
+        for tls in [false, true] {
+            let profile: Settings = serde_json::from_value(serde_json::json!({"tls": tls, "sentinel": {"tls": tls}})).unwrap();
+            assert_eq!(profile.tls, tls);
+            assert!(profile.verify_tls);
+            assert!(profile.sentinel.as_ref().unwrap().verify_tls);
+            assert_eq!(profile.sentinel.as_ref().unwrap().tls, tls);
+        }
+        let profile = Settings { verify_tls: false, port_forwards: vec![PortForward { host: "db.example.test".into(), port: 6379, local_port: 16379 }], ..Default::default() };
+        let restored: Settings = serde_json::from_str(&serde_json::to_string(&profile).unwrap()).unwrap();
+        assert_eq!(restored, profile);
+        assert_eq!(restored.tls_mode(), TlsMode::Require);
+        assert_eq!(Settings::default().tls_mode(), TlsMode::VerifyFull);
+    }
+    #[test]
+    fn forwards_are_exact_bounded_and_do_not_override_other_nodes() {
+        let mut settings = Settings { host: "db.example.test".into(), port_forwards: vec![PortForward { host: "db.example.test".into(), port: 6379, local_port: 16379 }], ..Default::default() };
+        settings.validate().unwrap();
+        assert_eq!(settings.forwarded_endpoint().unwrap().to_string(), "127.0.0.1:16379");
+        settings.host = "other.example.test".into();
+        assert!(settings.forwarded_endpoint().is_none());
+        settings.port_forwards.push(settings.port_forwards[0].clone());
+        assert!(settings.validate().unwrap_err().contains("duplicate"));
+        settings.port_forwards.pop();
+        settings.port_forwards[0].local_port = 0;
+        assert!(settings.validate().is_err());
+        settings.port_forwards[0].local_port = 16379;
+        settings.ssh = Some(Default::default());
+        assert!(settings.validate().unwrap_err().contains("not both"));
     }
 }

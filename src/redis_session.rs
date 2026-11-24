@@ -119,7 +119,7 @@ impl Session {
             redis::ConnectionAddr::TcpTls {
                 host: settings.host.clone(),
                 port: settings.port,
-                insecure: false,
+                insecure: !settings.verify_tls,
                 tls_params: None,
             }
         } else {
@@ -164,6 +164,8 @@ impl Session {
             .map_err(|message| failure(vec![], vec![SshHost], message))?;
         let opened = if let Some(tunnel) = &tunnel {
             client.get_connection_via(std::net::SocketAddr::from(([127, 0, 0, 1], tunnel.local_port())), settings.connect_timeout)
+        } else if let Some(endpoint) = settings.forwarded_endpoint() {
+            client.get_connection_via(endpoint, settings.connect_timeout)
         } else { client.get_connection_with_timeout(settings.connect_timeout) };
         let mut connection = opened
             .map_err(|e| {
@@ -176,7 +178,8 @@ impl Session {
                         format!("Redis authentication: {e}"),
                     )
                 } else {
-                    failure(vec![], transport.clone(), format!("Redis connection: {e}"))
+                    let stage = if e.is_timeout() { "Redis connection/setup timed out" } else { "Redis connection/setup failed" };
+                    failure(vec![], transport.clone(), format!("{stage} ({}): {e}. Check the endpoint, port forward and TLS mode.", settings.tls_mode().label()))
                 }
             })?;
         if let Some(tunnel) = tunnel { connection.retain_transport(Box::new(tunnel)); }
@@ -1937,6 +1940,58 @@ mod tests {
             assert!(crate::redis_stream::Control::default().connect(&invalid).is_err(), "invalid streaming identity variant {variant} connected");
             assert!(Session::connect(&invalid, "rustable-mtls-test-only").is_err(), "invalid identity variant {variant} connected");
         }
+        // Exercise the application path through a local forward with a DNS TLS identity.
+        let mut forwarded = settings.clone();
+        forwarded.host = "redis.fixture.test".into();
+        forwarded.port = 6379;
+        forwarded.port_forwards = vec![crate::redis_settings::PortForward { host: forwarded.host.clone(), port: 6379, local_port: settings.port }];
+        for verify in [true, false] {
+            forwarded.verify_tls = verify;
+            forwarded.root_certificate = verify.then(|| directory.join("ca.crt"));
+            let mut session = Session::connect(&forwarded, "rustable-mtls-test-only").unwrap();
+            for _ in 0..2 { assert_eq!(session.query(&redis::cmd("PING")).unwrap(), redis::Value::SimpleString("PONG".into())); }
+            session.reconnect(&forwarded, "rustable-mtls-test-only", "").unwrap();
+            assert!(Session::cluster_node(&forwarded, "rustable-mtls-test-only").is_ok());
+            assert!(Session::raw_node(&forwarded, "rustable-mtls-test-only").is_ok());
+            let control = crate::redis_stream::Control::default();
+            let mut stream = control.connect(&forwarded).unwrap();
+            stream.write_all(&redis::cmd("AUTH").arg("rustable-mtls-test-only").get_packed_command()).unwrap();
+            stream.read_exact(&mut okay).unwrap();
+            assert_eq!(&okay, b"+OK\r\n");
+            control.stop();
+        }
+        // This fixture rejects missing/wrong SNI, including in unverified mode.
+        let mut sni = forwarded.clone();
+        sni.port_forwards[0].local_port = std::env::var("RUSTABLE_REDIS_SNI_PORT").unwrap().parse().unwrap();
+        for verify in [true, false] {
+            sni.verify_tls = verify;
+            sni.root_certificate = verify.then(|| directory.join("ca.crt"));
+            assert!(Session::connect(&sni, "rustable-mtls-test-only").is_ok());
+            let control = crate::redis_stream::Control::default();
+            let mut stream = control.connect(&sni).unwrap();
+            stream.write_all(&redis::cmd("PING").get_packed_command()).unwrap();
+            let mut pong = [0; 7];
+            stream.read_exact(&mut pong).unwrap();
+            assert_eq!(&pong, b"+PONG\r\n");
+            control.stop();
+        }
+        // Unverified TLS must still present the client identity, even for a wrong server name.
+        forwarded.host = "wrong.fixture.test".into();
+        forwarded.port_forwards[0].host = forwarded.host.clone();
+        assert!(Session::connect(&forwarded, "rustable-mtls-test-only").is_ok());
+        assert!(crate::redis_stream::Control::default().connect(&forwarded).is_ok());
+        forwarded.verify_tls = true;
+        forwarded.root_certificate = Some(directory.join("ca.crt"));
+        assert!(Session::connect(&forwarded, "rustable-mtls-test-only").is_err());
+        assert!(crate::redis_stream::Control::default().connect(&forwarded).is_err());
+        forwarded.verify_tls = false;
+        forwarded.client_certificate = None;
+        forwarded.client_key = None;
+        assert!(Session::connect(&forwarded, "rustable-mtls-test-only").is_err());
+        // Explicit plaintext to a TLS-only endpoint must fail, without fallback.
+        forwarded.tls = false;
+        forwarded.connect_timeout = std::time::Duration::from_millis(200);
+        assert!(Session::connect(&forwarded, "rustable-mtls-test-only").is_err());
         let mut oversized = settings.clone();
         let file = directory.join("oversized.pem");
         std::fs::write(&file, vec![b'x'; 1024 * 1024 + 1]).unwrap();

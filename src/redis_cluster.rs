@@ -1767,6 +1767,7 @@ mod tests {
         let certs = std::path::PathBuf::from(std::env::var_os("RUSTABLE_REDIS_MTLS_CERTS").unwrap());
         let settings = Settings {
             host: "127.0.0.1".into(), port: 16430, cluster: true, tls: true,
+            port_forwards: (16430..=16432).map(|port| crate::redis_settings::PortForward { host: "127.0.0.1".into(), port, local_port: port + 1000 }).collect(),
             root_certificate: Some(certs.join("ca.crt")),
             client_certificate: Some(certs.join("client.crt")),
             client_key: Some(certs.join("client.key")),
@@ -1794,6 +1795,22 @@ mod tests {
             assert_eq!(router.query(redis::cmd("GET").arg(key)).unwrap(), redis::Value::BulkString(b"2".to_vec()));
             router.query(redis::cmd("DEL").arg(key)).unwrap();
         }
+        // Each redirected node uses the same explicit verification policy and its own mapping.
+        for verify in [true, false] {
+            let mut forwarded = settings.clone();
+            forwarded.host = "seed.fixture.test".into();
+            forwarded.verify_tls = verify;
+            forwarded.root_certificate = verify.then(|| certs.join("ca.crt"));
+            forwarded.port_forwards = std::iter::once(crate::redis_settings::PortForward { host: forwarded.host.clone(), port: 16430, local_port: 17430 })
+                .chain((16430..=16432).map(|port| crate::redis_settings::PortForward { host: "127.0.0.1".into(), port, local_port: port + 1000 })).collect();
+            let connection = crate::redis_session::Session::cluster_node(&forwarded, password).unwrap();
+            let mut router = Router::new(forwarded, password.into(), connection, vec![None; 16384]);
+            for key in &keys {
+                assert_eq!(router.query(redis::cmd("INCR").arg(key)).unwrap(), redis::Value::Int(1));
+                router.query(redis::cmd("DEL").arg(key)).unwrap();
+            }
+            router.reconnect().unwrap();
+        }
         // The seed is valid, but newly discovered connections must still require
         // the identity and the configured server hostname. No plaintext fallback.
         for fault in 0..3 {
@@ -1804,6 +1821,7 @@ mod tests {
                 invalid.client_certificate = Some(certs.join("untrusted.crt"));
                 invalid.client_key = Some(certs.join("untrusted.key"));
             }
+            invalid.port_forwards.push(crate::redis_settings::PortForward { host: "localhost".into(), port: 16431, local_port: 17431 });
             let mut router = Router::new(invalid, password.into(), connection, vec![None; 16384]);
             router.routes[hash_slot(keys[1].as_bytes()) as usize] = Some(Endpoint {
                 host: if fault == 2 { "localhost" } else { "127.0.0.1" }.into(), port: 16431,

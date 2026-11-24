@@ -456,3 +456,39 @@ fresh catalog shape and RowDescription before decoding rows and bounds its page
 collector while draining the remainder. Text results never resolve custom types.
 The older bounded buffering API remains available. This adds no Sync boundary,
 preparation, metadata lookup or cleanup request.
+
+### Explicit unverified Redis TLS (issue #17)
+
+The native TLS connector's `insecure` flag now disables server certificate and
+hostname verification only. It keeps SNI enabled and continues applying client
+certificates. Previously the early return silently discarded mTLS identity and
+also disabled SNI. Verified mode retains its existing trust and hostname checks.
+Rustable sets this flag only for the explicit “Require TLS (unverified)” mode;
+there is no automatic downgrade or plaintext retry.
+
+Both ordinary and streaming Redis connections use exact logical host/port →
+127.0.0.1/local-port mappings for existing port forwards. The existing
+`get_connection_via` API preserves the logical TLS hostname and Redis setup
+pipeline. Cluster redirects, reconnects and Sentinel discovery/primary connections
+retain the mappings and their respective TLS policies. A forward is not a new
+SSH tunnel; built-in SSH and existing local forwards are mutually exclusive.
+
+Cold established-TCP Redis setup remains one pipelined exchange (authentication
+when configured plus CLIENT SETINFO), then PING, then SELECT or CLUSTER SHARDS:
+three Redis exchanges for ordinary standalone/Cluster startup, before and after.
+Raw connections retain one setup exchange; newly routed Cluster connections retain
+setup + PING. Sentinel keeps its existing discovery exchanges and pipelined
+ROLE/SELECT validation. TLS handshake exchanges depend on negotiated TLS version
+and resumption; verified TLS is unchanged and the new unverified mode still
+requires TLS. Mapping lookup and verification policy add zero exchanges. Existing
+warm command routing, cancellation, cleanup, deadlines and write-replay policy
+are unchanged. PostgreSQL and MySQL/MariaDB execution paths are untouched.
+
+Disposable coverage: `scripts/test-redis-mtls.sh` exercises verified/unverified
+TLS, hostname rejection, client identity, reconnect, raw/node and streaming paths.
+Its `tls-sni.py` fixture requires SNI and client authentication. The Cluster script
+publishes local ports 17430–17432 for advertised ports 16430–16432, exercising
+mappings on MOVED and reconnect. The Sentinel script verifies independent trust
+policies for discovery and primary connections, including MONITOR/SUBSCRIBE.
+Set `RUSTABLE_TLS_IMAGE=valkey/valkey:8-alpine`, `RUSTABLE_TLS_SERVER=valkey-server`
+and `RUSTABLE_TLS_CLI=valkey-cli` to run the mTLS and Cluster scripts with Valkey.

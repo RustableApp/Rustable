@@ -169,11 +169,19 @@ def main():
     parser.add_argument('--postgres-connections', action='store_true', help='Compare only the PostgreSQL connection form at two sizes')
     parser.add_argument('--connection-activity', action='store_true', help='Compare only idle and busy connection toolbar CPU rendering')
     parser.add_argument('--matrix-connector', action='store_true', help='Compare the MCP setup dialog including copy feedback and idle resume')
+    parser.add_argument('--redis-tls', action='store_true', help='Compare existing standalone, Cluster, Sentinel and expanded Redis security forms')
     parser.add_argument('--base', required=True, help='Git revision to compare against')
     parser.add_argument('--output', default='target/ui-performance')
     parser.add_argument('--runs', type=int, default=5)
     args = parser.parse_args()
     global BENCHMARKS
+    if args.redis_tls:
+        BENCHMARKS = ('redis_connection_profile_frame_benchmark', 'redis_sentinel_profile_frame_benchmark', 'redis_cluster_profile_frame_benchmark', 'redis_security_profile_frame_benchmark')
+        EXPECTED.clear()
+        EXPECTED.add('redis/connection-profile')
+        EXPECTED.update(f'redis/sentinel-profile/{count}-seeds-scroll' for count in (1, 8))
+        EXPECTED.update(f'redis/cluster-profile/{count}-alternates-scroll' for count in (0, 7))
+        EXPECTED.update(f'redis/security-profile/{w}x{h}' for w, h in ((1000, 760), (1400, 1080)))
     if args.matrix_connector:
         BENCHMARKS = ('matrix_connector_frame_benchmark',)
         EXPECTED.clear()
@@ -428,6 +436,17 @@ def main():
                     rows = measure(base_binary if label == 'base' else head_binary,
                                    base_path if label == 'base' else root, logs, label, index)
                     (base_runs if label == 'base' else head_runs).append(rows)
+            if args.redis_tls:
+                absolute = []
+                for index in range(args.runs):
+                    result = run([str(head_binary), 'redis_forwarded_tls_frame_benchmark', '--ignored', '--nocapture', '--test-threads=1'], root, capture_output=True)
+                    output = result.stdout + result.stderr
+                    (logs / f'head-forwarded-tls-{index}.log').write_text(output)
+                    parsed = parse_output(output)
+                    if set(parsed) != {'redis/forwarded-tls/1-mappings', 'redis/forwarded-tls/16-mappings'}:
+                        raise ValueError('missing forwarded TLS workloads')
+                    absolute.append(parsed)
+                (logs / 'forwarded-tls-new-workload.json').write_text(json.dumps(dict(scope='Candidate-only unverified TLS and local-forward scrolling/after-idle workloads; no equivalent baseline controls', runs=absolute), indent=2))
             if args.redis_editing:
                 # This interaction did not exist in the base. Record absolute
                 # release costs, not a misleading comparison with one old row.

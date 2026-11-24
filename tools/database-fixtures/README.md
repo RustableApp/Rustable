@@ -669,3 +669,32 @@ TablePlus PostgreSQL values 0/1/2/4/5 map to Prefer/Disabled/Require/Verify CA/V
 full; unsupported Allow (3) and unknown values are rejected for manual review.
 The picker ordering is also documented in TablePro's
 [TablePlus import vocabulary](https://github.com/TableProApp/TablePro/blob/main/apple/TablePro/Core/Services/Export/ForeignApp/TablePlusFormValues.swift).
+
+### Redis/Valkey TLS modes and local port forwarding (#17)
+
+Run `bash scripts/test-redis-mtls.sh` for verified/unverified TLS, mutual TLS,
+required SNI, forwarded DNS identity, reconnect and streaming transport checks.
+The script creates its own certificates, an ephemeral loopback container port,
+and a bounded Python RESP stub that rejects missing SNI; it cleans them up on exit.
+The Python stub runs through mise.
+
+`bash scripts/test-redis-cluster-mtls.sh` publishes local ports 17430–17432 while
+the three nodes advertise 16430–16432. Exact endpoint mappings must work for the
+seed, discovered nodes, MOVED and reconnect. These fixed **local** ports must be
+free. `bash scripts/test-redis-sentinel-tls.sh` checks that an explicit unverified
+policy on discovery or the primary does not weaken the other connection's policy.
+
+The mTLS and Cluster scripts also support Valkey:
+
+```sh
+RUSTABLE_TLS_IMAGE=valkey/valkey:8-alpine RUSTABLE_TLS_SERVER=valkey-server RUSTABLE_TLS_CLI=valkey-cli bash scripts/test-redis-mtls.sh
+RUSTABLE_TLS_IMAGE=valkey/valkey:8-alpine RUSTABLE_TLS_SERVER=valkey-server RUSTABLE_TLS_CLI=valkey-cli bash scripts/test-redis-cluster-mtls.sh
+```
+
+Saved `tls` booleans keep their prior encryption behavior. The new `verify_tls`
+field defaults to true when absent, including for Sentinel. Unverified encryption
+must be chosen explicitly. Port forwards are bounded to 16 exact host/port entries,
+all targeting 127.0.0.1, and cannot be combined with built-in SSH. Set Host to the
+real database hostname and map that hostname and database port to the local port;
+no `/etc/hosts` edit is needed. A Cluster may need a mapping for every advertised
+node, not just the seed.

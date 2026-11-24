@@ -2398,3 +2398,52 @@ release profile, five alternating pairs. Query fixtures use 20 warmup frames and
 | query/editor-results/128/760 | 0.04458 → 0.04108 | 0.05671 → 0.05683 | 0.06271 → 0.06429 | 0.06383 → 0.09346 |
 | query/editor-results/4/500 | 0.04250 → 0.03892 | 0.05517 → 0.05604 | 0.06008 → 0.06187 | 0.06288 → 0.09079 |
 | query/editor-history | 0.21954 → 0.21971 | 0.23100 → 0.23321 | 0.23542 → 0.24825 | 0.24042 → 0.25517 |
+
+### Redis TLS modes and local forwards (#17, 2026-11-23)
+
+`mise exec -- python scripts/ui-performance.py --base 558c96cc2cd3a9b90238e4d1b9a19d11f1c0b3e1 --redis-tls --output target/tls-ui-performance`
+compares the seven existing standalone/Cluster/Sentinel/security form workloads.
+The option also records candidate-only unverified-TLS forms with 1 and 16 local
+port mappings; these new controls have no equivalent baseline and are not given
+comparative passes. Their scrolling workload includes a synthetic 30-second idle
+gap. Each case has 20 warmup and 160 measured frames per run, default headless
+scale (1×); standard forms use 1400×900, expanded security forms use the sizes below,
+and new forwarding forms use 1000×760.
+
+Measured on Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release profile, five
+alternating pairs, without competing builds or benchmark workloads. Initial raw
+results remain in `target/tls-ui-performance/`. Six cases passed; standalone was
+inconclusive (+12.7% median p95, variable pairs). A second five-pair measurement
+used the **same already-built binaries**, fixtures and thresholds, retained in
+`target/tls-ui-performance-repeat/`. It did not reproduce the slowdown (standalone
+-2.2% median p95). Five repeat cases passed; standalone and the zero-alternate
+Cluster case remained inconclusive due to timing noise. This is not an all-pass
+performance claim; no repeatable >10% regression was established, and thresholds
+were not relaxed.
+
+Repeat medians of per-run CPU milliseconds, base → candidate (maxima are medians
+of maxima, not a pooled worst-case stall):
+
+| Form | p50 | p95 | p99 | Maximum | Result |
+| --- | --- | --- | --- | --- | --- |
+| Standalone | 0.05446 → 0.05483 | 0.06567 → 0.06421 | 0.07487 → 0.07242 | 0.08554 → 0.08388 | Inconclusive |
+| Cluster, 0 alternates | 0.05654 → 0.05679 | 0.06387 → 0.06192 | 0.07025 → 0.06742 | 0.07446 → 0.07487 | Inconclusive |
+| Cluster, 7 alternates | 0.09900 → 0.09933 | 0.11158 → 0.10817 | 0.13429 → 0.12258 | 0.13521 → 0.12283 | Pass |
+| Sentinel, 1 seed | 0.07146 → 0.07171 | 0.08687 → 0.08108 | 0.10100 → 0.08908 | 0.10279 → 0.09167 | Pass |
+| Sentinel, 8 seeds | 0.11033 → 0.11229 | 0.13050 → 0.12742 | 0.14479 → 0.14021 | 0.15154 → 0.15592 | Pass |
+| Security, 1000×760 | 0.07083 → 0.07096 | 0.08450 → 0.07400 | 0.09458 → 0.08121 | 0.09642 → 0.08796 | Pass |
+| Security, 1400×1080 | 0.07621 → 0.07646 | 0.08842 → 0.07888 | 0.10104 → 0.08629 | 0.10150 → 0.09654 | Pass |
+
+Candidate-only forwarding p50/p95/p99/max: 1 mapping
+0.06508/0.06817/0.07229/0.07408 ms; 16 mappings
+0.16792/0.17796/0.18275/0.18283 ms. Five runs and raw samples are retained in
+`target/tls-ui-performance-repeat/new-forwarding.json`. These measurements were
+run separately with the identical candidate binary; the runner now includes them
+in `--redis-tls` for future comparisons.
+
+Native screenshots in `target/tls-review/` cover the mode picker, unverified
+warning, Sentinel scopes and local-forward forms at 1000/1280×760 in light/dark,
+at 2× display scale. Screenshot review found and fixed a Sentinel/primary widget-ID
+collision. Native input-to-present, 60/120 Hz, multiple windows, mixed-DPI and
+monitor movement/disconnection were not measured. Renderer, event loop and repaint
+scheduling are unchanged; these results measure CPU layout/tessellation only.

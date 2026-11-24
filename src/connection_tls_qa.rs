@@ -13,6 +13,12 @@ fn fixture(ctx: &egui::Context) -> Rustable {
         "Private PostgreSQL".into(),
         crate::connection_profiles::ConnectionKind::Postgres(profile),
     ));
+    if let Ok(kind) = std::env::var("RUSTABLE_TLS_REDIS") {
+        let mut settings = crate::redis_settings::Settings { host: "cache.example.test".into(), verify_tls: std::env::var_os("RUSTABLE_TLS_UNVERIFIED").is_none(), ..Default::default() };
+        if kind == "sentinel" { settings.sentinel = Some(Default::default()); }
+        if kind == "forward" { settings.port_forwards = vec![crate::redis_settings::PortForward { host: settings.host.clone(), port: 6379, local_port: 16379 }]; }
+        app.connection_manager.draft = Some(crate::connection_profiles::Profile::draft("Forwarded cache".into(), ConnectionKind::Redis(Box::new(settings))));
+    }
     app
 }
 
@@ -23,12 +29,20 @@ impl Rustable {
             app: Rustable,
             frame: usize,
             menu: bool,
+            scroll: bool,
             started: std::time::Instant,
             requested: bool,
             path: std::path::PathBuf,
             saved: Option<std::sync::mpsc::Receiver<()>>,
         }
         impl eframe::App for Preview {
+            fn persist_egui_memory(&self) -> bool { false }
+            fn raw_input_hook(&mut self, _: &egui::Context, input: &mut egui::RawInput) {
+                if self.scroll && (2..6).contains(&self.frame) {
+                    input.events.push(egui::Event::PointerMoved(egui::pos2(800.0, 500.0)));
+                    input.events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -140.0), modifiers: egui::Modifiers::NONE });
+                }
+            }
             fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
                 if self.saved.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -62,7 +76,7 @@ impl Rustable {
                 }
                 self.app.connections_window(ctx);
                 if !self.requested
-                    && self.frame >= 3
+                    && self.frame >= 12
                     && (!self.menu
                         || self.started.elapsed() >= std::time::Duration::from_millis(600))
                 {
@@ -80,10 +94,11 @@ impl Rustable {
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(1280.0);
         eframe::run_native(
-            "PostgreSQL TLS preview",
+            "Connection TLS preview",
             eframe::NativeOptions {
                 viewport: egui::ViewportBuilder::default().with_inner_size([width, 760.0]),
                 persist_window: false,
+                persistence_path: Some(path.with_extension(format!("state-{}", std::process::id()))),
                 ..Default::default()
             },
             Box::new(move |cc| {
@@ -103,6 +118,7 @@ impl Rustable {
                     started: std::time::Instant::now(),
                     requested: false,
                     menu: std::env::var_os("RUSTABLE_TLS_MENU").is_some(),
+                    scroll: std::env::var_os("RUSTABLE_TLS_SCROLL").is_some(),
                     path,
                     saved: None,
                 }))

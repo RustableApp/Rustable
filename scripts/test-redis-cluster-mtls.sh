@@ -15,20 +15,20 @@ for identity in server client untrusted; do
  if [ "$identity" = untrusted ]; then authority=other-ca; fi
  printf 'basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\n' > "$certs/extensions.cnf"
  if [ "$identity" = server ]; then
-  printf 'subjectAltName=IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' >> "$certs/extensions.cnf"
+  printf 'subjectAltName=IP:127.0.0.1,DNS:seed.fixture.test\nextendedKeyUsage=serverAuth\n' >> "$certs/extensions.cnf"
  else
   printf 'extendedKeyUsage=clientAuth\n' >> "$certs/extensions.cnf"
  fi
  openssl x509 -req -days 2 -in "$certs/$identity.csr" -CA "$certs/$authority.crt" -CAkey "$certs/$authority.key" -CAcreateserial -extfile "$certs/extensions.cnf" -out "$certs/$identity.crt" >/dev/null 2>&1
 done
-docker run -d --name "$fixture" -p 127.0.0.1:16430:16430 -p 127.0.0.1:16431:16431 -p 127.0.0.1:16432:16432 -v "$certs:/certs:ro" redis:7.4-alpine sh -c '
+docker run -d --name "$fixture" -p 127.0.0.1:17430:16430 -p 127.0.0.1:17431:16431 -p 127.0.0.1:17432:16432 -v "$certs:/certs:ro" -e RUSTABLE_TLS_SERVER="${RUSTABLE_TLS_SERVER:-redis-server}" "${RUSTABLE_TLS_IMAGE:-redis:7.4-alpine}" sh -c '
 set -eu
 for port in 16430 16431 16432; do
  mkdir -p /tmp/redis-$port
- redis-server --dir /tmp/redis-$port --port 0 --tls-port "$port" --bind 0.0.0.0 --tls-auth-clients yes --tls-cert-file /certs/server.crt --tls-key-file /certs/server.key --tls-client-cert-file /certs/client.crt --tls-client-key-file /certs/client.key --tls-ca-cert-file /certs/ca.crt --tls-cluster yes --tls-replication yes --requirepass rustable-mtls-test-only --masterauth rustable-mtls-test-only --cluster-enabled yes --cluster-config-file /tmp/redis-$port/nodes.conf --cluster-announce-ip 127.0.0.1 --cluster-announce-tls-port "$port" --save "" --appendonly no --maxmemory 64mb --daemonize yes
+ "$RUSTABLE_TLS_SERVER" --dir /tmp/redis-$port --port 0 --tls-port "$port" --bind 0.0.0.0 --tls-auth-clients yes --tls-cert-file /certs/server.crt --tls-key-file /certs/server.key --tls-client-cert-file /certs/client.crt --tls-client-key-file /certs/client.key --tls-ca-cert-file /certs/ca.crt --tls-cluster yes --tls-replication yes --requirepass rustable-mtls-test-only --masterauth rustable-mtls-test-only --cluster-enabled yes --cluster-config-file /tmp/redis-$port/nodes.conf --cluster-announce-ip 127.0.0.1 --cluster-announce-tls-port "$port" --save "" --appendonly no --maxmemory 64mb --daemonize yes
 done
 exec sleep 3600' >/dev/null
-cli() { docker exec -e REDISCLI_AUTH=rustable-mtls-test-only "$fixture" redis-cli --tls --cacert /certs/ca.crt --cert /certs/client.crt --key /certs/client.key "$@"; }
+cli() { docker exec -e REDISCLI_AUTH=rustable-mtls-test-only "$fixture" "${RUSTABLE_TLS_CLI:-redis-cli}" --tls --cacert /certs/ca.crt --cert /certs/client.crt --key /certs/client.key "$@"; }
 ready=false
 for attempt in {1..50}; do
  if cli -p 16432 PING 2>/dev/null | rg -q '^PONG'; then ready=true; break; fi

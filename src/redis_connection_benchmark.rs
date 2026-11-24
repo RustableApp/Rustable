@@ -116,3 +116,39 @@ fn redis_security_profile_frame_benchmark() {
         crate::ui_benchmark::report(&format!("redis/security-profile/{width}x{height}"), &samples);
     }
 }
+
+// New controls have no equivalent baseline. Report independently, never as a comparative pass.
+#[test]
+#[ignore = "manual port-forward and unverified TLS interaction measurements"]
+fn redis_forwarded_tls_frame_benchmark() {
+    for count in [1, 16] {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.connection_action(Action::NewRedis).unwrap();
+        app.connections = true;
+        app.child_window = false;
+        if let ConnectionKind::Redis(settings) = &mut app.connection_manager.draft.as_mut().unwrap().connection {
+            settings.verify_tls = false;
+            settings.port_forwards = (0..count).map(|index| crate::redis_settings::PortForward {
+                host: format!("cache-{index}.example.test"), port: 6379, local_port: 16379 + index,
+            }).collect();
+        }
+        let mut samples = Vec::new();
+        for frame in 0..180 {
+            let start = std::time::Instant::now();
+            let output = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 760.0))),
+                time: Some(frame as f64 / 120.0 + if frame >= 100 { 30.0 } else { 0.0 }),
+                events: vec![
+                    egui::Event::PointerMoved(egui::pos2(800.0, 500.0)),
+                    egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, if frame % 40 < 20 { -25.0 } else { 25.0 }), modifiers: egui::Modifiers::NONE },
+                ],
+                ..Default::default()
+            }, |ctx| app.connections_window(ctx));
+            let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+            if frame >= 20 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+        }
+        samples.sort_by(f64::total_cmp);
+        crate::ui_benchmark::report(&format!("redis/forwarded-tls/{count}-mappings"), &samples);
+    }
+}
