@@ -105,7 +105,7 @@ pub(super) fn plan(changes: &[Change], objects: &[Object]) -> Result<ChangePlan,
                 deleted.push((table, original));
                 let (predicate, parameters) = row_key(object, original)?;
                 check_row(&mut plan, object, original)?;
-                plan.statements.push(PlannedStatement { sql: format!("DELETE FROM {} WHERE {predicate}", qualified(object)?), parameters, expected_rows: Some(1) });
+                plan.push_delete(&qualified(object)?, true, |bound| { bound.extend(parameters); Ok(predicate) })?;
             }
             Change::InsertRow { fields, .. } => {
                 let columns = fields.iter().map(|(name, _)| quote(name)).collect::<Vec<_>>().join(", ");
@@ -290,7 +290,7 @@ pub(super) fn apply(driver: &mut MysqlDriver, plan: &ChangePlan) -> Result<(), S
                 return Err("Only reviewed row changes can use this transaction.".into());
             }
             let checks = plan.preconditions.iter().filter(|c| c.before_statement == index).collect::<Vec<_>>();
-            if (update || statement.sql.starts_with("DELETE FROM ")) && checks.len() != 1 {
+            if (update || statement.sql.starts_with("DELETE FROM ")) && Some(checks.len()) != statement.expected_rows {
                 return Err("Missing original-row check. Review changes again.".into());
             }
             for check in checks {

@@ -1658,6 +1658,35 @@ pub struct ChangePlan {
     pub preconditions: Vec<PlannedPrecondition>,
     pub schemas: Vec<(String, String)>,
 }
+impl ChangePlan {
+    /// Batch adjacent deletes only, preserving operation order and every locked
+    /// original-row check. Bound SQL size, expression depth and parameter count.
+    fn push_delete(&mut self, table: &str, batch: bool, predicate: impl FnOnce(&mut Vec<Value>) -> Result<String, String>) -> Result<(), String> {
+        let prefix = format!("DELETE FROM {table} WHERE ");
+        let previous = self.statements.last().filter(|s| {
+            batch && s.sql.starts_with(&prefix) && s.expected_rows.is_some_and(|n| n < 128)
+                && s.parameters.len() < 512 && s.sql.len() < 64 * 1024
+        });
+        let mut parameters = previous.map_or_else(Vec::new, |s| s.parameters.clone());
+        let condition = predicate(&mut parameters)?;
+        if previous.is_some() {
+            let index = self.statements.len() - 1;
+            for check in self.preconditions.iter_mut().rev().take_while(|c| c.before_statement == index + 1) {
+                check.before_statement = index;
+            }
+            let statement = &mut self.statements[index];
+            let old = statement.sql.trim_end_matches(';');
+            let old_predicate = &old[prefix.len()..];
+            let old_predicate = if statement.expected_rows == Some(1) { format!("({old_predicate})") } else { old_predicate.to_owned() };
+            statement.sql = format!("{prefix}{old_predicate} OR ({condition});");
+            statement.parameters = parameters;
+            statement.expected_rows = statement.expected_rows.map(|n| n + 1);
+        } else {
+            self.statements.push(PlannedStatement { sql: format!("{prefix}{condition};"), parameters, expected_rows: Some(1) });
+        }
+        Ok(())
+    }
+}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlannedPrecondition {
     pub before_statement: usize,

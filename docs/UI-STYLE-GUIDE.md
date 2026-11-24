@@ -98,8 +98,8 @@ after launching the rebuilt bundle before claiming visual verification.
 
 ## Solarized appearance
 
-The Appearance menu (or More in a narrow window) includes Solarized Light and
-Solarized Dark alongside System, Light and Dark. The choice is saved with the
+Settings (⌘, on macOS, also available in the application menu) includes visual
+previews for Solarized Light and Solarized Dark alongside System, Light and Dark. The choice is saved with the
 existing shared preferences. Solarized uses Ethan Schoonover's
 [canonical sRGB palette](https://ethanschoonover.com/solarized/#the-values):
 base3/base2 surfaces with base00 text in light mode, and base03/base02 surfaces

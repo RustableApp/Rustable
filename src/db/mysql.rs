@@ -1663,6 +1663,29 @@ mod tests {
 
     #[test]
     #[ignore = "requires disposable MySQL/MariaDB fixture"]
+    fn live_grouped_delete_checks_every_original_and_affected_count() {
+        let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
+        assert!([43316,43317].contains(&port));
+        let config = MysqlConfig { host: "127.0.0.1".into(), port, user: "rustable".into(), password: "rustable-test-only".into(), database: "rustable_test".into(), tls: false, ..Default::default() };
+        let mut driver = MysqlDriver::connect(&config).unwrap();
+        driver.conn().unwrap().query_drop("DROP TABLE IF EXISTS grouped_delete_probe").unwrap();
+        driver.conn().unwrap().query_drop("CREATE TABLE grouped_delete_probe(a INT,b VARCHAR(20),n INT,PRIMARY KEY(a,b)) ENGINE=InnoDB").unwrap();
+        driver.conn().unwrap().query_drop("INSERT INTO grouped_delete_probe VALUES(1,'key',0),(2,'key',0)").unwrap();
+        let changes: Vec<_> = (1..=2).map(|id| Change::DeleteRow { table: "grouped_delete_probe".into(), original: vec![Value::Integer(id),Value::Text("key".into()),Value::Integer(0)] }).collect();
+        let plan = driver.plan(&changes).unwrap();
+        assert_eq!(plan.statements.len(),1); assert_eq!(plan.statements[0].expected_rows,Some(2));
+        assert_eq!(plan.preconditions.len(),2); assert!(plan.preconditions.iter().all(|c| c.before_statement==0));
+        driver.conn().unwrap().query_drop("UPDATE grouped_delete_probe SET n=1 WHERE a=2").unwrap();
+        assert!(driver.apply(&plan).is_err());
+        assert_eq!(driver.conn().unwrap().query_first::<u64,_>("SELECT count(*) FROM grouped_delete_probe").unwrap(),Some(2));
+        driver.conn().unwrap().query_drop("UPDATE grouped_delete_probe SET n=0").unwrap();
+        driver.apply(&plan).unwrap();
+        assert_eq!(driver.conn().unwrap().query_first::<u64,_>("SELECT count(*) FROM grouped_delete_probe").unwrap(),Some(0));
+        driver.conn().unwrap().query_drop("DROP TABLE grouped_delete_probe").unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires disposable MySQL/MariaDB fixture"]
     fn live_review_insert_defaults_binary_values_delete_and_failed_batch() {
         let port = std::env::var("RUSTABLE_MYSQL_TEST_PORT").unwrap().parse().unwrap();
         assert!([43316, 43317].contains(&port));

@@ -124,7 +124,9 @@ impl Rustable {
                 }
                 if !self.app.prefs.sidebar_hidden { self.app.sidebar(ctx); }
                 self.app.workspace(ctx);
-                if self.saved.is_none() && !ctx.will_discard() && self.frame >= if self.menu_capture.is_some() { 20 } else if self.assist { 8 } else { 3 } {
+                self.app.settings_window(ctx);
+                self.app.protection_confirmation(ctx);
+                if self.saved.is_none() && !ctx.will_discard() && self.frame >= if self.menu_capture.is_some() || std::env::var_os("RUSTABLE_PROTECTION_CAPTURE").is_some() { 20 } else if self.assist { 8 } else { 3 } {
                     if self.assist {
                         assert_eq!(
                             self.app.tabs[0].sql,
@@ -195,6 +197,7 @@ impl Rustable {
                 if !assist && result_count > 1 {
                     app.tabs[0].pins.add(grid, 0).unwrap();
                 }
+                app.prepare_protection_preview();
                 Ok(Box::new(Preview {
                     app,
                     frame: 0,

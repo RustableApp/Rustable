@@ -13,7 +13,7 @@ No special launcher or command-line flag is needed. Windows and the browser buil
 do not yet support the local Unix-socket MCP bridge.
 
 The normal connection manager opens. Open the intended connection, choose your
-usual Safe mode setting, then open the **AI** toolbar menu and choose **Enable AI
+query protection mode, then open the **AI** toolbar menu and choose **Enable AI
 control** in that connection’s window. Nothing is exposed to MCP until you enable
 it. Redis is not supported.
 Choose **AI → Connect an AI agent… → Copy configuration** to get the live MCP
@@ -81,10 +81,11 @@ access is revoked. The client must ask the user to reenable the intended target;
 it must not substitute a different connection. Closing a window invalidates it.
 
 SQL uses the connection's existing database privileges. A workspace ID routes
-commands; it is not a database ACL or SQL sandbox. Safe mode and production
-protections use the normal Rustable implementation. When Safe mode is off, writes
-are possible; destructive-query dialogs still require the user. The MCP bridge
-cannot change Safe mode, approve dialogs, open saved connections, or close tabs. It returns query data to the connected AI client,
+commands; it is not a database ACL or SQL sandbox. Query protection uses the normal Rustable execution gate. Alert and Safe modes
+require the same human confirmation or authentication as editor execution; Silent
+mode permits execution without an extra warning. Production connections default
+to Alert Mode 2. The MCP bridge cannot change protection modes, approve dialogs,
+open saved connections, or close tabs. It returns query data to the connected AI client,
 which may send that data to its model provider.
 
 Human changes to AI SQL invalidate stale replacements and executions. At most

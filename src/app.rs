@@ -1,3 +1,7 @@
+#[path = "settings.rs"]
+mod settings;
+#[path = "query_protection.rs"]
+mod query_protection;
 #[cfg(unix)]
 pub(crate) mod matrix_edit;
 #[cfg(all(test, unix))]
@@ -157,6 +161,7 @@ struct Preferences {
     favorites: Vec<String>,
     query_directory: Option<PathBuf>,
     appearance: Appearance,
+    touch_id: bool,
     // Legacy sessions stored only SQL strings. Read them once during migration.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     queries: Vec<String>,
@@ -564,6 +569,8 @@ pub struct Rustable {
     filter_rules_original: Vec<Option<db::filters::Filter>>,
     paste_requested: bool,
     safe: bool,
+    protection: query_protection::Protection,
+    settings_open: bool,
     destructive_confirm: Option<DestructiveRun>,
     close_table_confirmation: Option<u64>,
     navigation_confirmation: Option<NavigationConfirmation>,
@@ -697,6 +704,7 @@ impl Rustable {
     }
     /// The launcher owns preferences and recovery; it never renders a database workspace.
     pub(crate) fn render_launcher(&mut self, ctx: &egui::Context) -> bool {
+        self.settings_shortcut(ctx);
         self.poll();
         self.manager_shortcut(ctx);
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
@@ -704,6 +712,7 @@ impl Rustable {
         }
         self.connections = true;
         self.connections_window(ctx);
+        self.settings_window(ctx);
         #[cfg(unix)]
         self.matrix_connector_dialog(ctx);
         false
@@ -787,6 +796,7 @@ impl Rustable {
             return;
         }
         child.prefs.appearance = self.prefs.appearance;
+        child.prefs.touch_id = self.prefs.touch_id;
         child.prefs.favorites = self.prefs.favorites.clone();
         child.prefs.query_directory = self.prefs.query_directory.clone();
         child.prefs.history = self.prefs.history.clone();
@@ -809,6 +819,7 @@ impl Rustable {
         // Child received the authoritative snapshot before rendering. Publish its
         // exact edits, including removals, instead of append-only union semantics.
         self.prefs.appearance = child.prefs.appearance;
+        self.prefs.touch_id = child.prefs.touch_id;
         self.prefs.favorites = child.prefs.favorites.clone();
         self.prefs.query_directory = child.prefs.query_directory.clone();
         self.prefs.history = child.prefs.history.clone();
@@ -835,6 +846,7 @@ impl Rustable {
         let scope = request.draft_scope();
         let prefs = Preferences {
             appearance: self.prefs.appearance,
+            touch_id: self.prefs.touch_id,
             favorites: self.prefs.favorites.clone(),
             query_directory: self.prefs.query_directory.clone(),
             history: self.prefs.history.clone(),
@@ -1255,6 +1267,8 @@ impl Rustable {
             filter_rules_original: Vec::new(),
             paste_requested: false,
             safe: false,
+            protection: Default::default(),
+            settings_open: false,
             destructive_confirm: None,
             close_table_confirmation: None,
             navigation_confirmation: None,
@@ -1320,6 +1334,12 @@ impl Rustable {
     }
 
     fn dispatch(&mut self, command: Command, pending: Pending) {
+        if self.pending.is_some() { return; }
+        let Some((command, pending)) = self.protect_command(command, pending) else { return; };
+        self.dispatch_authorized(command, pending);
+    }
+
+    fn dispatch_authorized(&mut self, command: Command, pending: Pending) {
         if self.pending.is_some() {
             return;
         }
@@ -1348,17 +1368,24 @@ impl Rustable {
         }
         let history_sql = match &command { Command::Query { sql, .. } => Some(sql.clone()), _ => None };
         let description = activity_description(&command, crate::sql::Dialect::for_engine(&self.engine));
+        self.protection.connecting(&command);
         match self.worker.send(command) {
             Ok(()) => {
                 if let Some(sql) = description { self.log_activity(sql); }
-                if let Some(sql) = history_sql { self.record_query_history(sql); }
+                if let Some(sql) = history_sql {
+                    self.prefs.history.retain(|entry| entry != &sql);
+                    self.prefs.history.insert(0, sql.clone());
+                    self.prefs.history.truncate(100);
+                    self.shared_preferences_dirty = true;
+                    self.record_query_history(sql);
+                }
                 if matches!(pending, Pending::Query(_)) { crate::query_notification::prepare(); }
                 self.pending = Some(pending);
                 self.started = Instant::now();
                 self.error = None;
                 self.status = "Working…".into();
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => { self.protection.connection_failed(); self.error = Some(e); },
         }
     }
 
@@ -1461,6 +1488,7 @@ impl Rustable {
             match result {
                 Ok(Payload::Databases(names)) => { self.navigator.databases = names; self.navigator.loaded = true; }
                 Err(e) => {
+                    if matches!(pending, Some(Pending::Connect(_) | Pending::ConnectProfile { .. })) { self.protection.connection_failed(); }
                     if matches!(pending, Some(Pending::Table)) {
                         self.saved_selection = None;
                     }
@@ -1485,10 +1513,8 @@ impl Rustable {
                         })
                         .collect();
                     self.review = Some(plan);
-                    self.status = "Review generated changes".into();
-                    if matches!(pending, Some(Pending::Plan(true))) {
-                        self.save_changes(false);
-                    }
+                    self.status = "Changes prepared".into();
+                    self.submit_changes(matches!(pending, Some(Pending::Plan(false))));
                 }
                 Ok(Payload::Applied { objects, refreshed }) => {
                     self.saved_selection = self
@@ -1562,8 +1588,8 @@ impl Rustable {
                     self.schemas = schemas;
                     self.objects = objects;
                     self.language.invalidate();
-                    // Production connections open read-only; the user opts in to writes.
-                    self.safe = self.supports_safe_mode() && self.is_production();
+                    self.safe = false;
+                    self.protection.connected(self.is_production());
                     self.skip_destructive_confirm = false;
                     self.destructive_confirm = None;
                     self.table = Arc::default();
@@ -2060,25 +2086,26 @@ impl Rustable {
             invalidate_tables: Vec::new(),
             tab_id: self.tabs[self.tab].id,
             source: (self.tabs[self.tab].sql.clone(), source_offset),
-            findings: if self.safe_mode_active() {
-                // The database session rejects writes; nothing destructive can run.
-                Vec::new()
-            } else {
-                crate::sql::destructive::findings(&sql, self.session_dialect.unwrap_or_else(|| crate::sql::Dialect::for_engine(&self.engine)))
-            },
+            findings: Vec::new(),
             sql,
             skip_for_session: false,
         };
-        let skipped = self.skip_destructive_confirm && !self.is_production();
-        if !run.findings.is_empty() && !skipped {
-            self.destructive_confirm = Some(run);
-            return;
-        }
         self.execute_query(run);
     }
 
     /// Sends previously prepared editor SQL, after any destructive-statement confirmation.
     fn execute_query(&mut self, run: DestructiveRun) {
+        if self.pending.is_some() || self.protection.modal_open() { return; }
+        let Some(tab) = self.tabs.iter().position(|tab| tab.id == run.tab_id) else { return; };
+        if self.safe || self.protection.mode == query_protection::Mode::Silent { self.execute_query_authorized(run); return; }
+        if self.protect_command(Command::Query { sql: run.sql.clone(), safe: self.safe }, Pending::Query(tab)).is_none() {
+            self.protection.defer_query(run);
+            return;
+        }
+        self.execute_query_authorized(run);
+    }
+
+    fn execute_query_authorized(&mut self, run: DestructiveRun) {
         if self.pending.is_some() {
             return;
         }
@@ -2094,13 +2121,9 @@ impl Rustable {
         // Staged changes belong to the workspace, not to this result snapshot.
         // Preserve them across reruns; the planner still checks the original row.
         if !self.finish_cell_edit() { return; }
-        self.prefs.history.retain(|s| s != &sql);
-        self.prefs.history.insert(0, sql.clone());
-        self.prefs.history.truncate(100);
-        self.shared_preferences_dirty = true;
         self.show_query();
         self.invalidate_context_table_snapshots(&invalidate_tables);
-        self.dispatch(
+        self.dispatch_authorized(
             Command::Query {
                 sql,
                 safe: self.safe,
@@ -2405,7 +2428,7 @@ impl Rustable {
         #[cfg(unix)]
         if self.matrix_interaction_locked() || self.matrix_connector_open() { return true; }
         self.query_monitor.open || self.ddl_preview.is_some() || self.json_editor.is_some() || self.date_picker.is_some() || self.query_library.owns_keyboard() || self.navigator.open || self.connections || self.review.is_some() || matches!(self.pending, Some(Pending::Plan(_))) || self.history
-            || self.destructive_confirm.is_some() || self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some()
+            || self.settings_open || self.protection.modal_open() || self.destructive_confirm.is_some() || self.close_table_confirmation.is_some() || self.navigation_confirmation.is_some()
             || (self.rename.is_some() && !self.rename_inline)
             || self.add_column.is_some()
             || self.alter_column.is_some()
@@ -2417,6 +2440,7 @@ impl Rustable {
     }
 
     fn workspace_shortcuts(&mut self, ctx: &egui::Context) {
+        if self.settings_open || self.protection.modal_open() { return; }
         #[cfg(unix)]
         if self.matrix_interaction_locked() || self.matrix_connector_open() { return; }
         if self.close_table_confirmation.is_some() || crate::session_windows::close_confirmation_open(ctx) { return; }
@@ -3030,7 +3054,7 @@ impl Rustable {
         } else {
             Color32::WHITE
         };
-        let right_controls = crate::icons::toolbar_group_width(3) + crate::icons::toolbar_group_width(2) + 6.0;
+        let right_controls = crate::icons::toolbar_group_width(2) + crate::icons::toolbar_group_width(2) + 6.0;
         // The AI menu is a third item in the right-aligned control strip.
         // Reserve its width and inter-item gap before giving the pill the rest.
         #[cfg(unix)]
@@ -3153,50 +3177,8 @@ impl Rustable {
         }
     }
 
-    /// Read-only session toggle. Disabled for engines that cannot enforce it.
     fn safe_mode_toggle(&mut self, ui: &mut egui::Ui, width: Option<f32>) {
-        let supported = self.supports_safe_mode();
-        let mut on = self.safe_mode_active();
-        let name = if on { "lock" } else { "lock-open" };
-        let response = ui
-            .add_enabled_ui(
-                supported && self.pending.is_none() && self.has_connection(),
-                |ui| match width {
-                    Some(width) => crate::icons::button(
-                        ui,
-                        name,
-                        egui::vec2(width, crate::icons::TOOLBAR_BUTTON.y),
-                        on,
-                    ),
-                    None => {
-                        ui.horizontal(|ui| {
-                            let response =
-                                crate::icons::button(ui, name, crate::icons::TOOLBAR_BUTTON, on);
-                            let label = ui.selectable_label(
-                                on,
-                                if on { "Safe mode on" } else { "Safe mode off" },
-                            );
-                            response.union(label)
-                        })
-                        .inner
-                    }
-                },
-            )
-            .inner;
-        let response = if supported {
-            response.on_hover_text(if on {
-                "Safe mode on: the database session rejects writes, and table edits, imports and schema changes are disabled. Click to allow writes."
-            } else {
-                "Safe mode off. Click for read-only queries: the database session rejects writes. Production connections start in Safe mode."
-            })
-        } else {
-            response.on_disabled_hover_text(format!("Safe mode isn't available for {} yet. Use a read-only database user instead.", if self.engine.is_empty() { "this connection" } else { self.engine.as_str() }))
-        };
-        if response.clicked() {
-            on = !on;
-            self.safe = on;
-            self.status = if on { "Safe mode on: writes are rejected".into() } else { "Safe mode off: writes allowed".into() };
-        }
+        self.protection_menu(ui, width);
     }
 
     fn edit_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -3237,7 +3219,7 @@ Right-click to inspect or remove individual changes",
                 .inner;
             if save
                 .on_hover_text(format!(
-                    "Save changes · {} · Review before committing",
+                    "Save changes · {}",
                     crate::icons::shortcut(ui.ctx(), false, "S")
                 ))
                 .clicked()
@@ -3349,11 +3331,7 @@ Right-click to inspect or remove individual changes",
                             if ui.button("SQL activity").clicked() { self.prefs.activity_visible = !self.prefs.activity_visible; self.shared_preferences_dirty = true; ui.close(); }
                             self.edit_toolbar(ui);
                             self.safe_mode_toggle(ui, None);
-                            for choice in Appearance::ALL {
-                                if ui.selectable_value(&mut self.prefs.appearance, choice, choice.label()).clicked() {
-                                    self.shared_preferences_dirty = true; apply_theme(ctx, choice); ui.close();
-                                }
-                            }
+                            if ui.button("Settings…").clicked() { self.settings_open = true; ui.close(); }
                         });
                         if self.pending.is_some() && !self.query_action_visible(ctx) && ui.add(crate::icons::shortcut_button("Cancel", false, ".", None)).on_hover_text(format!("Cancel database operation · {}", crate::icons::shortcut(ui.ctx(), false, "."))).clicked() { self.request_query_cancel(ctx); }
                         if transaction.blocks_replacement() {
@@ -3402,7 +3380,7 @@ Right-click to inspect or remove individual changes",
                             &mut self.inspector,
                         );
                         self.shared_preferences_dirty |= activity_before != self.prefs.activity_visible;
-                        toolbar_group(ui, |ui| {
+                        crate::icons::toolbar_group(ui, 2, |ui| {
                             if toolbar_action(ui, 4, false)
                                 .on_hover_text(format!(
                                     "Find anything · {}",
@@ -3424,27 +3402,6 @@ Right-click to inspect or remove individual changes",
                                 .clicked()
                             {
                                 self.refresh_current_view();
-                            }
-                            let before = self.prefs.appearance;
-                            let settings = toolbar_action(ui, 5, false).on_hover_text("Appearance");
-                            egui::Popup::menu(&settings).show(|ui| {
-                                ui.label("Appearance");
-                                for choice in Appearance::ALL {
-                                    if ui
-                                        .selectable_value(
-                                            &mut self.prefs.appearance,
-                                            choice,
-                                            choice.label(),
-                                        )
-                                        .clicked()
-                                    {
-                                        ui.close();
-                                    }
-                                }
-                            });
-                            if before != self.prefs.appearance {
-                                self.shared_preferences_dirty = true;
-                                apply_theme(ctx, self.prefs.appearance);
                             }
                         });
                     });
@@ -6809,7 +6766,7 @@ Right-click to inspect or remove individual changes",
         stage_cell_value_with_columns(&mut self.changes, edit, value, names);
         self.record_changes();
         self.review = None;
-        self.status = format!("{what} staged · review before saving");
+        self.status = format!("{what} staged · save to apply");
     }
 
     fn ddl_window(&mut self, ctx: &egui::Context) {
@@ -7230,7 +7187,7 @@ Right-click to inspect or remove individual changes",
     }
 
     fn preview_changes(&mut self) {
-        if self.pending.is_some() || !self.finish_cell_edit() || self.changes.is_empty() {
+        if self.pending.is_some() || self.protection.modal_open() || !self.finish_cell_edit() || self.changes.is_empty() {
             return;
         }
         // Preview is idempotent: pressing its shortcut again must never apply a plan.
@@ -7239,8 +7196,8 @@ Right-click to inspect or remove individual changes",
         }
     }
 
-    fn save_changes(&mut self, bypass: bool) {
-        if self.pending.is_some() {
+    fn save_changes(&mut self, _bypass: bool) {
+        if self.pending.is_some() || self.protection.modal_open() {
             return;
         }
         if !self.finish_cell_edit() {
@@ -7253,17 +7210,25 @@ Right-click to inspect or remove individual changes",
             self.error = Some("Turn off Safe mode before saving changes.".into());
             return;
         }
-        if let Some(mut plan) = self.review.clone() {
+        if self.review.is_some() {
+            self.submit_changes(false);
+        } else {
+            self.dispatch(Command::Plan(self.changes.clone()), Pending::Plan(true));
+        }
+    }
+
+    fn submit_changes(&mut self, preview: bool) {
+        if let Some(mut plan) = self.review.take() {
             plan.refresh_results = self.tabs.iter().any(|tab| {
                 tab.edit_target.as_ref().is_some_and(|target| {
-                    self.changes
-                        .iter()
-                        .any(|change| change.table() == target.table)
+                    self.changes.iter().any(|change| change.table() == target.table)
                 })
             });
-            self.dispatch(Command::Apply(plan), Pending::Apply);
-        } else {
-            self.dispatch(Command::Plan(self.changes.clone()), Pending::Plan(bypass));
+            if let Some((command, pending)) =
+                self.protect_command_with_preview(Command::Apply(plan), Pending::Apply, preview)
+            {
+                self.dispatch_authorized(command, pending);
+            }
         }
     }
 
@@ -7489,100 +7454,6 @@ Right-click to inspect or remove individual changes",
                 self.add_column = Some(draft);
             }
         }
-        if self.review.is_none() && matches!(self.pending, Some(Pending::Plan(_))) {
-            egui::Window::new("Review changes").id(egui::Id::new((ctx.viewport_id(), "Review changes")))
-                .default_width(720.0)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Preparing changes for review…");
-                    });
-                    if ui.button("Cancel preparation").clicked() { self.worker.cancel(); }
-                });
-        }
-        if let Some(plan) = &self.review {
-            let schema_plan = self.engine == "PostgreSQL"
-                && plan
-                    .statements
-                    .iter()
-                    .all(|statement| statement.expected_rows.is_none());
-            let mut open = true;
-            let mut apply = false;
-            let mut edit_changes = false;
-            egui::Window::new("Review changes").id(egui::Id::new((ctx.viewport_id(), "Review changes")))
-                .open(&mut open)
-                .collapsible(false)
-                .default_width(720.0)
-                .frame(egui::Frame::window(&ctx.style()).inner_margin(16.0))
-                .show(ctx, |ui| {
-                    ui.spacing_mut().item_spacing.y = 10.0;
-                    if let Some(error) = &self.error {
-                        ui.colored_label(Color32::from_rgb(230, 105, 105), error);
-                        ui.label("Pending edits are retained. Return to the grid to correct them, then review again.");
-                    }
-                    ui.horizontal(|ui| {
-                        let count = plan.statements.len();
-                        ui.strong(format!("{count} {}", if count == 1 { "statement" } else { "statements" }));
-                        ui.weak("· Saved together in one transaction");
-                    });
-                    if !plan.preconditions.is_empty() {
-                        ui.collapsing(format!("{} ({})", if schema_plan { "Schema checks" } else { "Concurrency checks" }, plan.preconditions.len()), |ui| {
-                            ui.weak(if schema_plan { "Definitions are checked before saving. Changed definitions cancel the save." } else { "Rows are checked before saving. Conflicting edits cancel the save." });
-                            egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
-                                for check in &plan.preconditions {
-                                    ui.weak(format!("Before statement {} · {}", check.before_statement + 1, if schema_plan { "must match the reviewed definition" } else { "must match exactly one row" }));
-                                    let sql = crate::review_sql::readable_dialect(&check.sql, &check.parameters, crate::sql::Dialect::for_engine(&self.engine));
-                                    if clipboard_button(ui).on_hover_text("Copy check SQL").clicked() { ui.ctx().copy_text(sql.clone()); }
-                                    ui.add(egui::Label::new(crate::editor::layout(ui, &sql.as_str(), ui.available_width())).selectable(true));
-                                }
-                            });
-                        });
-                    }
-                    if plan.rebuild { ui.label("Migration: temporarily disable foreign-key enforcement before BEGIN; check all foreign keys before COMMIT; restore enforcement on success or rollback. Table copying may take time."); }
-                    egui::Frame::new()
-                        .fill(ui.visuals().extreme_bg_color)
-                        .corner_radius(8.0)
-                        .inner_margin(12.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.weak("SQL preview");
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if clipboard_button(ui).on_hover_text("Copy SQL").clicked() {
-                                        ui.ctx().copy_text(self.review_sql.join("\n\n"));
-                                    }
-                                });
-                            });
-                            egui::ScrollArea::both().max_height(360.0).show(ui, |ui| {
-                                for (index, sql) in self.review_sql.iter().enumerate() {
-                                    ui.push_id(("review-sql", index), |ui| {
-                                        if index > 0 { ui.separator(); }
-                                        ui.add(egui::Label::new(crate::editor::layout(ui, &sql.as_str(), ui.available_width())).selectable(true));
-                                    });
-                                }
-                            });
-                        });
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        rounded_action_buttons(ui);
-                        edit_changes = ui.add_enabled(self.pending.is_none(), egui::Button::new("Back to editing")).clicked();
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let enabled = matches!(self.engine.as_str(), "SQLite" | "PostgreSQL" | "MySQL" | "MariaDB") && !self.safe && self.pending.is_none();
-                            apply = ui.add_enabled(enabled, crate::icons::shortcut_button("Save changes", false, "Enter", Some(BLUE)))
-                                .on_hover_text(format!("{} or {}", crate::icons::shortcut(ui.ctx(), false, "S"), crate::icons::shortcut(ui.ctx(), false, "Enter"))).clicked();
-                            if matches!(self.pending, Some(Pending::Apply)) {
-                                if ui.button("Cancel save").clicked() { self.worker.cancel(); }
-                                ui.spinner();
-                            }
-                        });
-                    });
-                });
-            if apply {
-                self.save_changes(false);
-            }
-            if !open || edit_changes {
-                self.review = None;
-            }
-        }
         if !self.rename_inline
             && let Some((from, mut to)) = self.rename.take()
         {
@@ -7669,6 +7540,7 @@ Right-click to inspect or remove individual changes",
 
 impl Rustable {
     pub(crate) fn begin_workspace_frame(&mut self, ctx: &egui::Context) {
+        self.settings_shortcut(ctx);
         #[cfg(target_arch = "wasm32")]
         if self.redis_demo_active { return; }
         #[cfg(not(target_arch = "wasm32"))]
@@ -7718,6 +7590,7 @@ impl Rustable {
                 }
                 self.shared_preferences_dirty |= workspace.store_preferences(&mut self.prefs.redis_browser);
             }
+            self.settings_window(ctx);
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -7744,6 +7617,7 @@ impl Rustable {
             }
             self.shared_preferences_dirty |=
                 workspace.store_preferences(&mut self.prefs.redis_browser);
+            self.settings_window(ctx);
             return;
         }
         let start = Instant::now();
@@ -7769,6 +7643,8 @@ impl Rustable {
         self.csv_import_review(ctx);
         self.sidebar_export_window(ctx);
         self.result_share_window(ctx);
+        self.settings_window(ctx);
+        self.protection_confirmation(ctx);
         self.destructive_confirmation(ctx);
         self.table_close_confirmation(ctx);
         self.navigation_confirmation(ctx);
@@ -12340,13 +12216,13 @@ mod review_recovery_tests {
             let mut app = Rustable::with_preferences(&ctx, Preferences::default());
             app.connections = false;
             app.review = Some(ChangePlan::default());
-            app.review_sql = vec!["UPDATE customers SET name = 'Grace' WHERE id = 1;".into()];
+            app.submit_changes(true);
             let mut output = None;
             for _ in 0..3 {
                 output = Some(ctx.run(egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 800.0))),
                     ..Default::default()
-                }, |ctx| app.windows(ctx)));
+                }, |ctx| app.protection_confirmation(ctx)));
             }
             let shapes = output.unwrap().shapes;
             let rect = |text| {
@@ -12355,8 +12231,8 @@ mod review_recovery_tests {
                     .find_map(|shape| text_rect(&shape.shape, text))
                     .unwrap()
             };
-            let back = rect("Back to editing");
-            let save = rect("Save changes");
+            let back = rect("Cancel");
+            let save = rect("Send");
             assert!((back.center().y - save.center().y).abs() < 1.0);
             assert!(save.left() > back.right());
             assert!(save.right() <= width);
@@ -12364,99 +12240,6 @@ mod review_recovery_tests {
         }
     }
 
-    #[test]
-    fn pending_review_shows_preparation_feedback_before_database_reply() {
-        let ctx = egui::Context::default();
-        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
-        app.pending = Some(Pending::Plan(false));
-        app.review = None;
-        let mut output = None;
-        for _ in 0..2 {
-            output = Some(ctx.run(egui::RawInput::default(), |ctx| app.windows(ctx)));
-        }
-        let shapes = output.unwrap().shapes;
-        assert!(shapes.iter().any(|s| text_rect(&s.shape, "Preparing changes for review…").is_some()));
-        assert!(shapes.iter().any(|s| text_rect(&s.shape, "Cancel preparation").is_some()));
-    }
-
-    #[test]
-    fn applying_review_exposes_its_own_cancel_action() {
-        let ctx = egui::Context::default();
-        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
-        app.connections = false;
-        app.review = Some(ChangePlan::default());
-        app.pending = Some(Pending::Apply);
-        let mut output = None;
-        for _ in 0..2 {
-            output = Some(ctx.run(egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 920.0))),
-                ..Default::default()
-            }, |ctx| app.windows(ctx)));
-        }
-        assert!(output.unwrap().shapes.iter().any(|s| text_rect(&s.shape, "Cancel save").is_some()));
-    }
-    #[test]
-    fn failed_review_shows_error_and_returns_without_losing_pending_values() {
-        let ctx = egui::Context::default();
-        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
-        app.pending = None;
-        app.connections = false;
-        app.error = Some("UNIQUE constraint failed: customers.email".into());
-        app.review = Some(db::ChangePlan::default());
-        app.changes.push(Change::InsertRow {
-            id: 998,
-            table: "customers".into(),
-            fields: vec![("email".into(), Value::Text("duplicate@example.test".into()))],
-        });
-        let mut frame = |events| {
-            ctx.run(
-                egui::RawInput {
-                    events,
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1440.0, 920.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| app.windows(ctx),
-            )
-        };
-        frame(vec![]);
-        let output = frame(vec![]);
-        assert!(
-            output.shapes.iter().any(|s| text_rect(
-                &s.shape,
-                "UNIQUE constraint failed: customers.email"
-            )
-            .is_some())
-        );
-        let pos = output
-            .shapes
-            .iter()
-            .find_map(|s| text_rect(&s.shape, "Back to editing"))
-            .unwrap()
-            .center();
-        frame(vec![
-            egui::Event::PointerMoved(pos),
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ]);
-        frame(vec![egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::NONE,
-        }]);
-        assert!(app.review.is_none());
-        assert!(
-            matches!(&app.changes[0], Change::InsertRow { fields, .. } if fields[0].1 == Value::Text("duplicate@example.test".into()))
-        );
-        assert!(app.pending.is_none());
-    }
 }
 
 #[cfg(test)]
@@ -14642,26 +14425,26 @@ mod mysql_editor_mode_tests {
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(app.supports_data_changes());
         edit_label(&mut app, "日本 🦀");
-        app.save_changes(false);
+        app.preview_changes();
         settle(&mut app);
-        assert!(app.review.is_some(), "{:?}", app.error);
+        assert!(app.protection.modal_open(), "{:?}", app.error);
         assert!(app.review_sql.join("\n").contains("日本 🦀"));
         assert_eq!(observer.query_first::<String,_>("SELECT label FROM ui_edit_probe").unwrap().as_deref(), Some("before"));
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
         assert!(app.error.is_none(), "{:?}", app.error);
         assert!(app.review.is_none());
         assert!(app.changes.is_empty());
         assert_eq!(app.table.rows[0][1], Value::Text("日本 🦀".into()));
         edit_label(&mut app, "local edit");
-        app.save_changes(false);
+        app.preview_changes();
         settle(&mut app);
-        assert!(app.review.is_some());
+        assert!(app.protection.modal_open());
         observer.query_drop("UPDATE ui_edit_probe SET label='external edit'").unwrap();
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
         assert!(app.error.is_some());
-        assert!(app.review.is_some());
+        assert!(!app.protection.modal_open());
         assert_eq!(app.changes.len(), 1);
         assert_eq!(observer.query_first::<String,_>("SELECT label FROM ui_edit_probe").unwrap().as_deref(), Some("external edit"));
         assert_eq!(app.worker.transaction_state(), db::TransactionState::Idle);
@@ -14842,145 +14625,6 @@ mod double_click_target_tests {
 }
 
 #[cfg(test)]
-mod destructive_sql_tests {
-    use super::*;
-    fn wait(app: &mut Rustable) {
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        while app.pending.is_some() {
-            assert!(Instant::now() < deadline, "worker timed out");
-            app.poll();
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    }
-    fn identity(environment: &str) -> ProfileIdentity {
-        ProfileIdentity {
-            id: crate::connection_profiles::ProfileId(7),
-            name: "Demo".into(),
-            environment: environment.into(),
-            color: [0; 3],
-        }
-    }
-    fn connected(environment: &str) -> Rustable {
-        let ctx = egui::Context::default();
-        let mut app = Rustable::with_preferences(&ctx, Preferences::default());
-        wait(&mut app);
-        app.dispatch(Command::Open(None), Pending::ConnectProfile { recent: None, identity: identity(environment) });
-        wait(&mut app);
-        app.connections = false;
-        app.view = View::Query;
-        app
-    }
-    fn run(app: &mut Rustable, sql: &str) {
-        app.tabs[app.tab].sql = sql.into();
-        app.tabs[app.tab].cursor = 0..0;
-        app.run_query(true);
-    }
-    fn customers_exist(app: &mut Rustable) -> bool {
-        let safe = std::mem::replace(&mut app.safe, true);
-        run(app, "SELECT count(*) FROM customers");
-        wait(app);
-        app.safe = safe;
-        app.tabs[app.tab].result_error.is_none()
-    }
-
-    #[test]
-    fn production_connections_open_in_safe_mode_and_others_do_not() {
-        let app = connected("Production");
-        assert!(app.safe_mode_active());
-        assert!(connected(" production ").safe_mode_active());
-        for environment in ["Local", "Staging", "Development"] {
-            assert!(!connected(environment).safe_mode_active(), "{environment}");
-        }
-    }
-
-    #[test]
-    fn destructive_sql_waits_for_explicit_confirmation() {
-        let mut app = connected("Local");
-        let history = app.prefs.history.len();
-        run(&mut app, "SELECT 1; DROP TABLE customers;");
-        let pending = app.destructive_confirm.as_ref().expect("confirmation requested");
-        assert_eq!(pending.findings.len(), 1);
-        assert!(app.pending.is_none(), "nothing may be sent before confirmation");
-        assert_eq!(app.prefs.history.len(), history, "unconfirmed SQL is not history");
-        // Cancelling discards the run.
-        app.destructive_confirm = None;
-        assert!(customers_exist(&mut app));
-        run(&mut app, "CREATE TABLE scratch(x)");
-        assert!(app.destructive_confirm.is_none());
-        wait(&mut app);
-        run(&mut app, "DROP TABLE scratch;");
-        let run = app.destructive_confirm.take().unwrap();
-        app.execute_query(run);
-        wait(&mut app);
-        assert_eq!(app.tabs[app.tab].result_error, None);
-        assert_eq!(app.prefs.history[0], "DROP TABLE scratch;");
-    }
-
-    #[test]
-    fn read_queries_and_bounded_writes_run_without_confirmation() {
-        let mut app = connected("Production");
-        app.safe = false;
-        run(&mut app, "UPDATE customers SET name = name WHERE id = 1");
-        assert!(app.destructive_confirm.is_none());
-        assert!(app.pending.is_some());
-        wait(&mut app);
-        run(&mut app, "SELECT * FROM customers");
-        assert!(app.destructive_confirm.is_none());
-        wait(&mut app);
-    }
-
-    #[test]
-    fn safe_mode_skips_confirmation_because_the_database_rejects_the_write() {
-        let mut app = connected("Production");
-        run(&mut app, "DROP TABLE customers;");
-        assert!(app.destructive_confirm.is_none());
-        wait(&mut app);
-        assert!(app.tabs[app.tab].result_error.is_some());
-        assert!(customers_exist(&mut app));
-    }
-
-    #[test]
-    fn dont_ask_again_applies_only_to_non_production_sessions() {
-        let mut app = connected("Local");
-        app.skip_destructive_confirm = true;
-        run(&mut app, "DELETE FROM customers WHERE false; UPDATE customers SET name = name;");
-        assert!(app.destructive_confirm.is_none());
-        wait(&mut app);
-        let mut production = connected("Production");
-        production.safe = false;
-        production.skip_destructive_confirm = true;
-        run(&mut production, "DROP TABLE customers;");
-        assert!(production.destructive_confirm.is_some());
-        // Reconnecting forgets the choice.
-        app.dispatch(Command::Open(None), Pending::ConnectProfile { recent: None, identity: identity("Local") });
-        wait(&mut app);
-        assert!(!app.skip_destructive_confirm);
-    }
-
-    #[test]
-    fn run_shortcuts_cannot_confirm_or_bypass_the_dialog() {
-        let mut app = connected("Local");
-        run(&mut app, "DROP TABLE customers;");
-        assert!(app.destructive_confirm.is_some());
-        let ctx = egui::Context::default();
-        for shift in [false, true] {
-            let modifiers = egui::Modifiers { shift, ..egui::Modifiers::COMMAND };
-            let _ = ctx.run(
-                egui::RawInput {
-                    events: vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers }],
-                    modifiers,
-                    ..Default::default()
-                },
-                |ctx| app.workspace_shortcuts(ctx),
-            );
-            assert!(app.pending.is_none());
-            assert!(app.destructive_confirm.is_some());
-        }
-        assert!(customers_exist(&mut app));
-    }
-}
-
-#[cfg(test)]
 mod query_result_editing_tests {
     use super::*;
 
@@ -15069,8 +14713,8 @@ mod query_result_editing_tests {
         assert!(app.finish_cell_edit());
         app.preview_changes(); settle(&mut app);
         assert!(app.error.is_none(), "{:?}", app.error);
-        assert_eq!(app.review.as_ref().unwrap().readbacks.len(), 1);
-        app.save_changes(false); settle(&mut app);
+        assert_eq!(app.protected_plan_for_test().readbacks.len(), 1);
+        app.confirm_changes_for_test(); settle(&mut app);
         assert!(app.error.is_none(), "{:?}", app.error);
         assert_eq!(app.tabs[0].grid.rows[0], vec![Value::Text("Grace".into()), Value::Integer(2), Value::Integer(1), Value::Integer(1)]);
         assert_eq!(conn.query_row("SELECT hidden FROM customers", [], |r| r.get::<_,String>(0)).unwrap(), "keep");
@@ -15079,7 +14723,7 @@ mod query_result_editing_tests {
         assert!(app.finish_cell_edit());
         conn.execute("UPDATE customers SET name='Other'", []).unwrap();
         app.preview_changes(); settle(&mut app);
-        app.save_changes(false); settle(&mut app);
+        app.confirm_changes_for_test(); settle(&mut app);
         assert!(app.error.is_some());
         assert!(!app.changes.is_empty());
     }
@@ -15104,14 +14748,13 @@ mod query_result_editing_tests {
                     modifiers: if preview { egui::Modifiers::COMMAND | egui::Modifiers::SHIFT } else { egui::Modifiers::COMMAND },
                 }], ..Default::default()
             }, |ctx| app.workspace_shortcuts(ctx));
-            assert!(matches!(app.pending, Some(Pending::Plan(false))));
+            assert!(matches!(app.pending, Some(Pending::Plan(save)) if save != preview));
             settle(&mut app);
-            assert!(app.review.is_some());
+            assert_eq!(app.protection.modal_open(), preview);
             assert!(!app.navigator.open, "preview shortcut must not open the command palette");
-            assert_eq!(app.changes.len(), 1);
+            assert_eq!(app.changes.len(), usize::from(preview));
             assert!(app.edit.is_none());
-            // Opening the preview must not write anything yet.
-            assert_eq!(conn.query_row("SELECT name FROM customers", [], |row| row.get::<_, String>(0)).unwrap(), "Ada");
+            assert_eq!(conn.query_row("SELECT name FROM customers", [], |row| row.get::<_, String>(0)).unwrap(), if preview { "Ada" } else { "Grace" });
         }
     }
 
@@ -15145,8 +14788,8 @@ mod query_result_editing_tests {
         run(&mut app, "SELECT * FROM customers");
         app.edit = Some(edit(&app, 0, "name", "Updated"));
         assert!(app.finish_cell_edit());
-        app.save_changes(false); settle(&mut app);
-        app.save_changes(false); settle(&mut app);
+        app.confirm_changes_for_test(); settle(&mut app);
+        app.confirm_changes_for_test(); settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
         let revision: i64 = conn.query_row("SELECT revision FROM customers", [], |r| r.get(0)).unwrap();
         assert_eq!(revision, 1);
@@ -15164,14 +14807,14 @@ mod query_result_editing_tests {
         run(&mut app, "SELECT * FROM t");
         app.edit = Some(edit(&app, 0, "name", "after"));
         assert!(app.finish_cell_edit());
-        app.save_changes(false); settle(&mut app);
-        app.save_changes(false); settle(&mut app);
+        app.confirm_changes_for_test(); settle(&mut app);
+        app.confirm_changes_for_test(); settle(&mut app);
         assert!(app.changes.is_empty());
         assert!(app.review.is_none());
         assert!(app.grid().rows.is_empty());
         assert!(!app.can_edit_rows());
         assert!(app.tabs[0].result_error.as_deref().unwrap().starts_with("Changes saved, but results could not be refreshed"));
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         assert!(app.pending.is_none());
         assert_eq!(conn.query_row("SELECT id,revision FROM t", [], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?))).unwrap(), (101,1));
     }
@@ -15192,8 +14835,8 @@ mod query_result_editing_tests {
         assert!(app.can_edit_rows());
         app.edit = Some(edit(&app, 0, "name", "Updated"));
         assert!(app.finish_cell_edit());
-        app.save_changes(false); settle(&mut app);
-        app.save_changes(false); settle(&mut app);
+        app.confirm_changes_for_test(); settle(&mut app);
+        app.confirm_changes_for_test(); settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
         let actual: String = observer.query_row("SELECT name FROM customers WHERE id=1", [], |r| r.get(0)).unwrap();
         assert_eq!(actual, "Updated", "saving main.customers must update main, not a shadowing temp table");
@@ -15253,7 +14896,7 @@ mod query_result_editing_tests {
         settle(&mut app);
         let review = app.review_sql.join("\n");
         assert!(review.contains("UPDATE main.\"customers\" SET \"name\" = 'Ada Lovelace'"), "{review}");
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
         let name: String = observer
@@ -15268,9 +14911,9 @@ mod query_result_editing_tests {
         // A second edit uses the patched row as its original image.
         app.edit = Some(edit(&app, 0, "email", "ada@lovelace.dev"));
         assert!(app.finish_cell_edit());
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
         let email: String = observer
@@ -15284,9 +14927,9 @@ mod query_result_editing_tests {
         observer.execute("UPDATE customers SET email = 'changed@elsewhere' WHERE id = 123", []).unwrap();
         app.edit = Some(edit(&app, 0, "name", "Stale"));
         assert!(app.finish_cell_edit());
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
         assert_eq!(app.changes.len(), 1, "a stale row must not be overwritten");
         let name: String = observer
@@ -15316,9 +14959,9 @@ mod query_result_editing_tests {
         app.row_selection.click(1, false, false, None);
         app.set_selected_rows_deleted(true);
         assert_eq!(app.changes.len(), 1);
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
         assert_eq!(app.grid().rows.len(), 1);
@@ -15395,7 +15038,7 @@ mod postgres_query_result_editing_tests {
         settle(&mut app);
         let review = app.review_sql.join("\n");
         assert!(review.contains("UPDATE \"public\".\"rustable_result_edit\" SET"), "{review}");
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
         let row = observer.query_one("SELECT name, amount::text FROM public.rustable_result_edit WHERE id = 123", &[]).unwrap();
@@ -15470,7 +15113,7 @@ mod json_editor_tests {
 
         app.preview_changes();
         settle(&mut app);
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
         let (doc, note): (String, Option<String>) = observer
@@ -15570,7 +15213,7 @@ mod date_picker_tests {
 
         app.preview_changes();
         settle(&mut app);
-        app.save_changes(false);
+        app.confirm_changes_for_test();
         settle(&mut app);
         assert!(app.changes.is_empty(), "{:?}", app.error);
         let (day, at): (String, String) = observer

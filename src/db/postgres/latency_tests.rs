@@ -1088,3 +1088,107 @@ fn progressive_query_and_browse_first_rows() {
         }
     }
 }
+
+#[test]
+#[ignore = "opted-in disposable PostgreSQL batched-delete latency comparison"]
+fn delete_wan_latency_comparison() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    assert_eq!(std::env::var("RUSTABLE_POSTGRES_QA").as_deref(), Ok("1"));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let proxy = std::thread::spawn(move || {
+        let (downstream, _) = listener.accept().unwrap();
+        let upstream = TcpStream::connect("127.0.0.1:54329").unwrap();
+        upstream.set_nodelay(true).unwrap();
+        downstream.set_nodelay(true).unwrap();
+        fn forward(mut source: TcpStream, mut target: TcpStream) {
+            // Delay arrival, not every sequential read: packets already in
+            // flight must overlap just as they do on a real network link.
+            let shutdown = source.try_clone().unwrap();
+            let (send, receive) = std::sync::mpsc::sync_channel(64);
+            let reader = std::thread::spawn(move || {
+                let mut bytes = [0u8; 65536];
+                while let Ok(length) = source.read(&mut bytes) {
+                    if length == 0 {
+                        break;
+                    }
+                    let deadline = Instant::now() + Duration::from_millis(15);
+                    if send.send((deadline, bytes[..length].to_vec())).is_err() {
+                        break;
+                    }
+                }
+            });
+            while let Ok((deadline, bytes)) = receive.recv() {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                if target.write_all(&bytes).is_err() {
+                    break;
+                }
+            }
+            drop(receive);
+            let _ = shutdown.shutdown(std::net::Shutdown::Both);
+            let _ = target.shutdown(std::net::Shutdown::Both);
+            reader.join().unwrap();
+        }
+
+        let reverse_source = upstream.try_clone().unwrap();
+        let reverse_target = downstream.try_clone().unwrap();
+        let reverse = std::thread::spawn(move || forward(reverse_source, reverse_target));
+        forward(downstream, upstream);
+        reverse.join().unwrap();
+    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut driver = PostgresDriver::open(
+        &crate::connection::PostgresConfig {
+            host: "127.0.0.1".into(),
+            port,
+            database: "rustable_qa".into(),
+            user: "postgres".into(),
+            password: "rustable_qa_only".into(),
+            tls: crate::connection::PostgresTlsMode::Disable,
+            ssh: None,
+        },
+        cancel.clone(),
+    )
+    .unwrap();
+
+
+    driver.client.batch_execute("CREATE TEMP TABLE delete_batch_latency(a integer,b text,n integer,PRIMARY KEY(a,b)); INSERT INTO delete_batch_latency SELECT n,'key',0 FROM generate_series(1,8) n").unwrap();
+    let changes: Vec<_> = (1..=8).map(|id| Change::DeleteRow { table: "delete_batch_latency".into(), original: vec![Value::Integer(id),Value::Text("key".into()),Value::Integer(0)] }).collect();
+    let mut separate = ChangePlan::default();
+    for change in &changes {
+        let mut single = driver.plan(std::slice::from_ref(change)).unwrap();
+        if separate.schemas.is_empty() { separate.schemas = single.schemas.clone(); }
+        single.preconditions[0].before_statement = separate.statements.len();
+        separate.preconditions.extend(single.preconditions);
+        separate.statements.extend(single.statements);
+    }
+    let grouped = driver.plan(&changes).unwrap();
+    assert_eq!(grouped.statements.len(),1);
+    assert_eq!(grouped.statements[0].expected_rows,Some(8));
+    assert!(grouped.statements[0].sql.contains("$16::"));
+    assert_eq!(grouped.preconditions.len(),8);
+    let mut timings = [Vec::new(),Vec::new()];
+    for sample in 0..5 {
+        for index in if sample % 2 == 0 { [0,1] } else { [1,0] } {
+            driver.client.batch_execute("TRUNCATE delete_batch_latency; INSERT INTO delete_batch_latency SELECT n,'key',0 FROM generate_series(1,8) n").unwrap();
+            let start = Instant::now();
+            driver.apply(if index == 0 { &separate } else { &grouped }).unwrap();
+            let ms = start.elapsed().as_secs_f64()*1000.0;
+            eprintln!("delete save sample={sample} grouped={} complete_ms={ms:.2}", index == 1);
+            timings[index].push(ms);
+            assert_eq!(driver.client.query_one("SELECT count(*) FROM delete_batch_latency", &[]).unwrap().get::<_,i64>(0),0);
+        }
+    }
+    for values in &mut timings { values.sort_by(f64::total_cmp); }
+    eprintln!("delete save 8 rows, 30ms simulated RTT: separate median={:.2}ms grouped median={:.2}ms", timings[0][2],timings[1][2]);
+    assert!(timings[1][2] < timings[0][2]*0.90);
+    driver.client.batch_execute("INSERT INTO delete_batch_latency SELECT n,'key',0 FROM generate_series(1,8) n; UPDATE delete_batch_latency SET n=1 WHERE a=8").unwrap();
+    assert!(driver.apply(&grouped).unwrap_err().contains("row changed"));
+    assert_eq!(driver.client.query_one("SELECT count(*) FROM delete_batch_latency", &[]).unwrap().get::<_,i64>(0),8);
+    driver.client.batch_execute("BEGIN").unwrap();
+    assert!(driver.apply(&grouped).is_err());
+    driver.client.batch_execute("ROLLBACK").unwrap();
+    drop(driver);
+    proxy.join().unwrap();
+}

@@ -204,6 +204,7 @@ impl Rustable {
 
     pub(crate) fn pause_matrix(&mut self, changed_connection: bool) {
         if let Some(mut bridge) = self.matrix.take() {
+            if bridge.running_tab.is_some() && bridge.running_tab == self.protection.query_tab() { self.protection.clear(); }
             if self.matrix_running(&bridge) {
                 self.worker.cancel();
             }
@@ -281,7 +282,7 @@ impl Rustable {
             return;
         };
         if bridge.activity == "AI · run query" && self.pending.is_none() {
-            bridge.activity = if self.destructive_confirm.is_some() {
+            bridge.activity = if self.destructive_confirm.is_some() || self.protection.modal_open() {
                 "Waiting for your confirmation".into()
             } else if self.tabs[self.tab].result_error.is_some() {
                 "Query failed · inspect the result message".into()
@@ -591,7 +592,7 @@ impl Rustable {
                 "selection":{"start":tab.cursor.start,"end":tab.cursor.end},
                 "active":self.view == View::Query && index == self.tab,
                 "edit":bridge.edit.as_ref().filter(|e|e.tab_id == tab.id).map(|e|e.summary()),
-                "awaiting_confirmation":self.destructive_confirm.as_ref().is_some_and(|r|r.tab_id == tab.id),
+                "awaiting_confirmation":self.protection.query_tab() == Some(tab.id) || self.destructive_confirm.as_ref().is_some_and(|r|r.tab_id == tab.id),
                 "error":tab.result_error,"result_sets":tab.results.len(),"columns":grid.columns.iter().take(30).map(|c|c.chars().take(200).collect::<String>()).collect::<Vec<_>>(),
                 "preview":rows,"total_rows":grid.row_count(),"preview_only":true}),
             );
@@ -601,6 +602,7 @@ impl Rustable {
             || self.pending.is_some()
             || self.has_pending_edits()
             || self.edit.is_some()
+            || self.protection.modal_open() || self.settings_open
             || self.destructive_confirm.is_some()
             || self.navigation_confirmation.is_some()
             || self.connections
@@ -692,7 +694,7 @@ impl Rustable {
                 bridge.running_tab = Some(self.tabs[index].id);
                 self.run_query(true);
                 Ok(
-                    json!({"tab_id":self.tabs[index].id,"started":self.pending.is_some(),"awaiting_confirmation":self.destructive_confirm.is_some()}),
+                    json!({"tab_id":self.tabs[index].id,"started":self.pending.is_some(),"awaiting_confirmation":self.destructive_confirm.is_some() || self.protection.modal_open()}),
                 )
             }
             _ => Err(format!("Unknown tool {name}")),

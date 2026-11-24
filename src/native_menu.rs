@@ -16,6 +16,7 @@ mod macos {
         sync::atomic::{AtomicBool, Ordering},
     };
 
+    static SETTINGS_REQUESTED: AtomicBool = AtomicBool::new(false);
     static REQUESTED: AtomicBool = AtomicBool::new(false);
     // Fail closed until SessionWindows publishes its complete end-of-frame
     // state. Root marks this blocked before entering each update/modal action.
@@ -42,6 +43,11 @@ mod macos {
             #[unsafe(method(rustableCheckForUpdates:))]
             fn check_for_updates(&self, _sender: Option<&AnyObject>) {
                 crate::updates::request_check();
+                self.ivars().context.request_repaint_of(egui::ViewportId::ROOT);
+            }
+            #[unsafe(method(rustableOpenSettings:))]
+            fn open_settings(&self, _sender: Option<&AnyObject>) {
+                SETTINGS_REQUESTED.store(true, Ordering::Release);
                 self.ivars().context.request_repaint_of(egui::ViewportId::ROOT);
             }
             #[unsafe(method(rustableRequestQuit:))]
@@ -223,6 +229,23 @@ mod macos {
                 item.setTag(0x52535550);
                 app_menu.insertItem_atIndex(&item, 1.min(app_menu.numberOfItems()));
             }
+            if let Some(app_menu) = menu.itemAtIndex(0).and_then(|item| item.submenu())
+                && app_menu.itemWithTag(0x52535354).is_none()
+            {
+                use objc2_app_kit::{NSMenuItem, NSEventModifierFlags};
+                use objc2_foundation::NSString;
+                // SAFETY: the retained target implements this AppKit action.
+                let item = unsafe {
+                    let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(main_thread), &NSString::from_str("Settings…"),
+                        Some(sel!(rustableOpenSettings:)), &NSString::from_str(","));
+                    item.setTarget(Some(target));
+                    item
+                };
+                item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+                item.setTag(0x52535354);
+                app_menu.insertItem_atIndex(&item, 1.min(app_menu.numberOfItems()));
+            }
             #[cfg(feature = "qa")]
             if menu_installed && delegate_installed {
                 install_qa_system_quit(&menu, &application);
@@ -230,6 +253,7 @@ mod macos {
             menu_installed && delegate_installed
         })
     }
+    pub(super) fn take_settings_requested() -> bool { SETTINGS_REQUESTED.swap(false, Ordering::AcqRel) }
     pub(super) fn take_requested() -> bool {
         REQUESTED.swap(false, Ordering::AcqRel)
     }
@@ -294,4 +318,11 @@ pub fn take_requested() -> bool {
     {
         false
     }
+}
+
+pub fn take_settings_requested() -> bool {
+    #[cfg(target_os = "macos")]
+    { macos::take_settings_requested() }
+    #[cfg(not(target_os = "macos"))]
+    { false }
 }

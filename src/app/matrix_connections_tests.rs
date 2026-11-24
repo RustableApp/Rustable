@@ -67,7 +67,8 @@ fn matrix_real_sqlite_file_reuses_ui_session_and_revokes_on_reconnect() {
             .unwrap(),
         2
     );
-    // Destructive SQL still opens the normal confirmation and does not run.
+    app.protection.mode = query_protection::Mode::AlertWrites;
+    // Protected SQL opens the normal confirmation and does not run.
     let sql = "DELETE FROM items";
     let tab = call(&mut app, "open_query", json!({"title":"Delete","sql":sql})).unwrap()["tab_id"]
         .clone();
@@ -86,7 +87,7 @@ fn matrix_real_sqlite_file_reuses_ui_session_and_revokes_on_reconnect() {
         2
     );
     app.pause_matrix(false);
-    assert!(app.destructive_confirm.is_none());
+    assert!(!app.protection.modal_open());
     app.grant_matrix_for_test();
     let id = app.matrix_id().unwrap();
     app.dispatch(Command::Open(Some(path)), Pending::Connect(None));

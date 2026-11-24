@@ -18,6 +18,7 @@ struct Table {
     name: String,
     columns: Vec<EditColumn>,
     fingerprint: String,
+    batch_deletes: bool,
 }
 
 fn native_equality(oid: u32) -> bool {
@@ -89,7 +90,7 @@ fn metadata(client: &mut impl GenericClient, input: &str, data: bool) -> Result<
     // Fetch independent catalog details together: each separate query costs a
     // network round trip, especially noticeable over SSH.
     let details = client.query_one(
-        "SELECT ARRAY(SELECT pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE conrelid=$1 ORDER BY oid), ARRAY(SELECT pg_catalog.pg_get_triggerdef(t.oid) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=$1 AND NOT t.tgisinternal ORDER BY t.oid), ARRAY(SELECT pg_catalog.pg_get_functiondef(t.tgfoid) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=$1 AND NOT t.tgisinternal ORDER BY t.oid), ARRAY(SELECT pg_catalog.pg_get_indexdef(indexrelid) FROM pg_catalog.pg_index WHERE indrelid=$1 ORDER BY indexrelid)",
+        "SELECT ARRAY(SELECT pg_catalog.pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint WHERE conrelid=$1 ORDER BY oid), ARRAY(SELECT pg_catalog.pg_get_triggerdef(t.oid) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=$1 AND NOT t.tgisinternal ORDER BY t.oid), ARRAY(SELECT pg_catalog.pg_get_functiondef(t.tgfoid) FROM pg_catalog.pg_trigger t WHERE t.tgrelid=$1 AND NOT t.tgisinternal ORDER BY t.oid), ARRAY(SELECT pg_catalog.pg_get_indexdef(indexrelid) FROM pg_catalog.pg_index WHERE indrelid=$1 ORDER BY indexrelid), EXISTS(WITH RECURSIVE affected(oid) AS (SELECT $1::oid UNION SELECT c.conrelid FROM pg_catalog.pg_constraint c JOIN affected a ON c.confrelid=a.oid WHERE c.contype='f' AND c.confdeltype IN ('c','n','d')) SELECT 1 FROM pg_catalog.pg_trigger t JOIN affected a ON t.tgrelid=a.oid WHERE NOT t.tgisinternal)",
         &[&oid],
     ).map_err(error)?;
     let constraints: Vec<String> = details.get(0);
@@ -99,12 +100,13 @@ fn metadata(client: &mut impl GenericClient, input: &str, data: bool) -> Result<
     let indexes: Vec<String> = details.get(3);
     let types = type_fingerprints(client, oid)?;
     let fingerprint =
-        serde_json::to_string(&(oid, signatures, constraints, triggers, types, indexes))
+        serde_json::to_string(&(oid, signatures, constraints, triggers, types, indexes, details.get::<_, bool>(4)))
             .map_err(|e| e.to_string())?;
     Ok(Table {
         name,
         columns,
         fingerprint,
+        batch_deletes: !details.get::<_, bool>(4),
     })
 }
 fn type_fingerprints(
@@ -359,14 +361,8 @@ pub(super) fn plan(driver: &mut PostgresDriver, changes: &[Change]) -> Result<Ch
                 }
                 deleted.push((table, original));
                 let meta = &tables[table];
-                let mut parameters = Vec::new();
-                let predicate = predicates(meta, original, &mut parameters, true)?;
                 precondition(&mut plan, meta, original)?;
-                plan.statements.push(PlannedStatement {
-                    sql: format!("DELETE FROM {} WHERE {};", meta.name, predicate),
-                    parameters,
-                    expected_rows: Some(1),
-                });
+                plan.push_delete(&meta.name, meta.batch_deletes, |parameters| predicates(meta, original, parameters, true))?;
             }
             Change::InsertRow { table, fields, .. } => {
                 let meta = &tables[table];
@@ -482,7 +478,7 @@ pub(super) fn apply(driver: &mut PostgresDriver, plan: &ChangePlan) -> Result<()
             .expected_rows
             .is_some_and(|expected| count != expected as u64)
         {
-            return Err("A write did not affect exactly one row. Nothing was saved; pending changes are retained.".into());
+            return Err("A write did not affect the expected number of rows. Nothing was saved; pending changes are retained.".into());
         }
     }
     if driver.cancel.load(Ordering::Relaxed) {
@@ -532,6 +528,26 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         )
         .unwrap()
+    }
+    #[test]
+    #[ignore = "requires disposable PostgreSQL QA"]
+    fn grouped_delete_preserves_cascade_trigger_checks_and_review_invalidation() {
+        let mut driver = fixture();
+        driver.client.batch_execute("CREATE TEMP TABLE delete_guard_root(id INT PRIMARY KEY,n INT); CREATE TEMP TABLE delete_guard_child(parent INT REFERENCES delete_guard_root(id) ON DELETE CASCADE); INSERT INTO delete_guard_root VALUES(1,0),(2,0); INSERT INTO delete_guard_child VALUES(1); CREATE FUNCTION pg_temp.delete_guard_touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE delete_guard_root SET n=1 WHERE id=2; RETURN OLD; END $$;").unwrap();
+        let changes: Vec<_> = (1..=2).map(|id| Change::DeleteRow { table: "delete_guard_root".into(), original: vec![Value::Integer(id),Value::Integer(0)] }).collect();
+        let grouped = plan(&mut driver,&changes).unwrap();
+        assert_eq!(grouped.statements.len(),1);
+        driver.client.batch_execute("CREATE TRIGGER touch_root AFTER DELETE ON delete_guard_child FOR EACH ROW EXECUTE FUNCTION pg_temp.delete_guard_touch()").unwrap();
+        assert!(apply(&mut driver,&grouped).unwrap_err().contains("structure changed"));
+        let guarded = plan(&mut driver,&changes).unwrap();
+        assert_eq!(guarded.statements.len(),2);
+        assert!(apply(&mut driver,&guarded).unwrap_err().contains("row changed"));
+        assert_eq!(driver.client.query_one("SELECT count(*) FROM delete_guard_root",&[]).unwrap().get::<_,i64>(0),2);
+        driver.client.batch_execute("DROP TRIGGER touch_root ON delete_guard_child; CREATE TEMP TABLE delete_guard_unrelated(id INT); CREATE TRIGGER unrelated AFTER DELETE ON delete_guard_unrelated FOR EACH ROW EXECUTE FUNCTION pg_temp.delete_guard_touch()").unwrap();
+        let grouped = plan(&mut driver,&changes).unwrap();
+        assert_eq!(grouped.statements.len(),1,"unrelated triggers do not disable grouping");
+        apply(&mut driver,&grouped).unwrap();
+        assert_eq!(driver.client.query_one("SELECT count(*) FROM delete_guard_root",&[]).unwrap().get::<_,i64>(0),0);
     }
     #[test]
     #[ignore = "requires disposable PostgreSQL QA"]
@@ -833,7 +849,7 @@ mod safety_tests {
         assert!(
             apply(&mut driver, &suppressed)
                 .unwrap_err()
-                .contains("exactly one row")
+                .contains("expected number of rows")
         );
         driver
             .client

@@ -1022,6 +1022,7 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
             expected_rows: Some(1),
         });
     }
+    let batch_deletes = !conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='trigger' UNION ALL SELECT 1 FROM sqlite_temp_schema WHERE type='trigger')", [], |row| row.get::<_, bool>(0)).map_err(|e| e.to_string())?;
     let mut deleted = Vec::new();
     for change in changes {
         if let Change::DeleteRow { table, original } = change {
@@ -1040,16 +1041,10 @@ fn plan_changes(conn: &Connection, changes: &[Change]) -> Result<ChangePlan, Str
                 .collect::<Vec<_>>()
                 .join(" AND ");
             append_row_precondition(&mut plan, table, &cols, original);
-            plan.statements.push(PlannedStatement {
-                sql: format!("DELETE FROM main.{} WHERE {};", quote(table), predicates),
-                parameters: cols
-                    .iter()
-                    .zip(original)
-                    .filter(|(c, _)| c.pk)
-                    .map(|(_, value)| value.clone())
-                    .collect(),
-                expected_rows: Some(1),
-            });
+            plan.push_delete(&format!("main.{}", quote(table)), batch_deletes, |parameters| {
+                parameters.extend(cols.iter().zip(original).filter(|(c, _)| c.pk).map(|(_, value)| value.clone()));
+                Ok(predicates)
+            })?;
         }
     }
     // Inserts follow deletions (allow replacing a unique key) and precede
@@ -1699,6 +1694,11 @@ fn apply_transaction(conn: &mut Connection, plan: &ChangePlan) -> Result<(), Str
         if current != expected {
             return Err("Schema changed after review; regenerate the migration plan.".into());
         }
+    }
+    if plan.statements.iter().any(|statement| statement.sql.starts_with("DELETE FROM ") && statement.expected_rows.is_some_and(|rows| rows > 1))
+        && tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_temp_schema WHERE type='trigger')", [], |row| row.get::<_, bool>(0)).map_err(|e| e.to_string())?
+    {
+        return Err("Temporary triggers changed since review. Review the changes again.".into());
     }
     let current = objects(&tx).map_err(|e| e.to_string())?;
     for (name, ddl) in &plan.schemas {
@@ -3199,6 +3199,28 @@ mod delete_tests {
                 .unwrap(),
             1
         );
+    }
+    #[test]
+    fn grouped_deletes_bound_batches_preserve_composite_keys_and_trigger_checks() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(a INTEGER,b TEXT,n INTEGER,PRIMARY KEY(a,b)); WITH RECURSIVE x(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM x WHERE n<260) INSERT INTO t SELECT n,'key',0 FROM x;").unwrap();
+        let changes: Vec<_> = (1..=260).map(|id| Change::DeleteRow { table: "t".into(), original: vec![Value::Integer(id),Value::Text("key".into()),Value::Integer(0)] }).collect();
+        let plan = plan_changes(&conn, &changes).unwrap();
+        assert_eq!(plan.statements.len(), 3);
+        assert_eq!(plan.statements[0].expected_rows, Some(128));
+        assert_eq!(plan.preconditions[127].before_statement, 0);
+        assert_eq!(plan.preconditions[128].before_statement, 1);
+        assert!(plan.statements[0].sql.contains("(\"a\" IS ? AND \"b\" IS ?) OR"));
+        conn.execute_batch("CREATE TEMP TRIGGER change_other AFTER DELETE ON main.t BEGIN UPDATE t SET n=1 WHERE a=2; END;").unwrap();
+        assert!(apply_plan(&mut conn, &plan).is_err());
+        conn.execute_batch("DROP TRIGGER temp.change_other").unwrap();
+        apply_plan(&mut conn, &plan).unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        conn.execute_batch("INSERT INTO t VALUES(1,'key',0),(2,'key',0); CREATE TRIGGER touch_other AFTER DELETE ON t WHEN OLD.a=1 BEGIN UPDATE t SET n=1 WHERE a=2; END;").unwrap();
+        let plan = plan_changes(&conn, &changes[..2]).unwrap();
+        assert_eq!(plan.statements.len(), 2);
+        assert!(apply_plan(&mut conn, &plan).is_err());
+        assert_eq!(conn.query_row("SELECT sum(n) FROM t", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     }
     #[test]
     fn stale_delete_rolls_back_entire_batch_and_fk_failure_preserves_parent() {
