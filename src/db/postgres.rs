@@ -781,6 +781,7 @@ fn native_display_type(ty: &Type) -> bool {
     match ty.kind() {
         Kind::Domain(base) => native_display_type(base),
         Kind::Enum(_) => true,
+        Kind::Simple if ty.name() == "citext" => true,
         _ => matches!(
             *ty,
             Type::BOOL
@@ -845,6 +846,10 @@ fn native_display_decodes_only_known_wire_formats() {
         Value::Blob(b"printable but not text".to_vec())
     );
 }
+#[cfg(test)]
+#[path = "postgres/citext_tests.rs"]
+mod citext_tests;
+
 impl PgValue {
     fn decode_bounded(
         ty: &Type,
@@ -901,6 +906,12 @@ impl<'a> FromSql<'a> for PgValue {
             ::postgres::types::Kind::Domain(base) => return Self::from_sql(base, raw),
             ::postgres::types::Kind::Enum(_) => {
                 return Ok(Self(Value::Text(std::str::from_utf8(raw)?.into())));
+            }
+            // postgres-types explicitly supports citext's text wire format.
+            // Extension OIDs/schema names are database-specific; do not guess
+            // other custom binary types from whether their bytes look like UTF-8.
+            ::postgres::types::Kind::Simple if ty.name() == "citext" => {
+                return Ok(Self(Value::Text(<&str>::from_sql(ty, raw)?.into())));
             }
             _ => {}
         }

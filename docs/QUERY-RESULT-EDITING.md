@@ -81,3 +81,48 @@ release-mode grid/selection/sidebar benchmarks against `bcfe84f` passed all p95
 thresholds (five paired runs; largest increase 3.4%). Raw environment and timing
 artifacts are in `target/ui-performance-pr5-projection`. These benchmarks cover
 CPU layout/tessellation, not native display latency or the new save interaction.
+
+## PostgreSQL citext results (v0.4.41)
+
+SQL execution uses PostgreSQL's binary result protocol. Previously `citext` fell
+through to `Value::Blob`, making an otherwise editable result cell read-only;
+the table browser already used text-format results and did not have this problem.
+`PgValue` now explicitly decodes the documented `citext` text wire format using
+postgres-types' string decoder. Extension OIDs and schemas vary, so recognition
+follows postgres-types' type-name convention, restricted to simple types. Domains
+recurse through their base type, and arrays use the existing bounded array decoder.
+Case and Unicode are preserved. Invalid UTF-8 fails decoding; unknown binary
+formats remain opaque. The normal source-table, selected-primary-key, generated
+column, read-only and save-concurrency guards still apply.
+
+This changes only local decoding after existing result/type resolution. No new
+SQL, preparation, metadata request, cleanup wait or retry is introduced. Tracing
+`query_typed_raw_spooled_with_prefix` through `query::resolve_types` and
+`prepare::get_type` gives unchanged established-connection exchange counts:
+scalar citext is three exchanges on a completely cold type cache (execution,
+type-info statement preparation, type-info query), two when that statement is
+already cached but citext is not, and one once citext is cached. Cold array or
+domain types add their existing type-info lookup; no lookup runs behind unread
+rows. Table browsing remains text-format and retains its existing one-pipelined-
+exchange cached-relation path, including cold custom types. MySQL/MariaDB have
+separate value decoders and protocol paths; neither is changed by this fix.
+
+Regression coverage includes bounded scalar/domain/array decoding, Unicode,
+case, empty strings, NULLs, malformed UTF-8, opaque-type preservation, cold/warm
+live results, empty result headers and explicit transactions. The PostgreSQL
+query-result editing test now opens the actual citext cell editor with Enter,
+stages the replacement, reviews/saves it, and verifies the stored and refreshed
+values against the disposable fixture on loopback port 54329. The old decoder
+fails the new scalar regression. Live tests require `RUSTABLE_POSTGRES_QA=1`.
+
+Release validation on the disposable PostgreSQL 17 fixture passed: 955 ordinary
+tests (273 ignored), strict all-target QA Clippy, both citext tests including the
+opted-in live case, the live editor/save/reread test, all three cold custom-type
+streaming tests, and both release-mode WAN regression tests. At 30 ms simulated
+RTT (seven samples), editor lookup p50/p95 was 39.0/40.1 ms against a 36.9 ms
+p50 single-exchange reference; browse/refresh was 40.5/42.7 ms, and initial
+sidebar load was 40.6/43.7 ms against a 36.8 ms p50 reference. These are existing
+regression workloads, not a before/after citext benchmark; unchanged exchange
+counts are established by the decoder-only diff and protocol trace above. Raw
+logs are retained under `target/release-v0.4.41/`. No rendering/input hot path
+changes in this fix; native click measurements remain in UI-PERFORMANCE.md.

@@ -15001,8 +15001,8 @@ mod postgres_query_result_editing_tests {
         let mut observer = ::postgres::Client::connect(
             "host=127.0.0.1 port=54329 dbname=rustable_qa user=postgres password=rustable_qa_only",
             ::postgres::NoTls).unwrap();
-        observer.batch_execute("DROP TABLE IF EXISTS public.rustable_result_edit;
-            CREATE TABLE public.rustable_result_edit(id integer PRIMARY KEY, name text NOT NULL, amount numeric(12,2), seen timestamptz, created integer GENERATED ALWAYS AS IDENTITY, doc jsonb);
+        observer.batch_execute("CREATE EXTENSION IF NOT EXISTS citext; DROP TABLE IF EXISTS public.rustable_result_edit;
+            CREATE TABLE public.rustable_result_edit(id integer PRIMARY KEY, name citext NOT NULL, amount numeric(12,2), seen timestamptz, created integer GENERATED ALWAYS AS IDENTITY, doc jsonb);
             INSERT INTO public.rustable_result_edit(id, name, amount, seen) VALUES (123, 'before', 12.50, '2024-02-29 12:00:00+00');
             UPDATE public.rustable_result_edit SET doc = '{\"b\": [1, 2], \"a\": 12345678901234567890.5}';").unwrap();
         let ctx = egui::Context::default();
@@ -15029,7 +15029,27 @@ mod postgres_query_result_editing_tests {
         assert_eq!(app.edit_table(), "\"public\".\"rustable_result_edit\"");
         assert!(app.edit_columns().iter().any(|c| c.name == "created" && c.generated));
         let grid = app.grid();
-        for (column, text) in [("name", "after"), ("amount", "99.95")] {
+        let name = grid.columns.iter().position(|c| c == "name").unwrap();
+        assert_eq!(grid.rows[0][name], Value::Text("before".into()));
+        app.connections = false;
+        app.selected = app.row_selection.click(0, false, false, None);
+        app.row_selection.cell_column = name;
+        let input = |events| egui::RawInput { events,
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0))),
+            ..Default::default() };
+        let _ = ctx.run(input(vec![]), |ctx| { egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui)); });
+        ctx.memory_mut(|m| m.request_focus(app.tabs[0].result_grid_focus.unwrap()));
+        let _ = ctx.run(input(vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None,
+            pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }]), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.data_grid(ui));
+        });
+        let edit = app.edit.as_mut().expect("citext query result must open the cell editor");
+        assert_eq!(edit.column, "name");
+        assert_eq!(edit.text, "before");
+        edit.text = "after".into();
+        assert!(app.finish_cell_edit());
+        {
+            let (column, text) = ("amount", "99.95");
             let index = grid.columns.iter().position(|c| c == column).unwrap();
             app.edit = Some(CellEdit { bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false, insert_id: None, advance: 0,
                 table: app.edit_table().to_owned(), row: grid.rows[0].clone(), original_value: grid.rows[0][index].clone(),
