@@ -209,14 +209,16 @@ impl Response {
     #[inline]
     pub fn double_clicked_by(&self, button: PointerButton) -> bool {
         self.flags.contains(Flags::CLICKED)
-            && self.ctx.input(|i| i.pointer.button_double_clicked(button))
+            && self.ctx.input(|i| i.pointer.button_clicked(button))
+            && self.ctx.interaction_snapshot(|i| i.click_count == 2)
     }
 
     /// Returns true if this widget was triple-clicked this frame by the given button.
     #[inline]
     pub fn triple_clicked_by(&self, button: PointerButton) -> bool {
         self.flags.contains(Flags::CLICKED)
-            && self.ctx.input(|i| i.pointer.button_triple_clicked(button))
+            && self.ctx.input(|i| i.pointer.button_clicked(button))
+            && self.ctx.interaction_snapshot(|i| i.click_count == 3)
     }
 
     /// Was this widget middle-clicked or clicked while holding down a modifier key?

@@ -2378,6 +2378,7 @@ impl Context {
                     drag_stopped: _,
                     contains_pointer,
                     hovered,
+                    ..
                 } = interact_widgets;
 
                 if true {

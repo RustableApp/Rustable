@@ -446,6 +446,10 @@ impl Options {
 /// If the cursor moves too much, we clear the `click_id` and start passing move events to `drag_id`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct InteractionState {
+    pub last_click_target: Option<Id>,
+    pub last_pointer_count: u32,
+    pub last_click_button: Option<crate::PointerButton>,
+    pub target_click_count: u32,
     /// A widget interested in clicks that has a mouse press on it.
     pub potential_click_id: Option<Id>,
 

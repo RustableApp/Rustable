@@ -187,3 +187,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "native_click_tests.rs"]
+mod native_click_tests;

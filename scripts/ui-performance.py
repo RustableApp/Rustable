@@ -150,6 +150,8 @@ def measure(binary, source, logs, label, iteration):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--native-clicks', action='store_true', help='Compare shared editor and connection-list click input, including after idle')
+    parser.add_argument('--query-protection', action='store_true', help='Compare query confirmation, password entry and protection settings')
     parser.add_argument('--pending-rows', action='store_true', help='Compare pending-row rendering and reediting with the identical fixture')
     parser.add_argument('--grid-selection', action='store_true', help='Compare Select All and row-tail-click CPU with identical grid input')
     parser.add_argument('--cell-editor', action='store_true', help='Compare selected-cell editing with the identical shared fixture')
@@ -175,6 +177,14 @@ def main():
     parser.add_argument('--runs', type=int, default=5)
     args = parser.parse_args()
     global BENCHMARKS
+    if args.native_clicks:
+        BENCHMARKS = ('shared_click_frame_benchmark',)
+        EXPECTED.clear()
+        EXPECTED.update(('click/editor', 'click/connections'))
+    if args.query_protection:
+        BENCHMARKS = ('protection_interaction_frame_benchmark',)
+        EXPECTED.clear()
+        EXPECTED.update(f'protection/{view}' for view in ('settings', 'menu', 'password', 'password_large'))
     if args.redis_tls:
         BENCHMARKS = ('redis_connection_profile_frame_benchmark', 'redis_sentinel_profile_frame_benchmark', 'redis_cluster_profile_frame_benchmark', 'redis_security_profile_frame_benchmark')
         EXPECTED.clear()
@@ -202,8 +212,8 @@ def main():
         BENCHMARKS += ('grid_selection_frame_benchmark',)
         EXPECTED.update(('grid/selection/select-all', 'grid/selection/row-tail-click'))
     if args.cell_editor:
-        BENCHMARKS += ('selected_cell_edit_frame_benchmark',)
-        EXPECTED.update(('grid/selected-cell-edit/false', 'grid/selected-cell-edit/true'))
+        BENCHMARKS += ('selected_cell_edit_frame_benchmark', 'cell_entry_frame_benchmark')
+        EXPECTED.update(('grid/selected-cell-edit/false', 'grid/selected-cell-edit/true', 'grid/cell-entry'))
     if args.result_search:
         BENCHMARKS += ('result_search_cpu_benchmark',)
         EXPECTED.update(('search/scan/text', 'search/scan/numeric', 'search/scan/large-cell', 'search/panel-navigation'))
@@ -270,6 +280,15 @@ def main():
         base_path = Path(temp) / 'base'
         run(['git', 'worktree', 'add', '--detach', str(base_path), base_sha], root)
         try:
+            if args.native_clicks:
+                fixture = root / 'src' / 'click_benchmark.rs'
+                shutil.copy2(fixture, base_path / 'src' / fixture.name)
+                source = base_path / 'src' / 'connections.rs'
+                text = source.read_text()
+                if 'include!("click_benchmark.rs");' not in text:
+                    source.write_text(text.replace('include!("redis_connection_benchmark.rs");', 'include!("redis_connection_benchmark.rs");\n    include!("click_benchmark.rs");', 1))
+                metadata['native_click_fixture'] = fixture.read_text()
+                (logs / 'environment.json').write_text(json.dumps(metadata, indent=2))
             if args.connection_activity:
                 fixture = root / 'src' / 'connection_activity_benchmark.rs'
                 shutil.copy2(fixture, base_path / 'src' / fixture.name)

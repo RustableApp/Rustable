@@ -68,11 +68,11 @@ fn pending_rows_are_green_selectable_and_reopen_from_text_or_padding() {
             frame(&mut app, vec![]);
             assert!(app.edit.is_none());
             assert_eq!(app.selected, None);
-            assert_eq!(app.insert_value(id, "name"), Some(&Value::Text("Again New".into())));
+            assert_eq!(app.insert_value(id, "name"), Some(&Value::Text("Again ".into())));
             // A second edit after blur must not hit a retired TextEdit or lose the draft.
             for _ in 0..2 { for pressed in [true, false] { frame(&mut app, click(point, pressed)); } }
             assert_eq!(app.edit.as_ref().unwrap().insert_id, Some(id));
-            assert_eq!(app.edit.as_ref().unwrap().text, "Again New");
+            assert_eq!(app.edit.as_ref().unwrap().text, "Again ");
             assert_eq!(app.insert_ids(), vec![id]);
         }
     }

@@ -514,3 +514,43 @@ automatic commit or replay is added. Rustable uses this only for generated edit
 guards/writes, then checks cancellation and explicitly commits in a separate
 exchange. See `docs/EDIT-SERVER-CHECKS-PERFORMANCE.md` for ordering, fallback,
 protocol-count tests and failure injection.
+
+## Shared native click handling
+
+`winit` 0.30.13 and `egui-winit` 0.33.3 are vendored from their crates.io
+packages, retaining the upstream licenses. Their minimal integration patch adds
+`WindowEvent::MouseInput::click_count: Option<u32>` and forwards it, alongside
+the exact accepted mouse event, to egui's `Event::PointerClickCount`. Touch and
+backends without native counts use `None`. Do not query AppKit's `currentEvent`
+from a rendering/input hook: winit queues events and the current OS event can
+already be different when egui processes a frame.
+
+- macOS: `view.rs::mouse_click` forwards the originating `NSEvent.clickCount`.
+  AppKit owns cadence, position tolerance and current system settings. This also
+  avoids classifying OS events using rendering-frame timestamps.
+- Windows: the window class requests `CS_DBLCLKS`; left/right/middle/X double-click
+  messages are handled as presses with a native count. The per-window sequence
+  extends pairs to triples using `GetMessageTime`, `GetDoubleClickTime` and the
+  system double-click rectangle in physical pixels, and resets on focus loss.
+- Linux/other integrations: there is no native count exposed by these winit
+  backends. The shared fallback requires each consecutive press to meet the
+  configured interval and distance, with the same button. This fixes false
+  triples/button/position mixing, but does not claim exact GNOME/KDE/Wayland
+  preference parity. Native Windows and Linux runtime validation requires those
+  platforms; a macOS/headless pass is not evidence of that validation.
+- `egui::PointerState`: classifies on press and retains the result through release;
+  focus loss, pointer departure and completed drags break sequences. Fallback counts keep
+  increasing instead of becoming permanently triple-clicks; native counts retain
+  their platform semantics (including Windows double-click pairs). Native counts take
+  precedence over fallback timing/distance.
+- `egui::interaction`: bounds each sequence to its target widget. `Response`
+  double/triple-click queries use this shared result, including union responses
+  in connection rows. The workspace helper retains only the semantic cell/tab
+  identity guard for recycled widgets; it has no independent timer/pair counter.
+- `egui::TextCursorState`: selects words/lines on primary mouse-down and extends
+  double/triple-click drags by word/line. Word dragging walks Unicode boundaries
+  without reversing/cloning the whole text buffer. Secondary clicks preserve selection.
+
+Regression coverage is in `src/native_click_tests.rs`, the existing connection
+manager and workspace interaction tests, and the identical baseline/candidate
+workload `src/click_benchmark.rs` (`scripts/ui-performance.py --native-clicks`).

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Render the macOS icon from our vector mark (requires resvg and iconutil)."""
+"""Render app icons from the vector mark (run with mise exec; needs iconutil)."""
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+for pixels in (1024, 2048):
+    subprocess.run([
+        "resvg", "--width", str(pixels), str(ROOT / "assets/rustable-mark.svg"),
+        str(ROOT / f"assets/rustable-logo-{pixels}.png"),
+    ], check=True)
 
 with tempfile.TemporaryDirectory(prefix="rustable-icon-") as temporary:
     directory = Path(temporary)

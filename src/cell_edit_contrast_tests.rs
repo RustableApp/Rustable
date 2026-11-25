@@ -73,3 +73,25 @@ fn selected_cell_edit_frame_benchmark() {
     }
 }
 
+
+#[test]
+#[ignore = "shared cell entry, replacement typing and after-idle CPU workload"]
+fn cell_entry_frame_benchmark() {
+    let ctx = egui::Context::default();
+    let mut edit = None;
+    let mut samples = Vec::new();
+    for frame in 0..180 {
+        if frame % 6 == 0 { edit = draft(); edit.as_mut().unwrap().text = "café customer".into(); }
+        let events = if frame % 6 == 1 { vec![egui::Event::Text("new value".into())] } else { vec![] };
+        let start = Instant::now();
+        let output = ctx.run(egui::RawInput {
+            events, time: Some(frame as f64 / 120.0 + if frame >= 100 { 30.0 } else { 0.0 }),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 500.0))),
+            ..Default::default()
+        }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| { std::hint::black_box(inline_value(ui, &mut edit)); }); });
+        std::hint::black_box(ctx.tessellate(output.shapes, output.pixels_per_point));
+        if frame >= 20 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+    }
+    samples.sort_by(f64::total_cmp);
+    crate::ui_benchmark::report("grid/cell-entry", &samples);
+}

@@ -536,8 +536,8 @@ impl Rustable {
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let button = crate::icons::shortcut_button(
-                            "Send", false, "Enter", Some(ui.visuals().selection.bg_fill),
+                        let button = crate::icons::primary_shortcut_button(
+                            ui, "Send", false, "Enter",
                         );
                         if ui
                             .add_enabled(can_send && (!password || !self.protection.entered.is_empty()), button)
@@ -947,6 +947,33 @@ impl Rustable {
 #[cfg(test)]
 mod rendering_tests {
     use super::*;
+    #[test]
+    fn send_uses_theme_foreground_in_all_appearances() {
+        fn send_color(shape: &egui::Shape) -> Option<Color32> {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == "Send" => Some(text.galley.job.sections[0].format.color),
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(send_color),
+                _ => None,
+            }
+        }
+        for appearance in [Appearance::Light, Appearance::Dark, Appearance::SolarizedLight, Appearance::SolarizedDark] {
+            let ctx = egui::Context::default();
+            let mut app = Rustable::with_optional_connection(&ctx, Preferences::default(), None, None);
+            apply_theme(&ctx, appearance);
+            app.protection.mode = Mode::AlertAll;
+            assert!(app.protect_command(Command::Query { sql: "BEGIN;".into(), safe: false }, Pending::Query(0)).is_none());
+            for frame in 0..3 {
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(760.0, 760.0))),
+                    ..Default::default()
+                }, |ctx| app.protection_confirmation(ctx));
+                let color = output.shapes.iter().find_map(|shape| send_color(&shape.shape));
+                if frame == 2 {
+                    assert_eq!(color, Some(ctx.style().visuals.selection.stroke.color));
+                }
+            }
+        }
+    }
     #[test]
     fn password_validation_is_exact_and_clears_on_cancellation() {
         let mut protection = Protection::default();

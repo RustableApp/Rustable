@@ -212,6 +212,7 @@ impl Widget for &memory::InteractionState {
         let memory::InteractionState {
             potential_click_id,
             potential_drag_id,
+            ..
         } = self;
 
         ui.vertical(|ui| {

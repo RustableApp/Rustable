@@ -25,6 +25,8 @@ opt-level = "s"
 codegen-units = 1
 
 [patch.crates-io]
+winit = { path = "../../vendor/winit" }
+egui-winit = { path = "../../vendor/egui-winit" }
 epaint = { path = "../../vendor/epaint" }
 egui = { path = "../../vendor/egui" }
 eframe = { path = "../../vendor/eframe" }

@@ -55,6 +55,8 @@ impl Rustable {
     pub fn run_query_layout_preview() -> eframe::Result {
         struct Preview {
             app: Rustable,
+            interactive: bool,
+            native_count: u32,
             frame: usize,
             assist: bool,
             menu_capture: Option<egui::Pos2>,
@@ -63,7 +65,11 @@ impl Rustable {
             saved: Option<std::sync::mpsc::Receiver<()>>,
         }
         impl eframe::App for Preview {
+            fn persist_egui_memory(&self) -> bool { false }
             fn raw_input_hook(&mut self, _: &egui::Context, input: &mut egui::RawInput) {
+                for event in &input.events {
+                    if let egui::Event::PointerClickCount(count) = event { self.native_count = *count; }
+                }
                 // Keep popup animation deterministic even when native QA frames run unpaced.
                 if self.menu_capture.is_some() { input.time = Some(self.frame as f64 / 60.0); }
                 if let Some(pos) = self.menu_capture.filter(|_| matches!(self.frame, 1 | 2)) {
@@ -126,7 +132,7 @@ impl Rustable {
                 self.app.workspace(ctx);
                 self.app.settings_window(ctx);
                 self.app.protection_confirmation(ctx);
-                if self.saved.is_none() && !ctx.will_discard() && self.frame >= if self.menu_capture.is_some() || std::env::var_os("RUSTABLE_PROTECTION_CAPTURE").is_some() { 20 } else if self.assist { 8 } else { 3 } {
+                if !self.interactive && self.saved.is_none() && !ctx.will_discard() && self.frame >= if self.menu_capture.is_some() || std::env::var_os("RUSTABLE_PROTECTION_CAPTURE").is_some() { 20 } else if self.assist { 8 } else { 3 } {
                     if self.assist {
                         assert_eq!(
                             self.app.tabs[0].sql,
@@ -136,7 +142,15 @@ impl Rustable {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
                 }
                 self.frame += 1;
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                if self.interactive {
+                    egui::Window::new("Native input QA").anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0]).show(ctx, |ui| {
+                        ui.label(format!("Native click count: {}", self.native_count));
+                        ui.label(format!("Connection requests: {}", self.app.window_requests.len()));
+                        ui.label(format!("SQL selection: {:?}", self.app.tabs[0].cursor));
+                    });
+                } else {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                }
             }
         }
         let path = std::path::PathBuf::from(std::env::var_os("RUSTABLE_QUERY_CAPTURE").unwrap());
@@ -197,9 +211,25 @@ impl Rustable {
                 if !assist && result_count > 1 {
                     app.tabs[0].pins.add(grid, 0).unwrap();
                 }
+                if std::env::var_os("RUSTABLE_CLICK_CELL").is_some() {
+                    app.view = View::Data;
+                    app.browse.table = "customers".into();
+                    app.table = app.tabs[0].grid.clone();
+                    app.selected = app.row_selection.click(0, false, false, None);
+                    app.row_selection.cell_column = 1;
+                    app.edit = Some(CellEdit {
+                        bulk_rows: Vec::new(), bulk_changed: false, undo_initialized: false,
+                        insert_id: None, advance: 0, table: "customers".into(),
+                        row: app.table.rows[0].clone(), original_value: app.table.rows[0][1].clone(),
+                        column: "name".into(), text: db::display(&app.table.rows[0][1]), kind: 3,
+                        focus: true, inspector: false,
+                    });
+                }
                 app.prepare_protection_preview();
                 Ok(Box::new(Preview {
                     app,
+                    interactive: std::env::var_os("RUSTABLE_CLICK_INTERACTIVE").is_some(),
+                    native_count: 0,
                     frame: 0,
                     assist,
                     menu_capture: std::env::var_os("RUSTABLE_QUERY_MENU_CAPTURE").map(|_| {

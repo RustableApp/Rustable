@@ -454,6 +454,10 @@ pub enum Event {
     /// This event is optional. If the integration can not determine unfiltered motion it should not send this event.
     MouseMoved(Vec2),
 
+    /// Native count for the immediately following pointer button event. Keeping this
+    /// separate preserves source compatibility for synthetic input and touch clients.
+    PointerClickCount(u32),
+
     /// A mouse button was pressed or released (or a touch started or stopped).
     PointerButton {
         /// Where is the pointer?

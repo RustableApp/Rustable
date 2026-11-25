@@ -80,10 +80,16 @@ empty states and responsive layouts. Record performance evidence per
 
 ## Native pointer conventions
 
-On macOS, use NSEvent's system double-click interval instead of a fixed toolkit
-value. Keep semantic same-target checks for opening/editing, and preserve ordinary
+Use the shared pointer classification for all double/triple-click actions. On
+macOS, forward the originating NSEvent click count; on Windows, use native
+double-click messages and system settings. Keep semantic same-target checks for
+recycled cells/tabs, without introducing independent widget timers. Preserve
 single-click selection and Control-click context menus. Test slower valid clicks,
-clicks outside the interval, and adjacent targets; do not tune thresholds by feel.
+clicks outside the interval, adjacent targets, and double/triple-click dragging.
+Text selects words/lines on mouse-down; macOS paragraph selection includes its
+line ending. Entering cell editing selects the existing value so typing replaces
+it, and Undo restores the original selected value. Backends without native counts
+use the documented shared fallback; do not claim desktop preference parity there.
 
 ## macOS application icon
 

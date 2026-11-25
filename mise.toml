@@ -1,6 +1,7 @@
 [tools]
 rust = "stable"
 python = "3.13.15"
+"cargo:resvg" = "0.45.1"
 
 [tasks.dev]
 run = "cargo run"

@@ -395,7 +395,7 @@ enum FileAction {
     BrowserDownload(String),
     QueryDirectory(PathBuf),
     QueryLibraryError(String),
-    ProfilePath(u64, bool, PathBuf),
+    ProfilePath(u64, connections::ProfileFile, PathBuf),
     OpenScript(PathBuf),
     SaveScript(PathBuf, String, u64, Option<crate::script_file::SaveSource>),
     PreviewCsv(PathBuf),
@@ -1860,8 +1860,8 @@ impl Rustable {
                 FileAction::BrowserScript(..) | FileAction::BrowserDownload(..) | FileAction::BrowserExportDone(..) => unreachable!(),
                 FileAction::QueryLibraryError(error) => self.error = Some(error),
                 FileAction::QueryDirectory(path) => { self.prefs.query_directory = Some(path); self.query_library.invalidate(); self.shared_preferences_dirty = true; }
-                FileAction::ProfilePath(generation, key, path) => {
-                    self.connection_manager.set_path(generation, key, path)
+                FileAction::ProfilePath(generation, field, path) => {
+                    self.connection_manager.set_path(generation, field, path)
                 }
                 FileAction::OpenScript(path) => {
                     self.dispatch(Command::OpenScript(path), Pending::Export)
@@ -8077,23 +8077,17 @@ fn workspace_tab_width(available: f32, count: usize, spacing: f32) -> f32 {
     ((available - 24.0 - spacing * count as f32) / count.max(1) as f32).max(72.0)
 }
 
-/// Consume same-target click pairs independently of egui's pointer-wide triple-click
-/// classification, so fast repeated activations do not require a cooldown.
+/// Preserve semantic identity when a recycled widget displays a different cell/tab.
+/// Timing, position, button and sequence classification belong to shared egui input.
 fn same_target_double_click(response: &egui::Response, target: egui::Id) -> bool {
-    if !response.clicked_by(egui::PointerButton::Primary) { return false; }
-    let now = response.ctx.input(|input| input.time);
-    let delay = response.ctx.options(|options| options.input_options.max_double_click_delay);
+    if !response.clicked() { return false; }
     let key = egui::Id::new((response.ctx.viewport_id(), "last-workspace-click-target"));
-    response.ctx.data_mut(|data| {
-        let previous = data.get_temp::<(egui::Id, f64)>(key);
-        let paired = previous.is_some_and(|(id, time)| id == target && now >= time && now - time < delay);
-        if paired {
-            data.remove::<(egui::Id, f64)>(key);
-        } else {
-            data.insert_temp(key, (target, now));
-        }
-        paired
-    })
+    let same_target = response.ctx.data_mut(|data| {
+        let previous = data.get_temp::<egui::Id>(key);
+        data.insert_temp(key, target);
+        previous.is_none_or(|previous| previous == target)
+    });
+    same_target && response.double_clicked()
 }
 
 fn workspace_tab(
@@ -8860,7 +8854,8 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
         draft.undo_initialized = true;
         // Each cell editing session starts its own typing history.
         let mut state = egui::text_edit::TextEditState::default();
-        let cursor = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
+        let cursor = egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0), egui::text::CCursor::new(draft.text.chars().count()));
         state.cursor.set_char_range(Some(cursor));
         let mut undoer = state.undoer();
         undoer.add_undo(&(cursor, draft.text.clone()));
@@ -8882,6 +8877,7 @@ fn inline_value(ui: &mut egui::Ui, edit: &mut Option<CellEdit>) -> bool {
     } else {
         0
     };
+    if draft.focus { ui.memory_mut(|memory| memory.request_focus(id)); }
     let response = ui.add(
         TextEdit::singleline(&mut draft.text)
             .hint_text(RichText::new(if draft.kind == 5 { "DEFAULT" } else if draft.kind == 0 { "NULL" } else { "" }).color(ui.visuals().weak_text_color()))
@@ -9197,6 +9193,30 @@ mod interaction_tests {
         };
         frame(vec![egui::Event::PointerMoved(pos), pointer(true)]);
         assert!(frame(vec![pointer(false)]).1);
+    }
+
+    #[test]
+    fn entering_cell_edit_selects_value_and_first_frame_typing_replaces_it() {
+        for inspector in [false, true] {
+            for text in ["old value", "café 東京", "", "42"] {
+                let ctx = egui::Context::default();
+                let mut edit = draft();
+                let value = edit.as_mut().unwrap();
+                value.inspector = inspector;
+                value.text = text.into();
+                edit_frame(&ctx, &mut edit, vec![]);
+                let id = ctx.memory(|m| m.focused()).unwrap();
+                let range = egui::TextEdit::load_state(&ctx, id).unwrap().cursor.char_range().unwrap().as_sorted_char_range();
+                assert_eq!(range, 0..text.chars().count());
+                edit_frame(&ctx, &mut edit, vec![egui::Event::Text("replacement".into())]);
+                assert_eq!(edit.as_ref().unwrap().text, "replacement");
+                // A freshly opened session must not drop text queued before its first frame.
+                let mut next = draft();
+                next.as_mut().unwrap().inspector = inspector;
+                edit_frame(&ctx, &mut next, vec![egui::Event::Text("first".into())]);
+                assert_eq!(next.as_ref().unwrap().text, "first");
+            }
+        }
     }
 
     #[test]
@@ -14552,10 +14572,10 @@ mod double_click_target_tests {
         check_clicks(99.0, true);
     }
     #[test]
-    fn rapid_click_pairs_keep_activating_without_a_cooldown() {
+    fn click_sequences_follow_shared_classification() {
         for (targets, gap, expected) in [
             (vec![0, 0, 1, 1, 0, 0], 0.1, 3),
-            (vec![0, 0, 0, 0, 0, 0], 0.1, 3),
+            (vec![0, 0, 0, 0, 0, 0], 0.1, 1),
             (vec![0, 1, 1], 0.1, 1),
             (vec![0, 1, 0, 1], 0.1, 0),
             (vec![0, 0], 0.4, 1),
@@ -14619,7 +14639,7 @@ mod double_click_target_tests {
         frame(0.0,99.0,false); frame(0.1,99.0,true); frame(0.12,99.0,false);
         frame(0.2,second_x,true); frame(0.22,second_x,false);
         drop(frame);
-        assert!(pointer_double,"fixture should reproduce the global double-click");
+        assert_eq!(pointer_double, expected, "shared classification must reject adjacent targets");
         assert_eq!(confirmed, expected, "only two clicks on the same cell count as a double-click");
     }
 }

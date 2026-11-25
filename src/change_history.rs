@@ -699,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_nonempty_cells_follows_history_and_places_caret_at_start() {
+    fn undo_nonempty_cells_follows_history_and_restores_entry_selection() {
         let (ctx, _file, mut app) = fixture();
         edit(&mut app, "earlier");
         let first = app.changes.clone();
@@ -718,13 +718,14 @@ mod tests {
         grid_frame(&ctx, &mut app, &mut time, vec![]);
         grid_frame(&ctx, &mut app, &mut time, vec![egui::Event::Text("typing".into())]);
         let typed = app.edit.as_ref().unwrap().text.clone();
+        assert_eq!(typed, "typing", "entry typing replaces the selected cell value");
         grid_frame(&ctx, &mut app, &mut time, vec![key(true, true), key(true, false)]);
         assert_eq!(app.edit.as_ref().unwrap().text, typed, "Redo must not discard fresh typing");
         grid_frame(&ctx, &mut app, &mut time, vec![key(false, true), key(false, false)]);
         assert_eq!(app.edit.as_ref().unwrap().text, "later");
         assert_eq!(app.changes, second);
         let id = ctx.memory(|m| m.focused()).unwrap();
-        assert_eq!(TextEdit::load_state(&ctx, id).unwrap().cursor.char_range().unwrap().primary.index, 0);
+        assert_eq!(TextEdit::load_state(&ctx, id).unwrap().cursor.char_range().unwrap().as_sorted_char_range(), 0..5);
         // Cursor movement and an idle history point must not trap Cmd+Z.
         grid_frame(&ctx, &mut app, &mut time, vec![egui::Event::Key {
             key: egui::Key::End, physical_key: None, pressed: true, repeat: false, modifiers: Default::default(),

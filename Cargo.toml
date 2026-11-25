@@ -1,6 +1,6 @@
 [package]
 name = "rustable"
-version = "0.4.39"
+version = "0.4.40"
 edition = "2024"
 description = "A responsive native database workspace built with Rust and egui"
 license = "MIT"
@@ -85,3 +85,6 @@ mysql = { path = "vendor/mysql" }
 egui = { path = "vendor/egui" }
 
 redis = { path = "vendor/redis" }
+
+winit = { path = "vendor/winit" }
+egui-winit = { path = "vendor/egui-winit" }

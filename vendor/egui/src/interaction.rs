@@ -14,6 +14,10 @@ pub struct InteractionSnapshot {
     /// The widget that got clicked this frame.
     pub clicked: Option<Id>,
 
+    /// Same-widget sequence count for the current press/release.
+    pub click_count: u32,
+    pub press_count: u32,
+
     /// This widget was long-pressed on a touch screen,
     /// so trigger a secondary click on it (context menu).
     pub long_touched: Option<Id>,
@@ -66,6 +70,7 @@ impl InteractionSnapshot {
             drag_stopped,
             hovered,
             contains_pointer,
+            ..
         } = self;
 
         fn id_ui<'a>(ui: &mut crate::Ui, widgets: impl IntoIterator<Item = &'a Id>) {
@@ -115,6 +120,12 @@ pub(crate) fn interact(
 ) -> InteractionSnapshot {
     profiling::function_scope!();
 
+    if !input.focused {
+        interaction.last_click_target = None;
+        interaction.last_pointer_count = 0;
+        interaction.last_click_button = None;
+    }
+
     if let Some(id) = interaction.potential_click_id
         && !widgets.contains(id)
     {
@@ -131,6 +142,8 @@ pub(crate) fn interact(
     }
 
     let mut clicked = None;
+    let mut click_count = 0;
+    let mut press_count = 0;
     let mut dragged = prev_snapshot.dragged;
     let mut long_touched = None;
 
@@ -159,7 +172,34 @@ pub(crate) fn interact(
         match pointer_event {
             PointerEvent::Moved(_) => {}
 
-            PointerEvent::Pressed { .. } => {
+            PointerEvent::Pressed {
+                count,
+                button,
+                native,
+                ..
+            } => {
+                let target = hits.click.or(hits.drag).map(|w| w.id);
+                let same_target = target.is_some()
+                    && target == interaction.last_click_target
+                    && interaction.last_click_button == Some(*button);
+                interaction.target_click_count = if *native && interaction.last_pointer_count == 0 {
+                    // The activating click may have been consumed by the OS. The
+                    // first event we receive can already be a native double/triple.
+                    *count
+                } else if same_target && *native && *count <= interaction.last_pointer_count {
+                    // A fresh native sequence; an integration may omit its first press.
+                    *count
+                } else if same_target && *count > interaction.last_pointer_count {
+                    interaction
+                        .target_click_count
+                        .saturating_add(*count - interaction.last_pointer_count)
+                } else {
+                    1
+                };
+                interaction.last_click_button = Some(*button);
+                interaction.last_click_target = target;
+                interaction.last_pointer_count = *count;
+                press_count = interaction.target_click_count;
                 // Maybe new click?
                 if interaction.potential_click_id.is_none() {
                     interaction.potential_click_id = hits.click.map(|w| w.id);
@@ -172,6 +212,9 @@ pub(crate) fn interact(
             }
 
             PointerEvent::Released { click, button: _ } => {
+                if click.is_none() {
+                    interaction.last_click_target = None;
+                }
                 if click.is_some()
                     && !input.pointer.is_decidedly_dragging()
                     && let Some(widget) = interaction
@@ -179,6 +222,7 @@ pub(crate) fn interact(
                         .and_then(|id| widgets.get(id))
                 {
                     clicked = Some(widget.id);
+                    click_count = interaction.target_click_count;
                 }
 
                 interaction.potential_drag_id = None;
@@ -289,6 +333,8 @@ pub(crate) fn interact(
 
     InteractionSnapshot {
         clicked,
+        click_count,
+        press_count,
         long_touched,
         drag_started,
         dragged,

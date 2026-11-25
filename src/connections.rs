@@ -15,6 +15,19 @@ enum ListSelection {
     Group(Option<GroupId>),
 }
 
+/// Destination captured when a background connection file picker opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProfileFile {
+    Sqlite,
+    SshKey,
+    Ca,
+    ClientCertificate,
+    ClientKey,
+    SentinelCa,
+    SentinelCertificate,
+    SentinelKey,
+}
+
 #[derive(Default)]
 pub(super) struct Manager {
     selection: Option<ListSelection>,
@@ -226,27 +239,38 @@ impl Manager {
         }
         if load_sentinel { self.queue_credential_for(id, CredentialPurpose::RedisSentinel, CredentialOperation::Read); }
     }
-    pub(super) fn set_path(&mut self, generation: u64, key: bool, path: PathBuf) {
-        if self.generation != generation {
-            return;
-        }
-        if let Some(draft) = &mut self.draft {
-            match &mut draft.connection {
-                ConnectionKind::SQLite { path: target } if !key => *target = path,
-                ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) if key => {
-                    if let Some(ssh) = &mut config.ssh { ssh.identity_file = Some(path); }
-                }
-                ConnectionKind::Redis(config) if key => {
-                    if let Some(ssh) = &mut config.ssh { ssh.identity_file = Some(path); }
-                }
-                ConnectionKind::Postgres(config) if key => {
-                    if let Some(ssh) = &mut config.ssh {
-                        ssh.identity_file = Some(path);
+    pub(super) fn set_path(&mut self, generation: u64, field: ProfileFile, path: PathBuf) {
+        if self.generation != generation { return; }
+        let Some(draft) = &mut self.draft else { return; };
+        match (&mut draft.connection, field) {
+            (ConnectionKind::SQLite { path: target }, ProfileFile::Sqlite) => *target = path,
+            (ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config), ProfileFile::Ca) => config.root_certificate = Some(path),
+            (ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config), ProfileFile::SshKey) => {
+                if let Some(ssh) = &mut config.ssh { ssh.identity_file = Some(path); }
+            }
+            (ConnectionKind::Postgres(config), ProfileFile::SshKey) => {
+                if let Some(ssh) = &mut config.ssh { ssh.identity_file = Some(path); }
+            }
+            (ConnectionKind::Redis(config), field) => match field {
+                ProfileFile::Ca => config.root_certificate = Some(path),
+                ProfileFile::ClientCertificate => config.client_certificate = Some(path),
+                ProfileFile::ClientKey => config.client_key = Some(path),
+                ProfileFile::SshKey => if let Some(ssh) = &mut config.ssh { ssh.identity_file = Some(path); },
+                ProfileFile::SentinelCa | ProfileFile::SentinelCertificate | ProfileFile::SentinelKey => {
+                    if let Some(sentinel) = &mut config.sentinel {
+                        match field {
+                            ProfileFile::SentinelCa => sentinel.root_certificate = Some(path),
+                            ProfileFile::SentinelCertificate => sentinel.client_certificate = Some(path),
+                            ProfileFile::SentinelKey => sentinel.client_key = Some(path),
+                            _ => unreachable!(),
+                        }
                     }
                 }
-                _ => {}
-            }
+                ProfileFile::Sqlite => {}
+            },
+            _ => {}
         }
+        self.invalidate_probe();
     }
     fn dirty(&self, profiles: &crate::connection_profiles::ConnectionProfiles) -> bool {
         self.draft
@@ -288,6 +312,7 @@ enum Action {
     NewMysql(bool),
     NewRedis,
     Select(ProfileId),
+    SelectAndOpen(ProfileId),
     New(bool),
     Save(bool),
     OpenWindow,
@@ -431,6 +456,38 @@ fn form_text(
     changed
 }
 
+/// A path field and its Browse action share one outline and one height.
+fn form_path(ui: &mut egui::Ui, label: &str, path: &mut Option<PathBuf>, field: ProfileFile, pick: &mut Option<ProfileFile>) {
+    let mut text = path.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
+    status_row(ui, label, Some(ProbeField::Tls), |ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
+        let split = rect.right() - 84.0_f32.min(rect.width() * 0.45);
+        let input_rect = egui::Rect::from_min_max(rect.min, egui::pos2(split, rect.bottom()));
+        let button_rect = egui::Rect::from_min_max(egui::pos2(split, rect.top()), rect.max);
+        ui.painter().rect_filled(rect, 6.0, ui.visuals().extreme_bg_color);
+        let input = ui.put(input_rect.shrink2(egui::vec2(8.0, 4.0)), TextEdit::singleline(&mut text)
+            .desired_width(input_rect.width() - 16.0).frame(false).margin(egui::Margin::ZERO)
+            .vertical_align(egui::Align::Center));
+        if input.changed() { *path = (!text.is_empty()).then(|| PathBuf::from(text)); }
+        let button = ui.scope(|ui| {
+            ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
+            let widgets = &mut ui.visuals_mut().widgets;
+            for widget in [&mut widgets.inactive, &mut widgets.hovered, &mut widgets.active] {
+                widget.expansion = 0.0;
+            }
+            ui.put(button_rect, egui::Button::new("Browse…").wrap_mode(egui::TextWrapMode::Extend)
+                .corner_radius(egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 })
+                .stroke(egui::Stroke::NONE).min_size(button_rect.size()))
+        }).inner.on_hover_text(format!("Choose {label}"));
+        if button.clicked() { *pick = Some(field); }
+        let border = ui.visuals().widgets.noninteractive.bg_stroke;
+        ui.painter().line_segment([egui::pos2(split, rect.top() + 1.0), egui::pos2(split, rect.bottom() - 1.0)], border);
+        ui.painter().rect_stroke(rect, 6.0, if input.has_focus() || button.has_focus() {
+            ui.visuals().selection.stroke
+        } else { border }, egui::StrokeKind::Inside);
+    });
+}
+
 fn cluster_seeds_form(ui: &mut egui::Ui, seeds: &mut Vec<crate::redis_settings::SentinelSeed>, generation: u64) -> bool {
     let mut valid = true;
     let mut remove = None;
@@ -458,7 +515,7 @@ fn cluster_seeds_form(ui: &mut egui::Ui, seeds: &mut Vec<crate::redis_settings::
     valid
 }
 
-fn sentinel_form(ui: &mut egui::Ui, config: &mut crate::redis_settings::Sentinel, password: &mut String, revision: &mut u64, generation: u64) -> bool {
+fn sentinel_form(ui: &mut egui::Ui, config: &mut crate::redis_settings::Sentinel, password: &mut String, revision: &mut u64, generation: u64, pick: &mut Option<ProfileFile>) -> bool {
     form_section(ui, "Sentinel discovery");
     form_text(ui, "Service", &mut config.service, false, None);
     let mut valid = true;
@@ -488,9 +545,8 @@ fn sentinel_form(ui: &mut egui::Ui, config: &mut crate::redis_settings::Sentinel
     form_text(ui, "User", &mut config.username, false, None);
     if form_text(ui, "Password", password, true, None) { *revision = revision.wrapping_add(1); }
     form_row(ui, "TLS", |ui| { redis_tls_picker(ui, &mut config.tls, &mut config.verify_tls); });
-    let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
-    if form_text(ui, "CA file", &mut ca, false, None) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
-    redis_identity_form(ui, &mut config.client_certificate, &mut config.client_key);
+    form_path(ui, "CA file", &mut config.root_certificate, ProfileFile::SentinelCa, pick);
+    redis_identity_form(ui, &mut config.client_certificate, &mut config.client_key, true, pick);
     valid
 }
 
@@ -546,16 +602,12 @@ fn redis_port_forwards_form(ui: &mut egui::Ui, forwards: &mut Vec<crate::redis_s
     valid
 }
 
-fn redis_identity_form(ui: &mut egui::Ui, certificate: &mut Option<PathBuf>, key: &mut Option<PathBuf>) {
+fn redis_identity_form(ui: &mut egui::Ui, certificate: &mut Option<PathBuf>, key: &mut Option<PathBuf>, sentinel: bool, pick: &mut Option<ProfileFile>) {
     egui::CollapsingHeader::new("Client certificate (optional)")
         .default_open(certificate.is_some() || key.is_some())
         .show(ui, |ui| {
-        for (label, path) in [("Certificate PEM", certificate), ("Private key PEM", key)] {
-            let mut text = path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-            if form_text(ui, label, &mut text, false, Some(ProbeField::Tls)) {
-                *path = (!text.is_empty()).then(|| PathBuf::from(text));
-            }
-        }
+        form_path(ui, "Certificate PEM", certificate, if sentinel { ProfileFile::SentinelCertificate } else { ProfileFile::ClientCertificate }, pick);
+        form_path(ui, "Private key PEM", key, if sentinel { ProfileFile::SentinelKey } else { ProfileFile::ClientKey }, pick);
         ui.weak("Both files are required. Only paths are saved; private key contents are never stored in the profile.");
     });
 }
@@ -958,9 +1010,13 @@ impl Rustable {
                                 let response = if filtering { ui.scope(render_row) } else { ui.dnd_drag_source(egui::Id::new(("saved-connection", profile.id.0)), Drag::Profile(profile.id), render_row) };
                                 let row_response = response.response.interact(egui::Sense::click()) | response.inner.clone();
                                 if response.inner.clicked() || row_response.clicked() { row_response.request_focus(); action = Some(Action::Select(profile.id)); }
-                                if selected && row_response.double_clicked()
-                                    && self.connection_manager.draft.as_ref().is_some_and(|draft| draft.id == profile.id) {
-                                    keyboard_connect = true;
+                                if row_response.double_clicked() {
+                                    if selected && self.connection_manager.draft.as_ref().is_some_and(|draft| draft.id == profile.id) {
+                                        keyboard_connect = true;
+                                    } else if self.pending.is_none() {
+                                        // Both native clicks can arrive before selection is rendered.
+                                        action = Some(Action::SelectAndOpen(profile.id));
+                                    }
                                 }
                                 if row_response.secondary_clicked() {
                                     row_response.request_focus();
@@ -1100,7 +1156,7 @@ impl Rustable {
                                 config.cluster = deployment == 1;
                                 if deployment == 2 {
                                     let sentinel = config.sentinel.get_or_insert_with(Default::default);
-                                    ports_valid &= ui.push_id("sentinel-discovery", |ui| sentinel_form(ui, sentinel, &mut self.connection_manager.sentinel_password, &mut self.connection_manager.sentinel_password_revision, self.connection_manager.generation)).inner;
+                                    ports_valid &= ui.push_id("sentinel-discovery", |ui| sentinel_form(ui, sentinel, &mut self.connection_manager.sentinel_password, &mut self.connection_manager.sentinel_password_revision, self.connection_manager.generation, &mut pick)).inner;
                                     form_section(ui, "Primary database");
                                     ui.weak("Connects to the primary discovered by Sentinel.");
                                 } else {
@@ -1114,9 +1170,8 @@ impl Rustable {
                                 form_text(ui, "User", &mut config.username, false, Some(ProbeField::User));
                                 if form_text(ui, "Password", &mut self.connection_manager.password, true, Some(ProbeField::Password)) { self.connection_manager.password_revision = self.connection_manager.password_revision.wrapping_add(1); }
                                 status_row(ui, "TLS", Some(ProbeField::Tls), |ui| { redis_tls_picker(ui, &mut config.tls, &mut config.verify_tls); });
-                                let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
-                                if form_text(ui, "CA file", &mut ca, false, Some(ProbeField::Tls)) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
-                                redis_identity_form(ui, &mut config.client_certificate, &mut config.client_key);
+                                form_path(ui, "CA file", &mut config.root_certificate, ProfileFile::Ca, &mut pick);
+                                redis_identity_form(ui, &mut config.client_certificate, &mut config.client_key, false, &mut pick);
                                 ports_valid &= redis_port_forwards_form(ui, &mut config.port_forwards, self.connection_manager.generation);
                                 ports_valid &= ssh_form(ui, &mut config.ssh, self.connection_manager.generation, &mut pick);
                                 form_row(ui, "Connect timeout", |ui| { let mut seconds = config.connect_timeout.as_secs_f64(); if ui.add_sized([92.0, 28.0], egui::DragValue::new(&mut seconds).range(0.1..=300.0).speed(0.1).suffix(" s")).changed() { config.connect_timeout = std::time::Duration::from_secs_f64(seconds); } });
@@ -1127,7 +1182,7 @@ impl Rustable {
                                 status_row(ui, "SQLite file", Some(ProbeField::File), |ui| {
                                     ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
                                 });
-                                form_row(ui, "", |ui| { if ui.button("Choose file…").clicked() { pick = Some(false); } });
+                                form_row(ui, "", |ui| { if ui.button("Choose file…").clicked() { pick = Some(ProfileFile::Sqlite); } });
                             }
                             ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config) => {
                                 ui.weak("Experimental · SQL, browsing, exports, CSV import and reviewed table editing available.");
@@ -1142,8 +1197,7 @@ impl Rustable {
                                         ui.selectable_value(&mut config.tls, false, "Disabled (unencrypted)");
                                     });
                                 });
-                                let mut ca = config.root_certificate.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
-                                if form_text(ui, "CA file", &mut ca, false, None) { config.root_certificate = (!ca.is_empty()).then(|| PathBuf::from(ca)); }
+                                form_path(ui, "CA file", &mut config.root_certificate, ProfileFile::Ca, &mut pick);
                                 for (label, timeout) in [("Connect timeout", &mut config.connect_timeout), ("Read timeout", &mut config.read_timeout)] {
                                     form_row(ui, label, |ui| {
                                         let mut seconds = timeout.as_secs_f64();
@@ -1300,21 +1354,20 @@ impl Rustable {
         #[cfg(target_arch = "wasm32")]
         if pick.is_some() { self.error = Some("Connection file selection requires the desktop app.".into()); }
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(key) = pick {
+        if let Some(field) = pick {
             let generation = self.connection_manager.generation;
             let tx = self.files_tx.clone();
             let ctx = ctx.clone();
             std::thread::spawn(move || {
                 let dialog = rfd::FileDialog::new();
-                let dialog = if key {
-                    dialog
-                } else {
-                    dialog
-                        .add_filter("SQLite database", &["db", "sqlite", "sqlite3"])
-                        .add_filter("All files", &["*"])
-                };
+                let dialog = match field {
+                    ProfileFile::Sqlite => dialog.add_filter("SQLite database", &["db", "sqlite", "sqlite3"]),
+                    ProfileFile::SshKey => dialog,
+                    ProfileFile::ClientKey | ProfileFile::SentinelKey => dialog.set_title("Choose private key").add_filter("Private key", &["pem", "key"]),
+                    _ => dialog.set_title("Choose certificate").add_filter("Certificate", &["pem", "crt", "cer", "der"]),
+                }.add_filter("All files", &["*"]);
                 if let Some(path) = dialog.pick_file() {
-                    let _ = tx.send(FileAction::ProfilePath(generation, key, path));
+                    let _ = tx.send(FileAction::ProfilePath(generation, field, path));
                     ctx.request_repaint();
                 }
             });
@@ -1429,6 +1482,12 @@ impl Rustable {
                     .ok_or("Connection no longer exists.")?
                     .clone();
                 self.connection_manager.select(profile);
+            }
+            Action::SelectAndOpen(id) => {
+                self.connection_action(Action::Select(id))?;
+                if self.pending.is_none() {
+                    return self.connection_action(Action::OpenWindow);
+                }
             }
             Action::NewRedis => {
                 if self.connection_manager.dirty(&self.prefs.saved_connections) { return Err("Save or discard the connection form before adding another.".into()); }
@@ -1838,7 +1897,7 @@ fn connection_search(ui: &mut egui::Ui, text: &mut String) {
 }
 
 
-fn ssh_form(ui: &mut egui::Ui, options: &mut Option<SshOptions>, generation: u64, pick: &mut Option<bool>) -> bool {
+fn ssh_form(ui: &mut egui::Ui, options: &mut Option<SshOptions>, generation: u64, pick: &mut Option<ProfileFile>) -> bool {
     let mut ports_valid = true;
     let mut ssh = options.is_some();
     form_row(ui, "SSH tunnel", |ui| { if form_checkbox(ui, &mut ssh, "Enabled").changed() { *options = ssh.then(SshOptions::default); } });
@@ -1866,7 +1925,7 @@ fn ssh_form(ui: &mut egui::Ui, options: &mut Option<SshOptions>, generation: u64
         form_text(ui, "User", &mut ssh.user, false, Some(ProbeField::SshUser));
             status_row(ui, "Key", Some(ProbeField::SshIdentity), |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("Choose key…").clicked() { *pick = Some(true); }
+                    if ui.button("Choose key…").clicked() { *pick = Some(ProfileFile::SshKey); }
                     if let Some(path) = &ssh.identity_file {
                         ui.add(egui::Label::new(path.file_name().unwrap_or_default().to_string_lossy()).truncate()).on_hover_text(path.display().to_string());
                         if ui.small_button("Clear").clicked() { ssh.identity_file = None; }
@@ -2103,6 +2162,7 @@ mod tests {
         }
     }
     include!("redis_connection_benchmark.rs");
+    include!("click_benchmark.rs");
     include!("postgres_connection_benchmark.rs");
     fn app() -> Rustable {
         let mut app = Rustable::with_preferences(&egui::Context::default(), Preferences::default());
@@ -2687,6 +2747,47 @@ mod tests {
     }
 
     #[test]
+    fn batched_native_double_click_opens_only_the_clicked_profile_and_preserves_dirty_guard() {
+        for filtering in [false, true] {
+            for dirty in [false, true] {
+                let ctx = egui::Context::default();
+                let mut app = app();
+                let mut ids = Vec::new();
+                for name in ["Native first", "Native second"] {
+                    app.connection_action(Action::New(false)).unwrap();
+                    let draft = app.connection_manager.draft.as_mut().unwrap();
+                    draft.name = name.into();
+                    draft.connection = ConnectionKind::SQLite { path: PathBuf::from(":memory:") };
+                    app.connection_action(Action::Save(false)).unwrap();
+                    ids.push(app.connection_manager.draft.as_ref().unwrap().id);
+                }
+                app.connections = true;
+                if filtering { app.connection_manager.search = "Native".into(); }
+                if dirty { app.connection_manager.draft.as_mut().unwrap().name = "Unsaved changes".into(); }
+                manager_frame(&ctx, &mut app, vec![]);
+                let output = manager_frame(&ctx, &mut app, vec![]);
+                let pos = painted_text(&output, "Native first").unwrap();
+                let mut events = vec![egui::Event::PointerMoved(pos)];
+                for count in [1, 2] {
+                    for pressed in [true, false] {
+                        events.push(egui::Event::PointerClickCount(count));
+                        events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+                    }
+                }
+                manager_frame(&ctx, &mut app, events);
+                if dirty {
+                    assert!(app.window_requests.is_empty());
+                    assert_eq!(app.connection_manager.draft.as_ref().unwrap().id, ids[1]);
+                    assert_eq!(app.connection_manager.draft.as_ref().unwrap().name, "Unsaved changes");
+                } else {
+                    assert_eq!(app.window_requests.len(), 1);
+                    assert_eq!(app.window_requests[0].identity.as_ref().unwrap().id, ids[0]);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn first_launch_offers_engines_without_an_empty_connection_list() {
         let ctx = egui::Context::default();
         let mut app = app();
@@ -3112,6 +3213,122 @@ mod tests {
         }
     }
     #[test]
+    fn certificate_picker_routes_database_and_sentinel_paths_independently() {
+        let mut root_app = app();
+        root_app.connection_action(Action::NewRedis).unwrap();
+        let manager = &mut root_app.connection_manager;
+        let ConnectionKind::Redis(settings) = &mut manager.draft.as_mut().unwrap().connection else { unreachable!() };
+        settings.sentinel = Some(Default::default());
+        let fields = [ProfileFile::Ca, ProfileFile::ClientCertificate, ProfileFile::ClientKey,
+            ProfileFile::SentinelCa, ProfileFile::SentinelCertificate, ProfileFile::SentinelKey];
+        for (index, field) in fields.into_iter().enumerate() {
+            manager.set_path(manager.generation, field, format!("/certificates/東京 {index}.pem").into());
+        }
+        let before = manager.draft.clone();
+        for field in fields {
+            manager.set_path(manager.generation.wrapping_add(1), field, "/stale.pem".into());
+        }
+        assert_eq!(manager.draft, before);
+        let ConnectionKind::Redis(settings) = &manager.draft.as_ref().unwrap().connection else { unreachable!() };
+        let sentinel = settings.sentinel.as_ref().unwrap();
+        for (index, path) in [&settings.root_certificate, &settings.client_certificate, &settings.client_key,
+            &sentinel.root_certificate, &sentinel.client_certificate, &sentinel.client_key].into_iter().enumerate() {
+            assert_eq!(path.as_ref().unwrap(), &PathBuf::from(format!("/certificates/東京 {index}.pem")));
+        }
+        let ConnectionKind::Redis(settings) = &mut manager.draft.as_mut().unwrap().connection else { unreachable!() };
+        settings.sentinel = None;
+        manager.set_path(manager.generation, ProfileFile::SentinelCa, "/late-sentinel.pem".into());
+        let ConnectionKind::Redis(settings) = &manager.draft.as_ref().unwrap().connection else { unreachable!() };
+        assert!(settings.sentinel.is_none());
+        assert_eq!(settings.root_certificate.as_ref().unwrap(), &PathBuf::from("/certificates/東京 0.pem"));
+        for maria in [false, true] {
+            let mut app = app();
+            app.connection_action(Action::NewMysql(maria)).unwrap();
+            let manager = &mut app.connection_manager;
+            manager.set_path(manager.generation, ProfileFile::Ca, "/mysql/ca.pem".into());
+            let (ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config)) = &manager.draft.as_ref().unwrap().connection else { unreachable!() };
+            assert_eq!(config.root_certificate.as_deref(), Some(std::path::Path::new("/mysql/ca.pem")));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual certificate path interaction CPU benchmark; excludes native dialog"]
+    fn certificate_path_interaction_frame_benchmark() {
+        for width in [360.0, 620.0] {
+            let ctx = egui::Context::default();
+            let mut path = Some(PathBuf::from("/certificates/client.pem"));
+            let mut button = None;
+            let mut requests = 0;
+            let mut samples = Vec::new();
+            for frame in 0..180 {
+                let phase = frame % 4;
+                let mut events = Vec::new();
+                if let Some(pos) = button {
+                    events.push(egui::Event::PointerMoved(pos));
+                    if phase == 0 || phase == 1 {
+                        events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary,
+                            pressed: phase == 0, modifiers: egui::Modifiers::NONE });
+                    }
+                }
+                let mut pick = None;
+                let start = Instant::now();
+                let output = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 120.0))),
+                    time: Some(frame as f64 / 120.0 + if frame >= 100 { 30.0 } else { 0.0 }),
+                    events, ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| {
+                    form_path(ui, "Certificate PEM", &mut path, ProfileFile::ClientCertificate, &mut pick);
+                }); });
+                let position = painted_text(&output, "Browse…");
+                let _ = ctx.tessellate(output.shapes, output.pixels_per_point);
+                if frame >= 20 { samples.push(start.elapsed().as_secs_f64() * 1000.0); }
+                if position.is_some() { button = position; }
+                if pick.is_some() {
+                    requests += 1;
+                    // Alternate a cancelled picker (no mutation) and a selected file.
+                    if requests % 2 == 0 { path = Some(format!("/certificates/client {requests}.pem").into()); }
+                }
+            }
+            assert!(requests >= 40);
+            samples.sort_by(f64::total_cmp);
+            crate::ui_benchmark::report(&format!("connection/certificate-picker/{width}"), &samples);
+        }
+    }
+
+    #[test]
+    fn browse_keeps_path_until_a_file_is_selected_and_fits_compact_rows() {
+        for width in [360.0, 620.0] {
+            let ctx = egui::Context::default();
+            let original = Some(PathBuf::from(format!("/certificates/{}/client.pem", "long folder ".repeat(20))));
+            let mut path = original.clone();
+            let mut pick = None;
+            let mut output = None;
+            for _ in 0..3 {
+                output = Some(ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 120.0))),
+                    ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| {
+                    form_path(ui, "CA file", &mut path, ProfileFile::Ca, &mut pick);
+                    assert!(ui.min_rect().right() <= width);
+                }); }));
+            }
+            let position = painted_text(&output.unwrap(), "Browse…").unwrap();
+            for pressed in [true, false] {
+                let _ = ctx.run(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 120.0))),
+                    events: vec![egui::Event::PointerMoved(position), egui::Event::PointerButton {
+                        pos: position, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+                    }], ..Default::default()
+                }, |ctx| { egui::CentralPanel::default().show(ctx, |ui| {
+                    form_path(ui, "CA file", &mut path, ProfileFile::Ca, &mut pick);
+                }); });
+            }
+            assert_eq!(pick, Some(ProfileFile::Ca));
+            assert_eq!(path, original, "opening or cancelling the picker must retain the typed path");
+        }
+    }
+
+    #[test]
     fn mysql_ssh_forms_show_gateway_and_accept_key_picker() {
         for maria in [false,true] {
             let ctx = egui::Context::default();
@@ -3121,7 +3338,7 @@ mod tests {
             let (ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config)) = &mut draft.connection else { unreachable!() };
             config.ssh = Some(SshOptions { host:"gateway".into(),..Default::default() });
             let generation = app.connection_manager.generation;
-            app.connection_manager.set_path(generation,true,"/keys/client".into());
+            app.connection_manager.set_path(generation,ProfileFile::SshKey,"/keys/client".into());
             let draft = app.connection_manager.draft.as_ref().unwrap();
             let (ConnectionKind::Mysql(config) | ConnectionKind::MariaDb(config)) = &draft.connection else { unreachable!() };
             assert_eq!(config.ssh.as_ref().unwrap().identity_file.as_deref(),Some(std::path::Path::new("/keys/client")));
@@ -3165,7 +3382,7 @@ mod tests {
         }
         assert_eq!(labels.len(), 8, "missing controls: {labels:?}");
         let generation = app.connection_manager.generation;
-        app.connection_manager.set_path(generation, true, "/keys/ssh-client".into());
+        app.connection_manager.set_path(generation, ProfileFile::SshKey, "/keys/ssh-client".into());
         let ConnectionKind::Redis(settings) = &app.connection_manager.draft.as_ref().unwrap().connection else { unreachable!() };
         assert_eq!(settings.ssh.as_ref().unwrap().identity_file.as_deref(), Some(std::path::Path::new("/keys/ssh-client")));
         assert_eq!(settings.client_certificate.as_deref(), Some(std::path::Path::new("/certificates/client.pem")));
@@ -3209,7 +3426,7 @@ mod tests {
         let generation = app.connection_manager.generation;
         // Only a completed picker changes authentication. No callback on cancel leaves it intact.
         app.connection_manager
-            .set_path(generation, true, "/tmp/test-key".into());
+            .set_path(generation, ProfileFile::SshKey, "/tmp/test-key".into());
         let ConnectionKind::Postgres(config) =
             &app.connection_manager.draft.as_ref().unwrap().connection
         else {
@@ -3731,7 +3948,7 @@ mod tests {
         app.connection_action(Action::Discard).unwrap();
         app.connection_action(Action::New(false)).unwrap();
         app.connection_manager
-            .set_path(old_generation, false, "/tmp/stale.sqlite".into());
+            .set_path(old_generation, ProfileFile::Sqlite, "/tmp/stale.sqlite".into());
         assert!(
             matches!(&app.connection_manager.draft.as_ref().unwrap().connection, ConnectionKind::SQLite { path } if path.as_os_str().is_empty())
         );

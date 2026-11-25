@@ -2447,3 +2447,210 @@ at 2× display scale. Screenshot review found and fixed a Sentinel/primary widge
 collision. Native input-to-present, 60/120 Hz, multiple windows, mixed-DPI and
 monitor movement/disconnection were not measured. Renderer, event loop and repaint
 scheduling are unchanged; these results measure CPU layout/tessellation only.
+
+### Send confirmation contrast (issue #19, 2026-11-24)
+
+Compared with `9983cb1` on Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1,
+release profile. Run `mise exec -- python scripts/ui-performance.py --base 9983cb1
+--query-protection --query-editor --output <new-directory>`. The new option selects
+existing protection fixtures without changing their workload: 760×760, default
+headless scale, 20 warmup / 160 measured frames, changing password lengths, ordinary
+and 2,000-repeat SQL previews, and a synthetic 30-second idle gap. Query fixtures
+use the sizes and sample counts documented above. Five alternating pairs run serially.
+
+The changed password-dialog and shared query-editor workloads passed all p95 gates
+in the initial run and a repeat using the same release executables. The unchanged
+protection menu was inconclusive due to noise in both runs; settings passed initially
+but was inconclusive in the repeat. The overall comparison is therefore inconclusive,
+not an all-scenarios pass. No thresholds or fixtures were weakened. Repeat median
+per-run milliseconds follow (maximum is the median of per-run maxima):
+
+| Scenario | p50 base → fix | p95 base → fix | p99 base → fix | Maximum base → fix |
+| --- | ---: | ---: | ---: | ---: |
+| protection/menu | 0.00692 → 0.00696 | 0.00842 → 0.00717 | 0.00937 → 0.00725 | 0.00958 → 0.00737 |
+| protection/password | 0.01512 → 0.01512 | 0.01788 → 0.01746 | 0.02042 → 0.02383 | 0.02883 → 0.02783 |
+| protection/password_large | 0.23446 → 0.23442 | 0.26138 → 0.25637 | 0.27675 → 0.26854 | 0.27900 → 0.27550 |
+| protection/settings | 0.01892 → 0.01917 | 0.02163 → 0.02658 | 0.02679 → 0.02779 | 0.02696 → 0.03942 |
+| query/editor-history | 0.19625 → 0.19617 | 0.21588 → 0.21500 | 0.22196 → 0.22337 | 0.22396 → 0.22667 |
+| query/editor-results/0/1280 | 0.02929 → 0.02921 | 0.03579 → 0.03579 | 0.05292 → 0.05108 | 0.15021 → 0.14496 |
+| query/editor-results/128/760 | 0.04008 → 0.03967 | 0.05625 → 0.05658 | 0.06342 → 0.06758 | 0.09187 → 0.09046 |
+| query/editor-results/4/1280 | 0.03758 → 0.03796 | 0.05400 → 0.05367 | 0.06033 → 0.05629 | 0.09558 → 0.09392 |
+| query/editor-results/4/500 | 0.03696 → 0.03754 | 0.05446 → 0.05375 | 0.06167 → 0.06121 | 0.09146 → 0.08296 |
+
+Raw environment, samples and logs: `target/issue19-performance/` and
+`target/issue19-performance-repeat-final/`. Native screenshots were inspected in
+`target/issue19-review/`: enabled Send in Light/Dark at 1280 points and both
+Solarized themes at 760 points; empty-password disabled Send in Light at 500 points
+and Dark at 760 points. Label and shortcut artwork use matching theme foregrounds.
+
+No database execution or protocol sequencing changes: PostgreSQL, MySQL/MariaDB
+and SQLite retain their cold/warm exchange counts; database latency fixtures were
+not rerun. No event-loop, repaint scheduling, geometry or virtualization changes.
+Native input-to-present, frame intervals, 60/120 Hz, multiple windows and mixed-DPI
+checks were not measured.
+
+### Certificate file pickers (issue #20, 2026-11-24)
+
+Compared with `9983cb1` using `mise exec -- python scripts/ui-performance.py
+--base 9983cb1 --redis-tls --output target/issue20-performance`. Apple M4 Max,
+macOS 27.2.1 arm64, Rust 1.99.1, release profile, five alternating paired runs,
+serial execution without competing builds. The working tree also includes the
+Send-button contrast fix documented above. All seven p95 gates passed (+1.2% to
++6.1%). Identical existing form fixtures on both revisions: 20 warmup / 160 measured
+frames per run, default headless scale; standalone/Cluster/Sentinel 1400×900,
+expanded security 1000×760 and 1400×1080. Scrolling and expanded-security
+after-idle workloads retain their original input. Median per-run CPU milliseconds:
+
+| Scenario | p50 base → fix | p95 base → fix | p99 base → fix | Maximum base → fix |
+| --- | ---: | ---: | ---: | ---: |
+| redis/cluster-profile/0-alternates-scroll | 0.05983 → 0.06063 | 0.06237 → 0.06354 | 0.06654 → 0.06767 | 0.06758 → 0.06896 |
+| redis/cluster-profile/7-alternates-scroll | 0.10213 → 0.10375 | 0.11012 → 0.11146 | 0.11313 → 0.11363 | 0.11500 → 0.11525 |
+| redis/connection-profile | 0.05754 → 0.05808 | 0.06004 → 0.06083 | 0.06387 → 0.06450 | 0.06608 → 0.06567 |
+| redis/security-profile/1000x760 | 0.07346 → 0.07896 | 0.07838 → 0.08313 | 0.08071 → 0.08858 | 0.08358 → 0.08996 |
+| redis/security-profile/1400x1080 | 0.08079 → 0.08592 | 0.08500 → 0.08912 | 0.08758 → 0.09371 | 0.09067 → 0.10183 |
+| redis/sentinel-profile/1-seeds-scroll | 0.07429 → 0.07712 | 0.07850 → 0.08229 | 0.08225 → 0.08521 | 0.08287 → 0.08725 |
+| redis/sentinel-profile/8-seeds-scroll | 0.11563 → 0.11575 | 0.12263 → 0.12446 | 0.12387 → 0.12700 | 0.12725 → 0.13046 |
+
+The new `certificate_path_interaction_frame_benchmark` was run five times using
+the same candidate release executable. It exercises Browse press/release,
+alternating cancelled/selected-file handling, and the first click after a synthetic
+30-second idle gap; 360×120 and 620×120, 20 warmup / 160 measured frames. It measures
+CPU layout/tessellation and request generation, excluding the native file dialog.
+No equivalent baseline interaction existed, so these are absolute measurements:
+
+| Width | p50 | p95 | p99 | Maximum |
+| --- | ---: | ---: | ---: | ---: |
+| 360 | 0.00829 | 0.01162 | 0.01479 | 0.01867 |
+| 620 | 0.00846 | 0.01129 | 0.01404 | 0.01733 |
+
+Raw samples, environment and logs are in `target/issue20-performance/`.
+Native screenshots inspected in `target/issue20-review/` cover Cluster, standalone
+client credentials, Sentinel, MySQL and MariaDB in light/dark appearances at
+1000/1280-point widths, empty/populated paths and scrolled expanded forms.
+Automated tests cover field routing, stale drafts, removed Sentinel settings,
+Unicode paths, long-path layout, and Browse clicks retaining the existing path.
+
+Native dialog click-through was unavailable because computer control reported the
+Mac locked. OS picker timing, native input-to-present, 60/120 Hz, multiple windows
+and mixed-DPI checks were not measured. No separate MySQL/MariaDB timing comparison
+was run; those forms use the same path-row helper. File selection reuses the
+existing background dialog and completion channel, with no new UI polling.
+No database execution/TLS protocol changes or added cold/warm exchanges; database
+latency fixtures were not rerun.
+
+### Joined certificate input and Browse action (2026-11-24)
+
+The final path control uses one 28-point outline with Browse as its flush right
+segment, a divider, and a shared focus border. Repeated the same seven workloads
+against `9983cb1` with the same hardware, toolchain, fixture sizes, sample counts
+and five alternating pairs described above. All p95 gates passed (−0.9% to +7.5%).
+Raw results: `target/issue20-joined-performance/`. Median per-run CPU milliseconds:
+
+| Scenario | p50 base → fix | p95 base → fix | p99 base → fix | Maximum base → fix |
+| --- | ---: | ---: | ---: | ---: |
+| redis/cluster-profile/0-alternates-scroll | 0.05917 → 0.06088 | 0.06154 → 0.06375 | 0.06837 → 0.06896 | 0.07246 → 0.07088 |
+| redis/cluster-profile/7-alternates-scroll | 0.10262 → 0.10321 | 0.11021 → 0.11296 | 0.11396 → 0.11629 | 0.11600 → 0.11950 |
+| redis/connection-profile | 0.05617 → 0.05721 | 0.05896 → 0.06117 | 0.06654 → 0.07804 | 0.06658 → 0.08983 |
+| redis/security-profile/1000x760 | 0.07308 → 0.07754 | 0.07775 → 0.08283 | 0.08050 → 0.08696 | 0.08171 → 0.08771 |
+| redis/security-profile/1400x1080 | 0.08042 → 0.08521 | 0.08342 → 0.08967 | 0.08812 → 0.09771 | 0.08892 → 0.09821 |
+| redis/sentinel-profile/1-seeds-scroll | 0.07404 → 0.07683 | 0.08117 → 0.08208 | 0.08504 → 0.08542 | 0.08683 → 0.08654 |
+| redis/sentinel-profile/8-seeds-scroll | 0.11338 → 0.11488 | 0.12317 → 0.12200 | 0.12721 → 0.12683 | 0.12933 → 0.13000 |
+
+The candidate-only Browse interaction workload was rerun (`picker.log`), including
+first interaction after idle. Native light/dark empty and populated path captures
+are retained in `target/issue20-joined-final/`. Native dialog and presentation-timing
+limitations from the previous entry still apply.
+
+## Native click and cell-entry verification (2026-11-25)
+
+The shared input change forwards macOS event click counts and Windows native
+mouse double-click messages, classifies text selection on press, and removes the
+workspace's independent click timer. Entering a cell selects its existing value,
+including when replacement typing is queued in the same frame. No database
+execution/protocol paths or round-trip budgets change.
+
+Reproduce the release comparison against `9983cb12421a146f818d53f4342044b125663a8e`:
+
+```sh
+mise exec -- python scripts/ui-performance.py --base 9983cb1 --native-clicks --query-editor --cell-editor --output target/native-click-performance-complete
+mise exec -- python scripts/ui-click-drag-performance.py --output target/native-click-drag-performance
+```
+
+The second command links the identical `tools/click-drag-benchmark.rs` against the
+first command's baseline/candidate release egui artifacts. It alternates five
+paired runs and retains samples, p50/p95/p99/max, and comparison results. It does
+not rebuild or modify the baseline. Use an empty output directory for each run.
+The workload contains 200 Unicode SQL lines in a 1000×500 viewport at scale 1,
+20 warmup frames and 270 measured drag frames per case/run, with a synthetic
+30-second idle transition. Both revisions receive identical double/triple-click
+and drag events; the intended selection output changes from character dragging
+to word/paragraph dragging. The initial implementation reversed the entire SQL
+buffer on each word-drag frame and regressed p95 from 0.0157 ms to 11.7409 ms.
+That implementation was rejected; selection now walks word boundaries without
+allocating a reversed buffer, and forward word traversal counts characters once.
+Initial diagnostic samples are retained in `target/click-investigation/drag-before*`.
+
+The main suite uses the same transplanted fixtures for both revisions: click/editor
+and click/connections (1400×900, 20 profiles, 20 warmups/160 samples), cell entry
+and selected-cell edit (800×500, 20 warmups/160 samples), plus the existing query
+editor/results and history workloads. Cell-entry input is identical; replacing
+instead of prefixing the selected value is the intended behavior difference.
+Runs are serial, on an Apple M4 Max, macOS 27.2.1 arm64, Rust 1.99.1, release
+profile. Full environment/fixture metadata and raw samples are retained under
+`target/native-click-performance-complete` and `target/native-click-drag-performance`.
+
+Native macOS inspection used disposable QA windows, without executing SQL or
+opening a database connection. Verified SQL word selection on double-click,
+paragraph selection including newline on triple-click (compared with TextEdit),
+selected cell entry/replacement typing/Undo, and exactly one queued connection
+open per double-click on the clicked profile. Single-click only selected a
+connection. The preview windows were closed after inspection. Tests additionally
+cover adjacent targets, button changes, idle/focus/drag resets, delayed delivery
+of native events, first received native double/triple counts, batched events,
+Unicode selection, and preservation of dirty connection drafts.
+
+Windows winit cross-compilation passed; Windows runtime behavior and Linux
+desktop settings were not verified. Linux/other backends retain the corrected
+shared fallback and do not yet have exact desktop preference parity. These CPU
+measurements do not establish input-to-display latency, GPU presentation timing,
+60/120 Hz behavior, mixed-DPI/multiple-monitor behavior or disconnect/reconnect
+behavior; those native checks remain unmeasured.
+
+Final CPU results (median of five run summaries; milliseconds, base → candidate):
+
+| Scenario | p50 | p95 | p99 | Maximum | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| click/connections | 0.06000 → 0.06071 | 0.06775 → 0.06875 | 0.07050 → 0.07033 | 0.07358 → 0.07279 | pass |
+| click/editor | 0.01442 → 0.01508 | 0.16675 → 0.01858 | 0.18075 → 0.02300 | 0.18279 → 0.02954 | pass |
+| grid/cell-entry | 0.00287 → 0.00287 | 0.00483 → 0.00554 | 0.00642 → 0.00704 | 0.00675 → 0.00729 | inconclusive |
+| grid/selected-cell-edit/false | 0.01379 → 0.01442 | 0.01538 → 0.01571 | 0.01625 → 0.01821 | 0.01675 → 0.01912 | pass |
+| grid/selected-cell-edit/true | 0.01392 → 0.01438 | 0.01567 → 0.01712 | 0.01688 → 0.01825 | 0.01758 → 0.01904 | pass |
+| query/editor-history | 0.22496 → 0.22792 | 0.24033 → 0.24996 | 0.26533 → 0.27621 | 0.29871 → 0.30088 | pass |
+| query/editor-results/0/1280 | 0.03296 → 0.03300 | 0.03887 → 0.04217 | 0.05917 → 0.08171 | 0.16583 → 0.17554 | pass |
+| query/editor-results/128/760 | 0.04221 → 0.04421 | 0.05958 → 0.06304 | 0.06787 → 0.07604 | 0.12050 → 0.12887 | pass |
+| query/editor-results/4/1280 | 0.03963 → 0.04158 | 0.05758 → 0.05987 | 0.06417 → 0.08150 | 0.11546 → 0.13596 | pass |
+| query/editor-results/4/500 | 0.03963 → 0.04146 | 0.05846 → 0.06042 | 0.06463 → 0.06667 | 0.10983 → 0.12525 | pass |
+| click/drag/2 | 0.01350 → 0.01604 | 0.01554 → 0.01892 | 0.01675 → 0.02129 | 0.01871 → 0.02300 | regression |
+| click/drag/3 | 0.01342 → 0.01429 | 0.01600 → 0.01758 | 0.01758 → 0.02263 | 0.01958 → 0.03337 | pass |
+
+The first final broad run had noisy cases; a second five-pair measurement of the
+same binaries is retained in `target/native-click-performance-repeat`. Cell entry
+remains **inconclusive**, not a pass: its median p95 changed by +0.00071 ms,
+but only two of five paired ratios exceeded 10%. No thresholds or fixtures were
+weakened. The other nine broad cases passed on the repeat.
+
+Word dragging has a repeatable **+21.7% p95 regression** (+0.00338 ms). This cost
+is accepted for the requested native word-granularity selection: baseline dragging
+only moves a character cursor, while the candidate resolves Unicode word boundaries
+and extends the anchored word selection. Reusing character dragging would lose the
+requested behavior. Whole-buffer reversal was rejected and removed; caching all
+word boundaries would add memory and text-edit invalidation complexity for this
+remaining cost. Paragraph dragging passed (+9.9%). This is a documented functional
+tradeoff, not an assertion that fitting within a display frame excuses regressions.
+
+Final validation: `cargo test --lib` passed (954 tests, 272 ignored), vendored
+`egui` library tests passed (27), and `cargo clippy --all-targets -- -D warnings`
+passed, all through mise. The performance runner's eight Python tests passed.
+The QA-feature build and wasm library check also completed; wasm emitted existing
+platform-unused warnings. Windows validation was a winit library cross-check for
+`aarch64-pc-windows-msvc`, not a full Windows app build/runtime test.

@@ -70,8 +70,8 @@ pub struct InputOptions {
     /// This is to support "press and hold for context menu" on touch screens.
     pub max_click_duration: f64,
 
-    /// The new pointer press must come within this many seconds from previous pointer release
-    /// for double click (or when this value is doubled, triple click) to count.
+    /// Maximum interval between consecutive presses in a click sequence.
+    /// Native platform counts take precedence when available.
     pub max_double_click_delay: f64,
 
     /// When this modifier is down, all scroll events are treated as zoom events.
@@ -1028,6 +1028,8 @@ pub(crate) enum PointerEvent {
     Pressed {
         position: Pos2,
         button: PointerButton,
+        count: u32,
+        native: bool,
     },
     Released {
         click: Option<Click>,
@@ -1116,6 +1118,12 @@ pub struct PointerState {
     /// Used to check for triple-clicks.
     last_last_click_time: f64,
 
+    /// Click sequences are classified on press, not release.
+    last_press_time: f64,
+    last_press_pos: Option<Pos2>,
+    last_press_button: Option<PointerButton>,
+    press_click_count: u32,
+
     /// When was the pointer last moved?
     /// Used for things like showing hover ui/tooltip with a delay.
     last_move_time: f64,
@@ -1147,6 +1155,10 @@ impl Default for PointerState {
             started_decidedly_dragging: false,
             last_click_time: f64::NEG_INFINITY,
             last_last_click_time: f64::NEG_INFINITY,
+            last_press_time: f64::NEG_INFINITY,
+            last_press_pos: None,
+            last_press_button: None,
+            press_click_count: 0,
             last_move_time: f64::NEG_INFINITY,
             pointer_events: vec![],
             options: Default::default(),
@@ -1171,8 +1183,17 @@ impl PointerState {
         }
 
         let mut clear_history_after_velocity_calculation = false;
+        let mut native_click_count = None;
         for event in &new.events {
             match event {
+                Event::PointerClickCount(count) => native_click_count = Some(*count),
+                Event::WindowFocused(false) => {
+                    self.last_press_button = None;
+                    self.press_click_count = 0;
+                    self.down.fill(false);
+                    self.press_origin = None;
+                    self.press_start_time = None;
+                }
                 Event::PointerMoved(pos) => {
                     let pos = *pos;
 
@@ -1207,30 +1228,40 @@ impl PointerState {
                         self.pos_history.clear();
                     }
 
+                    let native_count = native_click_count.take();
                     if pressed {
+                        let same_button = self.last_press_button == Some(button);
+                        let continues = same_button
+                            && time >= self.last_press_time
+                            && time - self.last_press_time < self.options.max_double_click_delay
+                            && self.last_press_pos.is_some_and(|previous| {
+                                previous.distance(pos) <= self.options.max_click_dist
+                            });
+                        self.press_click_count = if let Some(count) = native_count {
+                            count.max(1)
+                        } else if continues {
+                            self.press_click_count.saturating_add(1)
+                        } else {
+                            1
+                        };
+                        self.last_press_time = time;
+                        self.last_press_pos = Some(pos);
+                        self.last_press_button = Some(button);
                         self.press_origin = Some(pos);
                         self.press_start_time = Some(time);
                         self.has_moved_too_much_for_a_click = false;
                         self.pointer_events.push(PointerEvent::Pressed {
                             position: pos,
                             button,
+                            count: self.press_click_count,
+                            native: native_count.is_some(),
                         });
                     } else {
                         // Released
                         let clicked = self.could_any_button_be_click();
 
                         let click = if clicked {
-                            let double_click =
-                                (time - self.last_click_time) < self.options.max_double_click_delay;
-                            let triple_click = (time - self.last_last_click_time)
-                                < (self.options.max_double_click_delay * 2.0);
-                            let count = if triple_click {
-                                3
-                            } else if double_click {
-                                2
-                            } else {
-                                1
-                            };
+                            let count = self.press_click_count;
 
                             self.last_last_click_time = self.last_click_time;
                             self.last_click_time = time;
@@ -1241,6 +1272,8 @@ impl PointerState {
                                 modifiers,
                             })
                         } else {
+                            self.last_press_button = None;
+                            self.press_click_count = 0;
                             None
                         };
 
@@ -1254,6 +1287,8 @@ impl PointerState {
                     self.down[button as usize] = pressed; // must be done after the above call to `could_any_button_be_click`
                 }
                 Event::PointerGone => {
+                    self.last_press_button = None;
+                    self.press_click_count = 0;
                     self.latest_pos = None;
                     // When dragging a slider and the mouse leaves the viewport, we still want the drag to work,
                     // so we don't treat this as a `PointerEvent::Released`.
@@ -1722,6 +1757,7 @@ impl PointerState {
             pointer_events,
             last_move_time,
             options: _,
+            ..
         } = self;
 
         ui.label(format!("latest_pos: {latest_pos:?}"));

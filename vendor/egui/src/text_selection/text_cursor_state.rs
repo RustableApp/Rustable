@@ -15,12 +15,15 @@ use super::CCursorRange;
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct TextCursorState {
     ccursor_range: Option<CCursorRange>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    drag_selection: Option<(CCursorRange, u32)>,
 }
 
 impl From<CCursorRange> for TextCursorState {
     fn from(ccursor_range: CCursorRange) -> Self {
         Self {
             ccursor_range: Some(ccursor_range),
+            drag_selection: None,
         }
     }
 }
@@ -65,41 +68,64 @@ impl TextCursorState {
     ) -> bool {
         let text = galley.text();
 
-        if response.double_clicked() {
-            // Select word:
-            let ccursor_range = select_word_at(text, cursor_at_pointer);
-            self.set_char_range(Some(ccursor_range));
-            true
-        } else if response.triple_clicked() {
-            // Select line:
-            let ccursor_range = select_line_at(text, cursor_at_pointer);
-            self.set_char_range(Some(ccursor_range));
-            true
-        } else if response.sense.senses_drag() {
-            if response.hovered() && ui.input(|i| i.pointer.any_pressed()) {
-                // The start of a drag (or a click).
+        let pressed = ui.input(|i| i.pointer.button_pressed(crate::PointerButton::Primary));
+        if response.hovered() && pressed {
+            let count = ui.ctx().interaction_snapshot(|i| i.press_count);
+            if count >= 2 {
+                let range = if count == 2 {
+                    select_word_at(text, cursor_at_pointer)
+                } else {
+                    select_click_line_at(text, cursor_at_pointer, ui.ctx().os())
+                };
+                self.set_char_range(Some(range));
+                self.drag_selection = Some((range, count));
+            } else {
+                self.drag_selection = None;
                 if ui.input(|i| i.modifiers.shift) {
-                    if let Some(mut cursor_range) = self.range(galley) {
-                        cursor_range.primary = cursor_at_pointer;
-                        self.set_char_range(Some(cursor_range));
-                    } else {
-                        self.set_char_range(Some(CCursorRange::one(cursor_at_pointer)));
-                    }
+                    let mut range = self
+                        .range(galley)
+                        .unwrap_or(CCursorRange::one(cursor_at_pointer));
+                    range.primary = cursor_at_pointer;
+                    self.set_char_range(Some(range));
                 } else {
                     self.set_char_range(Some(CCursorRange::one(cursor_at_pointer)));
                 }
-                true
-            } else if is_being_dragged {
-                // Drag to select text:
-                if let Some(mut cursor_range) = self.range(galley) {
-                    cursor_range.primary = cursor_at_pointer;
-                    self.set_char_range(Some(cursor_range));
-                }
-                true
-            } else {
-                false
             }
+            true
+        } else if response.sense.senses_drag()
+            && is_being_dragged
+            && ui.input(|i| i.pointer.primary_down())
+        {
+            if let Some((anchor, count)) = self.drag_selection {
+                let extent = if count == 2 {
+                    select_word_at(text, cursor_at_pointer)
+                } else {
+                    select_click_line_at(text, cursor_at_pointer, ui.ctx().os())
+                };
+                let [start, end] = anchor.sorted_cursors();
+                let [extent_start, extent_end] = extent.sorted_cursors();
+                let range = if extent_start.index < start.index {
+                    CCursorRange::two(end, extent_start)
+                } else {
+                    CCursorRange::two(
+                        start,
+                        if extent_end.index > end.index {
+                            extent_end
+                        } else {
+                            end
+                        },
+                    )
+                };
+                self.set_char_range(Some(range));
+            } else if let Some(mut range) = self.range(galley) {
+                range.primary = cursor_at_pointer;
+                self.set_char_range(Some(range));
+            }
+            true
         } else {
+            if !ui.input(|i| i.pointer.primary_down()) {
+                self.drag_selection = None;
+            }
             false
         }
     }
@@ -114,23 +140,23 @@ fn select_word_at(text: &str, ccursor: CCursor) -> CCursorRange {
         if let Some(char_before_cursor) = it.next() {
             if let Some(char_after_cursor) = it.next() {
                 if is_word_char(char_before_cursor) && is_word_char(char_after_cursor) {
-                    let min = ccursor_previous_word(text, ccursor + 1);
+                    let min = selection_previous_word(text, ccursor + 1);
                     let max = ccursor_next_word(text, min);
                     CCursorRange::two(min, max)
                 } else if is_word_char(char_before_cursor) {
-                    let min = ccursor_previous_word(text, ccursor);
+                    let min = selection_previous_word(text, ccursor);
                     let max = ccursor_next_word(text, min);
                     CCursorRange::two(min, max)
                 } else if is_word_char(char_after_cursor) {
                     let max = ccursor_next_word(text, ccursor);
                     CCursorRange::two(ccursor, max)
                 } else {
-                    let min = ccursor_previous_word(text, ccursor);
+                    let min = selection_previous_word(text, ccursor);
                     let max = ccursor_next_word(text, ccursor);
                     CCursorRange::two(min, max)
                 }
             } else {
-                let min = ccursor_previous_word(text, ccursor);
+                let min = selection_previous_word(text, ccursor);
                 CCursorRange::two(min, ccursor)
             }
         } else {
@@ -138,6 +164,59 @@ fn select_word_at(text: &str, ccursor: CCursor) -> CCursorRange {
             CCursorRange::two(ccursor, max)
         }
     }
+}
+
+// Walk Unicode word boundaries without reversing/cloning the text on every
+// double-click drag frame. Keyboard navigation retains its existing behavior.
+fn selection_previous_word(text: &str, cursor: CCursor) -> CCursor {
+    let mut start = 0;
+    let mut boundary = 0;
+    for word in text.split_word_bounds() {
+        if start >= cursor.index {
+            break;
+        }
+        let end = start + word.chars().count();
+        if end < cursor.index && !all_word_chars(word) {
+            boundary = end;
+        }
+        for (offset, ch) in word.chars().enumerate() {
+            if ch == '.' && start + offset + 1 < cursor.index {
+                boundary = boundary.max(start + offset + 1);
+            }
+        }
+        start = end;
+    }
+    CCursor {
+        index: boundary,
+        prefer_next_row: true,
+    }
+}
+
+/// AppKit selects a paragraph including its line ending, even on an empty line.
+fn select_click_line_at(
+    text: &str,
+    cursor: CCursor,
+    os: crate::os::OperatingSystem,
+) -> CCursorRange {
+    if os != crate::os::OperatingSystem::Mac {
+        return select_line_at(text, cursor);
+    }
+    let mut chars = text.chars().enumerate().peekable();
+    let mut start = 0;
+    let mut end = 0;
+    while let Some((index, ch)) = chars.next() {
+        end = index + 1;
+        if is_linebreak(ch) {
+            if ch == '\r' && chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                end = chars.next().unwrap().0 + 1;
+            }
+            if cursor.index < end {
+                return CCursorRange::two(CCursor::new(start), CCursor::new(end));
+            }
+            start = end;
+        }
+    }
+    CCursorRange::two(CCursor::new(start), CCursor::new(end))
 }
 
 fn select_line_at(text: &str, ccursor: CCursor) -> CCursorRange {
@@ -209,8 +288,8 @@ fn ccursor_previous_line(text: &str, ccursor: CCursor) -> CCursor {
 }
 
 fn next_word_boundary_char_index(text: &str, cursor_ci: usize) -> usize {
-    for (word_byte_index, word) in text.split_word_bound_indices() {
-        let word_ci = char_index_from_byte_index(text, word_byte_index);
+    let mut word_ci = 0;
+    for word in text.split_word_bounds() {
 
         // We consider `.` a word boundary.
         // At least that's how Mac works when navigating something like `www.example.com`.
@@ -228,9 +307,10 @@ fn next_word_boundary_char_index(text: &str, cursor_ci: usize) -> usize {
         if cursor_ci < word_ci && !all_word_chars(word) {
             return word_ci;
         }
+        word_ci += word.chars().count();
     }
 
-    char_index_from_byte_index(text, text.len())
+    word_ci
 }
 
 fn all_word_chars(text: &str) -> bool {
@@ -330,6 +410,28 @@ pub fn cursor_rect(galley: &Galley, cursor: &CCursor, row_height: f32) -> Rect {
 #[cfg(test)]
 mod test {
     use crate::text_selection::text_cursor_state::next_word_boundary_char_index;
+
+    #[test]
+    fn selection_previous_word_preserves_word_boundaries() {
+        use super::*;
+        for text in [
+            "abc.def.ghi",
+            "SELECT café, value FROM customers;\n",
+            "abc d3f g_h i-j",
+            "❤️👍 skvělá knihovna 👍❤️",
+            "hello   world",
+            "don't stop",
+            "a\r\nb",
+        ] {
+            for index in 0..=text.chars().count() {
+                assert_eq!(
+                    selection_previous_word(text, CCursor::new(index)),
+                    ccursor_previous_word(text, CCursor::new(index)),
+                    "{text:?} at {index}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_next_word_boundary_char_index() {
