@@ -174,6 +174,13 @@ fn run(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    // A GUI-subsystem parent has no console to share; without this each server opens one.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = command
         .spawn()
         .map_err(|e| format!("Cannot start language server: {e}"))?;

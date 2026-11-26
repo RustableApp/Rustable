@@ -180,6 +180,11 @@ pub struct SessionWindows {
     migrate_launcher_size: bool,
     update_save_error: Option<String>,
     window_sizes: std::collections::HashMap<String, [f32; 2]>,
+    /// IDE layout: connections open inside the main window instead of new native windows.
+    single_window: bool,
+    /// The connection shown in the main window; `None` shows the connection list.
+    active_window: Option<egui::ViewportId>,
+    root_title: String,
 }
 impl SessionWindows {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -199,6 +204,10 @@ impl SessionWindows {
             close_confirmation: None,
             native_menu_installed: false,
             update_save_error: None,
+            // RUSTABLE_MULTI_WINDOW=1 restores one native window per connection.
+            single_window: std::env::var_os("RUSTABLE_MULTI_WINDOW").is_none(),
+            active_window: None,
+            root_title: String::new(),
             migrate_launcher_size: cc.storage.is_none_or(|storage| {
                 storage.get_string(LAUNCHER_SIZE_MIGRATION).as_deref() != Some("done")
             }),
@@ -285,7 +294,55 @@ impl SessionWindows {
         }
     }
 
+    /// Activity rail on the left edge: the connection list, then every open connection.
+    fn connection_rail(&mut self, ctx: &egui::Context) {
+        let mut select = None;
+        let mut close = None;
+        egui::SidePanel::left("connection-rail").exact_width(72.0).resizable(false)
+            .frame(egui::Frame::new().fill(ctx.style().visuals.extreme_bg_color))
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                if rail_item(ui, self.active_window.is_none(), "Connections", |painter, center, color| {
+                    crate::icons::paint(painter, center, "plug", 22.0, color);
+                }).clicked() {
+                    select = Some(None);
+                }
+                ui.separator();
+                for window in &self.windows {
+                    let color = window.app.as_ref().map_or(ui.visuals().weak_text_color(), |app| app.workspace_color());
+                    let response = rail_item(ui, self.active_window == Some(window.id), &window.title, |painter, center, _| {
+                        crate::app::navigator::paint_database_icon(painter, center, color, 22.0);
+                    });
+                    response.context_menu(|ui| {
+                        if ui.button("Close connection").clicked() {
+                            close = Some(window.id);
+                            ui.close();
+                        }
+                    });
+                    if response.clicked() { select = Some(Some(window.id)); }
+                }
+            });
+        if let Some(target) = select && target != self.active_window {
+            self.active_window = target;
+            if target.is_none() { self.root.open_connection_manager(); }
+            ctx.memory_mut(|memory| { if let Some(id) = memory.focused() { memory.surrender_focus(id); } });
+        }
+        if let Some(id) = close && let Some(window) = self.windows.iter_mut().find(|window| window.id == id) {
+            let blocked = window.request.is_some() || window.app.iter().chain(window.parked.iter()).any(|app| app.close_blocked());
+            if blocked {
+                // Bring the connection forward so the user sees what needs finishing.
+                self.active_window = Some(id);
+                if self.close_confirmation.is_none() {
+                    self.close_confirmation = Some(CloseConfirmation { action: CloseAction::Window(id), host: egui::ViewportId::ROOT });
+                }
+            } else {
+                window.closed = true;
+            }
+        }
+    }
+
     fn show_launcher(&mut self, ctx: &egui::Context) {
+        if self.single_window { self.active_window = None; }
         self.launcher_hidden = false;
         self.root.open_connection_manager();
         ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Visible(true));
@@ -318,7 +375,14 @@ impl eframe::App for SessionWindows {
             self.root.open_matrix_connector();
             self.crash_prompt = None;
         }
-        quit_requested |= self.root.render_launcher(ctx);
+        let single = self.single_window;
+        // The rail is a side panel, so it must claim its space before any central panel.
+        if single && !self.windows.is_empty() { self.connection_rail(ctx); }
+        if single && self.active_window.is_some() {
+            self.root.poll_launcher();
+        } else {
+            quit_requested |= self.root.render_launcher(ctx);
+        }
         #[cfg(all(unix, feature = "qa"))]
         if self.matrix.is_some() { crate::matrix::capture_launcher(ctx); }
         if !self.launcher_hidden { crate::ssh_prompt::show(ctx); }
@@ -336,8 +400,14 @@ impl eframe::App for SessionWindows {
         let mut manager_requested = false;
         let mut close_answer = None;
         let confirmation_work_blocked = self.close_confirmation.is_some_and(|prompt| self.close_work_blocked(prompt.action));
+        let active_window = self.active_window;
         for window in &mut self.windows {
-            ctx.show_viewport_immediate(window.id, window.viewport_builder(), |child_ctx, class| {
+            // In the single-window layout every prompt is hosted by the main window.
+            let host_id = if single { egui::ViewportId::ROOT } else { window.id };
+            let viewport_id = window.id;
+            let builder = window.viewport_builder();
+            let shown_here = active_window == Some(viewport_id) && !window.closed;
+            let mut body = |child_ctx: &egui::Context, class: egui::ViewportClass| {
                 if class == egui::ViewportClass::Embedded {
                     // Native desktop backends support immediate viewports. Never draw
                     // a second full workspace over the root on an unsupported backend.
@@ -345,8 +415,8 @@ impl eframe::App for SessionWindows {
                     window.closed = true;
                     return;
                 }
-                set_close_confirmation_open(child_ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == window.id));
-                if let Some(rect) = child_ctx.input(|input| input.viewport().inner_rect) {
+                set_close_confirmation_open(child_ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == host_id));
+                if !single && let Some(rect) = child_ctx.input(|input| input.viewport().inner_rect) {
                     window.remember_size(rect.size(), &mut self.window_sizes);
                 }
                 for app in &mut window.parked {
@@ -434,7 +504,7 @@ impl eframe::App for SessionWindows {
                             child_ctx.memory_mut(|memory| { if let Some(id) = memory.focused() { memory.surrender_focus(id); } });
                         }
                         Err(_) => {
-                            self.close_confirmation = Some(CloseConfirmation { action: CloseAction::Database(window.id, slot), host: window.id });
+                            self.close_confirmation = Some(CloseConfirmation { action: CloseAction::Database(window.id, slot), host: host_id });
                         }
                     }
                     if window.closed { return; }
@@ -445,7 +515,7 @@ impl eframe::App for SessionWindows {
                 app.manager_shortcut(child_ctx);
                 self.root.sync_window_preferences(app);
                 if self.root.sync_window_profile(app) { child_ctx.request_repaint(); }
-                set_close_confirmation_open(child_ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == window.id));
+                set_close_confirmation_open(child_ctx, self.close_confirmation.is_some_and(|prompt| prompt.host == host_id));
                 app.render_workspace_frame(child_ctx);
                 #[cfg(all(unix, feature = "qa"))]
                 if self.matrix.is_some() && window.id == egui::ViewportId::from_hash_of("matrix-fixture") {
@@ -461,7 +531,8 @@ impl eframe::App for SessionWindows {
                     self.root.select_manager_profile(app.active_profile_id());
                     manager_requested = true;
                 }
-                if child_ctx.input(|input| input.viewport().close_requested()) {
+                // In the single-window layout closing the main window means quit (handled below).
+                if !single && child_ctx.input(|input| input.viewport().close_requested()) {
                     if app.close_blocked() || parked_blocked {
                         child_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                         if self.close_confirmation.is_none() {
@@ -471,11 +542,24 @@ impl eframe::App for SessionWindows {
                 }
                 let connected = app.has_connection();
                 window.connection_completed(connected);
-                if let Some(prompt) = self.close_confirmation.filter(|prompt| prompt.host == window.id) {
+                if !single && let Some(prompt) = self.close_confirmation.filter(|prompt| prompt.host == window.id) {
                     let local_work_blocked = window.request.is_some() || window.app.iter().chain(window.parked.iter()).any(|app| app.close_work_blocked());
                     close_answer = close_confirmation(child_ctx, prompt.action, confirmation_work_blocked || local_work_blocked);
                 }
-            });
+            };
+            if !single {
+                ctx.show_viewport_immediate(viewport_id, builder, body);
+            } else if shown_here {
+                body(ctx, egui::ViewportClass::Immediate);
+            } else {
+                // Connections in the background keep receiving worker replies.
+                for app in window.app.iter_mut().chain(window.parked.iter_mut()) {
+                    app.poll_with_notifications(ctx);
+                    self.root.sync_window_preferences(app);
+                    self.root.sync_window_profile(app);
+                    shared_changed |= self.root.merge_window_preferences(app);
+                }
+            }
         }
         if shared_changed {
             ctx.request_repaint_of(egui::ViewportId::ROOT);
@@ -504,6 +588,11 @@ impl eframe::App for SessionWindows {
         }
         let closed_window = self.windows.iter().any(|window| window.closed);
         self.windows.retain(|window| !window.closed);
+        if single && self.active_window.is_some_and(|id| !self.windows.iter().any(|window| window.id == id)) {
+            // Fall back to the most recent connection, or the connection list.
+            self.active_window = self.windows.last().map(|window| window.id);
+            ctx.request_repaint();
+        }
         if (closed_window || closed_database) && let Some(storage) = frame.storage_mut() {
             self.save(storage);
             storage.flush();
@@ -511,13 +600,17 @@ impl eframe::App for SessionWindows {
         let blocked_window = self.windows.iter().position(|window| {
             window.request.is_some() || window.app.as_ref().is_some_and(|app| app.close_blocked()) || window.parked.iter().any(|app| app.close_blocked())
         });
+        if single && root_close_requested && !self.quitting { quit_requested = true; }
         if quit_requested {
             if self.root.close_blocked() || blocked_window.is_some() {
                 self.quitting = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                let host = blocked_window.map(|index| self.windows[index].id).unwrap_or(egui::ViewportId::ROOT);
+                let blocked_id = blocked_window.map(|index| self.windows[index].id);
+                let host = if single { egui::ViewportId::ROOT } else { blocked_id.unwrap_or(egui::ViewportId::ROOT) };
                 self.close_confirmation = Some(CloseConfirmation { action: CloseAction::Quit, host });
-                if host == egui::ViewportId::ROOT { manager_requested = true; }
+                if blocked_id.is_none() { manager_requested = true; }
+                // Show the connection that needs attention behind the prompt.
+                if single && blocked_id.is_some() { self.active_window = blocked_id; }
                 ctx.send_viewport_cmd_to(host, egui::ViewportCommand::Focus);
                 ctx.request_repaint_of(host);
             } else {
@@ -525,7 +618,7 @@ impl eframe::App for SessionWindows {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
-        if root_close_requested && !self.quitting && !self.windows.is_empty() {
+        if !single && root_close_requested && !self.quitting && !self.windows.is_empty() {
             // The launcher is independently dismissible; closing it must not close
             // sessions or silently commit/discard their state.
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -538,11 +631,26 @@ impl eframe::App for SessionWindows {
             // Hand off immediately to the new window, which owns connection
             // progress and errors. Later connection completion must not re-hide
             // a launcher explicitly reopened by the user.
-            self.hand_off_launcher(ctx);
-            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+            if single {
+                // Shown from the next frame so the list and workspace never draw together.
+                self.active_window = Some(id);
+                ctx.request_repaint();
+            } else {
+                self.hand_off_launcher(ctx);
+                ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+            }
         }
         if manager_requested || ((self.launcher_hidden || had_windows) && self.windows.is_empty()) {
             self.show_launcher(ctx);
+        }
+        if single {
+            let title = self.active_window
+                .and_then(|id| self.windows.iter().find(|window| window.id == id))
+                .map_or_else(|| "Rustable".to_owned(), |window| format!("{} — Rustable", window.title));
+            if title != self.root_title {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+                self.root_title = title;
+            }
         }
         let blocked = self.root.close_blocked() || blocked_window.is_some();
         crate::native_menu::set_blocked(blocked);
@@ -615,6 +723,31 @@ fn launcher_size(monitor: Option<egui::Vec2>) -> egui::Vec2 {
         })
 }
 
+fn rail_item(
+    ui: &mut egui::Ui,
+    selected: bool,
+    label: &str,
+    icon: impl FnOnce(&egui::Painter, egui::Pos2, egui::Color32),
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 64.0), egui::Sense::click());
+    let visuals = ui.visuals();
+    let (panel, accent, hover) = (visuals.panel_fill, visuals.selection.bg_fill, visuals.widgets.hovered.weak_bg_fill);
+    let color = if selected { visuals.strong_text_color() } else { visuals.text_color() };
+    if selected {
+        ui.painter().rect_filled(rect, 0.0, panel);
+        ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())), 0.0, accent);
+    } else if response.hovered() {
+        ui.painter().rect_filled(rect, 0.0, hover);
+    }
+    icon(ui.painter(), rect.center_top() + egui::vec2(0.0, 24.0), color);
+    let mut job = egui::text::LayoutJob::simple_singleline(label.into(), egui::FontId::proportional(11.0), color);
+    job.wrap.max_width = rect.width() - 8.0;
+    job.wrap.max_rows = 1;
+    let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    ui.painter().galley(egui::pos2(rect.center().x - galley.size().x * 0.5, rect.top() + 44.0), galley, color);
+    response.on_hover_text(label)
+}
+
 #[cfg(test)]
 mod launcher_tests {
     use super::*;
@@ -645,6 +778,7 @@ mod launcher_tests {
             launcher_hidden: false, quitting: false, close_confirmation: None,
             native_menu_installed: false, migrate_launcher_size: false,
             update_save_error: None, window_sizes: Default::default(),
+            single_window: false, active_window: None, root_title: String::new(),
         }
     }
 

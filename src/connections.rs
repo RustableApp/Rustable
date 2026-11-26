@@ -802,10 +802,8 @@ impl Rustable {
         let mut ports_valid = true;
         let panel = egui::CentralPanel::default()
             .show(ctx, |ui| {
-                let mut content = ui.available_rect_before_wrap();
-                let width = content.width().min(1000.0);
-                content.min.x += (content.width() - width) * 0.5;
-                content.max.x = content.min.x + width;
+                // Fill the window like an IDE; the list keeps its width and the details pane grows.
+                let content = ui.available_rect_before_wrap();
                 ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
                 ui.spacing_mut().button_padding = egui::vec2(10.0, 5.0);
                 ui.visuals_mut().widgets.inactive.corner_radius = egui::CornerRadius::same(8);

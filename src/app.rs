@@ -717,6 +717,10 @@ impl Rustable {
         self.matrix_connector_dialog(ctx);
         false
     }
+    /// Keeps launcher background work moving while a workspace occupies the window.
+    pub(crate) fn poll_launcher(&mut self) {
+        self.poll();
+    }
     pub(crate) fn take_manager_request(&mut self) -> bool {
         std::mem::take(&mut self.manager_requested)
     }

@@ -1,3 +1,5 @@
+// Release builds are GUI apps on Windows: no console window behind Rustable.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 fn main() -> eframe::Result {
     if let Some(status) = rustable::ssh_askpass_helper() {
         std::process::exit(status);
